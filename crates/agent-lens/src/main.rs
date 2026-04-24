@@ -1,17 +1,18 @@
 //! `agent-lens` CLI entry point.
 //!
-//! The binary reads JSON from stdin when invoked as a hook handler,
-//! dispatches to the named handler, and writes the handler's JSON response
-//! back to stdout. All diagnostics go to stderr via `tracing` — stdout is
-//! reserved for the protocol response so Claude Code can parse it.
+//! Each PostToolUse handler is a clap subcommand, so `agent-lens hook
+//! post-tool-use similarity` is parsed statically instead of routed by
+//! a runtime name string. Stdout is reserved for the hook's JSON
+//! response; diagnostics go to stderr via `tracing`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::io::{self, Read, Write as _};
 use std::process::ExitCode;
 
-use agent_hooks::claude_code::ClaudeCodeHookInput;
-use agent_lens::hooks::post_tool_use;
+use agent_hooks::Hook;
+use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
+use agent_lens::hooks::post_tool_use::SimilarityHook;
 use clap::{Parser, Subcommand};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -37,14 +38,18 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum HookCommand {
-    /// Handle a `PostToolUse` event by dispatching to the named handler.
+    /// Handle a `PostToolUse` event.
+    #[command(subcommand)]
+    PostToolUse(PostToolUseCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum PostToolUseCommand {
+    /// Report similar function pairs in the file that was just edited.
     ///
-    /// Reads the hook payload from stdin, writes the JSON response to
-    /// stdout, and logs diagnostics to stderr.
-    PostToolUse {
-        /// Handler name (e.g. `rust-similarity`).
-        name: String,
-    },
+    /// The parser is chosen from the file extension (`.rs` today).
+    /// Files with an unsupported extension are ignored silently.
+    Similarity,
 }
 
 fn main() -> ExitCode {
@@ -61,9 +66,8 @@ fn main() -> ExitCode {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // `try_init` so repeated calls in tests (should we ever use them) don't
-    // panic; in `main` we ignore the result because a failure here just
-    // means logging is silenced, not that the hook should abort.
+    // Ignore the init result — a second call would only happen in tests
+    // and would silently re-use the first subscriber.
     let _ = tracing_subscriber::fmt()
         .with_writer(io::stderr)
         .with_env_filter(filter)
@@ -72,24 +76,32 @@ fn init_tracing() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Hook(HookCommand::PostToolUse { name }) => run_post_tool_use(&name),
+        Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
     }
 }
 
-fn run_post_tool_use(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let input = read_post_tool_use_from_stdin()?;
+    let output = match cmd {
+        PostToolUseCommand::Similarity => SimilarityHook::new().handle(input)?,
+    };
+    write_output_to_stdout(&output)
+}
+
+fn read_post_tool_use_from_stdin() -> Result<PostToolUseInput, Box<dyn std::error::Error>> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
-
     let event: ClaudeCodeHookInput = serde_json::from_str(&buf)?;
-    let ClaudeCodeHookInput::PostToolUse(input) = event else {
-        return Err("expected a PostToolUse hook payload on stdin".into());
-    };
+    match event {
+        ClaudeCodeHookInput::PostToolUse(input) => Ok(input),
+        _ => Err("expected a PostToolUse hook payload on stdin".into()),
+    }
+}
 
-    let output = post_tool_use::dispatch(name, input)?;
-
+fn write_output_to_stdout(output: &PostToolUseOutput) -> Result<(), Box<dyn std::error::Error>> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    serde_json::to_writer(&mut stdout, &output)?;
+    serde_json::to_writer(&mut stdout, output)?;
     stdout.write_all(b"\n")?;
     Ok(())
 }

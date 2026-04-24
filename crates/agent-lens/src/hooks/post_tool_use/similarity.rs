@@ -1,17 +1,21 @@
-//! `rust-similarity` PostToolUse handler.
+//! `similarity` PostToolUse handler.
 //!
-//! After an agent edits a Rust file, parse it and report any pairs of
+//! After an agent edits a source file, parse it and report any pairs of
 //! functions whose TSED score is at or above [`DEFAULT_THRESHOLD`]. The
 //! findings come back as a `systemMessage` so they land in the agent's
 //! context without blocking the tool call.
+//!
+//! Language is picked from the file extension. Today only `.rs` is
+//! supported; other extensions are treated as "no opinion" so the hook
+//! stays silent instead of erroring.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
-use lens_domain::{LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
-use lens_rust::{RustParseError, RustParser};
+use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
+use lens_rust::RustParser;
 
 /// Tool names whose `tool_input.file_path` points at the file that was
 /// just modified. Anything outside this set is ignored.
@@ -22,14 +26,14 @@ const EDITING_TOOL_NAMES: &[&str] = &["Write", "Edit", "MultiEdit"];
 /// near-misses.
 pub const DEFAULT_THRESHOLD: f64 = 0.85;
 
-/// Handler implementation for the `rust-similarity` PostToolUse hook.
+/// Handler implementation for the `similarity` PostToolUse hook.
 #[derive(Debug, Clone)]
-pub struct RustSimilarityHook {
+pub struct SimilarityHook {
     threshold: f64,
     opts: TSEDOptions,
 }
 
-impl RustSimilarityHook {
+impl SimilarityHook {
     /// Construct a handler with [`DEFAULT_THRESHOLD`] and the default
     /// TSED options.
     pub fn new() -> Self {
@@ -47,51 +51,82 @@ impl RustSimilarityHook {
     }
 }
 
-impl Default for RustSimilarityHook {
+impl Default for SimilarityHook {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Errors raised while running [`RustSimilarityHook`].
+/// Languages that the similarity hook knows how to parse.
+///
+/// New entries slot in with a new [`Language::from_extension`] arm and
+/// a new [`Language::extract_functions`] arm; no other callers change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Language {
+    Rust,
+}
+
+impl Language {
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "rs" => Some(Self::Rust),
+            _ => None,
+        }
+    }
+
+    fn extract_functions(self, source: &str) -> Result<Vec<FunctionDef>, SimilarityError> {
+        match self {
+            Self::Rust => {
+                let mut parser = RustParser::new();
+                parser
+                    .extract_functions(source)
+                    .map_err(|e| SimilarityError::Parse(Box::new(e)))
+            }
+        }
+    }
+}
+
+/// Errors raised while running [`SimilarityHook`].
 #[derive(Debug)]
-pub enum RustSimilarityError {
+pub enum SimilarityError {
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
-    Parse(RustParseError),
+    /// Boxed to keep the error type language-agnostic as more parsers
+    /// are added.
+    Parse(Box<dyn std::error::Error + Send + Sync>),
 }
 
-impl std::fmt::Display for RustSimilarityError {
+impl std::fmt::Display for SimilarityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io { path, source } => {
                 write!(f, "failed to read {}: {source}", path.display())
             }
-            Self::Parse(e) => write!(f, "{e}"),
+            Self::Parse(e) => write!(f, "failed to parse source: {e}"),
         }
     }
 }
 
-impl std::error::Error for RustSimilarityError {
+impl std::error::Error for SimilarityError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
-            Self::Parse(e) => Some(e),
+            Self::Parse(e) => Some(e.as_ref()),
         }
     }
 }
 
-impl Hook for RustSimilarityHook {
+impl Hook for SimilarityHook {
     type Input = PostToolUseInput;
     type Output = PostToolUseOutput;
-    type Error = RustSimilarityError;
+    type Error = SimilarityError;
 
     fn handle(&self, input: PostToolUseInput) -> Result<PostToolUseOutput, Self::Error> {
-        // Ignore non-edit tool calls and anything that isn't a Rust file.
-        // Returning an empty output is the "no opinion" signal — Claude
-        // Code keeps going without injecting anything into the transcript.
+        // Ignore non-edit tool calls and anything whose extension we
+        // don't recognise. Returning an empty output is the "no opinion"
+        // signal — Claude Code keeps going without injecting anything.
         if !EDITING_TOOL_NAMES.contains(&input.tool_name.as_str()) {
             return Ok(PostToolUseOutput::default());
         }
@@ -99,9 +134,13 @@ impl Hook for RustSimilarityHook {
             return Ok(PostToolUseOutput::default());
         };
         let rel_path = Path::new(&file_path);
-        if rel_path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        let Some(language) = rel_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(Language::from_extension)
+        else {
             return Ok(PostToolUseOutput::default());
-        }
+        };
 
         let abs_path = if rel_path.is_absolute() {
             rel_path.to_path_buf()
@@ -109,16 +148,12 @@ impl Hook for RustSimilarityHook {
             input.context.cwd.join(rel_path)
         };
 
-        let source =
-            std::fs::read_to_string(&abs_path).map_err(|source| RustSimilarityError::Io {
-                path: abs_path.clone(),
-                source,
-            })?;
+        let source = std::fs::read_to_string(&abs_path).map_err(|source| SimilarityError::Io {
+            path: abs_path.clone(),
+            source,
+        })?;
 
-        let mut parser = RustParser::new();
-        let funcs = parser
-            .extract_functions(&source)
-            .map_err(RustSimilarityError::Parse)?;
+        let funcs = language.extract_functions(&source)?;
 
         let pairs = find_similar_functions(&funcs, self.threshold, &self.opts);
         if pairs.is_empty() {
@@ -144,7 +179,7 @@ fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {
 
 fn format_report(file_path: &str, pairs: &[SimilarPair<'_>]) -> String {
     let mut out = format!(
-        "agent-lens rust-similarity: {} similar function pair(s) in {}\n",
+        "agent-lens similarity: {} similar function pair(s) in {}\n",
         pairs.len(),
         file_path,
     );
@@ -192,7 +227,7 @@ mod tests {
 
     #[test]
     fn ignores_non_editing_tools() {
-        let hook = RustSimilarityHook::new();
+        let hook = SimilarityHook::new();
         let input = PostToolUseInput {
             context: ctx(PathBuf::from("/tmp")),
             tool_name: "Bash".into(),
@@ -204,12 +239,31 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_rust_files() {
-        let hook = RustSimilarityHook::new();
+    fn ignores_unknown_extensions() {
+        let hook = SimilarityHook::new();
+        for ext in ["README.md", "notes.txt", "script.py", "app.ts"] {
+            let input = PostToolUseInput {
+                context: ctx(PathBuf::from("/tmp")),
+                tool_name: "Write".into(),
+                tool_input: json!({ "file_path": ext }),
+                tool_response: json!({}),
+            };
+            let out = hook.handle(input).unwrap();
+            assert_eq!(
+                out,
+                PostToolUseOutput::default(),
+                "expected no-op for {ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_extensionless_paths() {
+        let hook = SimilarityHook::new();
         let input = PostToolUseInput {
             context: ctx(PathBuf::from("/tmp")),
             tool_name: "Write".into(),
-            tool_input: json!({"file_path": "README.md"}),
+            tool_input: json!({"file_path": "Makefile"}),
             tool_response: json!({}),
         };
         let out = hook.handle(input).unwrap();
@@ -218,7 +272,7 @@ mod tests {
 
     #[test]
     fn ignores_missing_file_path() {
-        let hook = RustSimilarityHook::new();
+        let hook = SimilarityHook::new();
         let input = PostToolUseInput {
             context: ctx(PathBuf::from("/tmp")),
             tool_name: "Edit".into(),
@@ -230,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_similar_pair_via_system_message() {
+    fn rust_extension_triggers_rust_parser() {
         let dir = tempfile::tempdir().unwrap();
         let source = r#"
             fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
@@ -238,7 +292,7 @@ mod tests {
         "#;
         let file = write_file(dir.path(), "lib.rs", source);
 
-        let hook = RustSimilarityHook::new().with_threshold(0.5);
+        let hook = SimilarityHook::new().with_threshold(0.5);
         let input = PostToolUseInput {
             context: ctx(dir.path().to_path_buf()),
             tool_name: "Write".into(),
@@ -259,7 +313,6 @@ mod tests {
     #[test]
     fn no_report_when_below_threshold() {
         let dir = tempfile::tempdir().unwrap();
-        // Two structurally unrelated functions so the score stays low.
         let source = r#"
             fn alpha() -> i32 { 42 }
             fn beta(xs: &[i32]) -> i32 {
@@ -274,7 +327,7 @@ mod tests {
         "#;
         let file = write_file(dir.path(), "lib.rs", source);
 
-        let hook = RustSimilarityHook::new();
+        let hook = SimilarityHook::new();
         let input = PostToolUseInput {
             context: ctx(dir.path().to_path_buf()),
             tool_name: "Write".into(),
@@ -296,7 +349,7 @@ mod tests {
         "#;
         write_file(&nested, "lib.rs", source);
 
-        let hook = RustSimilarityHook::new().with_threshold(0.5);
+        let hook = SimilarityHook::new().with_threshold(0.5);
         let input = PostToolUseInput {
             context: ctx(dir.path().to_path_buf()),
             tool_name: "Edit".into(),
@@ -309,7 +362,7 @@ mod tests {
 
     #[test]
     fn missing_file_surfaces_io_error() {
-        let hook = RustSimilarityHook::new();
+        let hook = SimilarityHook::new();
         let input = PostToolUseInput {
             context: ctx(PathBuf::from("/definitely/does/not/exist")),
             tool_name: "Write".into(),
@@ -317,6 +370,6 @@ mod tests {
             tool_response: json!({}),
         };
         let err = hook.handle(input).unwrap_err();
-        assert!(matches!(err, RustSimilarityError::Io { .. }));
+        assert!(matches!(err, SimilarityError::Io { .. }));
     }
 }
