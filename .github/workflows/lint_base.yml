@@ -1,0 +1,27 @@
+name: Lint Base
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    env:
+      MISE_ENV: base
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+
+      - name: Run pre-commit
+        run: prek run --all-files
+
+      - name: lint with mise
+        run: mise run lint:base

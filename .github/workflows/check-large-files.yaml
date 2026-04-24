@@ -1,0 +1,43 @@
+name: Check large files
+
+on: pull_request
+
+jobs:
+  build:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check file sizes
+        shell: bash
+        env:
+          BASE_REF: "${{ github.base_ref }}"
+          HEAD_SHA: "${{ github.sha }}"
+        run: |
+          # Size limit: 1MB = 1,000,000 bytes
+          SIZE_LIMIT=1000000
+
+          COMMIT_IDS=$(git log --pretty="%H" "origin/${BASE_REF}..${HEAD_SHA}")
+          exit_code=0
+          for COMMIT in ${COMMIT_IDS}; do
+            git checkout --detach "${COMMIT}"
+            readarray -t -d '' CHANGED_FILES < <(git diff -z --name-only HEAD "$(git rev-parse HEAD~1 -- || git hash-object -t tree /dev/null)")
+            for FILE in "${CHANGED_FILES[@]}"; do
+              if [ -e "${FILE}" ]; then
+                FILE_SIZE="$(stat -c%s "${FILE}")"
+                if [ "${FILE_SIZE}" -ge "${SIZE_LIMIT}" ]; then
+                  echo "Error: The file ${FILE} is larger than 1MB (size: ${FILE_SIZE})"
+                  exit_code=1
+                fi
+              fi
+            done
+          done
+          exit "${exit_code}"

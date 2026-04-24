@@ -1,0 +1,26 @@
+[tools]
+rust = "stable"
+"cargo:cargo-nextest" = "0.9.132"
+"cargo:cargo-deny" = "0.19.0"
+"cargo:cargo-audit" = "0.22.1"
+
+[tasks."fmt:rust"]
+description = "Format Rust code with cargo fmt"
+run = "cargo fmt --all"
+
+[tasks."lint:rust"]
+description = "Lint Rust with clippy, fmt check, cargo-deny, cargo-audit"
+run = [
+  "cargo clippy --all-targets --all-features -- -D warnings",
+  "cargo fmt --all --check",
+  "cargo deny check",
+  "cargo audit",
+]
+
+[tasks."test:rust"]
+description = "Run Rust tests with cargo-nextest"
+run = "cargo nextest run --locked --all-features"
+
+[tasks."ci:rust"]
+description = "Run Rust lint and test tasks"
+depends = ["lint:rust", "test:rust"]
