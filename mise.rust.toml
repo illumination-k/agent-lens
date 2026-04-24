@@ -1,8 +1,18 @@
 [tools]
 rust = "stable"
-"cargo:cargo-nextest" = "0.9.132"
-"cargo:cargo-deny" = "0.19.0"
-"cargo:cargo-audit" = "0.22.1"
+"aqua:cargo-bins/cargo-binstall" = "1.18.1"
+
+[tools."cargo:cargo-nextest"]
+version = "0.9.132"
+depends = ["aqua:cargo-bins/cargo-binstall"]
+
+[tools."cargo:cargo-deny"]
+version = "0.19.0"
+depends = ["aqua:cargo-bins/cargo-binstall"]
+
+[tools."cargo:cargo-audit"]
+version = "0.22.1"
+depends = ["aqua:cargo-bins/cargo-binstall"]
 
 [tasks."fmt:rust"]
 description = "Format Rust code with cargo fmt"
