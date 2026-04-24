@@ -10,5 +10,6 @@ repository = "https://github.com/illumination-k/agent-lens"
 
 [workspace.lints.clippy]
 print_stdout = "deny"
+print_stderr = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
