@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! `agent-lens` — hook handlers and analyzers for coding agents.
+//!
+//! The binary bundles two families of subcommands:
+//!
+//! * [`hooks`] — handlers that speak Claude Code's stdin/stdout hook
+//!   protocol. Each handler is addressed by a short name so that the same
+//!   binary can serve many hooks from `settings.json`.
+//! * analyzers (forthcoming) — on-demand code analyses that produce
+//!   LLM-friendly context.
+//!
+//! Only the pieces exercised by the current CLI live here today; the rest
+//! will land as new subcommands are added.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod hooks;
