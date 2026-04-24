@@ -102,6 +102,9 @@ agent-lens
 - `--format md` で **agent friendly な markdown サマリ** を出せるようにする
   （人間の目視でも読めるが、主目的は LLM に context として食わせること）
 - `stdout` は常にプロトコル／結果専用。ログは **必ず stderr**
+- 直接の `println!` / `eprintln!` は禁止（clippy で `deny`）。stdout 出力は
+  `serde_json` 等で構造化して書き、ログ・診断は `tracing` マクロ経由で stderr
+  に流す。`unwrap()` / `expect()` も同様に `deny`
 
 ### Hook プロトコル
 
@@ -123,6 +126,8 @@ agent-lens
 
 - [`tracing`](https://docs.rs/tracing) + `tracing-subscriber` で stderr に出力
 - `RUST_LOG` 環境変数でレベル制御（デフォルト `info`）
+- `eprintln!` は使わず必ず `tracing` マクロ（`info!` / `warn!` / `error!` 等）
+  を経由する。フォーマットやレベル制御を一元化するため
 
 ## Notes
 
