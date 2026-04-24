@@ -29,6 +29,9 @@ name = "lens-rust"
 version = "0.1.0"
 dependencies = [
  "lens-domain",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
