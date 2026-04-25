@@ -14,11 +14,19 @@
 //!   [`find_similar_functions`] helper that drives pairwise comparison.
 //! * [`cohesion`] — LCOM4-style cohesion metric over method graphs that the
 //!   language adapters (e.g. `lens-rust`) populate.
+//! * [`complexity`] — per-function Cyclomatic / Cognitive / Nesting / Halstead
+//!   counts, plus derived Maintainability Index. Adapters fill in the counts;
+//!   the derived metrics live here so every language goes through the same
+//!   formula.
+//! * [`coupling`] — module-level Number of Couplings / Fan-In / Fan-Out /
+//!   Henry-Kafura IFC / Inter-module coupling. Adapters produce
+//!   [`CouplingEdge`]s; this module folds them into the report.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod apted;
 pub mod cohesion;
+pub mod complexity;
 pub mod coupling;
 pub mod function;
 pub mod tree;
@@ -28,6 +36,7 @@ pub use apted::{APTEDOptions, compute_edit_distance};
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };
+pub use complexity::{FunctionComplexity, HalsteadCounts};
 pub use coupling::{
     CouplingEdge, CouplingReport, EdgeKind, ModuleMetrics, ModulePath, PairCoupling, compute_report,
 };

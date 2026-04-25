@@ -48,6 +48,14 @@ All tools are managed by mise. Run `mise install` to install them.
    - **Hotspot**（git の churn × 複雑度で「触るべき/危険な場所」を可視化）
    - **Function similarity**（似た関数・重複ロジックの検出）
    - **Cohesion / Coupling**（関数・モジュールの凝集度・結合度）
+   - **Complexity**（関数単位の Cyclomatic / Cognitive / Nesting depth /
+     Halstead / Maintainability Index）
+   - **Temporal Coupling**（git 履歴で同時に変更されやすいファイル対）
+   - **Code Age / Ownership**（最終変更日と作者の偏り）
+   - **Public API Surface**（pub 境界の広さと churn・破壊的変更リスク）
+   - **Doc Coverage**（pub item の `///` カバレッジ）
+   - **Dead / Unused public**（呼ばれない pub 項目）
+   - **Token Budget**（tokenizer 換算でのファイルサイズと context window フィット）
    - その他、agent が推論するのに有用な指標は随時追加
 
 > 通常の lint と違い、出力は **LLM のコンテキストに載せて意味がある形** にチューニ
@@ -72,6 +80,7 @@ agent-lens
     ├── hotspot [--since <rev>]      # git churn × 複雑度
     ├── similarity [--threshold N]   # 関数類似度
     ├── cohesion [--path <glob>]     # 凝集度 / LCOM 系
+    ├── complexity <path>            # 関数単位の CC / Cognitive / Nesting / MI
     └── ...                          # 追加指標
 ```
 
@@ -123,6 +132,58 @@ agent-lens
 - **Hotspot**: `git log --numstat` 等で churn を取り、複雑度（CC / LOC）と掛け合わせる
 - **Similarity**: AST を正規化 → トークン列を winnowing / MinHash で近似比較
 - **Cohesion**: モジュール単位で LCOM4 / 相互参照グラフをベースに算出
+- **Complexity**: 関数単位で Cyclomatic（McCabe）、Cognitive（Sonar）、最大ネスト
+  深度、Halstead Volume、Maintainability Index を算出。Hotspot の「複雑度」入力
+  としても再利用する
+
+### 追加候補の指標カタログ
+
+「随時追加」の候補。`agent-lens` のコンセプト（agent 向けに信号密度の高い情報を
+出す）に沿うものを優先する。実装難易度は AST のみ＝低、AST + git ＝中、ML/PDG
+が要るもの＝高、を目安とする。
+
+#### 複雑度・重複系
+
+| 指標                             | 一行定義                                          | 入力           | 難易度 |
+| -------------------------------- | ------------------------------------------------- | -------------- | ------ |
+| Cyclomatic Complexity            | 関数の制御フロー分岐数 +1（McCabe）               | AST            | 低     |
+| Cognitive Complexity             | ネスト深さで重み付けした人間視点の複雑度（Sonar） | AST            | 低     |
+| Max Nesting Depth                | 制御構造の最大ネスト                              | AST            | 低     |
+| Halstead / Maintainability Index | 演算子・オペランド数から導く可読性スコア          | AST            | 中     |
+| Type-3 Clone                     | AST 正規化後の near-miss 重複                     | AST + 編集距離 | 中     |
+
+#### git 履歴系
+
+| 指標                 | 一行定義                                 | 入力          | 難易度 |
+| -------------------- | ---------------------------------------- | ------------- | ------ |
+| Hotspot              | churn × 複雑度。「触るべき・危険」な場所 | AST + git log | 中     |
+| Temporal Coupling    | 同時に変更されやすいファイル対           | git log       | 中     |
+| Code Age             | 行/ファイルの最終変更からの経過時間      | git blame/log | 低     |
+| Code Ownership       | 主要作者比率（Major/Minor authors）      | git log       | 低     |
+| Coverage Gap × Churn | 「変わるのにテストない」場所             | cov + git log | 中     |
+
+#### 構造・API 系
+
+| 指標                         | 一行定義                              | 入力              | 難易度 |
+| ---------------------------- | ------------------------------------- | ----------------- | ------ |
+| Fan-in / Fan-out             | 呼ばれる側 / 呼ぶ側の数               | AST + import 解決 | 中     |
+| Instability (I = Ce/(Ca+Ce)) | パッケージ単位の変更しやすさ          | 依存グラフ        | 中     |
+| Cyclic dependencies          | モジュール間循環依存（SCC 検出）      | 依存グラフ        | 中     |
+| Public API Surface           | pub 項目の数とシグネチャ複雑度・churn | AST + git         | 中     |
+| Dead / Unused public         | 外から呼ばれない pub 項目             | AST + 呼出解析    | 中     |
+
+#### LLM コンテキスト系（agent-lens 独自色）
+
+| 指標            | 一行定義                                               | 入力       | 難易度 |
+| --------------- | ------------------------------------------------------ | ---------- | ------ |
+| Token Budget    | tokenizer 換算でファイル/モジュールの実トークン数      | tokenizer  | 低     |
+| Context Span    | 関数を理解するのに辿る必要があるファイル数（推移閉包） | 依存グラフ | 中     |
+| Doc Coverage    | pub item の `///` 付与率                               | AST        | 低     |
+| Onboarding Cost | 複雑度＋依存幅＋doc 不足の合成スコア                   | 複合       | 中     |
+
+> 「人間向け lint」と違い、ここでの判断軸は **agent の意思決定に効くか** と
+> **入力が現実的か**。コメント密度のような表層指標や、研究寄りの ML ベース
+> 可読性スコアは、明確な agent 用途が見えるまで採用しない。
 
 ### ログ
 

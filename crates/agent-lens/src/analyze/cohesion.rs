@@ -13,12 +13,7 @@ use std::path::{Path, PathBuf};
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
-/// Output format selector for [`CohesionAnalyzer::analyze`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum OutputFormat {
-    Json,
-    Md,
-}
+use super::OutputFormat;
 
 /// Errors raised while running the cohesion analyzer.
 #[derive(Debug)]
