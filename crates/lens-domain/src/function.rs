@@ -122,6 +122,39 @@ mod tests {
     }
 
     #[test]
+    fn line_count_includes_both_endpoints() {
+        let f = FunctionDef {
+            name: "f".into(),
+            start_line: 5,
+            end_line: 10,
+            tree: TreeNode::leaf("Block"),
+        };
+        assert_eq!(f.line_count(), 6);
+    }
+
+    #[test]
+    fn line_count_is_one_for_single_line() {
+        let f = FunctionDef {
+            name: "f".into(),
+            start_line: 7,
+            end_line: 7,
+            tree: TreeNode::leaf("Block"),
+        };
+        assert_eq!(f.line_count(), 1);
+    }
+
+    #[test]
+    fn line_count_saturates_when_end_before_start() {
+        let f = FunctionDef {
+            name: "f".into(),
+            start_line: 10,
+            end_line: 5,
+            tree: TreeNode::leaf("Block"),
+        };
+        assert_eq!(f.line_count(), 1);
+    }
+
+    #[test]
     fn pairs_sorted_by_similarity_desc() {
         let funcs = vec![
             def("base", fn_tree(&["Let", "Call", "Return"])),

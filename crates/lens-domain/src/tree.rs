@@ -72,4 +72,17 @@ mod tests {
     fn leaf_has_size_one() {
         assert_eq!(TreeNode::leaf("X").subtree_size(), 1);
     }
+
+    #[test]
+    fn push_child_appends_to_children_in_order() {
+        let mut tree = TreeNode::new("Root", "");
+        assert!(tree.children.is_empty());
+
+        tree.push_child(TreeNode::leaf("A"));
+        tree.push_child(TreeNode::leaf("B"));
+
+        assert_eq!(tree.children.len(), 2);
+        assert_eq!(tree.children[0].label, "A");
+        assert_eq!(tree.children[1].label, "B");
+    }
 }

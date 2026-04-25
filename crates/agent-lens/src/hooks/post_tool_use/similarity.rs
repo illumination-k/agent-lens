@@ -356,4 +356,69 @@ mod tests {
         let err = hook.handle(input).unwrap_err();
         assert!(matches!(err, SimilarityError::Io { .. }));
     }
+
+    #[test]
+    fn with_threshold_actually_overrides_default() {
+        // Two near-identical bodies — at the default threshold they would be
+        // reported. Setting an unreachable threshold has to suppress them, or
+        // `with_threshold` is silently dropping the override.
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"
+            fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
+            fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
+        "#;
+        let file = write_file(dir.path(), "lib.rs", source);
+
+        let hook = SimilarityHook::new().with_threshold(1.5);
+        let input = PostToolUseInput {
+            context: ctx(dir.path().to_path_buf()),
+            tool_name: "Write".into(),
+            tool_input: json!({"file_path": file.file_name().unwrap().to_str().unwrap()}),
+            tool_response: json!({}),
+        };
+        let out = hook.handle(input).unwrap();
+        assert_eq!(
+            out,
+            PostToolUseOutput::default(),
+            "threshold=1.5 must suppress all pairs",
+        );
+    }
+
+    #[test]
+    fn similarity_error_io_display_includes_path_and_inner_error() {
+        let err = SimilarityError::Io {
+            path: PathBuf::from("/some/missing.rs"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "boom"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("/some/missing.rs"), "got {msg}");
+        assert!(msg.contains("boom"), "got {msg}");
+    }
+
+    #[test]
+    fn similarity_error_parse_display_includes_inner_error() {
+        let inner: Box<dyn std::error::Error + Send + Sync> = "broken".into();
+        let err = SimilarityError::Parse(inner);
+        let msg = format!("{err}");
+        assert!(msg.contains("parse"), "got {msg}");
+        assert!(msg.contains("broken"), "got {msg}");
+    }
+
+    #[test]
+    fn similarity_error_io_exposes_underlying_io_error_via_source() {
+        let err = SimilarityError::Io {
+            path: PathBuf::from("/x"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "boom"),
+        };
+        let source = std::error::Error::source(&err).expect("source should be Some");
+        assert!(format!("{source}").contains("boom"));
+    }
+
+    #[test]
+    fn similarity_error_parse_exposes_inner_error_via_source() {
+        let inner: Box<dyn std::error::Error + Send + Sync> = "broken".into();
+        let err = SimilarityError::Parse(inner);
+        let source = std::error::Error::source(&err).expect("source should be Some");
+        assert_eq!(format!("{source}"), "broken");
+    }
 }

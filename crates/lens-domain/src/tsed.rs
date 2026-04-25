@@ -132,4 +132,32 @@ mod tests {
         let sim = calculate_tsed(&a, &b, &TSEDOptions::default());
         assert!((0.0..=1.0).contains(&sim));
     }
+
+    #[test]
+    fn empty_trees_are_identical() {
+        // max_size == 0 short-circuits to 1.0; without this the score would
+        // divide by zero.
+        let a = TreeNode::leaf("");
+        let b = TreeNode::leaf("");
+        let sim = calculate_tsed(&a, &b, &TSEDOptions::default());
+        assert!((sim - 1.0).abs() < 1e-9, "got {sim}");
+    }
+
+    #[test]
+    fn score_follows_one_minus_distance_over_max_size() {
+        // Concrete arithmetic check pinned to the formula: identical roots
+        // with one renamed leaf out of five total nodes yields
+        // 1 - rename_cost / 5 once the size penalty is disabled.
+        let a = parent("Root", vec![leaf("A"), leaf("B"), leaf("C"), leaf("D")]);
+        let b = parent("Root", vec![leaf("A"), leaf("B"), leaf("C"), leaf("Z")]);
+        let opts = TSEDOptions {
+            apted: APTEDOptions {
+                rename_cost: 1.0,
+                ..APTEDOptions::default()
+            },
+            size_penalty: false,
+        };
+        let sim = calculate_tsed(&a, &b, &opts);
+        assert!((sim - 0.8).abs() < 1e-9, "got {sim}");
+    }
 }

@@ -199,7 +199,34 @@ mod tests {
         assert_eq!(funcs[0].name, "first");
         assert_eq!(funcs[1].name, "second");
         assert_eq!(funcs[0].start_line, 1);
+        assert_eq!(funcs[0].end_line, 1);
         assert_eq!(funcs[1].start_line, 2);
+        assert_eq!(funcs[1].end_line, 2);
+    }
+
+    #[test]
+    fn end_line_tracks_closing_brace_for_multi_line_function() {
+        let src = "fn body() {\n    let x = 1;\n    let y = 2;\n}\n";
+        let funcs = parse_functions(src);
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].start_line, 1);
+        assert_eq!(funcs[0].end_line, 4);
+    }
+
+    #[test]
+    fn language_identifier_is_rust() {
+        let parser = RustParser::new();
+        assert_eq!(parser.language(), "rust");
+    }
+
+    #[test]
+    fn parse_error_exposes_underlying_syn_error_via_source() {
+        let mut parser = RustParser::new();
+        let err = parser.parse("fn ??? {").unwrap_err();
+        let source = std::error::Error::source(&err).expect("source should be Some");
+        // The underlying syn error should round-trip through Display so the
+        // chained error message stays intact.
+        assert!(!format!("{source}").is_empty());
     }
 
     #[test]
