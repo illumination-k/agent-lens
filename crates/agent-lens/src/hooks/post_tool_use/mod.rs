@@ -5,5 +5,7 @@
 //! runtime.
 
 pub mod similarity;
+pub mod wrapper;
 
 pub use similarity::{SimilarityError, SimilarityHook};
+pub use wrapper::{WrapperError, WrapperHook};
