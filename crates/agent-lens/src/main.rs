@@ -14,9 +14,16 @@ use std::process::ExitCode;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
+use agent_hooks::codex::{
+    CodexHookInput, PostToolUseInput as CodexPostToolUseInput,
+    PostToolUseOutput as CodexPostToolUseOutput,
+};
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_THRESHOLD,
     OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
+};
+use agent_lens::hooks::codex::post_tool_use::{
+    SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use clap::{Parser, Subcommand};
@@ -40,6 +47,9 @@ enum Command {
     /// Run a handler for one of Claude Code's hook events.
     #[command(subcommand)]
     Hook(HookCommand),
+    /// Run a handler for one of Codex's hook events.
+    #[command(subcommand)]
+    CodexHook(CodexHookCommand),
     /// Run an on-demand analyzer that emits LLM-friendly context.
     #[command(subcommand)]
     Analyze(AnalyzeCommand),
@@ -63,6 +73,29 @@ enum PostToolUseCommand {
     /// trivial adapters, is just a forwarding call to another function.
     ///
     /// The parser is chosen from the file extension (`.rs` today).
+    /// Files with an unsupported extension are ignored silently.
+    Wrapper,
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexHookCommand {
+    /// Handle a Codex `PostToolUse` event.
+    #[command(subcommand)]
+    PostToolUse(CodexPostToolUseCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexPostToolUseCommand {
+    /// Report similar function pairs across every file Codex's
+    /// `apply_patch` just touched.
+    ///
+    /// The parser is chosen from each file's extension (`.rs` today).
+    /// Files with an unsupported extension are ignored silently.
+    Similarity,
+    /// Report functions whose body, after stripping a short chain of
+    /// trivial adapters, is just a forwarding call to another function.
+    ///
+    /// Runs against every file Codex's `apply_patch` just touched.
     /// Files with an unsupported extension are ignored silently.
     Wrapper,
 }
@@ -168,6 +201,7 @@ fn init_tracing() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
+        Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
         Command::Analyze(sub) => run_analyze(sub),
     }
 }
@@ -223,6 +257,36 @@ fn read_post_tool_use_from_stdin() -> Result<PostToolUseInput, Box<dyn std::erro
 }
 
 fn write_output_to_stdout(output: &PostToolUseOutput) -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    serde_json::to_writer(&mut stdout, output)?;
+    stdout.write_all(b"\n")?;
+    Ok(())
+}
+
+fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let input = read_codex_post_tool_use_from_stdin()?;
+    let output = match cmd {
+        CodexPostToolUseCommand::Similarity => CodexSimilarityHook::new().handle(input)?,
+        CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
+    };
+    write_codex_output_to_stdout(&output)
+}
+
+fn read_codex_post_tool_use_from_stdin() -> Result<CodexPostToolUseInput, Box<dyn std::error::Error>>
+{
+    let mut buf = String::new();
+    io::stdin().read_to_string(&mut buf)?;
+    let event: CodexHookInput = serde_json::from_str(&buf)?;
+    match event {
+        CodexHookInput::PostToolUse(input) => Ok(input),
+        _ => Err("expected a Codex PostToolUse hook payload on stdin".into()),
+    }
+}
+
+fn write_codex_output_to_stdout(
+    output: &CodexPostToolUseOutput,
+) -> Result<(), Box<dyn std::error::Error>> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     serde_json::to_writer(&mut stdout, output)?;

@@ -1,12 +1,13 @@
 //! Hook protocol types and dispatch trait for coding agents.
 //!
-//! Each supported agent lives in its own module (currently [`claude_code`]).
+//! Each supported agent lives in its own module ([`claude_code`], [`codex`]).
 //! A hook handler implements [`Hook`] for a specific `Input`/`Output` pair and
 //! is responsible for the domain logic; this crate only deals with the schema.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod claude_code;
+pub mod codex;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
