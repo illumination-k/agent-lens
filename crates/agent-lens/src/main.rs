@@ -2,16 +2,19 @@
 //!
 //! Each PostToolUse handler is a clap subcommand, so `agent-lens hook
 //! post-tool-use similarity` is parsed statically instead of routed by
-//! a runtime name string. Stdout is reserved for the hook's JSON
-//! response; diagnostics go to stderr via `tracing`.
+//! a runtime name string. Analyzers live under `agent-lens analyze ...`
+//! and write their report to stdout. Stdout is otherwise reserved for the
+//! hook's JSON response; diagnostics go to stderr via `tracing`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::io::{self, Read, Write as _};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
+use agent_lens::analyze::{CohesionAnalyzer, OutputFormat};
 use agent_lens::hooks::post_tool_use::SimilarityHook;
 use clap::{Parser, Subcommand};
 use tracing::error;
@@ -34,6 +37,9 @@ enum Command {
     /// Run a handler for one of Claude Code's hook events.
     #[command(subcommand)]
     Hook(HookCommand),
+    /// Run an on-demand analyzer that emits LLM-friendly context.
+    #[command(subcommand)]
+    Analyze(AnalyzeCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -50,6 +56,22 @@ enum PostToolUseCommand {
     /// The parser is chosen from the file extension (`.rs` today).
     /// Files with an unsupported extension are ignored silently.
     Similarity,
+}
+
+#[derive(Debug, Subcommand)]
+enum AnalyzeCommand {
+    /// Report LCOM4 cohesion units (one per `impl` block) for a source file.
+    ///
+    /// The parser is chosen from the file extension (`.rs` today). The JSON
+    /// format is the default machine-readable output; `--format md` emits a
+    /// compact summary tuned for LLM context.
+    Cohesion {
+        /// Path to a source file to analyze.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
 }
 
 fn main() -> ExitCode {
@@ -77,6 +99,22 @@ fn init_tracing() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
+        Command::Analyze(sub) => run_analyze(sub),
+    }
+}
+
+fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        AnalyzeCommand::Cohesion { path, format } => {
+            let report = CohesionAnalyzer::new().analyze(&path, format)?;
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            stdout.write_all(report.as_bytes())?;
+            if !report.ends_with('\n') {
+                stdout.write_all(b"\n")?;
+            }
+            Ok(())
+        }
     }
 }
 

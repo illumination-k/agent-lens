@@ -9,6 +9,8 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod cohesion;
 mod parser;
 
+pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use parser::{RustParseError, RustParser};
