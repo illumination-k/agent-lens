@@ -225,62 +225,46 @@ mod tests {
         path
     }
 
-    #[test]
-    fn ignores_non_editing_tools() {
+    /// Assert that the default-configured hook treats `(tool_name,
+    /// tool_input)` as out of scope and returns the empty default
+    /// output. Folds together every "should ignore this" path so each
+    /// case is a single line at the call site.
+    fn assert_no_op(tool_name: &str, tool_input: serde_json::Value) {
         let hook = SimilarityHook::new();
         let input = PostToolUseInput {
             context: ctx(PathBuf::from("/tmp")),
-            tool_name: "Bash".into(),
-            tool_input: json!({"command": "ls"}),
+            tool_name: tool_name.into(),
+            tool_input: tool_input.clone(),
             tool_response: json!({}),
         };
         let out = hook.handle(input).unwrap();
-        assert_eq!(out, PostToolUseOutput::default());
+        assert_eq!(
+            out,
+            PostToolUseOutput::default(),
+            "expected no-op for tool={tool_name} input={tool_input}",
+        );
+    }
+
+    #[test]
+    fn ignores_non_editing_tools() {
+        assert_no_op("Bash", json!({"command": "ls"}));
     }
 
     #[test]
     fn ignores_unknown_extensions() {
-        let hook = SimilarityHook::new();
         for ext in ["README.md", "notes.txt", "script.py", "app.ts"] {
-            let input = PostToolUseInput {
-                context: ctx(PathBuf::from("/tmp")),
-                tool_name: "Write".into(),
-                tool_input: json!({ "file_path": ext }),
-                tool_response: json!({}),
-            };
-            let out = hook.handle(input).unwrap();
-            assert_eq!(
-                out,
-                PostToolUseOutput::default(),
-                "expected no-op for {ext}"
-            );
+            assert_no_op("Write", json!({ "file_path": ext }));
         }
     }
 
     #[test]
     fn ignores_extensionless_paths() {
-        let hook = SimilarityHook::new();
-        let input = PostToolUseInput {
-            context: ctx(PathBuf::from("/tmp")),
-            tool_name: "Write".into(),
-            tool_input: json!({"file_path": "Makefile"}),
-            tool_response: json!({}),
-        };
-        let out = hook.handle(input).unwrap();
-        assert_eq!(out, PostToolUseOutput::default());
+        assert_no_op("Write", json!({"file_path": "Makefile"}));
     }
 
     #[test]
     fn ignores_missing_file_path() {
-        let hook = SimilarityHook::new();
-        let input = PostToolUseInput {
-            context: ctx(PathBuf::from("/tmp")),
-            tool_name: "Edit".into(),
-            tool_input: json!({}),
-            tool_response: json!({}),
-        };
-        let out = hook.handle(input).unwrap();
-        assert_eq!(out, PostToolUseOutput::default());
+        assert_no_op("Edit", json!({}));
     }
 
     #[test]
