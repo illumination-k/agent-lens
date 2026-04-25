@@ -1,0 +1,126 @@
+name: Release Latest
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-latest
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      MISE_ENV: rust
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Add rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin agent-lens
+
+      - name: Package archive (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          dir="agent-lens-${TARGET}"
+          mkdir -p "${dir}"
+          cp "target/${TARGET}/release/agent-lens" "${dir}/"
+          cp README.md "${dir}/"
+          tar -czf "${dir}.tar.gz" "${dir}"
+          shasum -a 256 "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
+
+      - name: Package archive (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "agent-lens-$env:TARGET"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item "target\$env:TARGET\release\agent-lens.exe" "$dir\"
+          Copy-Item "README.md" "$dir\"
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash | Out-File -Encoding ascii "$dir.zip.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-lens-${{ matrix.target }}
+          path: |
+            agent-lens-*.tar.gz
+            agent-lens-*.tar.gz.sha256
+            agent-lens-*.zip
+            agent-lens-*.zip.sha256
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: Publish latest release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Replace latest tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest \
+            --target "${SHA}" \
+            --title "latest (${SHA})" \
+            --notes "Rolling release built from \`main\` at ${SHA}." \
+            --prerelease \
+            dist/*

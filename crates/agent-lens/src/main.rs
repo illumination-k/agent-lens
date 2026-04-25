@@ -14,7 +14,10 @@ use std::process::ExitCode;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
-use agent_lens::analyze::{CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, OutputFormat};
+use agent_lens::analyze::{
+    CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_THRESHOLD,
+    OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
+};
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use clap::{Parser, Subcommand};
 use tracing::error;
@@ -106,6 +109,38 @@ enum AnalyzeCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
+    /// Report near-duplicate function pairs in a source file.
+    ///
+    /// Function bodies are compared via TSED on their normalised AST and
+    /// reported when their similarity is at or above `--threshold`. The
+    /// parser is chosen from the file extension (`.rs` today). The JSON
+    /// format is the default machine-readable output; `--format md` emits
+    /// a compact summary tuned for LLM context.
+    Similarity {
+        /// Path to a source file to analyze.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+        /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
+        /// this value are reported. Defaults to the same cutoff used by
+        /// the PostToolUse `similarity` hook.
+        #[arg(long, default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
+        threshold: f64,
+    },
+    /// Report functions whose body, after stripping a short chain of
+    /// trivial adapters, is just a forwarding call to another function.
+    ///
+    /// The parser is chosen from the file extension (`.rs` today). The JSON
+    /// format is the default machine-readable output; `--format md` emits
+    /// a compact summary tuned for LLM context.
+    Wrapper {
+        /// Path to a source file to analyze.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
 }
 
 fn main() -> ExitCode {
@@ -147,6 +182,16 @@ fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         AnalyzeCommand::Coupling { path, format } => {
             CouplingAnalyzer::new().analyze(&path, format)?
+        }
+        AnalyzeCommand::Similarity {
+            path,
+            format,
+            threshold,
+        } => SimilarityAnalyzer::new()
+            .with_threshold(threshold)
+            .analyze(&path, format)?,
+        AnalyzeCommand::Wrapper { path, format } => {
+            WrapperAnalyzer::new().analyze(&path, format)?
         }
     };
     let stdout = io::stdout();
