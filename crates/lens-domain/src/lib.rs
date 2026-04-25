@@ -18,12 +18,16 @@
 //!   counts, plus derived Maintainability Index. Adapters fill in the counts;
 //!   the derived metrics live here so every language goes through the same
 //!   formula.
+//! * [`coupling`] — module-level Number of Couplings / Fan-In / Fan-Out /
+//!   Henry-Kafura IFC / Inter-module coupling. Adapters produce
+//!   [`CouplingEdge`]s; this module folds them into the report.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod apted;
 pub mod cohesion;
 pub mod complexity;
+pub mod coupling;
 pub mod function;
 pub mod tree;
 pub mod tsed;
@@ -33,6 +37,9 @@ pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };
 pub use complexity::{FunctionComplexity, HalsteadCounts};
+pub use coupling::{
+    CouplingEdge, CouplingReport, EdgeKind, ModuleMetrics, ModulePath, PairCoupling, compute_report,
+};
 pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed};

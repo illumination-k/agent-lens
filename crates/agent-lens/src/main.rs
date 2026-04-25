@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
-use agent_lens::analyze::{CohesionAnalyzer, ComplexityAnalyzer, OutputFormat};
+use agent_lens::analyze::{CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, OutputFormat};
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use clap::{Parser, Subcommand};
 use tracing::error;
@@ -92,6 +92,20 @@ enum AnalyzeCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
+    /// Report module-level coupling metrics for a Rust crate.
+    ///
+    /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
+    /// IFC ((fan_in*fan_out)^2), and per-pair shared-symbol counts.
+    /// `path` may be a `.rs` crate root (e.g. `src/lib.rs`) or a
+    /// directory containing one.
+    Coupling {
+        /// Path to a `.rs` crate root or a directory containing
+        /// `src/lib.rs` or `src/main.rs`.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
 }
 
 fn main() -> ExitCode {
@@ -130,6 +144,9 @@ fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         AnalyzeCommand::Complexity { path, format } => {
             ComplexityAnalyzer::new().analyze(&path, format)?
+        }
+        AnalyzeCommand::Coupling { path, format } => {
+            CouplingAnalyzer::new().analyze(&path, format)?
         }
     };
     let stdout = io::stdout();

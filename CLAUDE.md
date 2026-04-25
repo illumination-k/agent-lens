@@ -81,6 +81,7 @@ agent-lens
     ├── similarity [--threshold N]   # 関数類似度
     ├── cohesion [--path <glob>]     # 凝集度 / LCOM 系
     ├── complexity <path>            # 関数単位の CC / Cognitive / Nesting / MI
+    ├── coupling <path>              # モジュール間 Fan-In / Fan-Out / IFC
     └── ...                          # 追加指標
 ```
 
@@ -135,6 +136,11 @@ agent-lens
 - **Complexity**: 関数単位で Cyclomatic（McCabe）、Cognitive（Sonar）、最大ネスト
   深度、Halstead Volume、Maintainability Index を算出。Hotspot の「複雑度」入力
   としても再利用する
+- **Coupling**: Rust の `mod` 単位で Number of Couplings / Fan-In / Fan-Out /
+  簡略 Henry-Kafura IFC（`(fan_in × fan_out)^2`）/ モジュール対の Inter-module
+  Coupling（distinct シンボル数）を算出。クレートルート (`src/lib.rs` /
+  `src/main.rs`) から `mod foo;` を辿り、`use` / 関数呼び出し / 型参照 /
+  `impl OtherTrait for MyType` をエッジとして集める
 
 ### 追加候補の指標カタログ
 
@@ -166,11 +172,14 @@ agent-lens
 
 | 指標                         | 一行定義                              | 入力              | 難易度 |
 | ---------------------------- | ------------------------------------- | ----------------- | ------ |
-| Fan-in / Fan-out             | 呼ばれる側 / 呼ぶ側の数               | AST + import 解決 | 中     |
 | Instability (I = Ce/(Ca+Ce)) | パッケージ単位の変更しやすさ          | 依存グラフ        | 中     |
 | Cyclic dependencies          | モジュール間循環依存（SCC 検出）      | 依存グラフ        | 中     |
 | Public API Surface           | pub 項目の数とシグネチャ複雑度・churn | AST + git         | 中     |
 | Dead / Unused public         | 外から呼ばれない pub 項目             | AST + 呼出解析    | 中     |
+
+> Fan-In / Fan-Out / Henry-Kafura IFC は `analyze coupling` として実装済み。
+> 上記 Instability・Cyclic dependencies は同じ `coupling` モジュールの依存
+> グラフを再利用して追加できる。
 
 #### LLM コンテキスト系（agent-lens 独自色）
 
