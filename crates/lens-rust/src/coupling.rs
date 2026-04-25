@@ -24,10 +24,12 @@
 //! * Cross-crate references are out of scope; `build_module_tree` walks a
 //!   single crate root.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lens_domain::ModulePath;
-use syn::Item;
+use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
+use syn::visit::Visit;
+use syn::{ExprPath, Item, ItemImpl, ItemUse, TypePath, UseTree};
 
 /// Failures raised while walking a crate's module tree.
 #[derive(Debug)]
@@ -177,6 +179,249 @@ fn split_modules(
         }
     }
     Ok(kept)
+}
+
+/// Collect every cross-module reference in `modules` as a list of
+/// [`CouplingEdge`]s. Self-loops and duplicates are *not* filtered here
+/// — that's the caller's responsibility (typically
+/// [`lens_domain::compute_report`]).
+///
+/// External references (anything rooted at `std`, `core`, `alloc`, or an
+/// unrecognised crate name) are silently dropped.
+pub fn extract_edges(modules: &[CrateModule]) -> Vec<CouplingEdge> {
+    let known: HashSet<ModulePath> = modules.iter().map(|m| m.path.clone()).collect();
+    let mut edges = Vec::new();
+    for module in modules {
+        let mut visitor = EdgeVisitor::new(&module.path, &known);
+        // Pass 1: register `use` aliases so subsequent paths can resolve
+        // bare identifiers via them. `use` items at file scope dominate
+        // visibility for the whole module, regardless of source order.
+        for item in &module.items {
+            if let Item::Use(u) = item {
+                visitor.visit_item_use(u);
+            }
+        }
+        // Pass 2: walk every other item; nested `use` statements
+        // (e.g. inside a function body) are picked up here too and
+        // continue to extend the alias map for trailing items.
+        for item in &module.items {
+            if !matches!(item, Item::Use(_)) {
+                visitor.visit_item(item);
+            }
+        }
+        edges.append(&mut visitor.edges);
+    }
+    edges
+}
+
+/// Read off the simple ident sequence of a `syn::Path`, dropping any
+/// generic arguments. The conversion is lossy for things like
+/// `Vec<T>` but the only piece we need for module resolution is the
+/// segment list.
+fn path_to_segments(path: &syn::Path) -> Vec<String> {
+    path.segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect()
+}
+
+struct EdgeVisitor<'a> {
+    current: &'a ModulePath,
+    known: &'a HashSet<ModulePath>,
+    /// Local aliases introduced by `use` statements. Each entry maps a
+    /// local name to the absolute segment list it stands for, e.g.
+    /// `"Bar" -> ["crate", "a", "Foo"]` for `use crate::a::Foo as Bar;`.
+    aliases: HashMap<String, Vec<String>>,
+    edges: Vec<CouplingEdge>,
+}
+
+impl<'a> EdgeVisitor<'a> {
+    fn new(current: &'a ModulePath, known: &'a HashSet<ModulePath>) -> Self {
+        Self {
+            current,
+            known,
+            aliases: HashMap::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    /// Walk a `use` tree, recording an edge for each leaf and updating
+    /// `aliases`. `prefix` accumulates the path segments seen so far.
+    fn walk_use_tree(&mut self, tree: &UseTree, prefix: &mut Vec<String>) {
+        match tree {
+            UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                self.walk_use_tree(&p.tree, prefix);
+                prefix.pop();
+            }
+            UseTree::Name(n) => {
+                let mut full = prefix.clone();
+                full.push(n.ident.to_string());
+                if let Some((target, symbol)) = self.resolve_path(&full) {
+                    self.aliases.insert(n.ident.to_string(), full);
+                    self.record(target, symbol, EdgeKind::Use);
+                }
+            }
+            UseTree::Rename(r) => {
+                let mut full = prefix.clone();
+                full.push(r.ident.to_string());
+                if let Some((target, symbol)) = self.resolve_path(&full) {
+                    self.aliases.insert(r.rename.to_string(), full);
+                    self.record(target, symbol, EdgeKind::Use);
+                }
+            }
+            UseTree::Glob(_) => {
+                if let Some(target) = self.resolve_module(prefix) {
+                    self.record(target, "*".to_owned(), EdgeKind::Use);
+                }
+            }
+            UseTree::Group(g) => {
+                for item in &g.items {
+                    self.walk_use_tree(item, prefix);
+                }
+            }
+        }
+    }
+
+    fn record(&mut self, target: ModulePath, symbol: String, kind: EdgeKind) {
+        self.edges.push(CouplingEdge {
+            from: self.current.clone(),
+            to: target,
+            symbol,
+            kind,
+        });
+    }
+
+    fn try_record(&mut self, segments: &[String], kind: EdgeKind) {
+        if let Some((target, symbol)) = self.resolve_path(segments) {
+            self.record(target, symbol, kind);
+        }
+    }
+
+    /// Apply prefix transformations (`crate`, `self`, `super`, aliases,
+    /// external roots) and return an absolute segment list rooted at
+    /// `"crate"`. Returns `None` for paths that point outside the crate
+    /// or that cannot be anchored.
+    fn absolutize(&self, segments: &[String]) -> Option<Vec<String>> {
+        let first = segments.first()?;
+        match first.as_str() {
+            "crate" => Some(segments.to_vec()),
+            "self" => {
+                let mut v: Vec<String> =
+                    self.current.as_str().split("::").map(String::from).collect();
+                v.extend(segments.iter().skip(1).cloned());
+                Some(v)
+            }
+            "super" => {
+                let mut v: Vec<String> =
+                    self.current.as_str().split("::").map(String::from).collect();
+                let mut iter = segments.iter();
+                while let Some(s) = iter.next() {
+                    if s == "super" {
+                        if v.len() <= 1 {
+                            return None;
+                        }
+                        v.pop();
+                    } else {
+                        v.push(s.clone());
+                        for rest in iter {
+                            v.push(rest.clone());
+                        }
+                        break;
+                    }
+                }
+                Some(v)
+            }
+            "std" | "core" | "alloc" => None,
+            other => {
+                let alias = self.aliases.get(other)?;
+                let mut v = alias.clone();
+                v.extend(segments.iter().skip(1).cloned());
+                Some(v)
+            }
+        }
+    }
+
+    /// Resolve a path that names a value or type — the trailing segments
+    /// after the longest matching module prefix become the symbol.
+    fn resolve_path(&self, segments: &[String]) -> Option<(ModulePath, String)> {
+        let absolute = self.absolutize(segments)?;
+        if absolute.len() < 2 {
+            return None;
+        }
+        for split in (1..absolute.len()).rev() {
+            let candidate = absolute[..split].join("::");
+            let module = ModulePath::new(candidate);
+            if self.known.contains(&module) {
+                let symbol = absolute[split..].join("::");
+                return Some((module, symbol));
+            }
+        }
+        None
+    }
+
+    /// Resolve a path that names a module itself (used for use-globs).
+    fn resolve_module(&self, segments: &[String]) -> Option<ModulePath> {
+        let absolute = self.absolutize(segments)?;
+        let candidate = absolute.join("::");
+        let module = ModulePath::new(candidate);
+        if self.known.contains(&module) {
+            Some(module)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for EdgeVisitor<'_> {
+    fn visit_item_use(&mut self, u: &'ast ItemUse) {
+        let mut prefix = Vec::new();
+        self.walk_use_tree(&u.tree, &mut prefix);
+    }
+
+    fn visit_expr_path(&mut self, p: &'ast ExprPath) {
+        if p.qself.is_none() {
+            let segs = path_to_segments(&p.path);
+            self.try_record(&segs, EdgeKind::Call);
+        }
+        syn::visit::visit_expr_path(self, p);
+    }
+
+    fn visit_type_path(&mut self, t: &'ast TypePath) {
+        if t.qself.is_none() {
+            let segs = path_to_segments(&t.path);
+            self.try_record(&segs, EdgeKind::Type);
+        }
+        syn::visit::visit_type_path(self, t);
+    }
+
+    fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
+        if let syn::Type::Path(tp) = &*i.self_ty {
+            let segs = path_to_segments(&tp.path);
+            if let Some((target, symbol)) = self.resolve_path(&segs) {
+                self.record(target, symbol, EdgeKind::ImplFor);
+            }
+        }
+        if let Some((_, trait_path, _)) = &i.trait_ {
+            let segs = path_to_segments(trait_path);
+            if let Some((target, symbol)) = self.resolve_path(&segs) {
+                self.record(target, symbol, EdgeKind::ImplFor);
+            }
+        }
+        // Recurse into the body but skip the self_ty / trait_ to avoid
+        // double-counting them as Type edges (they're already recorded
+        // above as ImplFor; the bodies still need their own paths
+        // visited).
+        for item in &i.items {
+            syn::visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_item_mod(&mut self, _m: &'ast syn::ItemMod) {
+        // Items inside nested modules belong to a different `CrateModule`
+        // and have already been split out by `build_module_tree`. Stop
+        // here so we don't attribute their references to the parent.
+    }
 }
 
 fn resolve_mod_file(parent_file: &Path, name: &str) -> Option<PathBuf> {
@@ -371,5 +616,301 @@ mod tests {
         let lib = dir.path().join("ghost.rs");
         let err = build_module_tree(&lib).unwrap_err();
         assert!(matches!(err, CouplingError::Io { .. }));
+    }
+
+    fn edges_for(src: &str) -> (Vec<CrateModule>, Vec<CouplingEdge>) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", src);
+        let tree = build_module_tree(&lib).unwrap();
+        let edges = extract_edges(&tree);
+        (tree, edges)
+    }
+
+    fn has_edge(
+        edges: &[CouplingEdge],
+        from: &str,
+        to: &str,
+        symbol: &str,
+        kind: EdgeKind,
+    ) -> bool {
+        edges.iter().any(|e| {
+            e.from.as_str() == from
+                && e.to.as_str() == to
+                && e.symbol == symbol
+                && e.kind == kind
+        })
+    }
+
+    #[test]
+    fn use_statement_records_use_edge() {
+        let src = r#"
+            mod a { pub struct Foo; }
+            mod b {
+                use crate::a::Foo;
+                fn _x(_f: Foo) {}
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "Foo",
+            EdgeKind::Use
+        ));
+    }
+
+    #[test]
+    fn external_use_does_not_record_edge() {
+        let src = r#"
+            mod a {
+                use std::collections::HashMap;
+                fn _x() -> HashMap<u32, u32> { HashMap::new() }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(
+            !edges.iter().any(|e| e.symbol.contains("HashMap")),
+            "found unexpected edge for std type: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn glob_use_records_star_symbol() {
+        let src = r#"
+            mod a { pub struct Foo; pub struct Bar; }
+            mod b { use crate::a::*; }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(&edges, "crate::b", "crate::a", "*", EdgeKind::Use));
+    }
+
+    #[test]
+    fn renamed_use_aliases_resolve_back_to_target() {
+        let src = r#"
+            mod a { pub struct Foo; }
+            mod b {
+                use crate::a::Foo as Bar;
+                fn _x(_b: Bar) {}
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        // Use edge records the target symbol (Foo), not the local alias.
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "Foo",
+            EdgeKind::Use
+        ));
+        // Type edge from the function signature uses the alias `Bar`,
+        // which expands to crate::a::Foo.
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "Foo",
+            EdgeKind::Type
+        ));
+    }
+
+    #[test]
+    fn super_prefix_resolves_to_parent_module() {
+        let src = r#"
+            mod a {
+                pub struct Foo;
+                pub mod inner {
+                    fn _x(_f: super::Foo) {}
+                }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::a::inner",
+            "crate::a",
+            "Foo",
+            EdgeKind::Type
+        ));
+    }
+
+    #[test]
+    fn self_prefix_anchors_to_current_module() {
+        let src = r#"
+            mod a {
+                pub struct Foo;
+                fn _x() -> self::Foo { unimplemented!() }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        // self::Foo from inside crate::a resolves to crate::a::Foo, but
+        // Foo lives directly in crate::a — the longest matching module
+        // is crate::a, so symbol is "Foo".
+        assert!(has_edge(
+            &edges,
+            "crate::a",
+            "crate::a",
+            "Foo",
+            EdgeKind::Type
+        ));
+        // Self-loops will be filtered downstream by compute_report; the
+        // raw extractor still emits them so callers can see what was
+        // referenced.
+    }
+
+    #[test]
+    fn cross_module_function_call_records_call_edge() {
+        let src = r#"
+            mod a { pub fn helper() {} }
+            mod b {
+                fn _x() { crate::a::helper(); }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "helper",
+            EdgeKind::Call
+        ));
+    }
+
+    #[test]
+    fn type_reference_records_type_edge() {
+        let src = r#"
+            mod a { pub struct Foo; }
+            mod b {
+                fn _x(_f: crate::a::Foo) {}
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "Foo",
+            EdgeKind::Type
+        ));
+    }
+
+    #[test]
+    fn impl_block_records_impl_for_edge() {
+        let src = r#"
+            mod a { pub trait Greet { fn hi(&self); } }
+            mod b {
+                pub struct Local;
+                impl crate::a::Greet for Local {
+                    fn hi(&self) {}
+                }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        // The trait path crosses to crate::a as ImplFor.
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "Greet",
+            EdgeKind::ImplFor
+        ));
+    }
+
+    #[test]
+    fn aliased_use_lets_bare_path_resolve() {
+        let src = r#"
+            mod a { pub fn helper() {} }
+            mod b {
+                use crate::a;
+                fn _x() { a::helper(); }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "helper",
+            EdgeKind::Call
+        ));
+    }
+
+    #[test]
+    fn use_inside_function_still_records_edge() {
+        // `use` deep inside an item is picked up on pass 2 because the
+        // visitor recurses into the whole item tree.
+        let src = r#"
+            mod a { pub fn helper() {} }
+            mod b {
+                fn _x() {
+                    use crate::a::helper;
+                    helper();
+                }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "helper",
+            EdgeKind::Use
+        ));
+    }
+
+    #[test]
+    fn nested_module_items_are_attributed_to_the_inner_module() {
+        // `outer::inner` referencing `outer` should produce an edge
+        // attributed to `crate::outer::inner`, not `crate::outer`.
+        let src = r#"
+            pub mod outer {
+                pub struct Foo;
+                pub mod inner {
+                    fn _x(_f: super::Foo) {}
+                }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::outer::inner",
+            "crate::outer",
+            "Foo",
+            EdgeKind::Type
+        ));
+        // The outer module itself shouldn't carry the inner module's
+        // edge.
+        assert!(!has_edge(
+            &edges,
+            "crate::outer",
+            "crate::outer",
+            "Foo",
+            EdgeKind::Type
+        ));
+    }
+
+    #[test]
+    fn use_grouping_expands_each_branch() {
+        let src = r#"
+            mod a { pub struct Foo; pub struct Bar; }
+            mod b {
+                use crate::a::{Foo, Bar};
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "Foo",
+            EdgeKind::Use
+        ));
+        assert!(has_edge(
+            &edges,
+            "crate::b",
+            "crate::a",
+            "Bar",
+            EdgeKind::Use
+        ));
     }
 }
