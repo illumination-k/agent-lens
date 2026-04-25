@@ -152,6 +152,9 @@ struct UnitView<'a> {
     end_line: usize,
     method_count: usize,
     lcom4: usize,
+    /// Henderson-Sellers' LCOM\*. Serialised as JSON `null` when the
+    /// metric is undefined for the unit (single method or no fields).
+    lcom96: Option<f64>,
     components: Vec<Vec<&'a str>>,
     methods: Vec<MethodView<'a>>,
 }
@@ -180,6 +183,7 @@ impl<'a> From<&'a CohesionUnit> for UnitView<'a> {
             end_line: unit.end_line,
             method_count: unit.methods.len(),
             lcom4: unit.lcom4(),
+            lcom96: unit.lcom96,
             components,
             methods,
         }
@@ -221,13 +225,17 @@ fn format_markdown(report: &Report<'_>) -> String {
             Some(t) => format!("impl {t} for {}", unit.type_name),
             None => format!("impl {}", unit.type_name),
         };
+        let lcom96 = match unit.lcom96 {
+            Some(v) => format!("{v:.2}"),
+            None => "n/a".to_owned(),
+        };
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
         let _ = writeln!(
             out,
-            "\n## {header} (L{}-{}) — LCOM4 = {}, {} method(s)",
-            unit.start_line, unit.end_line, unit.lcom4, unit.method_count,
+            "\n## {header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
+            unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
         );
         for component in &unit.components {
             let _ = writeln!(out, "- {{{}}}", component.join(", "));
@@ -249,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn json_report_includes_components_and_lcom4() {
+    fn json_report_includes_components_lcom4_and_lcom96() {
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 struct Thing { a: i32, b: i32 }
@@ -267,10 +275,31 @@ impl Thing {
         assert_eq!(parsed["units"][0]["lcom4"], 2);
         assert_eq!(parsed["units"][0]["type_name"], "Thing");
         assert_eq!(parsed["units"][0]["kind"], "inherent");
+        // Two methods, two disjoint fields → LCOM96 = 1.0.
+        let lcom96 = parsed["units"][0]["lcom96"].as_f64().unwrap();
+        assert!((lcom96 - 1.0).abs() < 1e-9, "got {lcom96}");
     }
 
     #[test]
-    fn markdown_report_lists_each_component() {
+    fn json_report_emits_null_lcom96_when_undefined() {
+        let dir = tempfile::tempdir().unwrap();
+        // Single instance method → LCOM96 is undefined.
+        let src = r#"
+struct Foo { n: i32 }
+impl Foo {
+    fn get(&self) -> i32 { self.n }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let json = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["units"][0]["lcom96"].is_null());
+    }
+
+    #[test]
+    fn markdown_report_lists_each_component_with_both_scores() {
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 struct Thing { a: i32, b: i32 }
@@ -286,8 +315,25 @@ impl Thing {
             .unwrap();
         assert!(md.contains("impl Thing"));
         assert!(md.contains("LCOM4 = 2"));
+        assert!(md.contains("LCOM96 = "));
         assert!(md.contains("ga"));
         assert!(md.contains("gb"));
+    }
+
+    #[test]
+    fn markdown_report_shows_na_when_lcom96_undefined() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+struct Foo { n: i32 }
+impl Foo {
+    fn get(&self) -> i32 { self.n }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let md = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("LCOM96 = n/a"));
     }
 
     #[test]

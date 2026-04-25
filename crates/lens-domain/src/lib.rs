@@ -24,7 +24,9 @@ pub mod tree;
 pub mod tsed;
 
 pub use apted::{APTEDOptions, compute_edit_distance};
-pub use cohesion::{CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components};
+pub use cohesion::{
+    CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
+};
 pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed};

@@ -2,18 +2,22 @@
 //!
 //! `agent-lens` measures cohesion at the granularity of an `impl` block (or a
 //! similar concept in non-Rust languages). For each method we record the
-//! instance fields it touches and the sibling methods it calls; the LCOM4
-//! variant of "Lack of Cohesion of Methods" then drops out as the number of
-//! weakly-connected components in the graph where methods are vertices and
-//! shared field accesses or sibling calls are edges.
+//! instance fields it touches and the sibling methods it calls; from that
+//! footprint we derive two complementary metrics:
 //!
-//! Higher LCOM4 means the unit's methods split into more independent groups —
-//! a hint that the type may want to be broken apart.
+//! * **LCOM4** — the number of weakly-connected components in the graph
+//!   where methods are vertices and shared field accesses or sibling calls
+//!   are edges. An integer count that also tells you *which* methods cluster
+//!   together.
+//! * **LCOM96** (Henderson-Sellers' LCOM\*) — a continuous score in roughly
+//!   `[0, 1]` summarising "what fraction of methods do not touch the average
+//!   field". Useful as a single number when comparing units. Undefined when
+//!   the unit has fewer than two methods or no referenced fields.
 //!
 //! The types here are intentionally free of language-specific details: the
 //! per-language adapter (e.g. `lens-rust`) is responsible for filling in the
 //! [`MethodCohesion`] entries; this module only knows how to fold them into
-//! components.
+//! components and scores.
 
 use crate::function::FunctionDef;
 
@@ -77,7 +81,10 @@ impl MethodCohesion {
 
 /// One unit of analysis (typically a single `impl` block) along with its
 /// cohesion components.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Does not derive `Eq` because [`Self::lcom96`] is a float; use
+/// `PartialEq` if you need structural equality, but be mindful of NaN.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CohesionUnit {
     pub kind: CohesionUnitKind,
     /// Name of the type the unit is attached to (e.g. `Foo` for
@@ -91,10 +98,14 @@ pub struct CohesionUnit {
     /// Connected components, each as a sorted list of indices into
     /// [`Self::methods`]. Computed eagerly so the field is canonical.
     pub components: Vec<Vec<usize>>,
+    /// Henderson-Sellers' LCOM\* (a.k.a. LCOM96). `None` when the metric is
+    /// undefined for this unit (fewer than two methods, or no referenced
+    /// fields). See [`compute_lcom96`].
+    pub lcom96: Option<f64>,
 }
 
 impl CohesionUnit {
-    /// Build a unit and compute its components in one step.
+    /// Build a unit and compute its components and scores in one step.
     pub fn build(
         kind: CohesionUnitKind,
         type_name: impl Into<String>,
@@ -103,6 +114,7 @@ impl CohesionUnit {
         methods: Vec<MethodCohesion>,
     ) -> Self {
         let components = compute_components(&methods);
+        let lcom96 = compute_lcom96(&methods);
         Self {
             kind,
             type_name: type_name.into(),
@@ -110,6 +122,7 @@ impl CohesionUnit {
             end_line,
             methods,
             components,
+            lcom96,
         }
     }
 
@@ -150,6 +163,53 @@ pub fn compute_components(methods: &[MethodCohesion]) -> Vec<Vec<usize>> {
     }
     components.sort_by_key(|c| c.first().copied().unwrap_or(usize::MAX));
     components
+}
+
+/// Henderson-Sellers' LCOM\* (1996), the so-called LCOM96 score.
+///
+/// Defined as `(avg(μ(F)) - m) / (1 - m)` where:
+///
+/// * `m` is the number of methods,
+/// * `F` ranges over the fields actually referenced by the unit,
+/// * `μ(F)` is the number of methods that reference field `F`,
+/// * `avg(μ(F))` is the mean of `μ(F)` over all referenced fields.
+///
+/// `0.0` is perfect cohesion (every method touches every field); `1.0`
+/// is total lack of cohesion (each method touches a disjoint field set).
+/// Values can drift slightly outside `[0, 1]` for unusual layouts; the
+/// caller should treat the score as an indicator, not a hard bound.
+///
+/// Returns `None` when the metric is undefined: fewer than two methods
+/// makes the denominator zero, and zero referenced fields makes the
+/// average undefined.
+pub fn compute_lcom96(methods: &[MethodCohesion]) -> Option<f64> {
+    let m = methods.len();
+    if m < 2 {
+        return None;
+    }
+
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for method in methods {
+        // Defensive dedup: if a language adapter sends the same field
+        // twice for one method, count it once. The Rust adapter already
+        // dedups, but the metric should not depend on that.
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for field in &method.fields {
+            if seen.insert(field.as_str()) {
+                *counts.entry(field.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let a = counts.len();
+    if a == 0 {
+        return None;
+    }
+
+    let sum: usize = counts.values().sum();
+    let avg = sum as f64 / a as f64;
+    let m = m as f64;
+    Some((avg - m) / (1.0 - m))
 }
 
 fn methods_connected(a: &MethodCohesion, b: &MethodCohesion) -> bool {
@@ -268,5 +328,64 @@ mod tests {
         let methods = vec![m("a", &[], &[]), m("b", &[], &[])];
         let comps = compute_components(&methods);
         assert_eq!(comps, vec![vec![0], vec![1]]);
+    }
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn lcom96_is_zero_when_every_method_touches_every_field() {
+        // m=2, a=1, μ(x)=2, avg=2, (2-2)/(1-2) = 0
+        let methods = vec![m("a", &["x"], &[]), m("b", &["x"], &[])];
+        let lcom = compute_lcom96(&methods).unwrap();
+        assert!(approx(lcom, 0.0), "got {lcom}");
+    }
+
+    #[test]
+    fn lcom96_is_one_when_each_method_owns_a_disjoint_field() {
+        // m=2, a=2, μ(x)=μ(y)=1, avg=1, (1-2)/(1-2) = 1
+        let methods = vec![m("a", &["x"], &[]), m("b", &["y"], &[])];
+        let lcom = compute_lcom96(&methods).unwrap();
+        assert!(approx(lcom, 1.0), "got {lcom}");
+    }
+
+    #[test]
+    fn lcom96_handles_split_responsibilities() {
+        // m=4, a=2, μ(counter)=μ(log)=2, avg=2, (2-4)/(1-4) = 2/3
+        let methods = vec![
+            m("bump", &["counter"], &[]),
+            m("current", &["counter"], &[]),
+            m("record", &["log"], &[]),
+            m("dump", &["log"], &[]),
+        ];
+        let lcom = compute_lcom96(&methods).unwrap();
+        assert!(approx(lcom, 2.0 / 3.0), "got {lcom}");
+    }
+
+    #[test]
+    fn lcom96_is_undefined_for_single_method_units() {
+        let methods = vec![m("a", &["x"], &[])];
+        assert!(compute_lcom96(&methods).is_none());
+    }
+
+    #[test]
+    fn lcom96_is_undefined_when_no_fields_are_referenced() {
+        let methods = vec![m("a", &[], &[]), m("b", &[], &["a"])];
+        assert!(compute_lcom96(&methods).is_none());
+    }
+
+    #[test]
+    fn build_records_lcom96_alongside_components() {
+        let methods = vec![
+            m("bump", &["counter"], &[]),
+            m("current", &["counter"], &[]),
+            m("record", &["log"], &[]),
+            m("dump", &["log"], &[]),
+        ];
+        let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "Thing", 1, 10, methods);
+        assert_eq!(unit.lcom4(), 2);
+        let lcom96 = unit.lcom96.unwrap();
+        assert!(approx(lcom96, 2.0 / 3.0), "got {lcom96}");
     }
 }
