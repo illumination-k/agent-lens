@@ -5,8 +5,17 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "ISC",
   "Unicode-3.0",
+  "Unicode-DFS-2016",
 ]
 confidence-threshold = 0.8
+
+# `ruff_text_size`'s per-crate manifest omits the `license` field entirely
+# (the rest of the ruff workspace inherits via `license = { workspace = true }`).
+# The repo-level license is MIT, so clarify that here.
+[[licenses.clarify]]
+crate = "ruff_text_size"
+expression = "MIT"
+license-files = []
 
 [bans]
 multiple-versions = "warn"
