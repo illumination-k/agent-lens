@@ -188,26 +188,30 @@ pub fn extract_edges(modules: &[CrateModule]) -> Vec<CouplingEdge> {
     let known: HashSet<ModulePath> = modules.iter().map(|m| m.path.clone()).collect();
     let mut edges = Vec::new();
     for module in modules {
-        let mut visitor = EdgeVisitor::new(&module.path, &known);
-        // Pass 1: register `use` aliases so subsequent paths can resolve
-        // bare identifiers via them. `use` items at file scope dominate
-        // visibility for the whole module, regardless of source order.
-        for item in &module.items {
-            if let Item::Use(u) = item {
-                visitor.visit_item_use(u);
-            }
-        }
-        // Pass 2: walk every other item; nested `use` statements
-        // (e.g. inside a function body) are picked up here too and
-        // continue to extend the alias map for trailing items.
-        for item in &module.items {
-            if !matches!(item, Item::Use(_)) {
-                visitor.visit_item(item);
-            }
-        }
-        edges.append(&mut visitor.edges);
+        edges.extend(extract_module_edges(module, &known));
     }
     edges
+}
+
+fn extract_module_edges(module: &CrateModule, known: &HashSet<ModulePath>) -> Vec<CouplingEdge> {
+    let mut visitor = EdgeVisitor::new(&module.path, known);
+    // Pass 1: register `use` aliases so subsequent paths can resolve
+    // bare identifiers via them. `use` items at file scope dominate
+    // visibility for the whole module, regardless of source order.
+    for item in &module.items {
+        if let Item::Use(u) = item {
+            visitor.visit_item_use(u);
+        }
+    }
+    // Pass 2: walk every other item; nested `use` statements
+    // (e.g. inside a function body) are picked up here too and
+    // continue to extend the alias map for trailing items.
+    for item in &module.items {
+        if !matches!(item, Item::Use(_)) {
+            visitor.visit_item(item);
+        }
+    }
+    visitor.edges
 }
 
 /// Read off the simple ident sequence of a `syn::Path`, dropping any
@@ -242,37 +246,43 @@ impl<'a> EdgeVisitor<'a> {
     /// `aliases`. `prefix` accumulates the path segments seen so far.
     fn walk_use_tree(&mut self, tree: &UseTree, prefix: &mut Vec<String>) {
         match tree {
-            UseTree::Path(p) => {
-                prefix.push(p.ident.to_string());
-                self.walk_use_tree(&p.tree, prefix);
-                prefix.pop();
-            }
+            UseTree::Path(p) => self.walk_use_path(p, prefix),
             UseTree::Name(n) => {
-                let mut full = prefix.clone();
-                full.push(n.ident.to_string());
-                if let Some((target, symbol)) = self.resolve_path(&full) {
-                    self.aliases.insert(n.ident.to_string(), full);
-                    self.record(target, symbol, EdgeKind::Use);
-                }
+                self.walk_use_leaf(n.ident.to_string(), n.ident.to_string(), prefix)
             }
             UseTree::Rename(r) => {
-                let mut full = prefix.clone();
-                full.push(r.ident.to_string());
-                if let Some((target, symbol)) = self.resolve_path(&full) {
-                    self.aliases.insert(r.rename.to_string(), full);
-                    self.record(target, symbol, EdgeKind::Use);
-                }
+                self.walk_use_leaf(r.ident.to_string(), r.rename.to_string(), prefix)
             }
-            UseTree::Glob(_) => {
-                if let Some(target) = self.resolve_module(prefix) {
-                    self.record(target, "*".to_owned(), EdgeKind::Use);
-                }
-            }
+            UseTree::Glob(_) => self.walk_use_glob(prefix),
             UseTree::Group(g) => {
                 for item in &g.items {
                     self.walk_use_tree(item, prefix);
                 }
             }
+        }
+    }
+
+    fn walk_use_path(&mut self, p: &syn::UsePath, prefix: &mut Vec<String>) {
+        prefix.push(p.ident.to_string());
+        self.walk_use_tree(&p.tree, prefix);
+        prefix.pop();
+    }
+
+    /// `tail` is the last segment that completes the absolute path;
+    /// `alias` is the local name the import binds (same as `tail` for
+    /// `use ::Name`, the renamed identifier for `use ::Name as Other`).
+    fn walk_use_leaf(&mut self, tail: String, alias: String, prefix: &[String]) {
+        let mut full = prefix.to_vec();
+        full.push(tail);
+        if let Some((target, symbol)) = self.resolve_path(&full) {
+            self.aliases.insert(alias, full);
+            self.record(target, symbol, EdgeKind::Use);
+        }
+    }
+
+    fn walk_use_glob(&mut self, prefix: &[String]) {
+        if let Some(target) = self.resolve_module(prefix) {
+            self.record(target, "*".to_owned(), EdgeKind::Use);
         }
     }
 
@@ -299,54 +309,56 @@ impl<'a> EdgeVisitor<'a> {
         let first = segments.first()?;
         match first.as_str() {
             "crate" => Some(segments.to_vec()),
-            "self" => {
-                // Bare `self` in expression position is the receiver
-                // value, not a module reference; only `self::<x>::...`
-                // names a path inside the current module.
-                if segments.len() == 1 {
+            "self" => self.absolutize_self(segments),
+            "super" => self.absolutize_super(segments),
+            "std" | "core" | "alloc" => None,
+            other => self.absolutize_alias(other, segments),
+        }
+    }
+
+    fn current_segments(&self) -> Vec<String> {
+        self.current
+            .as_str()
+            .split("::")
+            .map(String::from)
+            .collect()
+    }
+
+    fn absolutize_self(&self, segments: &[String]) -> Option<Vec<String>> {
+        // Bare `self` in expression position is the receiver value, not a
+        // module reference; only `self::<x>::...` names a path inside the
+        // current module.
+        if segments.len() == 1 {
+            return None;
+        }
+        let mut v = self.current_segments();
+        v.extend(segments.iter().skip(1).cloned());
+        Some(v)
+    }
+
+    fn absolutize_super(&self, segments: &[String]) -> Option<Vec<String>> {
+        let mut v = self.current_segments();
+        let mut iter = segments.iter();
+        while let Some(s) = iter.next() {
+            if s == "super" {
+                if v.len() <= 1 {
                     return None;
                 }
-                let mut v: Vec<String> = self
-                    .current
-                    .as_str()
-                    .split("::")
-                    .map(String::from)
-                    .collect();
-                v.extend(segments.iter().skip(1).cloned());
-                Some(v)
-            }
-            "super" => {
-                let mut v: Vec<String> = self
-                    .current
-                    .as_str()
-                    .split("::")
-                    .map(String::from)
-                    .collect();
-                let mut iter = segments.iter();
-                while let Some(s) = iter.next() {
-                    if s == "super" {
-                        if v.len() <= 1 {
-                            return None;
-                        }
-                        v.pop();
-                    } else {
-                        v.push(s.clone());
-                        for rest in iter {
-                            v.push(rest.clone());
-                        }
-                        break;
-                    }
-                }
-                Some(v)
-            }
-            "std" | "core" | "alloc" => None,
-            other => {
-                let alias = self.aliases.get(other)?;
-                let mut v = alias.clone();
-                v.extend(segments.iter().skip(1).cloned());
-                Some(v)
+                v.pop();
+            } else {
+                v.push(s.clone());
+                v.extend(iter.cloned());
+                break;
             }
         }
+        Some(v)
+    }
+
+    fn absolutize_alias(&self, head: &str, segments: &[String]) -> Option<Vec<String>> {
+        let alias = self.aliases.get(head)?;
+        let mut v = alias.clone();
+        v.extend(segments.iter().skip(1).cloned());
+        Some(v)
     }
 
     /// Resolve a path that names a value or type — the trailing segments

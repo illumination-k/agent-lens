@@ -11,15 +11,14 @@
 //! stays silent instead of erroring.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
 use lens_rust::{WrapperFinding, find_wrappers};
 
-/// Tool names whose `tool_input.file_path` points at the file that was
-/// just modified. Anything outside this set is ignored.
-const EDITING_TOOL_NAMES: &[&str] = &["Write", "Edit", "MultiEdit"];
+use crate::analyze::SourceLang;
+use crate::hooks::post_tool_use::{EditedSource, ReadEditedSourceError, prepare_edited_source};
 
 /// Handler implementation for the `wrapper` PostToolUse hook.
 #[derive(Debug, Clone, Default)]
@@ -28,30 +27,6 @@ pub struct WrapperHook;
 impl WrapperHook {
     pub fn new() -> Self {
         Self
-    }
-}
-
-/// Languages that the wrapper hook knows how to parse.
-///
-/// Mirrors the similarity hook's enum so that adding a new language is
-/// a localised, one-spot change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Language {
-    Rust,
-}
-
-impl Language {
-    fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "rs" => Some(Self::Rust),
-            _ => None,
-        }
-    }
-
-    fn find_wrappers(self, source: &str) -> Result<Vec<WrapperFinding>, WrapperError> {
-        match self {
-            Self::Rust => find_wrappers(source).map_err(|e| WrapperError::Parse(Box::new(e))),
-        }
     }
 }
 
@@ -87,46 +62,39 @@ impl std::error::Error for WrapperError {
     }
 }
 
+impl From<ReadEditedSourceError> for WrapperError {
+    fn from(e: ReadEditedSourceError) -> Self {
+        Self::Io {
+            path: e.path,
+            source: e.source,
+        }
+    }
+}
+
 impl Hook for WrapperHook {
     type Input = PostToolUseInput;
     type Output = PostToolUseOutput;
     type Error = WrapperError;
 
     fn handle(&self, input: PostToolUseInput) -> Result<PostToolUseOutput, Self::Error> {
-        if !EDITING_TOOL_NAMES.contains(&input.tool_name.as_str()) {
-            return Ok(PostToolUseOutput::default());
-        }
-        let Some(file_path) = extract_file_path(&input.tool_input) else {
-            return Ok(PostToolUseOutput::default());
-        };
-        let rel_path = Path::new(&file_path);
-        let Some(language) = rel_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(Language::from_extension)
+        let Some(EditedSource {
+            rel_path,
+            lang,
+            source,
+            ..
+        }) = prepare_edited_source(&input)?
         else {
             return Ok(PostToolUseOutput::default());
         };
 
-        let abs_path = if rel_path.is_absolute() {
-            rel_path.to_path_buf()
-        } else {
-            input.context.cwd.join(rel_path)
-        };
-
-        let source = std::fs::read_to_string(&abs_path).map_err(|source| WrapperError::Io {
-            path: abs_path.clone(),
-            source,
-        })?;
-
-        let findings = language.find_wrappers(&source)?;
+        let findings = run_wrappers(lang, &source)?;
         if findings.is_empty() {
             return Ok(PostToolUseOutput::default());
         }
 
         Ok(PostToolUseOutput {
             common: CommonHookOutput {
-                system_message: Some(format_report(&file_path, &findings)),
+                system_message: Some(format_report(&rel_path, &findings)),
                 ..CommonHookOutput::default()
             },
             ..PostToolUseOutput::default()
@@ -134,11 +102,10 @@ impl Hook for WrapperHook {
     }
 }
 
-fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {
-    tool_input
-        .get("file_path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, WrapperError> {
+    match lang {
+        SourceLang::Rust => find_wrappers(source).map_err(|e| WrapperError::Parse(Box::new(e))),
+    }
 }
 
 fn format_report(file_path: &str, findings: &[WrapperFinding]) -> String {
@@ -178,6 +145,7 @@ mod tests {
     use agent_hooks::claude_code::HookContext;
     use serde_json::json;
     use std::io::Write;
+    use std::path::Path;
 
     fn ctx(cwd: PathBuf) -> HookContext {
         HookContext {

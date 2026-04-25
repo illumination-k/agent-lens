@@ -10,16 +10,15 @@
 //! stays silent instead of erroring.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
 use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
 use lens_rust::RustParser;
 
-/// Tool names whose `tool_input.file_path` points at the file that was
-/// just modified. Anything outside this set is ignored.
-const EDITING_TOOL_NAMES: &[&str] = &["Write", "Edit", "MultiEdit"];
+use crate::analyze::SourceLang;
+use crate::hooks::post_tool_use::{EditedSource, ReadEditedSourceError, prepare_edited_source};
 
 /// Default similarity threshold. Picked to match the cutoff used in the
 /// existing similarity tests and to avoid flooding the transcript with
@@ -57,35 +56,6 @@ impl Default for SimilarityHook {
     }
 }
 
-/// Languages that the similarity hook knows how to parse.
-///
-/// New entries slot in with a new [`Language::from_extension`] arm and
-/// a new [`Language::extract_functions`] arm; no other callers change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Language {
-    Rust,
-}
-
-impl Language {
-    fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "rs" => Some(Self::Rust),
-            _ => None,
-        }
-    }
-
-    fn extract_functions(self, source: &str) -> Result<Vec<FunctionDef>, SimilarityError> {
-        match self {
-            Self::Rust => {
-                let mut parser = RustParser::new();
-                parser
-                    .extract_functions(source)
-                    .map_err(|e| SimilarityError::Parse(Box::new(e)))
-            }
-        }
-    }
-}
-
 /// Errors raised while running [`SimilarityHook`].
 #[derive(Debug)]
 pub enum SimilarityError {
@@ -118,43 +88,32 @@ impl std::error::Error for SimilarityError {
     }
 }
 
+impl From<ReadEditedSourceError> for SimilarityError {
+    fn from(e: ReadEditedSourceError) -> Self {
+        Self::Io {
+            path: e.path,
+            source: e.source,
+        }
+    }
+}
+
 impl Hook for SimilarityHook {
     type Input = PostToolUseInput;
     type Output = PostToolUseOutput;
     type Error = SimilarityError;
 
     fn handle(&self, input: PostToolUseInput) -> Result<PostToolUseOutput, Self::Error> {
-        // Ignore non-edit tool calls and anything whose extension we
-        // don't recognise. Returning an empty output is the "no opinion"
-        // signal — Claude Code keeps going without injecting anything.
-        if !EDITING_TOOL_NAMES.contains(&input.tool_name.as_str()) {
-            return Ok(PostToolUseOutput::default());
-        }
-        let Some(file_path) = extract_file_path(&input.tool_input) else {
-            return Ok(PostToolUseOutput::default());
-        };
-        let rel_path = Path::new(&file_path);
-        let Some(language) = rel_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(Language::from_extension)
+        let Some(EditedSource {
+            rel_path,
+            lang,
+            source,
+            ..
+        }) = prepare_edited_source(&input)?
         else {
             return Ok(PostToolUseOutput::default());
         };
 
-        let abs_path = if rel_path.is_absolute() {
-            rel_path.to_path_buf()
-        } else {
-            input.context.cwd.join(rel_path)
-        };
-
-        let source = std::fs::read_to_string(&abs_path).map_err(|source| SimilarityError::Io {
-            path: abs_path.clone(),
-            source,
-        })?;
-
-        let funcs = language.extract_functions(&source)?;
-
+        let funcs = extract_functions(lang, &source)?;
         let pairs = find_similar_functions(&funcs, self.threshold, &self.opts);
         if pairs.is_empty() {
             return Ok(PostToolUseOutput::default());
@@ -162,7 +121,7 @@ impl Hook for SimilarityHook {
 
         Ok(PostToolUseOutput {
             common: CommonHookOutput {
-                system_message: Some(format_report(&file_path, &pairs)),
+                system_message: Some(format_report(&rel_path, &pairs)),
                 ..CommonHookOutput::default()
             },
             ..PostToolUseOutput::default()
@@ -170,11 +129,15 @@ impl Hook for SimilarityHook {
     }
 }
 
-fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {
-    tool_input
-        .get("file_path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>, SimilarityError> {
+    match lang {
+        SourceLang::Rust => {
+            let mut parser = RustParser::new();
+            parser
+                .extract_functions(source)
+                .map_err(|e| SimilarityError::Parse(Box::new(e)))
+        }
+    }
 }
 
 fn format_report(file_path: &str, pairs: &[SimilarPair<'_>]) -> String {
@@ -208,6 +171,7 @@ mod tests {
     use agent_hooks::claude_code::HookContext;
     use serde_json::json;
     use std::io::Write;
+    use std::path::Path;
 
     fn ctx(cwd: PathBuf) -> HookContext {
         HookContext {

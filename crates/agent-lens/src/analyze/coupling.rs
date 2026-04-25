@@ -28,7 +28,7 @@ use lens_domain::{
 use lens_rust::{CouplingError as RustCouplingError, build_module_tree, extract_edges};
 use serde::Serialize;
 
-use super::OutputFormat;
+use super::{OutputFormat, SourceLang};
 
 /// Errors raised while running the coupling analyzer.
 #[derive(Debug)]
@@ -153,7 +153,7 @@ fn resolve_crate_root(path: &Path) -> Result<PathBuf, CouplingAnalyzerError> {
         source,
     })?;
     if meta.is_file() {
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        if SourceLang::from_path(path) == Some(SourceLang::Rust) {
             return Ok(path.to_path_buf());
         }
         return Err(CouplingAnalyzerError::UnsupportedRoot {
@@ -262,11 +262,19 @@ fn format_markdown(view: &ReportView<'_>) -> String {
         out.push_str("\n_No modules discovered._\n");
         return out;
     }
+    render_modules_table(&mut out, &view.modules);
+    render_pairs(&mut out, &view.pairs);
+    out
+}
 
+fn render_modules_table(out: &mut String, modules: &[ModuleView<'_>]) {
+    // writeln! into a String cannot fail; the result is swallowed
+    // deliberately rather than unwrapped to satisfy the workspace's
+    // `unwrap_used` lint.
     let _ = writeln!(out, "\n## Modules (by IFC desc)\n");
     let _ = writeln!(out, "| module | fan_in | fan_out | ifc |");
     let _ = writeln!(out, "| --- | ---: | ---: | ---: |");
-    let mut sorted: Vec<&ModuleView<'_>> = view.modules.iter().collect();
+    let mut sorted: Vec<&ModuleView<'_>> = modules.iter().collect();
     sorted.sort_by(|a, b| {
         b.ifc
             .cmp(&a.ifc)
@@ -281,15 +289,16 @@ fn format_markdown(view: &ReportView<'_>) -> String {
             m.path, m.fan_in, m.fan_out, m.ifc
         );
     }
+}
 
-    if !view.pairs.is_empty() {
-        let _ = writeln!(out, "\n## Top coupled pairs\n");
-        for p in view.pairs.iter().take(TOP_PAIRS_LIMIT) {
-            let _ = writeln!(out, "- {} ↔ {} ({} symbol(s))", p.a, p.b, p.shared_symbols);
-        }
+fn render_pairs(out: &mut String, pairs: &[PairView<'_>]) {
+    if pairs.is_empty() {
+        return;
     }
-
-    out
+    let _ = writeln!(out, "\n## Top coupled pairs\n");
+    for p in pairs.iter().take(TOP_PAIRS_LIMIT) {
+        let _ = writeln!(out, "- {} ↔ {} ({} symbol(s))", p.a, p.b, p.shared_symbols);
+    }
 }
 
 #[cfg(test)]

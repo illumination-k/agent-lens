@@ -10,76 +10,12 @@
 //! ethos.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
-use super::OutputFormat;
-
-/// Errors raised while running the complexity analyzer.
-#[derive(Debug)]
-pub enum ComplexityAnalyzerError {
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    UnsupportedExtension {
-        path: PathBuf,
-    },
-    Parse(Box<dyn std::error::Error + Send + Sync>),
-    Serialize(serde_json::Error),
-}
-
-impl std::fmt::Display for ComplexityAnalyzerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "failed to read {}: {source}", path.display())
-            }
-            Self::UnsupportedExtension { path } => write!(
-                f,
-                "unsupported file extension for complexity analysis: {}",
-                path.display()
-            ),
-            Self::Parse(e) => write!(f, "failed to parse source: {e}"),
-            Self::Serialize(e) => write!(f, "failed to serialize report: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ComplexityAnalyzerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse(e) => Some(e.as_ref()),
-            Self::Serialize(e) => Some(e),
-            Self::UnsupportedExtension { .. } => None,
-        }
-    }
-}
-
-/// Languages the analyzer knows how to handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Language {
-    Rust,
-}
-
-impl Language {
-    fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "rs" => Some(Self::Rust),
-            _ => None,
-        }
-    }
-
-    fn extract(self, source: &str) -> Result<Vec<FunctionComplexity>, ComplexityAnalyzerError> {
-        match self {
-            Self::Rust => lens_rust::extract_complexity_units(source)
-                .map_err(|e| ComplexityAnalyzerError::Parse(Box::new(e))),
-        }
-    }
-}
+use super::{AnalyzerError, OutputFormat, SourceLang, read_source};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -93,30 +29,16 @@ impl ComplexityAnalyzer {
     }
 
     /// Read `path`, analyze it, and produce a report in `format`.
-    pub fn analyze(
-        &self,
-        path: &Path,
-        format: OutputFormat,
-    ) -> Result<String, ComplexityAnalyzerError> {
-        let language = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(Language::from_extension)
-            .ok_or_else(|| ComplexityAnalyzerError::UnsupportedExtension {
-                path: path.to_path_buf(),
-            })?;
-
-        let source =
-            std::fs::read_to_string(path).map_err(|source| ComplexityAnalyzerError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-
-        let functions = language.extract(&source)?;
+    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+        let (lang, source) = read_source(path)?;
+        let functions = match lang {
+            SourceLang::Rust => lens_rust::extract_complexity_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+        };
         let report = Report::new(path, &functions);
         match format {
             OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(ComplexityAnalyzerError::Serialize)
+                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
@@ -253,11 +175,15 @@ fn format_markdown(report: &Report<'_>) -> String {
         out.push_str("\n_No functions found._\n");
         return out;
     }
-    let s = &report.summary;
-    let mi_min = match s.maintainability_index_min {
-        Some(v) => format!("{v:.1}"),
-        None => "n/a".to_owned(),
-    };
+    render_summary(&mut out, &report.summary);
+    render_top_functions(&mut out, &report.functions);
+    out
+}
+
+fn render_summary(out: &mut String, s: &Summary) {
+    // writeln! into a String cannot fail; the result is swallowed
+    // deliberately rather than unwrapped to satisfy the workspace's
+    // `unwrap_used` lint.
     let _ = writeln!(
         out,
         "\n## Summary\n\
@@ -274,11 +200,13 @@ fn format_markdown(report: &Report<'_>) -> String {
         s.cognitive_max,
         s.max_nesting_max,
         s.loc_total,
-        mi_min,
+        format_optional_f64(s.maintainability_index_min, 1),
     );
+}
 
+fn render_top_functions(out: &mut String, functions: &[FunctionView<'_>]) {
     // Worst N by cyclomatic, ties broken by cognitive then by line.
-    let mut indexed: Vec<&FunctionView<'_>> = report.functions.iter().collect();
+    let mut indexed: Vec<&FunctionView<'_>> = functions.iter().collect();
     indexed.sort_by(|a, b| {
         b.cyclomatic
             .cmp(&a.cyclomatic)
@@ -288,10 +216,6 @@ fn format_markdown(report: &Report<'_>) -> String {
 
     let _ = writeln!(out, "\n## Top {TOP_N} by cyclomatic");
     for fv in indexed.iter().take(TOP_N) {
-        let mi = match fv.maintainability_index {
-            Some(v) => format!("{v:.0}"),
-            None => "n/a".to_owned(),
-        };
         let _ = writeln!(
             out,
             "- `{}` (L{}-{}): cc={}, cog={}, nest={}, loc={}, mi={}",
@@ -302,16 +226,23 @@ fn format_markdown(report: &Report<'_>) -> String {
             fv.cognitive,
             fv.max_nesting,
             fv.loc,
-            mi,
+            format_optional_f64(fv.maintainability_index, 0),
         );
     }
-    out
+}
+
+fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
+    match v {
+        Some(x) => format!("{x:.precision$}"),
+        None => "n/a".to_owned(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
@@ -383,10 +314,7 @@ fn c(n: i32) -> i32 {
         let err = ComplexityAnalyzer::new()
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            ComplexityAnalyzerError::UnsupportedExtension { .. }
-        ));
+        assert!(matches!(err, AnalyzerError::UnsupportedExtension { .. }));
     }
 
     #[test]
@@ -397,7 +325,7 @@ fn c(n: i32) -> i32 {
                 OutputFormat::Json,
             )
             .unwrap_err();
-        assert!(matches!(err, ComplexityAnalyzerError::Io { .. }));
+        assert!(matches!(err, AnalyzerError::Io { .. }));
     }
 
     #[test]
@@ -407,7 +335,7 @@ fn c(n: i32) -> i32 {
         let err = ComplexityAnalyzer::new()
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
-        assert!(matches!(err, ComplexityAnalyzerError::Parse(_)));
+        assert!(matches!(err, AnalyzerError::Parse(_)));
     }
 
     #[test]

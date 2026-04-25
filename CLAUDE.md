@@ -170,12 +170,12 @@ agent-lens
 
 #### 構造・API 系
 
-| 指標                         | 一行定義                              | 入力              | 難易度 |
-| ---------------------------- | ------------------------------------- | ----------------- | ------ |
-| Instability (I = Ce/(Ca+Ce)) | パッケージ単位の変更しやすさ          | 依存グラフ        | 中     |
-| Cyclic dependencies          | モジュール間循環依存（SCC 検出）      | 依存グラフ        | 中     |
-| Public API Surface           | pub 項目の数とシグネチャ複雑度・churn | AST + git         | 中     |
-| Dead / Unused public         | 外から呼ばれない pub 項目             | AST + 呼出解析    | 中     |
+| 指標                         | 一行定義                              | 入力           | 難易度 |
+| ---------------------------- | ------------------------------------- | -------------- | ------ |
+| Instability (I = Ce/(Ca+Ce)) | パッケージ単位の変更しやすさ          | 依存グラフ     | 中     |
+| Cyclic dependencies          | モジュール間循環依存（SCC 検出）      | 依存グラフ     | 中     |
+| Public API Surface           | pub 項目の数とシグネチャ複雑度・churn | AST + git      | 中     |
+| Dead / Unused public         | 外から呼ばれない pub 項目             | AST + 呼出解析 | 中     |
 
 > Fan-In / Fan-Out / Henry-Kafura IFC は `analyze coupling` として実装済み。
 > 上記 Instability・Cyclic dependencies は同じ `coupling` モジュールの依存

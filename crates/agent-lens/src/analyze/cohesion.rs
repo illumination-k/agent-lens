@@ -8,76 +8,12 @@
 //! ethos.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
-use super::OutputFormat;
-
-/// Errors raised while running the cohesion analyzer.
-#[derive(Debug)]
-pub enum CohesionAnalyzerError {
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    UnsupportedExtension {
-        path: PathBuf,
-    },
-    Parse(Box<dyn std::error::Error + Send + Sync>),
-    Serialize(serde_json::Error),
-}
-
-impl std::fmt::Display for CohesionAnalyzerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "failed to read {}: {source}", path.display())
-            }
-            Self::UnsupportedExtension { path } => write!(
-                f,
-                "unsupported file extension for cohesion analysis: {}",
-                path.display()
-            ),
-            Self::Parse(e) => write!(f, "failed to parse source: {e}"),
-            Self::Serialize(e) => write!(f, "failed to serialize report: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for CohesionAnalyzerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse(e) => Some(e.as_ref()),
-            Self::Serialize(e) => Some(e),
-            Self::UnsupportedExtension { .. } => None,
-        }
-    }
-}
-
-/// Languages the analyzer knows how to handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Language {
-    Rust,
-}
-
-impl Language {
-    fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "rs" => Some(Self::Rust),
-            _ => None,
-        }
-    }
-
-    fn extract(self, source: &str) -> Result<Vec<CohesionUnit>, CohesionAnalyzerError> {
-        match self {
-            Self::Rust => lens_rust::extract_cohesion_units(source)
-                .map_err(|e| CohesionAnalyzerError::Parse(Box::new(e))),
-        }
-    }
-}
+use super::{AnalyzerError, OutputFormat, SourceLang, read_source};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -91,29 +27,16 @@ impl CohesionAnalyzer {
     }
 
     /// Read `path`, analyze it, and produce a report in `format`.
-    pub fn analyze(
-        &self,
-        path: &Path,
-        format: OutputFormat,
-    ) -> Result<String, CohesionAnalyzerError> {
-        let language = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(Language::from_extension)
-            .ok_or_else(|| CohesionAnalyzerError::UnsupportedExtension {
-                path: path.to_path_buf(),
-            })?;
-
-        let source = std::fs::read_to_string(path).map_err(|source| CohesionAnalyzerError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-        let units = language.extract(&source)?;
+    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+        let (lang, source) = read_source(path)?;
+        let units = match lang {
+            SourceLang::Rust => lens_rust::extract_cohesion_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+        };
         let report = Report::new(path, &units);
         match format {
             OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(CohesionAnalyzerError::Serialize)
+                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
@@ -216,33 +139,42 @@ fn format_markdown(report: &Report<'_>) -> String {
         return out;
     }
     for unit in &report.units {
-        let header = match unit.trait_name {
-            Some(t) => format!("impl {t} for {}", unit.type_name),
-            None => format!("impl {}", unit.type_name),
-        };
-        let lcom96 = match unit.lcom96 {
-            Some(v) => format!("{v:.2}"),
-            None => "n/a".to_owned(),
-        };
-        // writeln! into a String cannot fail; the result is swallowed
-        // deliberately rather than unwrapped to satisfy the workspace's
-        // `unwrap_used` lint.
-        let _ = writeln!(
-            out,
-            "\n## {header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
-            unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
-        );
-        for component in &unit.components {
-            let _ = writeln!(out, "- {{{}}}", component.join(", "));
-        }
+        render_unit(&mut out, unit);
     }
     out
+}
+
+fn render_unit(out: &mut String, unit: &UnitView<'_>) {
+    let header = match unit.trait_name {
+        Some(t) => format!("impl {t} for {}", unit.type_name),
+        None => format!("impl {}", unit.type_name),
+    };
+    let lcom96 = format_optional_f64(unit.lcom96, 2);
+    // writeln! into a String cannot fail; the result is swallowed
+    // deliberately rather than unwrapped to satisfy the workspace's
+    // `unwrap_used` lint.
+    let _ = writeln!(
+        out,
+        "\n## {header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
+        unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
+    );
+    for component in &unit.components {
+        let _ = writeln!(out, "- {{{}}}", component.join(", "));
+    }
+}
+
+fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
+    match v {
+        Some(x) => format!("{x:.precision$}"),
+        None => "n/a".to_owned(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
@@ -338,10 +270,7 @@ impl Foo {
         let err = CohesionAnalyzer::new()
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            CohesionAnalyzerError::UnsupportedExtension { .. }
-        ));
+        assert!(matches!(err, AnalyzerError::UnsupportedExtension { .. }));
     }
 
     #[test]
@@ -352,7 +281,7 @@ impl Foo {
                 OutputFormat::Json,
             )
             .unwrap_err();
-        assert!(matches!(err, CohesionAnalyzerError::Io { .. }));
+        assert!(matches!(err, AnalyzerError::Io { .. }));
     }
 
     #[test]
@@ -362,7 +291,7 @@ impl Foo {
         let err = CohesionAnalyzer::new()
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
-        assert!(matches!(err, CohesionAnalyzerError::Parse(_)));
+        assert!(matches!(err, AnalyzerError::Parse(_)));
     }
 
     #[test]
