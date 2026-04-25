@@ -5,12 +5,13 @@
 //! * [`hooks`] — handlers that speak Claude Code's stdin/stdout hook
 //!   protocol. Each handler is addressed by a short name so that the same
 //!   binary can serve many hooks from `settings.json`.
-//! * analyzers (forthcoming) — on-demand code analyses that produce
-//!   LLM-friendly context.
+//! * [`analyze`] — on-demand code analyses that produce LLM-friendly context
+//!   (e.g. cohesion reports).
 //!
 //! Only the pieces exercised by the current CLI live here today; the rest
 //! will land as new subcommands are added.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod analyze;
 pub mod hooks;
