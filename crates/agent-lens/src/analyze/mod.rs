@@ -1,20 +1,24 @@
 //! On-demand analyzers that emit LLM-friendly context.
 //!
 //! Each submodule is one analyzer (cohesion, complexity, coupling,
-//! similarity, hotspot, …) and is wired to a clap subcommand so typos
-//! surface at parse time. Output is always written to stdout as JSON by
-//! default; analyzers can opt in to a `--format md` mode for a more
+//! similarity, wrapper, hotspot, …) and is wired to a clap subcommand so
+//! typos surface at parse time. Output is always written to stdout as JSON
+//! by default; analyzers can opt in to a `--format md` mode for a more
 //! compact human-readable summary.
 
 pub mod cohesion;
 pub mod complexity;
 pub mod coupling;
+pub mod similarity;
+pub mod wrapper;
 
 use std::path::{Path, PathBuf};
 
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use coupling::{CouplingAnalyzer, CouplingAnalyzerError};
+pub use similarity::{DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer};
+pub use wrapper::WrapperAnalyzer;
 
 /// Output format shared across analyzers.
 ///
