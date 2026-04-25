@@ -14,3 +14,7 @@ Thumbs.db
 
 # Rust
 target/
+
+# cargo-mutants
+mutants.out/
+mutants.out.old/
