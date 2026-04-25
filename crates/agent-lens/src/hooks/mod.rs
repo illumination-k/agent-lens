@@ -1,7 +1,9 @@
-//! Claude Code hook handlers, grouped by event.
+//! Hook handlers, grouped by agent and then by event.
 //!
-//! Each submodule exposes a `dispatch(name, input)` entry point that the
-//! binary calls after reading JSON from stdin and routing on the
-//! subcommand name (e.g. `rust-similarity`).
+//! The Claude Code handlers live directly under `post_tool_use` for
+//! historical reasons (they were the first to land); Codex handlers are
+//! namespaced under [`codex`]. The CLI wires each handler to a clap
+//! subcommand so typos surface at parse time.
 
+pub mod codex;
 pub mod post_tool_use;
