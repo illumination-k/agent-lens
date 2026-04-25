@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
-use agent_lens::analyze::{CohesionAnalyzer, OutputFormat};
+use agent_lens::analyze::{CohesionAnalyzer, ComplexityAnalyzer, OutputFormat};
 use agent_lens::hooks::post_tool_use::SimilarityHook;
 use clap::{Parser, Subcommand};
 use tracing::error;
@@ -72,6 +72,20 @@ enum AnalyzeCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
+    /// Report per-function complexity metrics (Cyclomatic, Cognitive,
+    /// Max Nesting, Halstead Volume, Maintainability Index) for a source
+    /// file.
+    ///
+    /// The parser is chosen from the file extension (`.rs` today). The JSON
+    /// format is the default machine-readable output; `--format md` emits a
+    /// compact summary tuned for LLM context.
+    Complexity {
+        /// Path to a source file to analyze.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
 }
 
 fn main() -> ExitCode {
@@ -104,18 +118,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
-    match cmd {
+    let report = match cmd {
         AnalyzeCommand::Cohesion { path, format } => {
-            let report = CohesionAnalyzer::new().analyze(&path, format)?;
-            let stdout = io::stdout();
-            let mut stdout = stdout.lock();
-            stdout.write_all(report.as_bytes())?;
-            if !report.ends_with('\n') {
-                stdout.write_all(b"\n")?;
-            }
-            Ok(())
+            CohesionAnalyzer::new().analyze(&path, format)?
         }
+        AnalyzeCommand::Complexity { path, format } => {
+            ComplexityAnalyzer::new().analyze(&path, format)?
+        }
+    };
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_all(report.as_bytes())?;
+    if !report.ends_with('\n') {
+        stdout.write_all(b"\n")?;
     }
+    Ok(())
 }
 
 fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
