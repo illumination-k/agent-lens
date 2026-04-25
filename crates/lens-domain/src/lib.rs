@@ -19,6 +19,7 @@
 
 pub mod apted;
 pub mod cohesion;
+pub mod coupling;
 pub mod function;
 pub mod tree;
 pub mod tsed;
@@ -26,6 +27,10 @@ pub mod tsed;
 pub use apted::{APTEDOptions, compute_edit_distance};
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
+};
+pub use coupling::{
+    CouplingEdge, CouplingReport, EdgeKind, ModuleMetrics, ModulePath, PairCoupling,
+    compute_report,
 };
 pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
 pub use tree::TreeNode;
