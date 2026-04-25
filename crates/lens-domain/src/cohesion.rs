@@ -141,9 +141,13 @@ impl CohesionUnit {
 /// if one calls the other by name. The result is sorted: smaller indices
 /// first within each component, components ordered by their smallest index.
 pub fn compute_components(methods: &[MethodCohesion]) -> Vec<Vec<usize>> {
+    let uf = build_method_union_find(methods);
+    flatten_union_find(uf, methods.len())
+}
+
+fn build_method_union_find(methods: &[MethodCohesion]) -> UnionFind {
     let n = methods.len();
     let mut uf = UnionFind::new(n);
-
     for i in 0..n {
         for j in (i + 1)..n {
             if methods_connected(&methods[i], &methods[j]) {
@@ -151,7 +155,10 @@ pub fn compute_components(methods: &[MethodCohesion]) -> Vec<Vec<usize>> {
             }
         }
     }
+    uf
+}
 
+fn flatten_union_find(mut uf: UnionFind, n: usize) -> Vec<Vec<usize>> {
     let mut by_root: std::collections::BTreeMap<usize, Vec<usize>> =
         std::collections::BTreeMap::new();
     for i in 0..n {
@@ -187,12 +194,24 @@ pub fn compute_lcom96(methods: &[MethodCohesion]) -> Option<f64> {
     if m < 2 {
         return None;
     }
+    let counts = field_method_counts(methods);
+    if counts.is_empty() {
+        return None;
+    }
+    let sum: usize = counts.values().sum();
+    let avg = sum as f64 / counts.len() as f64;
+    let m = m as f64;
+    Some((avg - m) / (1.0 - m))
+}
 
+/// For each referenced field, count how many distinct methods reference it.
+///
+/// Defensive dedup: if a language adapter sends the same field twice for
+/// one method, count it once. The Rust adapter already dedups, but the
+/// metric should not depend on that.
+fn field_method_counts(methods: &[MethodCohesion]) -> std::collections::BTreeMap<&str, usize> {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for method in methods {
-        // Defensive dedup: if a language adapter sends the same field
-        // twice for one method, count it once. The Rust adapter already
-        // dedups, but the metric should not depend on that.
         let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for field in &method.fields {
             if seen.insert(field.as_str()) {
@@ -200,16 +219,7 @@ pub fn compute_lcom96(methods: &[MethodCohesion]) -> Option<f64> {
             }
         }
     }
-
-    let a = counts.len();
-    if a == 0 {
-        return None;
-    }
-
-    let sum: usize = counts.values().sum();
-    let avg = sum as f64 / a as f64;
-    let m = m as f64;
-    Some((avg - m) / (1.0 - m))
+    counts
 }
 
 fn methods_connected(a: &MethodCohesion, b: &MethodCohesion) -> bool {
