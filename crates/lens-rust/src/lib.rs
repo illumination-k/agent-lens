@@ -12,7 +12,9 @@
 mod cohesion;
 mod complexity;
 mod parser;
+mod wrapper;
 
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use parser::{RustParseError, RustParser};
+pub use wrapper::{WrapperFinding, find_wrappers};
