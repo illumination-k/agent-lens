@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
 use agent_lens::analyze::{CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, OutputFormat};
-use agent_lens::hooks::post_tool_use::SimilarityHook;
+use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use clap::{Parser, Subcommand};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -56,6 +56,12 @@ enum PostToolUseCommand {
     /// The parser is chosen from the file extension (`.rs` today).
     /// Files with an unsupported extension are ignored silently.
     Similarity,
+    /// Report functions whose body, after stripping a short chain of
+    /// trivial adapters, is just a forwarding call to another function.
+    ///
+    /// The parser is chosen from the file extension (`.rs` today).
+    /// Files with an unsupported extension are ignored silently.
+    Wrapper,
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,6 +162,7 @@ fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::
     let input = read_post_tool_use_from_stdin()?;
     let output = match cmd {
         PostToolUseCommand::Similarity => SimilarityHook::new().handle(input)?,
+        PostToolUseCommand::Wrapper => WrapperHook::new().handle(input)?,
     };
     write_output_to_stdout(&output)
 }
