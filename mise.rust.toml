@@ -14,6 +14,10 @@ depends = ["aqua:cargo-bins/cargo-binstall"]
 version = "0.22.1"
 depends = ["aqua:cargo-bins/cargo-binstall"]
 
+[tools."cargo:cargo-mutants"]
+version = "27.0.0"
+depends = ["aqua:cargo-bins/cargo-binstall"]
+
 [tasks."fmt:rust"]
 description = "Format Rust code with cargo fmt"
 run = "cargo fmt --all"
@@ -30,6 +34,10 @@ run = [
 [tasks."test:rust"]
 description = "Run Rust tests with cargo-nextest"
 run = "cargo nextest run --locked --all-features"
+
+[tasks."mutants:rust"]
+description = "Run mutation tests with cargo-mutants (slow; use --in-diff origin/main for PRs)"
+run = "cargo mutants --workspace --no-shuffle"
 
 [tasks."ci:rust"]
 description = "Run Rust lint and test tasks"

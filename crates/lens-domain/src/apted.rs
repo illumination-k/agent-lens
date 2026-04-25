@@ -174,4 +174,138 @@ mod tests {
         };
         assert!((compute_edit_distance(&a, &b, &opts) - 1.0).abs() < 1e-9);
     }
+
+    #[test]
+    fn deleting_multiple_children_sums_subtree_sizes() {
+        let a = parent("Root", vec![leaf("A"), leaf("B"), leaf("C")]);
+        let b = parent("Root", vec![]);
+        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
+        assert!((d - 3.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn inserting_multiple_children_sums_subtree_sizes() {
+        let a = parent("Root", vec![]);
+        let b = parent(
+            "Root",
+            vec![leaf("A"), parent("B", vec![leaf("C"), leaf("D")])],
+        );
+        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
+        assert!((d - 4.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn delete_cost_scales_distance() {
+        let a = parent("Root", vec![leaf("A")]);
+        let b = parent("Root", vec![]);
+        let opts = APTEDOptions {
+            delete_cost: 2.5,
+            ..Default::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        assert!((d - 2.5).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn insert_cost_scales_distance() {
+        let a = parent("Root", vec![]);
+        let b = parent("Root", vec![leaf("A")]);
+        let opts = APTEDOptions {
+            insert_cost: 3.0,
+            ..Default::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        assert!((d - 3.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn rename_cost_scales_distance() {
+        let a = parent("Root", vec![leaf("A")]);
+        let b = parent("Root", vec![leaf("B")]);
+        let opts = APTEDOptions {
+            rename_cost: 0.25,
+            ..Default::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        assert!((d - 0.25).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn transposed_children_force_two_renames() {
+        // Aligning [A,B] against [B,A] cannot match either pair without paying
+        // the rename cost on both children, so the optimal path costs 2.
+        let a = parent("Root", vec![leaf("A"), leaf("B")]);
+        let b = parent("Root", vec![leaf("B"), leaf("A")]);
+        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
+        assert!((d - 2.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn body_picks_minimum_of_delete_insert_rename() {
+        // Make rename strictly cheaper than delete+insert so the body of
+        // align_children is forced to take the rename branch and consume
+        // dp[i - 1][j - 1].
+        let a = parent("Root", vec![leaf("A"), leaf("B"), leaf("C")]);
+        let b = parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]);
+        let opts = APTEDOptions {
+            rename_cost: 0.5,
+            delete_cost: 10.0,
+            insert_cost: 10.0,
+            ..Default::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        assert!((d - 1.5).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn body_chooses_delete_when_cheaper_than_rename() {
+        // Both children of `a` mismatch every child of `b`, but `b` is empty
+        // so the only path is to delete every child of `a` — exercising the
+        // dp[i - 1][j] + delete_cost branch with j = 0 throughout.
+        let a = parent("Root", vec![leaf("A"), leaf("B")]);
+        let b = parent("Root", vec![]);
+        let opts = APTEDOptions {
+            delete_cost: 1.5,
+            ..Default::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        assert!((d - 3.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn body_delete_branch_uses_size_times_delete_cost() {
+        // Force the body of align_children to take the `dp[i - 1][j] + size *
+        // delete_cost` branch by making rename so expensive that deleting the
+        // mismatched extra children is always cheaper. With size = 1 across
+        // the board, only a non-unit delete_cost can distinguish `*` from
+        // `/` or `+`.
+        let a = parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]);
+        let b = parent("Root", vec![leaf("X")]);
+        let opts = APTEDOptions {
+            rename_cost: 10.0,
+            delete_cost: 2.0,
+            insert_cost: 2.0,
+            ..Default::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        // X aligns with X for free, then Y and Z get deleted at cost 2 each.
+        assert!((d - 4.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
+    fn body_insert_branch_uses_size_times_insert_cost() {
+        // Mirror image of the delete-branch test: force the insert path in
+        // the body of align_children with a non-unit insert_cost so the `*`
+        // can't be confused with `/` (1 / 1 == 1 * 1 hides the mutation).
+        let a = parent("Root", vec![leaf("X")]);
+        let b = parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]);
+        let opts = APTEDOptions {
+            rename_cost: 10.0,
+            delete_cost: 2.0,
+            insert_cost: 2.0,
+            ..Default::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        assert!((d - 4.0).abs() < 1e-9, "got {d}");
+    }
 }

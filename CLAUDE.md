@@ -5,10 +5,11 @@
 Run `mise install` first to install all tools.
 
 ```bash
-mise run ci    # Run all ci:* tasks
-mise run fmt   # Run all fmt:* tasks
-mise run lint  # Run all lint:* tasks
-mise run test  # Run all test:* tasks
+mise run ci       # Run all ci:* tasks
+mise run fmt      # Run all fmt:* tasks
+mise run lint     # Run all lint:* tasks
+mise run test     # Run all test:* tasks
+mise run mutants  # Run all mutants:* tasks (slow; not wired into ci)
 ```
 
 ## Tools
@@ -30,6 +31,7 @@ All tools are managed by mise. Run `mise install` to install them.
 | cargo-nextest | Fast Rust test runner                   |
 | cargo-deny    | Dependency license and advisory checker |
 | cargo-audit   | Security advisory checker for Rust      |
+| cargo-mutants | Mutation testing for Rust               |
 
 ## Purpose
 
@@ -128,6 +130,16 @@ agent-lens
 - `RUST_LOG` 環境変数でレベル制御（デフォルト `info`）
 - `eprintln!` は使わず必ず `tracing` マクロ（`info!` / `warn!` / `error!` 等）
   を経由する。フォーマットやレベル制御を一元化するため
+
+### Mutation Testing
+
+- [`cargo-mutants`](https://mutants.rs/) でテストの実効性（assertion 不足や
+  到達していない分岐）を検出する
+- 設定は `.cargo/mutants.toml`（`test_tool = "nextest"` で nextest と統一）
+- 通常 CI には含めない（重いため）。代わりに `.github/workflows/mutants.yml` が
+  PR 差分のみを対象に `--in-diff` で走らせ、`workflow_dispatch` で全体実行も可能
+- ローカルでは `mise run mutants:rust` か `mise run mutants` で実行
+- `mutants.out/` は `.gitignore` 済み
 
 ## Notes
 

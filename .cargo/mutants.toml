@@ -1,0 +1,16 @@
+# Configuration for cargo-mutants.
+# https://mutants.rs/
+
+# Use cargo-nextest, matching the project's standard test runner.
+test_tool = "nextest"
+
+# Allow generous slack over the baseline test runtime; mutations sometimes
+# trigger pathological loops in similarity / edit-distance code.
+timeout_multiplier = 2.0
+minimum_test_timeout = 60
+
+# Skip the binary entrypoint and other thin glue. Logic worth covering lives in
+# the library crates.
+exclude_globs = [
+  "crates/agent-lens/src/main.rs",
+]
