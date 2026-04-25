@@ -247,7 +247,11 @@ mod tests {
         let r = compute_report(&mods, vec![]);
         assert_eq!(r.number_of_couplings, 0);
         assert_eq!(r.modules.len(), 2);
-        assert!(r.modules.iter().all(|x| x.fan_in == 0 && x.fan_out == 0 && x.ifc == 0));
+        assert!(
+            r.modules
+                .iter()
+                .all(|x| x.fan_in == 0 && x.fan_out == 0 && x.ifc == 0)
+        );
         assert!(r.pairs.is_empty());
         assert!(r.edges.is_empty());
     }

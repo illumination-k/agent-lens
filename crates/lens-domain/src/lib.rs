@@ -29,8 +29,7 @@ pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };
 pub use coupling::{
-    CouplingEdge, CouplingReport, EdgeKind, ModuleMetrics, ModulePath, PairCoupling,
-    compute_report,
+    CouplingEdge, CouplingReport, EdgeKind, ModuleMetrics, ModulePath, PairCoupling, compute_report,
 };
 pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
 pub use tree::TreeNode;

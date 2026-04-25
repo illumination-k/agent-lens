@@ -40,10 +40,7 @@ pub enum CouplingError {
         source: std::io::Error,
     },
     /// `syn` rejected the file's contents.
-    Parse {
-        path: PathBuf,
-        source: syn::Error,
-    },
+    Parse { path: PathBuf, source: syn::Error },
     /// `mod foo;` was declared but neither `foo.rs` nor `foo/mod.rs` was
     /// found in the parent directory.
     MissingMod {
@@ -153,8 +150,7 @@ fn split_modules(
                 let child_path = parent.child(&item_mod.ident.to_string());
                 match item_mod.content {
                     Some((_, inline_items)) => {
-                        let leaf =
-                            split_modules(inline_items, &child_path, parent_file, out)?;
+                        let leaf = split_modules(inline_items, &child_path, parent_file, out)?;
                         out.push(CrateModule {
                             path: child_path,
                             file: parent_file.to_path_buf(),
@@ -164,13 +160,13 @@ fn split_modules(
                     None => {
                         let resolved = resolve_mod_file(parent_file, &item_mod.ident.to_string())
                             .ok_or_else(|| CouplingError::MissingMod {
-                                parent: parent.as_str().to_owned(),
-                                name: item_mod.ident.to_string(),
-                                near: parent_file
-                                    .parent()
-                                    .unwrap_or_else(|| Path::new("."))
-                                    .to_path_buf(),
-                            })?;
+                            parent: parent.as_str().to_owned(),
+                            name: item_mod.ident.to_string(),
+                            near: parent_file
+                                .parent()
+                                .unwrap_or_else(|| Path::new("."))
+                                .to_path_buf(),
+                        })?;
                         walk_file(&resolved, child_path, out)?;
                     }
                 }
@@ -219,10 +215,7 @@ pub fn extract_edges(modules: &[CrateModule]) -> Vec<CouplingEdge> {
 /// `Vec<T>` but the only piece we need for module resolution is the
 /// segment list.
 fn path_to_segments(path: &syn::Path) -> Vec<String> {
-    path.segments
-        .iter()
-        .map(|s| s.ident.to_string())
-        .collect()
+    path.segments.iter().map(|s| s.ident.to_string()).collect()
 }
 
 struct EdgeVisitor<'a> {
@@ -307,14 +300,28 @@ impl<'a> EdgeVisitor<'a> {
         match first.as_str() {
             "crate" => Some(segments.to_vec()),
             "self" => {
-                let mut v: Vec<String> =
-                    self.current.as_str().split("::").map(String::from).collect();
+                // Bare `self` in expression position is the receiver
+                // value, not a module reference; only `self::<x>::...`
+                // names a path inside the current module.
+                if segments.len() == 1 {
+                    return None;
+                }
+                let mut v: Vec<String> = self
+                    .current
+                    .as_str()
+                    .split("::")
+                    .map(String::from)
+                    .collect();
                 v.extend(segments.iter().skip(1).cloned());
                 Some(v)
             }
             "super" => {
-                let mut v: Vec<String> =
-                    self.current.as_str().split("::").map(String::from).collect();
+                let mut v: Vec<String> = self
+                    .current
+                    .as_str()
+                    .split("::")
+                    .map(String::from)
+                    .collect();
                 let mut iter = segments.iter();
                 while let Some(s) = iter.next() {
                     if s == "super" {
@@ -555,10 +562,7 @@ mod tests {
         let flat = write_file(dir.path(), "a.rs", "// flat\n");
         write_file(dir.path(), "a/mod.rs", "// nested\n");
         let tree = build_module_tree(&lib).unwrap();
-        let a = tree
-            .iter()
-            .find(|m| m.path.as_str() == "crate::a")
-            .unwrap();
+        let a = tree.iter().find(|m| m.path.as_str() == "crate::a").unwrap();
         assert_eq!(a.file, flat);
     }
 
@@ -634,10 +638,7 @@ mod tests {
         kind: EdgeKind,
     ) -> bool {
         edges.iter().any(|e| {
-            e.from.as_str() == from
-                && e.to.as_str() == to
-                && e.symbol == symbol
-                && e.kind == kind
+            e.from.as_str() == from && e.to.as_str() == to && e.symbol == symbol && e.kind == kind
         })
     }
 
@@ -887,6 +888,33 @@ mod tests {
             "Foo",
             EdgeKind::Type
         ));
+    }
+
+    #[test]
+    fn bare_self_receiver_does_not_create_edge() {
+        // `self` alone is the receiver value (`self.field`), not a path
+        // referencing the current module. Without this guard, `self`
+        // would absolutize to the current module path and falsely
+        // resolve via longest-prefix match into the parent.
+        let src = r#"
+            mod a {
+                pub mod b {
+                    pub struct Foo { n: i32 }
+                    impl Foo {
+                        pub fn get(&self) -> i32 { self.n }
+                    }
+                }
+            }
+        "#;
+        let (_, edges) = edges_for(src);
+        // The only edge here would be a spurious one from crate::a::b
+        // to crate::a (symbol "b"); confirm it isn't recorded.
+        assert!(
+            !edges.iter().any(|e| e.from.as_str() == "crate::a::b"
+                && e.to.as_str() == "crate::a"
+                && e.symbol == "b"),
+            "spurious self-receiver edge: {edges:?}"
+        );
     }
 
     #[test]

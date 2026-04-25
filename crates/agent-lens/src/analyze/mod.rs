@@ -6,5 +6,7 @@
 //! `--format md` mode for a more compact human-readable summary.
 
 pub mod cohesion;
+pub mod coupling;
 
 pub use cohesion::{CohesionAnalyzer, CohesionAnalyzerError, OutputFormat};
+pub use coupling::{CouplingAnalyzer, CouplingAnalyzerError};
