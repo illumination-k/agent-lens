@@ -221,44 +221,54 @@ fn collect_complexity(
 const SKIP_DIRS: &[&str] = &["target", "node_modules"];
 
 fn walk_rust_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
-    let meta = std::fs::metadata(path).map_err(|source| HotspotError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let meta = std::fs::metadata(path).map_err(|source| io_err(path, source))?;
     if meta.is_file() {
-        if SourceLang::from_path(path) == Some(SourceLang::Rust) {
-            out.push(path.to_path_buf());
-        }
+        push_if_rust(path, out);
         return Ok(());
     }
-    let entries = std::fs::read_dir(path).map_err(|source| HotspotError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    walk_dir(path, out)
+}
+
+fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
+    let entries = std::fs::read_dir(dir).map_err(|source| io_err(dir, source))?;
     for entry in entries {
-        let entry = entry.map_err(|source| HotspotError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let entry_path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
-            continue;
-        }
-        let file_type = entry.file_type().map_err(|source| HotspotError::Io {
-            path: entry_path.clone(),
-            source,
-        })?;
-        if file_type.is_dir() {
-            walk_rust_files(&entry_path, out)?;
-        } else if file_type.is_file()
-            && SourceLang::from_path(&entry_path) == Some(SourceLang::Rust)
-        {
-            out.push(entry_path);
-        }
+        let entry = entry.map_err(|source| io_err(dir, source))?;
+        process_entry(&entry, out)?;
     }
     Ok(())
+}
+
+fn process_entry(entry: &std::fs::DirEntry, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
+    let name = entry.file_name();
+    let name_str = name.to_string_lossy();
+    if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
+        return Ok(());
+    }
+    let entry_path = entry.path();
+    let file_type = entry
+        .file_type()
+        .map_err(|source| io_err(&entry_path, source))?;
+    if file_type.is_dir() {
+        walk_rust_files(&entry_path, out)
+    } else if file_type.is_file() {
+        push_if_rust(&entry_path, out);
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
+fn push_if_rust(path: &Path, out: &mut Vec<PathBuf>) {
+    if SourceLang::from_path(path) == Some(SourceLang::Rust) {
+        out.push(path.to_path_buf());
+    }
+}
+
+fn io_err(path: &Path, source: std::io::Error) -> HotspotError {
+    HotspotError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 #[derive(Debug, Serialize)]
