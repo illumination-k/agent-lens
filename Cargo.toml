@@ -10,6 +10,7 @@ repository = "https://github.com/illumination-k/agent-lens"
 
 [workspace.dependencies]
 rstest = "0.26"
+thiserror = "2"
 
 [workspace.lints.clippy]
 print_stdout = "deny"

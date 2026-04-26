@@ -22,31 +22,10 @@ impl RustParser {
 }
 
 /// Parse failures surfaced by [`RustParser`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RustParseError {
-    Syn(syn::Error),
-}
-
-impl std::fmt::Display for RustParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Syn(e) => write!(f, "failed to parse Rust source: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for RustParseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Syn(e) => Some(e),
-        }
-    }
-}
-
-impl From<syn::Error> for RustParseError {
-    fn from(value: syn::Error) -> Self {
-        Self::Syn(value)
-    }
+    #[error("failed to parse Rust source: {0}")]
+    Syn(#[from] syn::Error),
 }
 
 impl LanguageParser for RustParser {

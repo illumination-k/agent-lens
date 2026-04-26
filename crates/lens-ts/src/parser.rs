@@ -34,9 +34,10 @@ impl TypeScriptParser {
 }
 
 /// Parse failures surfaced by [`TypeScriptParser`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TsParseError {
     /// One or more errors were emitted by `oxc_parser`.
+    #[error("failed to parse TypeScript source: {message}")]
     Parse {
         /// Stringified diagnostics, joined by `\n`. We swallow the rich
         /// `oxc_diagnostics` types here to keep the public surface small —
@@ -45,16 +46,6 @@ pub enum TsParseError {
         message: String,
     },
 }
-
-impl std::fmt::Display for TsParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Parse { message } => write!(f, "failed to parse TypeScript source: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for TsParseError {}
 
 impl TsParseError {
     pub(crate) fn from_diagnostics<I>(errors: I) -> Self

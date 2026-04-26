@@ -42,35 +42,18 @@ pub(crate) struct ReadEditedSourceError {
 /// Hooks used to each define their own copy of this enum (`SimilarityError`,
 /// `WrapperError`, …); they are now thin aliases so the `From`, `Display`,
 /// `source` plumbing only exists once.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum HookError {
+    #[error("failed to read {path:?}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
     /// Boxed to keep the error type language-agnostic as more parsers
     /// are added.
-    Parse(Box<dyn std::error::Error + Send + Sync>),
-}
-
-impl std::fmt::Display for HookError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "failed to read {}: {source}", path.display())
-            }
-            Self::Parse(e) => write!(f, "failed to parse source: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for HookError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse(e) => Some(e.as_ref()),
-        }
-    }
+    #[error("failed to parse source: {0}")]
+    Parse(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<ReadEditedSourceError> for HookError {

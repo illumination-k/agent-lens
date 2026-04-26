@@ -33,45 +33,23 @@ use tracing::warn;
 use super::{OutputFormat, SourceLang};
 
 /// Errors raised while running the hotspot analyzer.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum HotspotError {
+    #[error("failed to read {path:?}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
     /// `git` is missing or returned a non-zero exit status. The captured
     /// stderr is forwarded so the agent has a useful diagnostic.
-    Git {
-        stderr: String,
-    },
+    #[error("git failed: {}", stderr.trim_end())]
+    Git { stderr: String },
     /// The provided path is not inside any git working tree.
-    NotInGitRepo {
-        path: PathBuf,
-    },
-    Serialize(serde_json::Error),
-}
-
-impl std::fmt::Display for HotspotError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
-            Self::Git { stderr } => write!(f, "git failed: {}", stderr.trim_end()),
-            Self::NotInGitRepo { path } => {
-                write!(f, "{} is not inside a git working tree", path.display())
-            }
-            Self::Serialize(e) => write!(f, "failed to serialize report: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for HotspotError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Serialize(e) => Some(e),
-            Self::Git { .. } | Self::NotInGitRepo { .. } => None,
-        }
-    }
+    #[error("{path:?} is not inside a git working tree")]
+    NotInGitRepo { path: PathBuf },
+    #[error("failed to serialize report: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 /// Stateful hotspot runner. `since` is plumbed through to git's

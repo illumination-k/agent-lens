@@ -64,41 +64,20 @@ impl SourceLang {
 /// keeps its own error type. The shared variants here keep the simple
 /// analyzers from each repeating the same Io / extension / parse /
 /// serialize boilerplate.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AnalyzerError {
+    #[error("failed to read {path:?}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
-    UnsupportedExtension {
-        path: PathBuf,
-    },
-    Parse(Box<dyn std::error::Error + Send + Sync>),
-    Serialize(serde_json::Error),
-}
-
-impl std::fmt::Display for AnalyzerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
-            Self::UnsupportedExtension { path } => {
-                write!(f, "unsupported file extension: {}", path.display())
-            }
-            Self::Parse(e) => write!(f, "failed to parse source: {e}"),
-            Self::Serialize(e) => write!(f, "failed to serialize report: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for AnalyzerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse(e) => Some(e.as_ref()),
-            Self::Serialize(e) => Some(e),
-            Self::UnsupportedExtension { .. } => None,
-        }
-    }
+    #[error("unsupported file extension: {path:?}")]
+    UnsupportedExtension { path: PathBuf },
+    #[error("failed to parse source: {0}")]
+    Parse(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("failed to serialize report: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 /// Detect the source language from `path` and read it into memory.
