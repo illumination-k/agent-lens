@@ -595,17 +595,26 @@ def sample(x):
     #[test]
     fn unary_builtin_with_extra_positional_arg_is_not_treated_as_adapter() {
         // `is_trivial_unary_builtin` rejects unless arity is exactly
-        // 1 *and* keywords are empty. Tightening the `||` to `&&`
-        // would let a 2-arg `int(x, base)` slip through and turn
-        // `def a(x): return int(x, 16)` into a flagged wrapper.
-        let src = "def a(x):\n    return int(x, 16)\n";
-        assert!(run(src).is_empty());
+        // 1 *and* keywords are empty. Wrap an inner forwarding call
+        // so the mutation is observable: with the gate intact,
+        // `int(b(x), 16)` is left whole and `core_call` sees
+        // arity-2 args that don't pass through `def a(x)`. With the
+        // `||` silently tightened to `&&`, the gate misfires, the
+        // adapter peels down to `b(x)`, and `a` would be reported
+        // as a wrapper over `b`.
+        let src = "def a(x):\n    return int(b(x), 16)\n";
+        assert!(
+            run(src).is_empty(),
+            "int(b(x), extra) is not a trivial unary builtin and a should not be flagged",
+        );
     }
 
     #[test]
     fn unary_builtin_with_keyword_arg_is_not_treated_as_adapter() {
-        // Same gate, keyword-arg side.
-        let src = "def a(x):\n    return int(x, base=16)\n";
+        // Same gate, keyword-arg side. Mirror of the positional
+        // test: the inner forwarding call must be present so the
+        // mutation has somewhere to fall through to.
+        let src = "def a(x):\n    return int(b(x), base=16)\n";
         assert!(run(src).is_empty());
     }
 

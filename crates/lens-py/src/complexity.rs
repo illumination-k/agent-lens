@@ -870,31 +870,48 @@ def f(ctx):
     }
 
     #[test]
-    fn unary_not_walks_into_operand() {
-        // `visit_unary` records the unary operator AND descends into
-        // its operand. Replacing it with a no-op would drop both the
-        // operator label and the inner identifier, so `not x` would
-        // stop counting `x` as an operand.
+    fn unary_not_records_operator_and_walks_into_operand() {
+        // `visit_unary` does two things: records the unary operator
+        // ("not"/"~"/"+u"/"-u") and descends into its operand.
+        // Deleting the `Expr::UnaryOp` arm in `visit_expr` would
+        // route through the default `walk_expr` path, which still
+        // walks the operand (so `x` is counted) but drops the
+        // operator label. Pinning a minimum on `distinct_operators`
+        // catches that drop.
         let f = one("def f(x):\n    return not x\n");
         // `x` must still appear as an operand.
         assert!(
             f.halstead.distinct_operands >= 1,
             "expected `x` to be counted as an operand under `not`",
         );
+        // Operators must include both `return` and `not`; if the
+        // UnaryOp arm is deleted, only `return` survives.
+        assert!(
+            f.halstead.distinct_operators >= 2,
+            "expected `return` and `not` operators, got distinct={}",
+            f.halstead.distinct_operators,
+        );
     }
 
     #[test]
-    fn call_walks_into_arguments() {
-        // `visit_call` walks the call's arguments. Replacing it with
-        // a no-op would mean identifiers used as call arguments are
-        // never counted as operands.
+    fn call_records_operator_and_walks_into_arguments() {
+        // `visit_call` does two things: records the `call` operator
+        // and walks the arguments. The default `walk_expr` path also
+        // walks args (so `x`, `y`, `foo` would still be counted as
+        // operands), but the `call` operator label only comes from
+        // `visit_call`. Without `Stmt::Expr` recording any operator
+        // of its own, deleting the `Expr::Call` arm leaves the body
+        // with zero operators.
         let f = one("def f(x, y):\n    foo(x, y)\n");
-        // `x` and `y` are passed as call arguments and must show up
-        // as operands.
         assert!(
             f.halstead.distinct_operands >= 2,
             "expected call args to be counted as operands, got distinct={}",
             f.halstead.distinct_operands,
+        );
+        assert!(
+            f.halstead.distinct_operators >= 1,
+            "expected `call` operator from visit_call, got distinct={}",
+            f.halstead.distinct_operators,
         );
     }
 }
