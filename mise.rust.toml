@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "latest", profile = "default", components = "rustfmt,clippy" }
+rust = { version = "latest", profile = "default", components = "rustfmt,clippy,llvm-tools-preview" }
 "aqua:cargo-bins/cargo-binstall" = "1.18.1"
 
 [tools."cargo:cargo-nextest"]

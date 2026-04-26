@@ -15,3 +15,6 @@ oxc_ast_visit = "0.127"
 oxc_parser = "0.127"
 oxc_span = "0.127"
 thiserror = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }

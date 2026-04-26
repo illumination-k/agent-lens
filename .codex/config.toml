@@ -1,4 +1,4 @@
-#:schema https://developers.openai.com/codex/config-schema.json
+# :schema https://developers.openai.com/codex/config-schema.json
 
 [shell_environment_policy]
 # Avoid forcing a Rust toolchain in Codex-spawned commands.

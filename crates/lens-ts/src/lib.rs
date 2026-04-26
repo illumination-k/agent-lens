@@ -15,6 +15,7 @@ mod complexity;
 mod line_index;
 mod parser;
 mod tree;
+mod walk;
 
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use parser::{TsParseError, TypeScriptParser};

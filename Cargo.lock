@@ -436,6 +436,7 @@ dependencies = [
  "lens-domain",
  "proc-macro2",
  "quote",
+ "rstest",
  "syn",
  "tempfile",
  "thiserror",
@@ -451,6 +452,7 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
+ "rstest",
  "thiserror",
 ]
 
