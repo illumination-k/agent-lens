@@ -27,12 +27,21 @@ mise settings experimental=true
 mise install
 
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+	DETECTED_SHELL=${CLAUDE_CODE_SHELL:-$(basename "${SHELL:-/bin/bash}")}
+	case "$DETECTED_SHELL" in
+	bash | zsh) ;;
+	*)
+		echo "Unsupported shell: $DETECTED_SHELL; falling back to bash."
+		DETECTED_SHELL=bash
+		;;
+	esac
+
 	# Use `mise env` (direct export statements) rather than `mise activate`
 	# (interactive-shell hooks via PROMPT_COMMAND) so non-interactive Bash tool
 	# invocations get the resolved tool PATH on first source.
 	{
 		echo "export PATH=\"\$HOME/.local/bin:\$PATH\""
-		mise env -s bash
+		mise env -s "$DETECTED_SHELL"
 	} >"$CLAUDE_ENV_FILE"
 else
 	echo "CLAUDE_ENV_FILE is not set. Skipping shell environment setup."
