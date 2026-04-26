@@ -23,6 +23,7 @@ use oxc_ast::ast::*;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
+use crate::attrs::{name_looks_like_test_class, name_looks_like_test_function};
 use crate::line_index::LineIndex;
 use crate::tree::{expr_tree, function_body_tree};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
@@ -93,33 +94,82 @@ impl LanguageParser for TypeScriptParser {
     }
 
     fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        let alloc = Allocator::default();
-        let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
-        if !ret.errors.is_empty() {
-            return Err(TsParseError::from_diagnostics(
-                ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
-            ));
-        }
-        let line_index = LineIndex::new(source);
-        let mut visitor = FunctionDefCollector::default();
-        walk_program(&ret.program, &line_index, &mut visitor);
-        Ok(visitor.out)
+        extract_with(source, ExtractOptions::default())
     }
 }
 
-#[derive(Default)]
+/// Like [`TypeScriptParser::extract_functions`] but drops items that
+/// look like xUnit-style test scaffolding: declaration-level functions
+/// whose name matches the `test` / `test_*` convention, and methods of
+/// classes whose name starts with `Test`.
+///
+/// Anonymous arrow callbacks passed to `describe()` / `it()` / `test()`
+/// are already invisible to the walker (they aren't bound to a name),
+/// so this filter only catches the named, declaration-level shapes
+/// that slip through. Used by analysers (similarity, future cohesion /
+/// complexity reports) that want to look at production code only.
+pub fn extract_functions_excluding_tests(source: &str) -> Result<Vec<FunctionDef>, TsParseError> {
+    extract_with(
+        source,
+        ExtractOptions {
+            exclude_tests: true,
+        },
+    )
+}
+
+#[derive(Default, Clone, Copy)]
+struct ExtractOptions {
+    exclude_tests: bool,
+}
+
+fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, TsParseError> {
+    let alloc = Allocator::default();
+    let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+    if !ret.errors.is_empty() {
+        return Err(TsParseError::from_diagnostics(
+            ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
+        ));
+    }
+    let line_index = LineIndex::new(source);
+    let mut visitor = FunctionDefCollector {
+        opts,
+        out: Vec::new(),
+    };
+    walk_program(&ret.program, &line_index, &mut visitor);
+    Ok(visitor.out)
+}
+
 struct FunctionDefCollector {
+    opts: ExtractOptions,
     out: Vec<FunctionDef>,
 }
 
 impl FunctionVisitor for FunctionDefCollector {
     fn on_function(&mut self, item: FunctionItem<'_>) {
+        if self.opts.exclude_tests && is_test_item(&item.name) {
+            return;
+        }
         self.out.push(FunctionDef {
             name: item.name,
             start_line: item.start_line,
             end_line: item.end_line,
             tree: function_body_tree(item.body),
         });
+    }
+}
+
+/// True iff a [`FunctionItem`] qualified name belongs to test
+/// scaffolding. Class methods come through as `ClassName::method`, so
+/// we split on the last `::` to recover the immediate owner; namespaces
+/// don't propagate as owners (the walker passes `None` through
+/// `walk_module_body`) so a namespaced free function shows up bare
+/// here.
+fn is_test_item(qualified: &str) -> bool {
+    match qualified.rsplit_once("::") {
+        Some((owner, method)) => {
+            name_looks_like_test_class(owner) || name_looks_like_test_function(method)
+        }
+        None => name_looks_like_test_function(qualified),
     }
 }
 
@@ -271,6 +321,92 @@ function cloned(ys: number[]): number {
             sim > 0.85,
             "expected renamed clone to stay > 0.85 similar, got {sim}"
         );
+    }
+
+    /// Default `extract_functions` keeps every item — even what
+    /// `--exclude-tests` would drop. If the boolean guards in the
+    /// collector ever degrade to constants the default contract would
+    /// silently break, so each test-flavoured shape gets a default-mode
+    /// case here.
+    #[rstest]
+    #[case::xunit_test_function("function test_foo(): void {}\n", &["test_foo"][..])]
+    #[case::just_test("function test(): void {}\n", &["test"][..])]
+    #[case::test_class(
+        "class TestThing {\n    helper(): number { return 1; }\n}\n",
+        &["TestThing::helper"][..],
+    )]
+    #[case::test_class_method(
+        "class Foo {\n    test_a(): void {}\n}\n",
+        &["Foo::test_a"][..],
+    )]
+    fn default_extraction_includes_test_flavoured_items(
+        #[case] src: &str,
+        #[case] expected: &[&str],
+    ) {
+        let funcs = parse_functions(src);
+        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names, expected,
+            "default extraction must keep every item; only --exclude-tests should drop them",
+        );
+    }
+
+    #[test]
+    fn excluding_tests_drops_xunit_named_scaffolding() {
+        // Production code surrounded by every shape `--exclude-tests`
+        // is supposed to filter for TypeScript: an xUnit-style
+        // `test_*` free function, a `Test*` class with helper
+        // methods, and a `test_*` method on a regular class. The
+        // production class method (`Service::compute`) should
+        // survive — covers the negative branch of the test-class
+        // check (a mutant that always returns `true` would drop it
+        // and fail the assertion).
+        let src = r#"
+function production(x: number): number {
+    return x + 1;
+}
+
+function test_unit(): void {
+    if (production(0) !== 1) throw new Error("bad");
+}
+
+class Service {
+    compute(x: number): number {
+        return production(x);
+    }
+    test_internal(): void {
+        // xUnit-style method on a production class.
+    }
+}
+
+class TestThing {
+    helper(): number {
+        return production(0);
+    }
+}
+"#;
+        let funcs = extract_functions_excluding_tests(src).unwrap();
+        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["production", "Service::compute"]);
+    }
+
+    #[test]
+    fn excluding_tests_keeps_default_extraction_with_no_test_markers() {
+        // No test-shaped items — the filter should be a no-op so the
+        // public surface still reports every production function.
+        let src = "function a(): void {}\nfunction b(): void {}\n";
+        let baseline = parse_functions(src);
+        let filtered = extract_functions_excluding_tests(src).unwrap();
+        assert_eq!(
+            baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn excluding_tests_surfaces_parse_errors() {
+        let err = extract_functions_excluding_tests("function ??? {").unwrap_err();
+        assert!(format!("{err}").contains("failed to parse TypeScript source"));
     }
 
     #[test]

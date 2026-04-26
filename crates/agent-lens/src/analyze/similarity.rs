@@ -270,16 +270,17 @@ fn extract_functions(
             }
         }
         SourceLang::TypeScript => {
-            // `exclude_tests` has no concrete meaning yet for TS — there
-            // is no `#[test]` attribute equivalent. Fall through to the
-            // standard parser; file-pattern based filtering can be
-            // wired later if it proves useful.
-            let mut parser = lens_ts::TypeScriptParser::new();
-            <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
-                &mut parser,
-                source,
-            )
-            .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            if exclude_tests {
+                lens_ts::extract_functions_excluding_tests(source)
+                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            } else {
+                let mut parser = lens_ts::TypeScriptParser::new();
+                <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
+                    &mut parser,
+                    source,
+                )
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            }
         }
         SourceLang::Python => {
             if exclude_tests {
@@ -659,6 +660,54 @@ def test_beta():
     assert a + b + c == 6
 "#;
         let file = write_file(dir.path(), "lib.py", src);
+
+        let with_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
+        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+
+        let without_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_exclude_tests(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
+        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["function_count"], 1);
+    }
+
+    #[test]
+    fn exclude_tests_drops_typescript_test_functions_from_report() {
+        // xUnit-style `test_*` functions form a parallel pair next to
+        // a single production function; `--exclude-tests` should drop
+        // them via `lens_ts::extract_functions_excluding_tests`.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+function production(xs: number[]): number {
+    let total = 0;
+    for (const x of xs) {
+        total += x;
+    }
+    return total;
+}
+
+function test_alpha(): void {
+    const a = 1;
+    const b = 2;
+    const c = 3;
+    if (a + b + c !== 6) throw new Error("bad");
+}
+
+function test_beta(): void {
+    const a = 1;
+    const b = 2;
+    const c = 3;
+    if (a + b + c !== 6) throw new Error("bad");
+}
+"#;
+        let file = write_file(dir.path(), "lib.ts", src);
 
         let with_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)
