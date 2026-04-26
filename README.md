@@ -80,13 +80,32 @@ Wire `agent-lens` into Claude Code by pointing a `PostToolUse` hook at it.
 After every `Edit` / `Write`, the binary reads Claude Code's JSON payload from
 stdin and writes feedback back on stdout.
 
+The fastest way is to let `agent-lens` write the `settings.json` block for you:
+
+```bash
+# Project scope: ./.claude/settings.json (created if missing)
+agent-lens hook setup
+
+# User scope: $HOME/.claude/settings.json
+agent-lens hook setup --scope user
+
+# Preview without writing
+agent-lens hook setup --dry-run
+```
+
+The merge is conservative: existing entries are preserved, and a fresh
+`PostToolUse` block is appended only with the commands that aren't already
+wired up. Re-running is a no-op once every handler is installed.
+
+If you'd rather edit the file by hand, the equivalent block looks like:
+
 ```jsonc
 // ~/.claude/settings.json (or .claude/settings.json in a project)
 {
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",

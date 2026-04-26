@@ -23,8 +23,9 @@ use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
-use clap::{Parser, Subcommand};
-use tracing::error;
+use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -57,6 +58,41 @@ enum HookCommand {
     /// Handle a `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(PostToolUseCommand),
+    /// Wire `agent-lens`'s PostToolUse handlers into a Claude Code
+    /// `settings.json`.
+    ///
+    /// The merge is conservative: existing entries are preserved, and a
+    /// new `PostToolUse` block is appended only with the commands that
+    /// aren't already wired up. Re-running the command is a no-op once
+    /// every handler is installed.
+    Setup(SetupArgs),
+}
+
+#[derive(Debug, Args)]
+struct SetupArgs {
+    /// Where to install the hooks. `project` writes to
+    /// `<cwd>/.claude/settings.json`; `user` writes to
+    /// `$HOME/.claude/settings.json`.
+    #[arg(long, value_enum, default_value_t = SetupScope::Project)]
+    scope: SetupScope,
+    /// Show the resulting JSON without touching disk.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SetupScope {
+    Project,
+    User,
+}
+
+impl From<SetupScope> for SettingsScope {
+    fn from(value: SetupScope) -> Self {
+        match value {
+            SetupScope::Project => Self::Project,
+            SetupScope::User => Self::User,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -224,6 +260,7 @@ fn init_tracing() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
+        Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args),
         Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
         Command::Analyze(sub) => run_analyze(sub),
     }
@@ -287,6 +324,33 @@ fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::
         PostToolUseCommand::Wrapper => WrapperHook::new().handle(input)?,
     };
     write_stdout_json(&output)
+}
+
+fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let path = setup::resolve_path(args.scope.into(), &cwd)?;
+    let plan = setup::plan(path)?;
+    let wrote = if args.dry_run {
+        info!(path = %plan.path.display(), "dry-run: leaving settings.json untouched");
+        false
+    } else if plan.changed() {
+        setup::apply(&plan)?;
+        info!(
+            path = %plan.path.display(),
+            added = plan.added_commands.len(),
+            "wrote settings.json",
+        );
+        true
+    } else {
+        info!(path = %plan.path.display(), "settings.json already configured; nothing to do");
+        false
+    };
+    write_stdout_json(&SetupSummary {
+        path: &plan.path,
+        wrote,
+        added_commands: &plan.added_commands,
+        settings: &plan.after,
+    })
 }
 
 fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {

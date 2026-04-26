@@ -14,6 +14,21 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook post-tool-use similarity",
+            "type": "command"
+          },
+          {
+            "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook post-tool-use wrapper",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

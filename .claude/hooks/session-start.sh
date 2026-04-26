@@ -26,6 +26,13 @@ mise trust --all
 mise settings experimental=true
 mise install
 
+# Build the agent-lens binary so the PostToolUse hooks wired up in
+# .claude/settings.json can invoke it directly. `mise exec` activates the
+# Rust toolchain for this one command without depending on the env file
+# below being sourced first. Debug build is intentional — incremental
+# rebuilds are sub-second and these hooks do small, fast analysis.
+mise exec -- cargo build -p agent-lens
+
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
 	DETECTED_SHELL=${CLAUDE_CODE_SHELL:-$(basename "${SHELL:-/bin/bash}")}
 	case "$DETECTED_SHELL" in
@@ -39,9 +46,13 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
 	# Use `mise env` (direct export statements) rather than `mise activate`
 	# (interactive-shell hooks via PROMPT_COMMAND) so non-interactive Bash tool
 	# invocations get the resolved tool PATH on first source.
+	# `target/debug` is prepended so `agent-lens` is callable by name from
+	# the Bash tool too (the PostToolUse hook commands use the absolute path
+	# directly so they don't depend on the env file being sourced).
 	{
 		echo "export PATH=\"\$HOME/.local/bin:\$PATH\""
 		mise env -s "$DETECTED_SHELL"
+		echo "export PATH=\"$PWD/target/debug:\$PATH\""
 	} >"$CLAUDE_ENV_FILE"
 else
 	echo "CLAUDE_ENV_FILE is not set. Skipping shell environment setup."
