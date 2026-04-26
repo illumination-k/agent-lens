@@ -19,8 +19,12 @@
 //!   the derived metrics live here so every language goes through the same
 //!   formula.
 //! * [`coupling`] — module-level Number of Couplings / Fan-In / Fan-Out /
-//!   Henry-Kafura IFC / Inter-module coupling. Adapters produce
-//!   [`CouplingEdge`]s; this module folds them into the report.
+//!   Henry-Kafura IFC / Inter-module coupling / Instability / dependency
+//!   cycles. Adapters produce [`CouplingEdge`]s; this module folds them
+//!   into the report.
+//! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
+//!   feed in per-file complexity rollups and a churn table; this module
+//!   merges them into a ranked list.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -29,6 +33,7 @@ pub mod cohesion;
 pub mod complexity;
 pub mod coupling;
 pub mod function;
+pub mod hotspot;
 pub mod tree;
 pub mod tsed;
 
@@ -38,8 +43,10 @@ pub use cohesion::{
 };
 pub use complexity::{FunctionComplexity, HalsteadCounts};
 pub use coupling::{
-    CouplingEdge, CouplingReport, EdgeKind, ModuleMetrics, ModulePath, PairCoupling, compute_report,
+    CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,
+    PairCoupling, compute_report,
 };
 pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
+pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed};

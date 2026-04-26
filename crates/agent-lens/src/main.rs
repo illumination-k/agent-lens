@@ -17,7 +17,7 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_THRESHOLD,
-    OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
+    HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
@@ -128,9 +128,11 @@ enum AnalyzeCommand {
     /// Report module-level coupling metrics for a Rust crate.
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
-    /// IFC ((fan_in*fan_out)^2), and per-pair shared-symbol counts.
-    /// `path` may be a `.rs` crate root (e.g. `src/lib.rs`) or a
-    /// directory containing one.
+    /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
+    /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly
+    /// connected components of the dependency graph (cycles). `path`
+    /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
+    /// containing one.
     Coupling {
         /// Path to a `.rs` crate root or a directory containing
         /// `src/lib.rs` or `src/main.rs`.
@@ -138,6 +140,30 @@ enum AnalyzeCommand {
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+    },
+    /// Rank files by `commits × cognitive_max` to surface hotspots.
+    ///
+    /// Walks `path` for `.rs` files, asks `git` how many commits each
+    /// file has been touched in (optionally scoped by `--since`), and
+    /// joins the two with cognitive complexity. The resulting ranking
+    /// points at "frequently changed *and* complex" code — where bugs
+    /// concentrate and where a refactor is most likely to pay off.
+    /// `path` must be inside a git working tree.
+    Hotspot {
+        /// File or directory to score. Must lie inside a git repo.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+        /// Restrict churn to commits in this `--since=` window. Accepts
+        /// anything git's approxidate parser does (e.g. `90.days.ago`,
+        /// `2024-01-01`).
+        #[arg(long)]
+        since: Option<String>,
+        /// Cap the markdown table to the top-N entries (JSON always
+        /// carries the full list).
+        #[arg(long)]
+        top: Option<usize>,
     },
     /// Report near-duplicate function pairs in a source file.
     ///
@@ -218,6 +244,18 @@ impl AnalyzeCommand {
                 ComplexityAnalyzer::new().analyze(&path, format)?
             }
             Self::Coupling { path, format } => CouplingAnalyzer::new().analyze(&path, format)?,
+            Self::Hotspot {
+                path,
+                format,
+                since,
+                top,
+            } => {
+                let mut analyzer = HotspotAnalyzer::new().with_top(top);
+                if let Some(s) = since {
+                    analyzer = analyzer.with_since(s);
+                }
+                analyzer.analyze(&path, format)?
+            }
             Self::Similarity {
                 path,
                 format,
