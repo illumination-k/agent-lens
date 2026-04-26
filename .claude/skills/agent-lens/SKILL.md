@@ -9,14 +9,14 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 
 ## Pick the analyzer
 
-| Question | Subcommand | Path argument |
-|---|---|---|
-| Are there near-duplicate functions in this file? | `similarity` | a `.rs` file |
-| Are there forwarding-only functions worth inlining? | `wrapper` | a `.rs` file |
-| Which `impl` blocks are doing too many things? | `cohesion` | a `.rs` file |
-| Which functions are landmines to edit? | `complexity` | `.rs` / `.ts` / `.js` / `.py` file |
-| Which modules are Fan-In bottlenecks or cyclic? | `coupling` | crate root or directory |
-| Where do churn and complexity collide? | `hotspot` | git-tracked file or directory |
+| Question                                            | Subcommand   | Path argument                      |
+| --------------------------------------------------- | ------------ | ---------------------------------- |
+| Are there near-duplicate functions in this file?    | `similarity` | a `.rs` file                       |
+| Are there forwarding-only functions worth inlining? | `wrapper`    | a `.rs` file                       |
+| Which `impl` blocks are doing too many things?      | `cohesion`   | a `.rs` file                       |
+| Which functions are landmines to edit?              | `complexity` | `.rs` / `.ts` / `.js` / `.py` file |
+| Which modules are Fan-In bottlenecks or cyclic?     | `coupling`   | crate root or directory            |
+| Where do churn and complexity collide?              | `hotspot`    | git-tracked file or directory      |
 
 Only `complexity` runs on TS/JS/Python today; the rest are Rust-only.
 

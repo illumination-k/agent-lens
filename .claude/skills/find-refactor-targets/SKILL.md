@@ -7,7 +7,7 @@ description: Use when the user wants to know where to refactor first, where bugs
 
 Goal: produce a short, ordered list of files and functions where a refactor is most likely to pay off, instead of letting the user guess.
 
-The driver is **Hotspot** — `commits × cognitive_max`. A file with a high cognitive complexity that nobody touches isn't urgent. A file that everyone touches *and* is complex is where bugs accumulate.
+The driver is **Hotspot** — `commits × cognitive_max`. A file with a high cognitive complexity that nobody touches isn't urgent. A file that everyone touches _and_ is complex is where bugs accumulate.
 
 ## Workflow
 
@@ -20,6 +20,7 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 15 --format md
 ```
 
 Tune `--since`:
+
 - `90.days.ago` for "what's been hot this quarter"
 - `1.year.ago` for stable repos
 - omit for full history (defaults to all commits)
@@ -48,7 +49,7 @@ If the worst function lives in an `impl` block, see whether the block itself is 
 agent-lens analyze cohesion <hotspot-path> --format md
 ```
 
-`lcom4 ≥ 2` plus high cognitive in the same `impl` means: the methods are doing unrelated jobs *and* one of them is a landmine. Splitting the `impl` is a high-leverage move.
+`lcom4 ≥ 2` plus high cognitive in the same `impl` means: the methods are doing unrelated jobs _and_ one of them is a landmine. Splitting the `impl` is a high-leverage move.
 
 ### 4. Verify the file isn't an architectural bottleneck
 
@@ -62,14 +63,14 @@ A high `fan_in` on the hotspot module means changes ripple. Stage the refactor: 
 
 ## Reading the metrics
 
-| Signal | Threshold | What it means |
-|---|---|---|
-| Hotspot rank | top 5 | Where to spend refactor budget first |
-| Cognitive | ≥ 25 | Hard to hold in your head; bug magnet |
-| Cognitive | 15–24 | Yellow flag; consider splitting |
-| Maintainability Index | < 65 | Hard to maintain regardless of cyclomatic |
-| LCOM4 | ≥ 2 | `impl` has disjoint responsibilities |
-| Cyclomatic alone | — | Don't anchor on this; cognitive is the more useful number |
+| Signal                | Threshold | What it means                                             |
+| --------------------- | --------- | --------------------------------------------------------- |
+| Hotspot rank          | top 5     | Where to spend refactor budget first                      |
+| Cognitive             | ≥ 25      | Hard to hold in your head; bug magnet                     |
+| Cognitive             | 15–24     | Yellow flag; consider splitting                           |
+| Maintainability Index | < 65      | Hard to maintain regardless of cyclomatic                 |
+| LCOM4                 | ≥ 2       | `impl` has disjoint responsibilities                      |
+| Cyclomatic alone      | —         | Don't anchor on this; cognitive is the more useful number |
 
 ## Output format for the user
 

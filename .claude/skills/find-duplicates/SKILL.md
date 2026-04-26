@@ -8,7 +8,7 @@ description: Use when the user asks to find duplicated, near-duplicate, copy-pas
 Two analyzers cover the "is this already written?" question:
 
 - `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ).
-- `wrapper`   — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
+- `wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
 
 Both analyzers are Rust-only today and operate on a single `.rs` file at a time.
 

@@ -51,13 +51,13 @@ agent-lens analyze cohesion <path> --diff-only --format md
 
 The two analyzers tell different stories that often line up:
 
-| Coupling signal | Cohesion signal | Diagnosis |
-|---|---|---|
-| Module has high Fan-Out | LCOM4 = 1 across its `impl`s | God object — split by responsibility, not by struct. |
-| Module has high Fan-In | One `impl` has LCOM4 ≥ 2 | The hub leaks an internal split — fix cohesion first, then re-measure coupling. |
-| Cycle between A and B | — | Move the shared abstraction into a third module both depend on. |
-| Instability ≈ 1 on a leaf module | — | Fine. Leaves are supposed to be unstable. |
-| Instability ≈ 0 with high churn | — | Stable hub that keeps changing. Either it's miscategorised or the hub abstraction is wrong. |
+| Coupling signal                  | Cohesion signal              | Diagnosis                                                                                   |
+| -------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------- |
+| Module has high Fan-Out          | LCOM4 = 1 across its `impl`s | God object — split by responsibility, not by struct.                                        |
+| Module has high Fan-In           | One `impl` has LCOM4 ≥ 2     | The hub leaks an internal split — fix cohesion first, then re-measure coupling.             |
+| Cycle between A and B            | —                            | Move the shared abstraction into a third module both depend on.                             |
+| Instability ≈ 1 on a leaf module | —                            | Fine. Leaves are supposed to be unstable.                                                   |
+| Instability ≈ 0 with high churn  | —                            | Stable hub that keeps changing. Either it's miscategorised or the hub abstraction is wrong. |
 
 ## Reading the JSON when `--format md` isn't enough
 
