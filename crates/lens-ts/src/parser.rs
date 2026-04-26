@@ -221,6 +221,24 @@ class Foo {
     }
 
     #[test]
+    fn extracts_functions_inside_exported_namespace() {
+        // `export namespace foo { ... }` wraps the inner namespace in
+        // an `ExportNamedDeclaration` whose `declaration` is the
+        // `Declaration::TSModuleDeclaration` arm of `walk_decl`. The
+        // top-level `namespace foo` form goes through `walk_stmt` —
+        // only `export namespace` reaches the analogous arm in
+        // `walk_decl`, so it needs its own coverage.
+        let src = r#"
+export namespace outer {
+    export function exported_inner(): void {}
+}
+"#;
+        let funcs = parse_functions(src);
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "exported_inner");
+    }
+
+    #[test]
     fn parse_returns_error_for_invalid_typescript() {
         let mut parser = TypeScriptParser::new();
         let err = parser.parse("function ??? {").unwrap_err();

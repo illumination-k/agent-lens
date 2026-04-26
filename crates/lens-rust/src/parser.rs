@@ -215,6 +215,7 @@ fn token_tree_to_node(tt: TokenTree) -> TreeNode {
 mod tests {
     use super::*;
     use lens_domain::{TSEDOptions, calculate_tsed, find_similar_functions};
+    use rstest::rstest;
 
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = RustParser::new();
@@ -354,6 +355,46 @@ fn recursive(n: u32) -> u32 {
         assert!(
             sim < 0.8,
             "expected structurally different functions to score < 0.8, got {sim}"
+        );
+    }
+
+    /// Default `extract_functions` keeps every item — even the ones an
+    /// `--exclude-tests` run would drop. Walking into a `#[cfg(test)]
+    /// mod` / `impl` / `trait` and the test-tagged free fn inside each
+    /// must still surface them; otherwise the boolean guards in
+    /// `collect_*` could degrade to constants (mutant `&& → ||`) and
+    /// silently break the default contract without any test catching it.
+    #[rstest]
+    #[case::cfg_test_mod(
+        "#[cfg(test)]\nmod tests { fn helper() {} }\n",
+        &["helper"][..],
+    )]
+    #[case::cfg_test_impl(
+        "struct T;\n#[cfg(test)]\nimpl T { fn helper() {} }\n",
+        &["T::helper"][..],
+    )]
+    #[case::cfg_test_trait(
+        "#[cfg(test)]\ntrait Tr { fn def_method() -> u32 { 0 } }\n",
+        &["Tr::def_method"][..],
+    )]
+    #[case::test_attr_free_fn("#[test]\nfn ut() {}\n", &["ut"][..])]
+    #[case::test_attr_impl_method(
+        "struct T;\nimpl T { #[test] fn fixture() {} }\n",
+        &["T::fixture"][..],
+    )]
+    #[case::test_attr_trait_method(
+        "trait Tr { #[test] fn default_test() -> u32 { 0 } }\n",
+        &["Tr::default_test"][..],
+    )]
+    fn default_extraction_includes_test_attributed_items(
+        #[case] src: &str,
+        #[case] expected: &[&str],
+    ) {
+        let funcs = parse_functions(src);
+        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names, expected,
+            "default extraction must keep every item; only --exclude-tests should drop them",
         );
     }
 
