@@ -54,3 +54,99 @@ pub struct CommonHookOutput {
     )]
     pub suppress_output: Option<bool>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn hook_context_round_trip_with_path() {
+        let v = json!({
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/transcript.jsonl",
+            "cwd": "/work",
+            "model": "gpt-5-mini",
+        });
+        let ctx: HookContext = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(ctx.session_id, "sess-1");
+        assert_eq!(ctx.model, "gpt-5-mini");
+        assert!(ctx.transcript_path.is_some());
+        assert_eq!(serde_json::to_value(&ctx).unwrap(), v);
+    }
+
+    #[test]
+    fn hook_context_accepts_null_transcript_path() {
+        let v = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/work",
+            "model": "gpt-5",
+        });
+        let ctx: HookContext = serde_json::from_value(v).unwrap();
+        assert!(ctx.transcript_path.is_none());
+    }
+
+    #[test]
+    fn hook_context_accepts_missing_transcript_path() {
+        // Codex's documented schema lets the field be absent entirely;
+        // serde's `default` covers that.
+        let v = json!({
+            "session_id": "sess",
+            "cwd": "/work",
+            "model": "gpt-5",
+        });
+        let ctx: HookContext = serde_json::from_value(v).unwrap();
+        assert!(ctx.transcript_path.is_none());
+    }
+
+    #[test]
+    fn hook_context_missing_session_id_is_rejected() {
+        let v = json!({
+            "transcript_path": null,
+            "cwd": "/work",
+            "model": "gpt-5",
+        });
+        let err = serde_json::from_value::<HookContext>(v).unwrap_err();
+        assert!(err.to_string().contains("session_id"), "{err}");
+    }
+
+    #[test]
+    fn hook_context_missing_model_is_rejected() {
+        let v = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/work",
+        });
+        let err = serde_json::from_value::<HookContext>(v).unwrap_err();
+        assert!(err.to_string().contains("model"), "{err}");
+    }
+
+    #[test]
+    fn common_hook_output_default_serializes_to_empty_object() {
+        let v = serde_json::to_value(CommonHookOutput::default()).unwrap();
+        assert_eq!(v, json!({}));
+    }
+
+    #[test]
+    fn common_hook_output_uses_camel_case_keys() {
+        let out = CommonHookOutput {
+            continue_: Some(true),
+            stop_reason: Some("done".into()),
+            system_message: Some("note".into()),
+            suppress_output: Some(false),
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "continue": true,
+                "stopReason": "done",
+                "systemMessage": "note",
+                "suppressOutput": false,
+            })
+        );
+        let parsed: CommonHookOutput = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed, out);
+    }
+}

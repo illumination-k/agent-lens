@@ -64,3 +64,134 @@ pub enum CodexHookInput {
     UserPromptSubmit(UserPromptSubmitInput),
     Stop(StopInput),
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::CodexHookInput;
+    use serde_json::json;
+
+    fn ctx() -> serde_json::Value {
+        json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "model": "gpt-5",
+        })
+    }
+
+    fn turn_ctx() -> serde_json::Value {
+        let mut v = ctx();
+        v.as_object_mut()
+            .unwrap()
+            .insert("turn_id".into(), json!("turn-1"));
+        v
+    }
+
+    #[test]
+    fn dispatches_session_start_variant() {
+        let mut payload = ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("SessionStart"));
+        obj.insert("source".into(), json!("startup"));
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, CodexHookInput::SessionStart(_)));
+    }
+
+    #[test]
+    fn dispatches_pre_tool_use_variant() {
+        let mut payload = turn_ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("PreToolUse"));
+        obj.insert("tool_name".into(), json!("Bash"));
+        obj.insert("tool_use_id".into(), json!("call-1"));
+        obj.insert("tool_input".into(), json!({}));
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, CodexHookInput::PreToolUse(_)));
+    }
+
+    #[test]
+    fn dispatches_permission_request_variant() {
+        let mut payload = turn_ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("PermissionRequest"));
+        obj.insert("tool_name".into(), json!("Bash"));
+        obj.insert("tool_input".into(), json!({}));
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, CodexHookInput::PermissionRequest(_)));
+    }
+
+    #[test]
+    fn dispatches_post_tool_use_variant() {
+        let mut payload = turn_ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("PostToolUse"));
+        obj.insert("tool_name".into(), json!("apply_patch"));
+        obj.insert("tool_use_id".into(), json!("call-1"));
+        obj.insert("tool_input".into(), json!({}));
+        obj.insert("tool_response".into(), json!({}));
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, CodexHookInput::PostToolUse(_)));
+    }
+
+    #[test]
+    fn dispatches_user_prompt_submit_variant() {
+        let mut payload = turn_ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("UserPromptSubmit"));
+        obj.insert("prompt".into(), json!("hi"));
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, CodexHookInput::UserPromptSubmit(_)));
+    }
+
+    #[test]
+    fn dispatches_stop_variant() {
+        let mut payload = turn_ctx();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("hook_event_name".into(), json!("Stop"));
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, CodexHookInput::Stop(_)));
+    }
+
+    #[test]
+    fn missing_model_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "Stop",
+            "turn_id": "turn-1",
+        });
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("model"), "{err}");
+    }
+
+    #[test]
+    fn unknown_hook_event_name_is_rejected() {
+        let mut payload = ctx();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("hook_event_name".into(), json!("Telepathy"));
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("variant"), "{err}");
+    }
+
+    #[test]
+    fn null_transcript_path_is_accepted() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "Stop",
+            "turn_id": "turn-1",
+        });
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        let CodexHookInput::Stop(stop) = parsed else {
+            panic!("expected Stop variant");
+        };
+        assert!(stop.context.transcript_path.is_none());
+    }
+}

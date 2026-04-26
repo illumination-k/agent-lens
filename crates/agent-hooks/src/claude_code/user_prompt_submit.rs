@@ -94,4 +94,56 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn missing_prompt_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "UserPromptSubmit",
+        });
+        let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("prompt"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "hi",
+            "future_field": [1, 2, 3],
+        });
+        serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap();
+    }
+
+    #[test]
+    fn empty_prompt_is_accepted() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "",
+        });
+        let input: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        let ClaudeCodeHookInput::UserPromptSubmit(input) = input else {
+            panic!("expected UserPromptSubmit variant");
+        };
+        assert!(input.prompt.is_empty());
+    }
+
+    #[test]
+    fn block_decision_round_trip() {
+        let output = UserPromptSubmitOutput {
+            decision: Some(UserPromptSubmitDecision::Block),
+            reason: Some("blocked".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&output).unwrap();
+        assert_eq!(v, json!({"decision": "block", "reason": "blocked"}));
+    }
 }
