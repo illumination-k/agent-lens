@@ -13,33 +13,36 @@ cd "$(dirname "$0")/../.."
 
 source .claude/hooks/common.sh
 
+# Send progress to stderr so Claude Code doesn't capture it as additionalContext.
+# stdout is reserved for the hook protocol (JSON or empty).
+exec 3>&1 1>&2
+
 if ! check_command mise; then
 	curl https://mise.run | sh
 	export PATH="$HOME/.local/bin:$PATH"
 fi
 
 mise trust --all
-
-DETECTED_SHELL=${CLAUDE_CODE_SHELL:-$(basename "$SHELL")}
+mise settings experimental=true
+mise install
 
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-	# initialize
-	echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >"$CLAUDE_ENV_FILE"
+	DETECTED_SHELL=${CLAUDE_CODE_SHELL:-$(basename "${SHELL:-/bin/bash}")}
 	case "$DETECTED_SHELL" in
-	bash)
-		mise activate bash >>"$CLAUDE_ENV_FILE"
-		;;
-	zsh)
-		mise activate zsh >>"$CLAUDE_ENV_FILE"
-		;;
+	bash | zsh) ;;
 	*)
-		echo "Unsupported shell: $DETECTED_SHELL"
-		exit 1
+		echo "Unsupported shell: $DETECTED_SHELL; falling back to bash."
+		DETECTED_SHELL=bash
 		;;
 	esac
+
+	# Use `mise env` (direct export statements) rather than `mise activate`
+	# (interactive-shell hooks via PROMPT_COMMAND) so non-interactive Bash tool
+	# invocations get the resolved tool PATH on first source.
+	{
+		echo "export PATH=\"\$HOME/.local/bin:\$PATH\""
+		mise env -s "$DETECTED_SHELL"
+	} >"$CLAUDE_ENV_FILE"
 else
 	echo "CLAUDE_ENV_FILE is not set. Skipping shell environment setup."
 fi
-
-mise settings experimental=true
-mise install
