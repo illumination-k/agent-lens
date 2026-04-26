@@ -400,7 +400,16 @@ fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
+        // Mirror the hardened helper in `hotspot.rs`: disable commit /
+        // tag signing so the test never asks the host's signing setup
+        // to participate. Without this, sandboxes that have a global
+        // `commit.gpgsign=true` (and a signing helper that talks to a
+        // service which can fail) make the test brittle.
         let status = std::process::Command::new("git")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .arg("-c")
+            .arg("tag.gpgsign=false")
             .args(args)
             .current_dir(dir)
             .status()

@@ -424,6 +424,7 @@ name = "lens-py"
 version = "0.1.0"
 dependencies = [
  "lens-domain",
+ "rstest",
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_text_size",
