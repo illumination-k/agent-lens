@@ -98,4 +98,44 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn missing_prompt_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "UserPromptSubmit",
+            "turn_id": "turn-1",
+        });
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("prompt"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "UserPromptSubmit",
+            "turn_id": "turn-1",
+            "prompt": "hi",
+            "future_field": "ignored",
+        });
+        serde_json::from_value::<CodexHookInput>(payload).unwrap();
+    }
+
+    #[test]
+    fn block_decision_round_trip() {
+        let output = UserPromptSubmitOutput {
+            decision: Some(UserPromptSubmitDecision::Block),
+            reason: Some("blocked".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&output).unwrap();
+        assert_eq!(v, json!({"decision": "block", "reason": "blocked"}));
+    }
 }

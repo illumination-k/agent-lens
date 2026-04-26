@@ -95,4 +95,74 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn deserializes_each_source_variant() {
+        for (raw, expected) in [
+            ("startup", SessionStartSource::Startup),
+            ("resume", SessionStartSource::Resume),
+            ("clear", SessionStartSource::Clear),
+        ] {
+            let parsed: SessionStartSource = serde_json::from_value(json!(raw)).unwrap();
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    #[test]
+    fn unknown_source_variant_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "SessionStart",
+            "source": "fork"
+        });
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("variant"), "{err}");
+    }
+
+    #[test]
+    fn missing_source_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "SessionStart",
+        });
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("source"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "SessionStart",
+            "source": "resume",
+            "future_field": {"a": 1},
+        });
+        serde_json::from_value::<CodexHookInput>(payload).unwrap();
+    }
+
+    #[test]
+    fn session_start_input_does_not_carry_turn_id() {
+        // Sanity-check: if a turn_id sneaks in, deserialization must
+        // still succeed because flatten + unknown fields tolerates it.
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "turn_id": "turn-1",
+        });
+        let parsed: CodexHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, CodexHookInput::SessionStart(_)));
+    }
 }

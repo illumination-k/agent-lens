@@ -112,4 +112,64 @@ mod tests {
             })
         );
     }
+
+    fn full_payload() -> serde_json::Value {
+        json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "PostToolUse",
+            "turn_id": "turn-1",
+            "tool_name": "apply_patch",
+            "tool_use_id": "call-1",
+            "tool_input": {"command": "*** Begin Patch\n*** End Patch"},
+            "tool_response": {"success": true}
+        })
+    }
+
+    #[test]
+    fn missing_turn_id_is_rejected() {
+        let mut payload = full_payload();
+        payload.as_object_mut().unwrap().remove("turn_id");
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("turn_id"), "{err}");
+    }
+
+    #[test]
+    fn missing_tool_use_id_is_rejected() {
+        let mut payload = full_payload();
+        payload.as_object_mut().unwrap().remove("tool_use_id");
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("tool_use_id"), "{err}");
+    }
+
+    #[test]
+    fn missing_tool_response_is_rejected() {
+        let mut payload = full_payload();
+        payload.as_object_mut().unwrap().remove("tool_response");
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("tool_response"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let mut payload = full_payload();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("future_field".into(), json!("ignored"));
+        serde_json::from_value::<CodexHookInput>(payload).unwrap();
+    }
+
+    #[test]
+    fn block_decision_round_trip() {
+        let output = PostToolUseOutput {
+            decision: Some(PostToolUseDecision::Block),
+            reason: Some("override".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&output).unwrap();
+        assert_eq!(v, json!({"decision": "block", "reason": "override"}));
+    }
 }

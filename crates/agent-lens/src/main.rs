@@ -594,4 +594,243 @@ mod tests {
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
     }
+
+    #[test]
+    fn parses_hook_post_tool_use_similarity() {
+        let cli = Cli::try_parse_from(["agent-lens", "hook", "post-tool-use", "similarity"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Similarity)),
+        ));
+    }
+
+    #[test]
+    fn parses_hook_post_tool_use_wrapper() {
+        let cli = Cli::try_parse_from(["agent-lens", "hook", "post-tool-use", "wrapper"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Wrapper)),
+        ));
+    }
+
+    #[test]
+    fn parses_hook_setup_with_default_scope() {
+        let cli = Cli::try_parse_from(["agent-lens", "hook", "setup"]).expect("clean parse");
+        let Command::Hook(HookCommand::Setup(args)) = cli.command else {
+            panic!("expected hook setup");
+        };
+        assert!(matches!(args.scope, SetupScope::Project));
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn parses_hook_setup_with_user_scope_and_dry_run() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "hook",
+            "setup",
+            "--scope",
+            "user",
+            "--dry-run",
+        ])
+        .expect("clean parse");
+        let Command::Hook(HookCommand::Setup(args)) = cli.command else {
+            panic!("expected hook setup");
+        };
+        assert!(matches!(args.scope, SetupScope::User));
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_codex_hook_post_tool_use_similarity() {
+        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "post-tool-use", "similarity"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::CodexHook(CodexHookCommand::PostToolUse(
+                CodexPostToolUseCommand::Similarity,
+            )),
+        ));
+    }
+
+    #[test]
+    fn parses_codex_hook_setup_defaults_to_user_scope() {
+        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "setup"]).expect("clean parse");
+        let Command::CodexHook(CodexHookCommand::Setup(args)) = cli.command else {
+            panic!("expected codex-hook setup");
+        };
+        assert!(matches!(args.scope, CodexSetupScope::User));
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_with_threshold() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--threshold",
+            "0.85",
+            "--format",
+            "md",
+            "--diff-only",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity {
+            path,
+            format,
+            diff_only,
+            exclude_tests,
+            threshold,
+        }) = cli.command
+        else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(path, PathBuf::from("src/lib.rs"));
+        assert_eq!(format, OutputFormat::Md);
+        assert!(diff_only);
+        assert!(exclude_tests);
+        assert!((threshold - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_analyze_hotspot_with_since_and_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "hotspot",
+            ".",
+            "--since",
+            "90.days.ago",
+            "--top",
+            "5",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Hotspot {
+            since, top, format, ..
+        }) = cli.command
+        else {
+            panic!("expected analyze hotspot");
+        };
+        assert_eq!(since.as_deref(), Some("90.days.ago"));
+        assert_eq!(top, Some(5));
+        assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_coupling_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Coupling { path, format }) = cli.command else {
+            panic!("expected analyze coupling");
+        };
+        assert_eq!(path, PathBuf::from("."));
+        assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn analyze_command_requires_a_subcommand() {
+        let err = Cli::try_parse_from(["agent-lens", "analyze"]).expect_err("missing subcommand");
+        // clap reports this as DisplayHelpOnMissingArgumentOrSubcommand
+        // because the parent command has no default behaviour without a
+        // subcommand.
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+        );
+    }
+
+    #[test]
+    fn analyze_cohesion_requires_path() {
+        let err =
+            Cli::try_parse_from(["agent-lens", "analyze", "cohesion"]).expect_err("missing path");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument,);
+    }
+
+    #[test]
+    fn invalid_format_value_is_rejected() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "cohesion",
+            "src/lib.rs",
+            "--format",
+            "yaml",
+        ])
+        .expect_err("yaml is not a known format");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn invalid_setup_scope_is_rejected() {
+        let err = Cli::try_parse_from(["agent-lens", "hook", "setup", "--scope", "global"])
+            .expect_err("global is not a known scope");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn unknown_subcommand_is_rejected() {
+        let err = Cli::try_parse_from(["agent-lens", "lint"]).expect_err("no lint subcommand");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn unknown_post_tool_use_handler_is_rejected() {
+        let err = Cli::try_parse_from(["agent-lens", "hook", "post-tool-use", "complexity"])
+            .expect_err("complexity is not a hook handler");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn version_flag_short_circuits_parsing() {
+        let err = Cli::try_parse_from(["agent-lens", "--version"]).expect_err("version exits");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn setup_scope_into_settings_scope_round_trip() {
+        let project: SettingsScope = SetupScope::Project.into();
+        let user: SettingsScope = SetupScope::User.into();
+        assert!(matches!(project, SettingsScope::Project));
+        assert!(matches!(user, SettingsScope::User));
+    }
+
+    #[test]
+    fn codex_setup_scope_into_config_scope_round_trip() {
+        let project: codex_setup::ConfigScope = CodexSetupScope::Project.into();
+        let user: codex_setup::ConfigScope = CodexSetupScope::User.into();
+        assert!(matches!(project, codex_setup::ConfigScope::Project));
+        assert!(matches!(user, codex_setup::ConfigScope::User));
+    }
+
+    #[test]
+    fn git_top_level_returns_none_outside_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        // tempdir() returns a fresh path; nothing inside it is git-tracked.
+        assert!(git_top_level(dir.path()).is_none());
+    }
+
+    #[test]
+    fn git_top_level_finds_repo_root_from_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let nested = dir.path().join("nested/inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        let resolved = git_top_level(&nested).expect("inside the new repo");
+        // Resolve symlinks on both sides — macOS tempdirs live under
+        // /private/var/... while git emits /var/..., so a literal
+        // comparison is fragile.
+        let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
+        let canonical_resolved = std::fs::canonicalize(&resolved).unwrap();
+        assert_eq!(canonical_resolved, canonical_dir);
+    }
 }

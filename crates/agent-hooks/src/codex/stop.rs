@@ -42,6 +42,7 @@ pub enum StopDecision {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::codex::CodexHookInput;
     use serde_json::json;
 
@@ -81,5 +82,43 @@ mod tests {
         };
         assert!(!input.stop_hook_active);
         assert!(input.last_assistant_message.is_none());
+    }
+
+    #[test]
+    fn missing_turn_id_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "Stop",
+        });
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("turn_id"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "Stop",
+            "turn_id": "turn-1",
+            "future_field": [1, 2],
+        });
+        serde_json::from_value::<CodexHookInput>(payload).unwrap();
+    }
+
+    #[test]
+    fn block_decision_round_trip() {
+        let output = StopOutput {
+            decision: Some(StopDecision::Block),
+            reason: Some("keep going".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&output).unwrap();
+        assert_eq!(v, json!({"decision": "block", "reason": "keep going"}));
     }
 }

@@ -129,4 +129,65 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn missing_tool_input_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "PermissionRequest",
+            "turn_id": "turn-1",
+            "tool_name": "Bash",
+        });
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("tool_input"), "{err}");
+    }
+
+    #[test]
+    fn missing_turn_id_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": {},
+        });
+        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("turn_id"), "{err}");
+    }
+
+    #[test]
+    fn deny_without_message_is_rejected() {
+        // Deny carries a `message` field; a bare "deny" tag is invalid.
+        let v = json!({"behavior": "deny"});
+        let err = serde_json::from_value::<PermissionDecision>(v).unwrap_err();
+        assert!(err.to_string().contains("message"), "{err}");
+    }
+
+    #[test]
+    fn unknown_behavior_is_rejected() {
+        let v = json!({"behavior": "maybe"});
+        let err = serde_json::from_value::<PermissionDecision>(v).unwrap_err();
+        assert!(err.to_string().contains("variant"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": null,
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "hook_event_name": "PermissionRequest",
+            "turn_id": "turn-1",
+            "tool_name": "Bash",
+            "tool_input": {},
+            "future_field": [],
+        });
+        serde_json::from_value::<CodexHookInput>(payload).unwrap();
+    }
 }

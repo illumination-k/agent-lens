@@ -36,6 +36,7 @@ pub enum StopDecision {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::claude_code::ClaudeCodeHookInput;
     use serde_json::json;
 
@@ -53,5 +54,54 @@ mod tests {
             panic!("expected Stop variant");
         };
         assert!(input.stop_hook_active);
+    }
+
+    #[test]
+    fn stop_hook_active_defaults_to_false_when_absent() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "Stop",
+        });
+        let input: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        let ClaudeCodeHookInput::Stop(input) = input else {
+            panic!("expected Stop variant");
+        };
+        assert!(!input.stop_hook_active);
+    }
+
+    #[test]
+    fn missing_cwd_is_rejected() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "hook_event_name": "Stop",
+        });
+        let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("cwd"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let payload = json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "Stop",
+            "future": "ignored",
+        });
+        serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap();
+    }
+
+    #[test]
+    fn block_decision_round_trip() {
+        let output = StopOutput {
+            decision: Some(StopDecision::Block),
+            reason: Some("keep going".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&output).unwrap();
+        assert_eq!(v, json!({"decision": "block", "reason": "keep going"}));
     }
 }

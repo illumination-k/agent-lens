@@ -42,3 +42,105 @@ pub enum ClaudeCodeHookInput {
     Stop(StopInput),
     SubagentStop(SubagentStopInput),
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::ClaudeCodeHookInput;
+    use serde_json::json;
+
+    fn ctx() -> serde_json::Value {
+        json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+        })
+    }
+
+    #[test]
+    fn dispatches_pre_tool_use_variant() {
+        let mut payload = ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("PreToolUse"));
+        obj.insert("tool_name".into(), json!("Bash"));
+        obj.insert("tool_input".into(), json!({}));
+        let parsed: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, ClaudeCodeHookInput::PreToolUse(_)));
+    }
+
+    #[test]
+    fn dispatches_post_tool_use_variant() {
+        let mut payload = ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("PostToolUse"));
+        obj.insert("tool_name".into(), json!("Write"));
+        obj.insert("tool_input".into(), json!({}));
+        obj.insert("tool_response".into(), json!({}));
+        let parsed: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, ClaudeCodeHookInput::PostToolUse(_)));
+    }
+
+    #[test]
+    fn dispatches_user_prompt_submit_variant() {
+        let mut payload = ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("UserPromptSubmit"));
+        obj.insert("prompt".into(), json!("hi"));
+        let parsed: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, ClaudeCodeHookInput::UserPromptSubmit(_)));
+    }
+
+    #[test]
+    fn dispatches_stop_variant() {
+        let mut payload = ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("Stop"));
+        let parsed: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, ClaudeCodeHookInput::Stop(_)));
+    }
+
+    #[test]
+    fn dispatches_subagent_stop_variant() {
+        let mut payload = ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("SubagentStop"));
+        let parsed: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, ClaudeCodeHookInput::SubagentStop(_)));
+    }
+
+    #[test]
+    fn missing_hook_event_name_is_rejected() {
+        let payload = ctx();
+        let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hook_event_name"),
+            "expected discriminator complaint, got {msg}",
+        );
+    }
+
+    #[test]
+    fn unknown_hook_event_name_is_rejected() {
+        let mut payload = ctx();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("hook_event_name".into(), json!("Telepathy"));
+        let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Telepathy") || msg.contains("variant"),
+            "expected unknown-variant complaint, got {msg}",
+        );
+    }
+
+    #[test]
+    fn missing_required_session_id_is_rejected() {
+        let payload = json!({
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "Stop",
+        });
+        let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
+        assert!(err.to_string().contains("session_id"), "{err}");
+    }
+}
