@@ -184,6 +184,10 @@ enum AnalyzeCommand {
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+        /// Restrict the report to `impl` blocks touching unstaged
+        /// changed lines in `git diff -U0`.
+        #[arg(long)]
+        diff_only: bool,
     },
     /// Report per-function complexity metrics (Cyclomatic, Cognitive,
     /// Max Nesting, Halstead Volume, Maintainability Index) for a source
@@ -198,6 +202,10 @@ enum AnalyzeCommand {
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+        /// Restrict the report to functions touching unstaged changed
+        /// lines in `git diff -U0`.
+        #[arg(long)]
+        diff_only: bool,
     },
     /// Report module-level coupling metrics for a Rust crate.
     ///
@@ -252,6 +260,10 @@ enum AnalyzeCommand {
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+        /// Restrict the report to functions touching unstaged changed
+        /// lines in `git diff -U0`.
+        #[arg(long)]
+        diff_only: bool,
         /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
         /// this value are reported. Defaults to the same cutoff used by
         /// the PostToolUse `similarity` hook.
@@ -270,6 +282,10 @@ enum AnalyzeCommand {
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+        /// Restrict the report to wrappers touching unstaged changed
+        /// lines in `git diff -U0`.
+        #[arg(long)]
+        diff_only: bool,
     },
 }
 
@@ -315,10 +331,20 @@ impl AnalyzeCommand {
     /// adding a new analyzer is a localised arm here.
     fn run(self) -> Result<String, Box<dyn std::error::Error>> {
         Ok(match self {
-            Self::Cohesion { path, format } => CohesionAnalyzer::new().analyze(&path, format)?,
-            Self::Complexity { path, format } => {
-                ComplexityAnalyzer::new().analyze(&path, format)?
-            }
+            Self::Cohesion {
+                path,
+                format,
+                diff_only,
+            } => CohesionAnalyzer::new()
+                .with_diff_only(diff_only)
+                .analyze(&path, format)?,
+            Self::Complexity {
+                path,
+                format,
+                diff_only,
+            } => ComplexityAnalyzer::new()
+                .with_diff_only(diff_only)
+                .analyze(&path, format)?,
             Self::Coupling { path, format } => CouplingAnalyzer::new().analyze(&path, format)?,
             Self::Hotspot {
                 path,
@@ -335,11 +361,19 @@ impl AnalyzeCommand {
             Self::Similarity {
                 path,
                 format,
+                diff_only,
                 threshold,
             } => SimilarityAnalyzer::new()
                 .with_threshold(threshold)
+                .with_diff_only(diff_only)
                 .analyze(&path, format)?,
-            Self::Wrapper { path, format } => WrapperAnalyzer::new().analyze(&path, format)?,
+            Self::Wrapper {
+                path,
+                format,
+                diff_only,
+            } => WrapperAnalyzer::new()
+                .with_diff_only(diff_only)
+                .analyze(&path, format)?,
         })
     }
 }

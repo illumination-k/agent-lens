@@ -15,26 +15,39 @@ use std::path::Path;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
-use super::{AnalyzerError, OutputFormat, SourceLang, read_source};
+use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
 /// CLI surface.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct ComplexityAnalyzer;
+pub struct ComplexityAnalyzer {
+    diff_only: bool,
+}
 
 impl ComplexityAnalyzer {
     pub fn new() -> Self {
-        Self
+        Self { diff_only: false }
+    }
+
+    /// Restrict reports to functions intersecting an unstaged changed
+    /// line in `git diff -U0`.
+    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
+        self.diff_only = diff_only;
+        self
     }
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let (lang, source) = read_source(path)?;
-        let functions = match lang {
+        let mut functions = match lang {
             SourceLang::Rust => lens_rust::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
+        if self.diff_only {
+            let changed = changed_line_ranges(path);
+            functions.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
+        }
         let report = Report::new(path, &functions);
         match format {
             OutputFormat::Json => {
@@ -43,6 +56,10 @@ impl ComplexityAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
     }
+}
+
+fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
+    ranges.iter().any(|r| r.overlaps(start, end))
 }
 
 #[derive(Debug, Serialize)]
@@ -354,6 +371,49 @@ fn dispatch(n: i32) -> i32 {
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, AnalyzerError::Parse(_)));
+    }
+
+    #[test]
+    fn diff_only_filters_to_changed_functions() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn alpha() -> i32 { 1 }
+fn beta() -> i32 { 2 }
+"#,
+        );
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "lib.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn alpha() -> i32 { if true { 1 } else { 0 } }
+fn beta() -> i32 { 2 }
+"#,
+        );
+        let json = ComplexityAnalyzer::new()
+            .with_diff_only(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 1);
+        assert_eq!(parsed["functions"][0]["name"], "alpha");
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 
     #[test]
