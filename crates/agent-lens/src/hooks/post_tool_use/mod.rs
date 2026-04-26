@@ -1,8 +1,10 @@
-//! `PostToolUse` hook handlers.
+//! `PostToolUse` hook handlers for Claude Code.
 //!
 //! Each submodule is one handler; the CLI wires them to clap
 //! subcommands so that typos surface at parse time rather than at
-//! runtime.
+//! runtime. The actual analysis lives in [`crate::hooks::core`]; this
+//! module is just the Claude Code adapter (input shape → `EditedSource`
+//! list, output string → `systemMessage`).
 
 pub mod similarity;
 pub mod wrapper;
@@ -10,55 +12,35 @@ pub mod wrapper;
 pub use similarity::{SimilarityError, SimilarityHook};
 pub use wrapper::{WrapperError, WrapperHook};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use agent_hooks::claude_code::PostToolUseInput;
 
 use crate::analyze::SourceLang;
+use crate::hooks::core::{EditedSource, ReadEditedSourceError};
 
 /// Tool names whose `tool_input.file_path` points at the file that was
 /// just modified. Anything outside this set is ignored.
 pub(crate) const EDITING_TOOL_NAMES: &[&str] = &["Write", "Edit", "MultiEdit"];
 
-/// One file that an agent just edited, prepared for a hook to analyze.
-pub(crate) struct EditedSource {
-    /// `file_path` as it appeared in `tool_input` — the original string is
-    /// what hooks include in user-facing reports.
-    pub rel_path: String,
-    pub lang: SourceLang,
-    pub source: String,
-}
-
-/// IO failure raised while preparing an [`EditedSource`].
+/// Prepare the edited file for a PostToolUse hook to analyse.
 ///
-/// Each hook converts this into its own `Io` variant via `From`, keeping
-/// the public hook errors stable while the shared pipeline owns one
-/// canonical IO shape.
-#[derive(Debug)]
-pub(crate) struct ReadEditedSourceError {
-    pub path: PathBuf,
-    pub source: std::io::Error,
-}
-
-/// Prepare the edited file for a PostToolUse hook to analyze.
-///
-/// Returns `Ok(None)` for "no opinion" cases — non-editing tools, missing
-/// `file_path`, or an extension the analyzers can't handle. Returns
-/// `Ok(Some(...))` once the file has been read into memory and the
-/// language has been resolved, leaving the analyzer-specific work to the
-/// caller.
-pub(crate) fn prepare_edited_source(
+/// Returns an empty `Vec` for "no opinion" cases — non-editing tools,
+/// missing `file_path`, or an extension the analysers can't handle. The
+/// list is at most one element long; returning a `Vec` lets the engine-
+/// agnostic core treat Claude Code and Codex inputs the same way.
+pub(crate) fn prepare_edited_sources(
     input: &PostToolUseInput,
-) -> Result<Option<EditedSource>, ReadEditedSourceError> {
+) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
     if !EDITING_TOOL_NAMES.contains(&input.tool_name.as_str()) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let Some(rel_path) = extract_file_path(&input.tool_input) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let rel = Path::new(&rel_path);
     let Some(lang) = SourceLang::from_path(rel) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let abs_path = if rel.is_absolute() {
         rel.to_path_buf()
@@ -69,11 +51,11 @@ pub(crate) fn prepare_edited_source(
         path: abs_path,
         source,
     })?;
-    Ok(Some(EditedSource {
+    Ok(vec![EditedSource {
         rel_path,
         lang,
         source,
-    }))
+    }])
 }
 
 fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {

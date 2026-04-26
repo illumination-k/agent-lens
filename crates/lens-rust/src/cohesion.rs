@@ -173,10 +173,14 @@ struct SelfRefVisitor {
 
 impl<'ast> Visit<'ast> for SelfRefVisitor {
     fn visit_expr_field(&mut self, ef: &'ast ExprField) {
-        if is_self_expr(&ef.base)
-            && let Member::Named(name) = &ef.member
-        {
-            self.fields.push(name.to_string());
+        if is_self_expr(&ef.base) {
+            // Tuple-struct fields (`self.0`) participate in cohesion just
+            // like named fields, so include them under their numeric name.
+            let name = match &ef.member {
+                Member::Named(id) => id.to_string(),
+                Member::Unnamed(idx) => idx.index.to_string(),
+            };
+            self.fields.push(name);
         }
         syn::visit::visit_expr_field(self, ef);
     }
@@ -364,6 +368,33 @@ impl Foo {
 "#;
         let units = extract_cohesion_units(src).unwrap();
         assert!(units.is_empty());
+    }
+
+    #[test]
+    fn tuple_struct_fields_are_counted_for_lcom4() {
+        let src = r#"
+struct ModulePath(String);
+impl ModulePath {
+    fn as_str(&self) -> &str { &self.0 }
+    fn len(&self) -> usize { self.0.len() }
+    fn first_byte(&self) -> Option<u8> { self.0.bytes().next() }
+}
+"#;
+        let u = unit(src);
+        // All three methods read `self.0`, so they share a single field and
+        // collapse to one component instead of being mistakenly reported as
+        // three disjoint responsibilities (the bug: `Member::Unnamed` was
+        // ignored, so tuple-struct impls had `LCOM4 = method_count`).
+        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.methods.len(), 3);
+        for m in &u.methods {
+            assert_eq!(
+                m.fields,
+                vec!["0"],
+                "method {} should reference self.0",
+                m.name
+            );
+        }
     }
 
     #[test]

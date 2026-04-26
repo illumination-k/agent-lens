@@ -205,16 +205,27 @@ fn render_summary(out: &mut String, s: &Summary) {
 }
 
 fn render_top_functions(out: &mut String, functions: &[FunctionView<'_>]) {
-    // Worst N by cyclomatic, ties broken by cognitive then by line.
+    // Rank by cognitive first, then cyclomatic, then earliest line.
+    //
+    // Cyclomatic is dominated by `match` arms, so an exhaustive enum
+    // dispatch (CC=30, cog=1) would otherwise drown out genuinely complex
+    // logic (CC=8, cog=12). Cognitive penalises nesting and short-circuit
+    // chains the way a human reader does, which is closer to the signal
+    // the agent actually wants when picking what to read or refactor
+    // first. Cyclomatic stays as the tiebreaker so ranking is still
+    // deterministic when cognitive ties.
     let mut indexed: Vec<&FunctionView<'_>> = functions.iter().collect();
     indexed.sort_by(|a, b| {
-        b.cyclomatic
-            .cmp(&a.cyclomatic)
-            .then_with(|| b.cognitive.cmp(&a.cognitive))
+        b.cognitive
+            .cmp(&a.cognitive)
+            .then_with(|| b.cyclomatic.cmp(&a.cyclomatic))
             .then_with(|| a.start_line.cmp(&b.start_line))
     });
 
-    let _ = writeln!(out, "\n## Top {TOP_N} by cyclomatic");
+    let _ = writeln!(
+        out,
+        "\n## Top {TOP_N} by complexity (cognitive, then cyclomatic)"
+    );
     for fv in indexed.iter().take(TOP_N) {
         let _ = writeln!(
             out,
@@ -277,10 +288,14 @@ fn branchy(n: i32) -> i32 {
     #[test]
     fn markdown_report_lists_top_functions_and_summary() {
         let dir = tempfile::tempdir().unwrap();
+        // `branchy` nests an if/else (cc=2, cog=2). `dispatch` is a flat
+        // exhaustive match (cc=4, cog=1). Cyclomatic-first ordering would
+        // surface `dispatch` even though it is humanly trivial, while
+        // cognitive-first ordering correctly puts `branchy` ahead.
         let src = r#"
-fn a() {}
-fn b(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }
-fn c(n: i32) -> i32 {
+fn quiet() {}
+fn branchy(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }
+fn dispatch(n: i32) -> i32 {
     match n { 0 => 0, 1 => 1, 2 => 2, _ => 3 }
 }
 "#;
@@ -290,11 +305,15 @@ fn c(n: i32) -> i32 {
             .unwrap();
         assert!(md.contains("Complexity report"));
         assert!(md.contains("Summary"));
-        assert!(md.contains("Top 5 by cyclomatic"));
-        // `c` has the highest CC (4) and should appear before `b` (CC 2).
-        let pos_c = md.find("`c`").unwrap();
-        let pos_b = md.find("`b`").unwrap();
-        assert!(pos_c < pos_b, "expected highest-CC function listed first");
+        assert!(md.contains("Top 5 by complexity (cognitive, then cyclomatic)"));
+        // Cognitive-first: `branchy` (cog=2) outranks `dispatch` (cog=1)
+        // even though `dispatch` has the higher cyclomatic.
+        let pos_branchy = md.find("`branchy`").unwrap();
+        let pos_dispatch = md.find("`dispatch`").unwrap();
+        assert!(
+            pos_branchy < pos_dispatch,
+            "expected highest-cognitive function listed first",
+        );
     }
 
     #[test]
