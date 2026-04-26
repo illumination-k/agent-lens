@@ -43,14 +43,8 @@ impl CohesionAnalyzer {
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
             SourceLang::TypeScript => lens_ts::extract_cohesion_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            // lens-py only implements similarity today; until a Python
-            // cohesion extractor lands, route `.py` to the same error
-            // shape unsupported extensions go through.
-            SourceLang::Python => {
-                return Err(AnalyzerError::UnsupportedExtension {
-                    path: path.to_path_buf(),
-                });
-            }
+            SourceLang::Python => lens_py::extract_cohesion_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
         if self.diff_only {
             let changed = changed_line_ranges(path);
@@ -298,6 +292,26 @@ impl Foo {
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, AnalyzerError::UnsupportedExtension { .. }));
+    }
+
+    #[test]
+    fn python_class_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "
+class Counter:
+    def inc(self):
+        self.n += 1
+    def get(self):
+        return self.n
+";
+        let file = write_file(dir.path(), "lib.py", src);
+        let json = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["unit_count"], 1);
+        assert_eq!(parsed["units"][0]["type_name"], "Counter");
+        assert_eq!(parsed["units"][0]["lcom4"], 1);
     }
 
     #[test]
