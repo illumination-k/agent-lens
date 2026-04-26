@@ -22,6 +22,7 @@ use agent_lens::analyze::{
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
+use agent_lens::hooks::codex::setup::{self as codex_setup, SetupSummary as CodexSetupSummary};
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -115,6 +116,22 @@ enum CodexHookCommand {
     /// Handle a Codex `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(CodexPostToolUseCommand),
+    /// Wire `agent-lens`'s Codex PostToolUse handlers into a Codex
+    /// `config.toml` (`$CODEX_HOME/config.toml`, defaulting to
+    /// `$HOME/.codex/config.toml`).
+    ///
+    /// The merge is conservative: existing keys and comments are
+    /// preserved, and a `[[hooks.post_tool_use]]` block is appended
+    /// only for handlers that aren't already wired up. Re-running the
+    /// command is a no-op once every handler is installed.
+    Setup(CodexSetupArgs),
+}
+
+#[derive(Debug, Args)]
+struct CodexSetupArgs {
+    /// Show the resulting TOML without touching disk.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -262,6 +279,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
         Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args),
         Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
+        Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
         Command::Analyze(sub) => run_analyze(sub),
     }
 }
@@ -350,6 +368,32 @@ fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
         wrote,
         added_commands: &plan.added_commands,
         settings: &plan.after,
+    })
+}
+
+fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let path = codex_setup::resolve_path()?;
+    let plan = codex_setup::plan(path)?;
+    let wrote = if args.dry_run {
+        info!(path = %plan.path.display(), "dry-run: leaving config.toml untouched");
+        false
+    } else if plan.changed() {
+        codex_setup::apply(&plan)?;
+        info!(
+            path = %plan.path.display(),
+            added = plan.added_commands.len(),
+            "wrote config.toml",
+        );
+        true
+    } else {
+        info!(path = %plan.path.display(), "config.toml already configured; nothing to do");
+        false
+    };
+    write_stdout_json(&CodexSetupSummary {
+        path: &plan.path,
+        wrote,
+        added_commands: &plan.added_commands,
+        config: &plan.after,
     })
 }
 

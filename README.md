@@ -127,7 +127,23 @@ If you'd rather edit the file by hand, the equivalent block looks like:
 Codex's hook protocol differs from Claude Code's (every payload carries a
 `model` slug, `apply_patch` can touch multiple files at once, etc.).
 `agent-lens` ships a separate `codex-hook` command tree so the differences
-don't leak into the CLI surface:
+don't leak into the CLI surface.
+
+The fastest way is to let `agent-lens` write the `config.toml` block for you:
+
+```bash
+# Writes to $CODEX_HOME/config.toml, defaulting to $HOME/.codex/config.toml
+agent-lens codex-hook setup
+
+# Preview without writing
+agent-lens codex-hook setup --dry-run
+```
+
+The merge is conservative: existing keys and comments are preserved, and a
+`[[hooks.post_tool_use]]` block is appended only for handlers that aren't
+already wired up. Re-running is a no-op once every handler is installed.
+
+If you'd rather edit the file by hand, the equivalent block looks like:
 
 ```toml
 # ~/.codex/config.toml
