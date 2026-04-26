@@ -39,10 +39,14 @@ run = [
 description = "Run Rust tests with cargo-nextest"
 run = "cargo nextest run --locked --all-features"
 
+[tasks."test:rust:doc"]
+description = "Run Rust doctests (cargo-nextest does not run them)"
+run = "cargo test --doc --locked --all-features --workspace"
+
 [tasks."mutants:rust"]
 description = "Run mutation tests with cargo-mutants (slow; use --in-diff origin/main for PRs)"
 run = "cargo mutants --workspace --no-shuffle"
 
 [tasks."ci:rust"]
 description = "Run Rust lint and test tasks"
-depends = ["lint:rust", "test:rust"]
+depends = ["lint:rust", "test:rust", "test:rust:doc"]

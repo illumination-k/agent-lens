@@ -50,6 +50,24 @@ impl HalsteadCounts {
     ///
     /// Returns `None` when the function has no operators or no operands —
     /// `log2(0)` is undefined and the resulting MI would be meaningless.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use lens_domain::HalsteadCounts;
+    ///
+    /// // N = 8, n = 4 → V = 8 * log2(4) = 16.
+    /// let h = HalsteadCounts {
+    ///     distinct_operators: 2,
+    ///     distinct_operands: 2,
+    ///     total_operators: 4,
+    ///     total_operands: 4,
+    /// };
+    /// assert_eq!(h.volume(), Some(16.0));
+    ///
+    /// // No tokens → vocabulary too small → undefined.
+    /// assert_eq!(HalsteadCounts::default().volume(), None);
+    /// ```
     pub fn volume(&self) -> Option<f64> {
         let n = self.vocabulary();
         let len = self.length();

@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 agent-hooks = { path = "../agent-hooks", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
 lens-domain = { path = "../lens-domain", version = "0.1.0" }
 lens-py = { path = "../lens-py", version = "0.1.0" }
 lens-rust = { path = "../lens-rust", version = "0.1.0" }

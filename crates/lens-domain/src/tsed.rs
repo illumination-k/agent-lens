@@ -38,6 +38,21 @@ impl Default for TSEDOptions {
 /// `1.0` means identical (up to the value comparison setting); `0.0` means
 /// totally different (or empty on one side). The score is clamped to the
 /// valid range, so callers can compare raw floats safely.
+///
+/// # Examples
+///
+/// ```
+/// use lens_domain::{TSEDOptions, TreeNode, calculate_tsed};
+///
+/// let a = TreeNode::with_children(
+///     "Root",
+///     "",
+///     vec![TreeNode::leaf("A"), TreeNode::leaf("B")],
+/// );
+/// let b = a.clone();
+/// let sim = calculate_tsed(&a, &b, &TSEDOptions::default());
+/// assert!((sim - 1.0).abs() < 1e-9);
+/// ```
 pub fn calculate_tsed(a: &TreeNode, b: &TreeNode, opts: &TSEDOptions) -> f64 {
     let size_a = a.subtree_size();
     let size_b = b.subtree_size();
