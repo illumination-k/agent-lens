@@ -15,23 +15,36 @@ use std::path::Path;
 use lens_rust::{WrapperFinding, find_wrappers};
 use serde::Serialize;
 
-use super::{AnalyzerError, OutputFormat, SourceLang, read_source};
+use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
 /// CLI surface.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct WrapperAnalyzer;
+pub struct WrapperAnalyzer {
+    diff_only: bool,
+}
 
 impl WrapperAnalyzer {
     pub fn new() -> Self {
-        Self
+        Self { diff_only: false }
+    }
+
+    /// Restrict reports to wrappers intersecting an unstaged changed line
+    /// in `git diff -U0`.
+    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
+        self.diff_only = diff_only;
+        self
     }
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let (lang, source) = read_source(path)?;
-        let findings = run_wrappers(lang, &source)?;
+        let mut findings = run_wrappers(lang, &source)?;
+        if self.diff_only {
+            let changed = changed_line_ranges(path);
+            findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
+        }
         let report = Report::new(path, &findings);
         match format {
             OutputFormat::Json => {
@@ -40,6 +53,10 @@ impl WrapperAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
     }
+}
+
+fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
+    ranges.iter().any(|r| r.overlaps(start, end))
 }
 
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, AnalyzerError> {
@@ -237,5 +254,48 @@ fn alpha(xs: &[i32]) -> i32 {
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, AnalyzerError::Parse(_)));
+    }
+
+    #[test]
+    fn diff_only_filters_to_changed_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn render(x: &str) -> String { internal_render(x) }
+fn passthrough(x: i32) -> i32 { compute(x) }
+"#,
+        );
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "lib.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn render(x: &str) -> String { internal_render(x).into() }
+fn passthrough(x: i32) -> i32 { compute(x) }
+"#,
+        );
+        let json = WrapperAnalyzer::new()
+            .with_diff_only(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["wrapper_count"], 1);
+        assert_eq!(parsed["wrappers"][0]["name"], "render");
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 }

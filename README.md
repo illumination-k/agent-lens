@@ -61,17 +61,29 @@ agent-lens analyze similarity src/foo.rs
 # Same, but emit a compact summary instead of the full JSON
 agent-lens analyze similarity src/foo.rs --format md --threshold 0.9
 
+# Analyze only functions touching unstaged diff hunks for this file
+agent-lens analyze similarity src/foo.rs --diff-only
+
 # Cohesion (LCOM4) per impl block
 agent-lens analyze cohesion src/foo.rs
 
+# Cohesion only for impl blocks overlapping `git diff -U0` hunks
+agent-lens analyze cohesion src/foo.rs --diff-only
+
 # Cyclomatic / Cognitive / Nesting / Halstead / Maintainability Index
 agent-lens analyze complexity src/foo.rs
+
+# Complexity only for functions overlapping `git diff -U0` hunks
+agent-lens analyze complexity src/foo.rs --diff-only
 
 # Module-level Fan-In / Fan-Out / Henry-Kafura IFC for a Rust crate
 agent-lens analyze coupling crates/agent-lens
 
 # Forwarding wrappers (functions that are just `other(args).into()?` etc.)
 agent-lens analyze wrapper src/foo.rs
+
+# Wrapper findings limited to functions overlapping `git diff -U0` hunks
+agent-lens analyze wrapper src/foo.rs --diff-only
 ```
 
 ### As a Claude Code hook

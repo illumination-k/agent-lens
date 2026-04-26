@@ -13,26 +13,39 @@ use std::path::Path;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
-use super::{AnalyzerError, OutputFormat, SourceLang, read_source};
+use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
 /// CLI surface.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct CohesionAnalyzer;
+pub struct CohesionAnalyzer {
+    diff_only: bool,
+}
 
 impl CohesionAnalyzer {
     pub fn new() -> Self {
-        Self
+        Self { diff_only: false }
+    }
+
+    /// Restrict reports to cohesion units whose `impl` range intersects
+    /// an unstaged changed line in `git diff -U0`.
+    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
+        self.diff_only = diff_only;
+        self
     }
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let (lang, source) = read_source(path)?;
-        let units = match lang {
+        let mut units = match lang {
             SourceLang::Rust => lens_rust::extract_cohesion_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
+        if self.diff_only {
+            let changed = changed_line_ranges(path);
+            units.retain(|u| overlaps_any(u.start_line, u.end_line, &changed));
+        }
         let report = Report::new(path, &units);
         match format {
             OutputFormat::Json => {
@@ -41,6 +54,10 @@ impl CohesionAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
     }
+}
+
+fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
+    ranges.iter().any(|r| r.overlaps(start, end))
 }
 
 #[derive(Debug, Serialize)]
@@ -302,5 +319,52 @@ impl Foo {
             .analyze(&file, OutputFormat::Md)
             .unwrap();
         assert!(md.contains("No `impl` blocks"));
+    }
+
+    #[test]
+    fn diff_only_filters_to_changed_impl_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+struct A { x: i32 }
+impl A { fn get(&self) -> i32 { self.x } }
+struct B { y: i32 }
+impl B { fn get(&self) -> i32 { self.y } }
+"#,
+        );
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "lib.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+struct A { x: i32 }
+impl A { fn get(&self) -> i32 { self.x + 1 } }
+struct B { y: i32 }
+impl B { fn get(&self) -> i32 { self.y } }
+"#,
+        );
+        let json = CohesionAnalyzer::new()
+            .with_diff_only(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["unit_count"], 1);
+        assert_eq!(parsed["units"][0]["type_name"], "A");
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 }

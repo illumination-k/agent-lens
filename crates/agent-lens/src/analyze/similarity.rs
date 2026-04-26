@@ -15,7 +15,7 @@ use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_si
 use lens_rust::RustParser;
 use serde::Serialize;
 
-use super::{AnalyzerError, OutputFormat, SourceLang, read_source};
+use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
 
 /// Default similarity threshold. Picked to match the cutoff used by the
 /// PostToolUse `similarity` hook so the on-demand analyzer reports the
@@ -29,6 +29,7 @@ pub const DEFAULT_THRESHOLD: f64 = 0.85;
 pub struct SimilarityAnalyzer {
     threshold: f64,
     opts: TSEDOptions,
+    diff_only: bool,
 }
 
 impl SimilarityAnalyzer {
@@ -36,6 +37,7 @@ impl SimilarityAnalyzer {
         Self {
             threshold: DEFAULT_THRESHOLD,
             opts: TSEDOptions::default(),
+            diff_only: false,
         }
     }
 
@@ -46,11 +48,33 @@ impl SimilarityAnalyzer {
         self
     }
 
+    /// Restrict reports to pairs where at least one function intersects
+    /// an unstaged changed line in `git diff -U0`.
+    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
+        self.diff_only = diff_only;
+        self
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let (lang, source) = read_source(path)?;
         let functions = extract_functions(lang, &source)?;
-        let pairs = find_similar_functions(&functions, self.threshold, &self.opts);
+        let changed = if self.diff_only {
+            changed_line_ranges(path)
+        } else {
+            Vec::new()
+        };
+        let pairs = if self.diff_only {
+            find_similar_functions(&functions, self.threshold, &self.opts)
+                .into_iter()
+                .filter(|pair| {
+                    overlaps_any(pair.a.start_line, pair.a.end_line, &changed)
+                        || overlaps_any(pair.b.start_line, pair.b.end_line, &changed)
+                })
+                .collect()
+        } else {
+            find_similar_functions(&functions, self.threshold, &self.opts)
+        };
         let report = Report::new(path, self.threshold, functions.len(), &pairs);
         match format {
             OutputFormat::Json => {
@@ -59,6 +83,10 @@ impl SimilarityAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
     }
+}
+
+fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
+    ranges.iter().any(|r| r.overlaps(start, end))
 }
 
 impl Default for SimilarityAnalyzer {
@@ -266,6 +294,50 @@ fn beta(xs: &[i32]) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["pair_count"], 0);
+    }
+
+    #[test]
+    fn diff_only_filters_to_pairs_touching_changed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
+fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
+"#,
+        );
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "lib.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn alpha(x: i32) -> i32 { let y = x + 10; let z = y * 2; z }
+fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
+"#,
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_diff_only(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["pair_count"], 1);
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 
     fn setup_unsupported_extension(dir: &Path) -> PathBuf {
