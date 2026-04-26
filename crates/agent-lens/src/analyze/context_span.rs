@@ -507,4 +507,17 @@ mod tests {
         let xs: Vec<&str> = Vec::new();
         assert_eq!(reachable_preview(&xs), "—");
     }
+
+    #[test]
+    fn reachable_preview_at_exact_limit_has_no_more_suffix() {
+        // Boundary: a list whose length equals TOP_REACHABLE_LIMIT must
+        // not emit a "+0 more" tail. The strict `>` comparison in
+        // `reachable_preview` is what guards this; weakening it to
+        // `>=` would render a spurious "(+0 more)" suffix here.
+        let xs: Vec<&str> = vec!["a", "b", "c", "d", "e"];
+        assert_eq!(xs.len(), TOP_REACHABLE_LIMIT);
+        let preview = reachable_preview(&xs);
+        assert_eq!(preview, "a, b, c, d, e");
+        assert!(!preview.contains("more"));
+    }
 }
