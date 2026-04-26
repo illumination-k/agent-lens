@@ -221,7 +221,7 @@ fn push_variable_declarator(
         Expression::ArrowFunctionExpression(arrow) => {
             let start_line = line_index.line(decl.span.start);
             let end_line = line_index.line(arrow.body.span.end);
-            out.push(analyze_block_body(name, start_line, end_line, &arrow.body));
+            out.push(analyze(name, start_line, end_line, &arrow.body));
         }
         Expression::FunctionExpression(f) => {
             if let Some(body) = &f.body {
@@ -235,15 +235,6 @@ fn push_variable_declarator(
 }
 
 fn analyze(
-    name: String,
-    start_line: usize,
-    end_line: usize,
-    body: &FunctionBody,
-) -> FunctionComplexity {
-    analyze_block_body(name, start_line, end_line, body)
-}
-
-fn analyze_block_body(
     name: String,
     start_line: usize,
     end_line: usize,

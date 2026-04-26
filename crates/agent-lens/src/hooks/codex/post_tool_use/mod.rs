@@ -1,10 +1,10 @@
 //! Codex `PostToolUse` hook handlers.
 //!
 //! Codex's only source-modifying tool today is `apply_patch`, which carries
-//! the entire patch as a single string in `tool_input.command`. The shared
-//! pipeline here parses that envelope, walks the `*** Update File:` and
-//! `*** Add File:` markers, and reads each touched file off disk so each
-//! handler can focus on the analysis it actually wants to run.
+//! the entire patch as a single string in `tool_input.command`. This
+//! module parses that envelope, walks the `*** Update File:` and
+//! `*** Add File:` markers, and reads each touched file off disk so the
+//! engine-agnostic [`crate::hooks::core`] runners can analyse them.
 
 pub mod similarity;
 pub mod wrapper;
@@ -12,37 +12,19 @@ pub mod wrapper;
 pub use similarity::{SimilarityError, SimilarityHook};
 pub use wrapper::{WrapperError, WrapperHook};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use agent_hooks::codex::PostToolUseInput;
 
 use crate::analyze::SourceLang;
+use crate::hooks::core::{EditedSource, ReadEditedSourceError};
 
 /// Tool name Codex uses for the patch-style edit tool.
 pub(crate) const APPLY_PATCH_TOOL: &str = "apply_patch";
 
-/// One file that Codex just patched, prepared for a hook to analyze.
-pub(crate) struct EditedSource {
-    /// Path as it appeared inside the patch envelope — kept verbatim so
-    /// hooks can quote it back to the agent without surprising it with
-    /// resolved absolute paths.
-    pub rel_path: String,
-    pub lang: SourceLang,
-    pub source: String,
-}
+pub(crate) const HOOK_EVENT_NAME: &str = "PostToolUse";
 
-/// IO failure raised while preparing an [`EditedSource`].
-///
-/// Each hook converts this into its own `Io` variant via `From`, keeping
-/// the public hook errors stable while the shared pipeline owns one
-/// canonical IO shape.
-#[derive(Debug)]
-pub(crate) struct ReadEditedSourceError {
-    pub path: PathBuf,
-    pub source: std::io::Error,
-}
-
-/// Prepare every patched source file that the analyzers can handle.
+/// Prepare every patched source file the analysers can handle.
 ///
 /// Returns `Ok(vec![])` for "no opinion" cases — non-`apply_patch` tools,
 /// missing patch text, or a patch that only touches files in unsupported

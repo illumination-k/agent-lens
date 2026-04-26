@@ -6,4 +6,5 @@
 //! subcommand so typos surface at parse time.
 
 pub mod codex;
+pub(crate) mod core;
 pub mod post_tool_use;

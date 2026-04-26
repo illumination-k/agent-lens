@@ -13,11 +13,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent_hooks::Hook;
-use agent_hooks::claude_code::{ClaudeCodeHookInput, PostToolUseInput, PostToolUseOutput};
-use agent_hooks::codex::{
-    CodexHookInput, PostToolUseInput as CodexPostToolUseInput,
-    PostToolUseOutput as CodexPostToolUseOutput,
-};
+use agent_hooks::claude_code::ClaudeCodeHookInput;
+use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_THRESHOLD,
     OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
@@ -207,27 +204,33 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let report = match cmd {
-        AnalyzeCommand::Cohesion { path, format } => {
-            CohesionAnalyzer::new().analyze(&path, format)?
-        }
-        AnalyzeCommand::Complexity { path, format } => {
-            ComplexityAnalyzer::new().analyze(&path, format)?
-        }
-        AnalyzeCommand::Coupling { path, format } => {
-            CouplingAnalyzer::new().analyze(&path, format)?
-        }
-        AnalyzeCommand::Similarity {
-            path,
-            format,
-            threshold,
-        } => SimilarityAnalyzer::new()
-            .with_threshold(threshold)
-            .analyze(&path, format)?,
-        AnalyzeCommand::Wrapper { path, format } => {
-            WrapperAnalyzer::new().analyze(&path, format)?
-        }
-    };
+    write_stdout_line(&cmd.run()?)
+}
+
+impl AnalyzeCommand {
+    /// Pick the right analyzer for this CLI variant and produce its
+    /// report. Kept on the enum so `run_analyze` is a one-liner and
+    /// adding a new analyzer is a localised arm here.
+    fn run(self) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(match self {
+            Self::Cohesion { path, format } => CohesionAnalyzer::new().analyze(&path, format)?,
+            Self::Complexity { path, format } => {
+                ComplexityAnalyzer::new().analyze(&path, format)?
+            }
+            Self::Coupling { path, format } => CouplingAnalyzer::new().analyze(&path, format)?,
+            Self::Similarity {
+                path,
+                format,
+                threshold,
+            } => SimilarityAnalyzer::new()
+                .with_threshold(threshold)
+                .analyze(&path, format)?,
+            Self::Wrapper { path, format } => WrapperAnalyzer::new().analyze(&path, format)?,
+        })
+    }
+}
+
+fn write_stdout_line(report: &str) -> Result<(), Box<dyn std::error::Error>> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     stdout.write_all(report.as_bytes())?;
@@ -238,58 +241,37 @@ fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let input = read_post_tool_use_from_stdin()?;
+    let ClaudeCodeHookInput::PostToolUse(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
+        return Err("expected a PostToolUse hook payload on stdin".into());
+    };
     let output = match cmd {
         PostToolUseCommand::Similarity => SimilarityHook::new().handle(input)?,
         PostToolUseCommand::Wrapper => WrapperHook::new().handle(input)?,
     };
-    write_output_to_stdout(&output)
-}
-
-fn read_post_tool_use_from_stdin() -> Result<PostToolUseInput, Box<dyn std::error::Error>> {
-    let mut buf = String::new();
-    io::stdin().read_to_string(&mut buf)?;
-    let event: ClaudeCodeHookInput = serde_json::from_str(&buf)?;
-    match event {
-        ClaudeCodeHookInput::PostToolUse(input) => Ok(input),
-        _ => Err("expected a PostToolUse hook payload on stdin".into()),
-    }
-}
-
-fn write_output_to_stdout(output: &PostToolUseOutput) -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    serde_json::to_writer(&mut stdout, output)?;
-    stdout.write_all(b"\n")?;
-    Ok(())
+    write_stdout_json(&output)
 }
 
 fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let input = read_codex_post_tool_use_from_stdin()?;
+    let CodexHookInput::PostToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
+        return Err("expected a Codex PostToolUse hook payload on stdin".into());
+    };
     let output = match cmd {
         CodexPostToolUseCommand::Similarity => CodexSimilarityHook::new().handle(input)?,
         CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
     };
-    write_codex_output_to_stdout(&output)
+    write_stdout_json(&output)
 }
 
-fn read_codex_post_tool_use_from_stdin() -> Result<CodexPostToolUseInput, Box<dyn std::error::Error>>
-{
+fn read_stdin_json<T: serde::de::DeserializeOwned>() -> Result<T, Box<dyn std::error::Error>> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
-    let event: CodexHookInput = serde_json::from_str(&buf)?;
-    match event {
-        CodexHookInput::PostToolUse(input) => Ok(input),
-        _ => Err("expected a Codex PostToolUse hook payload on stdin".into()),
-    }
+    Ok(serde_json::from_str(&buf)?)
 }
 
-fn write_codex_output_to_stdout(
-    output: &CodexPostToolUseOutput,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn write_stdout_json<T: serde::Serialize>(value: &T) -> Result<(), Box<dyn std::error::Error>> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    serde_json::to_writer(&mut stdout, output)?;
+    serde_json::to_writer(&mut stdout, value)?;
     stdout.write_all(b"\n")?;
     Ok(())
 }

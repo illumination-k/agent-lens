@@ -222,83 +222,33 @@ fn path_to_segments(path: &syn::Path) -> Vec<String> {
     path.segments.iter().map(|s| s.ident.to_string()).collect()
 }
 
-struct EdgeVisitor<'a> {
+/// Module-path resolution context.
+///
+/// Owns everything needed to take a written path (`crate::a::Foo`,
+/// `super::b::g`, an aliased bare ident) and produce the absolute
+/// `(module, symbol)` it refers to. Held separately from the visitor so
+/// the resolution rules are testable on their own and the visitor only
+/// touches state related to edge collection.
+struct PathResolver<'a> {
     current: &'a ModulePath,
     known: &'a HashSet<ModulePath>,
     /// Local aliases introduced by `use` statements. Each entry maps a
     /// local name to the absolute segment list it stands for, e.g.
     /// `"Bar" -> ["crate", "a", "Foo"]` for `use crate::a::Foo as Bar;`.
     aliases: HashMap<String, Vec<String>>,
-    edges: Vec<CouplingEdge>,
 }
 
-impl<'a> EdgeVisitor<'a> {
+impl<'a> PathResolver<'a> {
     fn new(current: &'a ModulePath, known: &'a HashSet<ModulePath>) -> Self {
         Self {
             current,
             known,
             aliases: HashMap::new(),
-            edges: Vec::new(),
         }
     }
 
-    /// Walk a `use` tree, recording an edge for each leaf and updating
-    /// `aliases`. `prefix` accumulates the path segments seen so far.
-    fn walk_use_tree(&mut self, tree: &UseTree, prefix: &mut Vec<String>) {
-        match tree {
-            UseTree::Path(p) => self.walk_use_path(p, prefix),
-            UseTree::Name(n) => {
-                self.walk_use_leaf(n.ident.to_string(), n.ident.to_string(), prefix)
-            }
-            UseTree::Rename(r) => {
-                self.walk_use_leaf(r.ident.to_string(), r.rename.to_string(), prefix)
-            }
-            UseTree::Glob(_) => self.walk_use_glob(prefix),
-            UseTree::Group(g) => {
-                for item in &g.items {
-                    self.walk_use_tree(item, prefix);
-                }
-            }
-        }
-    }
-
-    fn walk_use_path(&mut self, p: &syn::UsePath, prefix: &mut Vec<String>) {
-        prefix.push(p.ident.to_string());
-        self.walk_use_tree(&p.tree, prefix);
-        prefix.pop();
-    }
-
-    /// `tail` is the last segment that completes the absolute path;
-    /// `alias` is the local name the import binds (same as `tail` for
-    /// `use ::Name`, the renamed identifier for `use ::Name as Other`).
-    fn walk_use_leaf(&mut self, tail: String, alias: String, prefix: &[String]) {
-        let mut full = prefix.to_vec();
-        full.push(tail);
-        if let Some((target, symbol)) = self.resolve_path(&full) {
-            self.aliases.insert(alias, full);
-            self.record(target, symbol, EdgeKind::Use);
-        }
-    }
-
-    fn walk_use_glob(&mut self, prefix: &[String]) {
-        if let Some(target) = self.resolve_module(prefix) {
-            self.record(target, "*".to_owned(), EdgeKind::Use);
-        }
-    }
-
-    fn record(&mut self, target: ModulePath, symbol: String, kind: EdgeKind) {
-        self.edges.push(CouplingEdge {
-            from: self.current.clone(),
-            to: target,
-            symbol,
-            kind,
-        });
-    }
-
-    fn try_record(&mut self, segments: &[String], kind: EdgeKind) {
-        if let Some((target, symbol)) = self.resolve_path(segments) {
-            self.record(target, symbol, kind);
-        }
+    fn add_alias(&mut self, alias: String, target: Vec<String>) {
+        self.aliases.insert(alias, target);
     }
 
     /// Apply prefix transformations (`crate`, `self`, `super`, aliases,
@@ -392,10 +342,126 @@ impl<'a> EdgeVisitor<'a> {
     }
 }
 
+/// Walk a `use` tree, recording an edge for each leaf and updating
+/// `resolver`'s alias map. `prefix` accumulates the path segments seen
+/// so far. Free function (rather than a method) so the resolver isn't
+/// borrowed mutably for the whole walk.
+fn walk_use_tree(
+    resolver: &mut PathResolver<'_>,
+    current: &ModulePath,
+    edges: &mut Vec<CouplingEdge>,
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+) {
+    match tree {
+        UseTree::Path(p) => {
+            prefix.push(p.ident.to_string());
+            walk_use_tree(resolver, current, edges, &p.tree, prefix);
+            prefix.pop();
+        }
+        UseTree::Name(n) => {
+            walk_use_leaf(
+                resolver,
+                current,
+                edges,
+                n.ident.to_string(),
+                n.ident.to_string(),
+                prefix,
+            );
+        }
+        UseTree::Rename(r) => {
+            walk_use_leaf(
+                resolver,
+                current,
+                edges,
+                r.ident.to_string(),
+                r.rename.to_string(),
+                prefix,
+            );
+        }
+        UseTree::Glob(_) => {
+            if let Some(target) = resolver.resolve_module(prefix) {
+                edges.push(CouplingEdge {
+                    from: current.clone(),
+                    to: target,
+                    symbol: "*".to_owned(),
+                    kind: EdgeKind::Use,
+                });
+            }
+        }
+        UseTree::Group(g) => {
+            for item in &g.items {
+                walk_use_tree(resolver, current, edges, item, prefix);
+            }
+        }
+    }
+}
+
+/// `tail` is the last segment that completes the absolute path; `alias`
+/// is the local name the import binds (same as `tail` for `use ::Name`,
+/// the renamed identifier for `use ::Name as Other`).
+fn walk_use_leaf(
+    resolver: &mut PathResolver<'_>,
+    current: &ModulePath,
+    edges: &mut Vec<CouplingEdge>,
+    tail: String,
+    alias: String,
+    prefix: &[String],
+) {
+    let mut full = prefix.to_vec();
+    full.push(tail);
+    if let Some((target, symbol)) = resolver.resolve_path(&full) {
+        resolver.add_alias(alias, full);
+        edges.push(CouplingEdge {
+            from: current.clone(),
+            to: target,
+            symbol,
+            kind: EdgeKind::Use,
+        });
+    }
+}
+
+struct EdgeVisitor<'a> {
+    current: &'a ModulePath,
+    resolver: PathResolver<'a>,
+    edges: Vec<CouplingEdge>,
+}
+
+impl<'a> EdgeVisitor<'a> {
+    fn new(current: &'a ModulePath, known: &'a HashSet<ModulePath>) -> Self {
+        Self {
+            current,
+            resolver: PathResolver::new(current, known),
+            edges: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, target: ModulePath, symbol: String, kind: EdgeKind) {
+        self.edges.push(CouplingEdge {
+            from: self.current.clone(),
+            to: target,
+            symbol,
+            kind,
+        });
+    }
+
+    fn try_record(&mut self, segments: &[String], kind: EdgeKind) {
+        if let Some((target, symbol)) = self.resolver.resolve_path(segments) {
+            self.record(target, symbol, kind);
+        }
+    }
+}
+
 impl<'ast> Visit<'ast> for EdgeVisitor<'_> {
     fn visit_item_use(&mut self, u: &'ast ItemUse) {
         let mut prefix = Vec::new();
-        self.walk_use_tree(&u.tree, &mut prefix);
+        walk_use_tree(
+            &mut self.resolver,
+            self.current,
+            &mut self.edges,
+            &u.tree,
+            &mut prefix,
+        );
     }
 
     fn visit_expr_path(&mut self, p: &'ast ExprPath) {
@@ -416,16 +482,10 @@ impl<'ast> Visit<'ast> for EdgeVisitor<'_> {
 
     fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
         if let syn::Type::Path(tp) = &*i.self_ty {
-            let segs = path_to_segments(&tp.path);
-            if let Some((target, symbol)) = self.resolve_path(&segs) {
-                self.record(target, symbol, EdgeKind::ImplFor);
-            }
+            self.try_record(&path_to_segments(&tp.path), EdgeKind::ImplFor);
         }
         if let Some((_, trait_path, _)) = &i.trait_ {
-            let segs = path_to_segments(trait_path);
-            if let Some((target, symbol)) = self.resolve_path(&segs) {
-                self.record(target, symbol, EdgeKind::ImplFor);
-            }
+            self.try_record(&path_to_segments(trait_path), EdgeKind::ImplFor);
         }
         // Recurse into the body but skip the self_ty / trait_ to avoid
         // double-counting them as Type edges (they're already recorded

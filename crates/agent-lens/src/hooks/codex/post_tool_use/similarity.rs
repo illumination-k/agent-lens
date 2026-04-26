@@ -1,51 +1,36 @@
 //! `similarity` PostToolUse handler for Codex.
 //!
-//! After `apply_patch` runs, parse every updated/added source file and
-//! report any pairs of functions whose TSED score is at or above
-//! [`DEFAULT_THRESHOLD`]. Findings are returned as
-//! `hookSpecificOutput.additionalContext` so they land in Codex's
-//! developer context without blocking the turn.
-//!
-//! Language is picked from each file's extension. Today only `.rs` is
-//! supported; other extensions are treated as "no opinion" so the hook
-//! stays silent instead of erroring.
-
-use std::fmt::Write as _;
-use std::path::PathBuf;
+//! The analysis itself lives in [`crate::hooks::core::similarity`]; this
+//! module is the Codex adapter that converts the `apply_patch` envelope
+//! into a list of [`crate::hooks::core::EditedSource`]s and wraps the
+//! report string in `hookSpecificOutput.additionalContext`.
 
 use agent_hooks::Hook;
 use agent_hooks::codex::{PostToolUseHookSpecificOutput, PostToolUseInput, PostToolUseOutput};
-use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
-use lens_rust::RustParser;
 
-use crate::analyze::SourceLang;
-use crate::hooks::codex::post_tool_use::{ReadEditedSourceError, prepare_edited_sources};
+use crate::hooks::codex::post_tool_use::{HOOK_EVENT_NAME, prepare_edited_sources};
+use crate::hooks::core::HookError;
+use crate::hooks::core::similarity::SimilarityCore;
 
-/// Default similarity threshold. Matches the Claude Code variant so the
-/// two hooks behave the same on the same input.
-pub const DEFAULT_THRESHOLD: f64 = 0.85;
-
-const HOOK_EVENT_NAME: &str = "PostToolUse";
+pub use crate::hooks::core::HookError as SimilarityError;
 
 /// Handler implementation for the `similarity` Codex `PostToolUse` hook.
 #[derive(Debug, Clone)]
 pub struct SimilarityHook {
-    threshold: f64,
-    opts: TSEDOptions,
+    core: SimilarityCore,
 }
 
 impl SimilarityHook {
     pub fn new() -> Self {
         Self {
-            threshold: DEFAULT_THRESHOLD,
-            opts: TSEDOptions::default(),
+            core: SimilarityCore::new(),
         }
     }
 
     /// Override the similarity threshold. Useful for tests; the binary
     /// currently always uses the default.
     pub fn with_threshold(mut self, threshold: f64) -> Self {
-        self.threshold = threshold;
+        self.core = self.core.with_threshold(threshold);
         self
     }
 }
@@ -56,113 +41,24 @@ impl Default for SimilarityHook {
     }
 }
 
-/// Errors raised while running [`SimilarityHook`].
-#[derive(Debug)]
-pub enum SimilarityError {
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    /// Boxed to keep the error type language-agnostic as more parsers
-    /// are added.
-    Parse(Box<dyn std::error::Error + Send + Sync>),
-}
-
-impl std::fmt::Display for SimilarityError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "failed to read {}: {source}", path.display())
-            }
-            Self::Parse(e) => write!(f, "failed to parse source: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SimilarityError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse(e) => Some(e.as_ref()),
-        }
-    }
-}
-
-impl From<ReadEditedSourceError> for SimilarityError {
-    fn from(e: ReadEditedSourceError) -> Self {
-        Self::Io {
-            path: e.path,
-            source: e.source,
-        }
-    }
-}
-
 impl Hook for SimilarityHook {
     type Input = PostToolUseInput;
     type Output = PostToolUseOutput;
-    type Error = SimilarityError;
+    type Error = HookError;
 
     fn handle(&self, input: PostToolUseInput) -> Result<PostToolUseOutput, Self::Error> {
         let sources = prepare_edited_sources(&input)?;
-        if sources.is_empty() {
+        let Some(report) = self.core.run(&sources)? else {
             return Ok(PostToolUseOutput::default());
-        }
+        };
 
-        let mut report = String::new();
-        let mut total_pairs = 0usize;
-        for src in &sources {
-            let funcs = extract_functions(src.lang, &src.source)?;
-            let pairs = find_similar_functions(&funcs, self.threshold, &self.opts);
-            if pairs.is_empty() {
-                continue;
-            }
-            total_pairs += pairs.len();
-            append_file_report(&mut report, &src.rel_path, &pairs);
-        }
-        if total_pairs == 0 {
-            return Ok(PostToolUseOutput::default());
-        }
-
-        let header =
-            format!("agent-lens similarity: {total_pairs} similar function pair(s) detected\n");
         Ok(PostToolUseOutput {
             hook_specific_output: Some(PostToolUseHookSpecificOutput {
                 hook_event_name: HOOK_EVENT_NAME.to_owned(),
-                additional_context: Some(format!("{header}{report}")),
+                additional_context: Some(report),
             }),
             ..PostToolUseOutput::default()
         })
-    }
-}
-
-fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>, SimilarityError> {
-    match lang {
-        SourceLang::Rust => {
-            let mut parser = RustParser::new();
-            parser
-                .extract_functions(source)
-                .map_err(|e| SimilarityError::Parse(Box::new(e)))
-        }
-    }
-}
-
-fn append_file_report(out: &mut String, file_path: &str, pairs: &[SimilarPair<'_>]) {
-    // writeln! into a String cannot fail; the result is swallowed
-    // deliberately rather than unwrapped to satisfy the workspace's
-    // `unwrap_used` lint.
-    let _ = writeln!(out, "{file_path}:");
-    for pair in pairs {
-        let _ = writeln!(
-            out,
-            "- {} (L{}-{}) <-> {} (L{}-{}): {:.0}% similar",
-            pair.a.name,
-            pair.a.start_line,
-            pair.a.end_line,
-            pair.b.name,
-            pair.b.start_line,
-            pair.b.end_line,
-            pair.similarity * 100.0,
-        );
     }
 }
 
@@ -172,7 +68,7 @@ mod tests {
     use agent_hooks::codex::HookContext;
     use serde_json::json;
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn ctx(cwd: PathBuf) -> HookContext {
         HookContext {
@@ -344,25 +240,5 @@ mod tests {
             PostToolUseOutput::default(),
             "threshold=1.5 must suppress all pairs",
         );
-    }
-
-    #[test]
-    fn similarity_error_io_display_includes_path_and_inner_error() {
-        let err = SimilarityError::Io {
-            path: PathBuf::from("/some/missing.rs"),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "boom"),
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("/some/missing.rs"), "got {msg}");
-        assert!(msg.contains("boom"), "got {msg}");
-    }
-
-    #[test]
-    fn similarity_error_parse_display_includes_inner_error() {
-        let inner: Box<dyn std::error::Error + Send + Sync> = "broken".into();
-        let err = SimilarityError::Parse(inner);
-        let msg = format!("{err}");
-        assert!(msg.contains("parse"), "got {msg}");
-        assert!(msg.contains("broken"), "got {msg}");
     }
 }

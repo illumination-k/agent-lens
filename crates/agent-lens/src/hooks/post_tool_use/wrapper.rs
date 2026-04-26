@@ -1,72 +1,29 @@
-//! `wrapper` PostToolUse handler.
+//! `wrapper` PostToolUse handler for Claude Code.
 //!
-//! After an agent edits a Rust source file, parse it and report any
-//! function whose body, after stripping a short chain of trivial
-//! adapters, is just a forwarding call to another function. The
-//! findings come back as a `systemMessage` so they land in the agent's
-//! context without blocking the tool call.
-//!
-//! Language is picked from the file extension. Today only `.rs` is
-//! supported; other extensions are treated as "no opinion" so the hook
-//! stays silent instead of erroring.
-
-use std::fmt::Write as _;
-use std::path::PathBuf;
+//! The detection itself lives in [`crate::hooks::core::wrapper`]; this
+//! module is the Claude Code adapter that converts the hook input into a
+//! list of [`crate::hooks::core::EditedSource`]s and wraps the report
+//! string in a `systemMessage`.
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
-use lens_rust::{WrapperFinding, find_wrappers};
 
-use crate::analyze::SourceLang;
-use crate::hooks::post_tool_use::{EditedSource, ReadEditedSourceError, prepare_edited_source};
+use crate::hooks::core::HookError;
+use crate::hooks::core::wrapper::WrapperCore;
+use crate::hooks::post_tool_use::prepare_edited_sources;
+
+pub use crate::hooks::core::HookError as WrapperError;
 
 /// Handler implementation for the `wrapper` PostToolUse hook.
 #[derive(Debug, Clone, Default)]
-pub struct WrapperHook;
+pub struct WrapperHook {
+    core: WrapperCore,
+}
 
 impl WrapperHook {
     pub fn new() -> Self {
-        Self
-    }
-}
-
-/// Errors raised while running [`WrapperHook`].
-#[derive(Debug)]
-pub enum WrapperError {
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    /// Boxed to keep the error type language-agnostic as more parsers
-    /// are added.
-    Parse(Box<dyn std::error::Error + Send + Sync>),
-}
-
-impl std::fmt::Display for WrapperError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "failed to read {}: {source}", path.display())
-            }
-            Self::Parse(e) => write!(f, "failed to parse source: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for WrapperError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse(e) => Some(e.as_ref()),
-        }
-    }
-}
-
-impl From<ReadEditedSourceError> for WrapperError {
-    fn from(e: ReadEditedSourceError) -> Self {
-        Self::Io {
-            path: e.path,
-            source: e.source,
+        Self {
+            core: WrapperCore::new(),
         }
     }
 }
@@ -74,69 +31,22 @@ impl From<ReadEditedSourceError> for WrapperError {
 impl Hook for WrapperHook {
     type Input = PostToolUseInput;
     type Output = PostToolUseOutput;
-    type Error = WrapperError;
+    type Error = HookError;
 
     fn handle(&self, input: PostToolUseInput) -> Result<PostToolUseOutput, Self::Error> {
-        let Some(EditedSource {
-            rel_path,
-            lang,
-            source,
-            ..
-        }) = prepare_edited_source(&input)?
-        else {
+        let sources = prepare_edited_sources(&input)?;
+        let Some(report) = self.core.run(&sources)? else {
             return Ok(PostToolUseOutput::default());
         };
 
-        let findings = run_wrappers(lang, &source)?;
-        if findings.is_empty() {
-            return Ok(PostToolUseOutput::default());
-        }
-
         Ok(PostToolUseOutput {
             common: CommonHookOutput {
-                system_message: Some(format_report(&rel_path, &findings)),
+                system_message: Some(report),
                 ..CommonHookOutput::default()
             },
             ..PostToolUseOutput::default()
         })
     }
-}
-
-fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, WrapperError> {
-    match lang {
-        SourceLang::Rust => find_wrappers(source).map_err(|e| WrapperError::Parse(Box::new(e))),
-    }
-}
-
-fn format_report(file_path: &str, findings: &[WrapperFinding]) -> String {
-    let mut out = format!(
-        "agent-lens wrapper: {} thin wrapper(s) in {}\n",
-        findings.len(),
-        file_path,
-    );
-    for finding in findings {
-        // writeln! into a String cannot fail; the result is swallowed
-        // deliberately rather than unwrapped to satisfy the workspace's
-        // `unwrap_used` lint.
-        if finding.adapters.is_empty() {
-            let _ = writeln!(
-                out,
-                "- {} (L{}-{}) -> {}",
-                finding.name, finding.start_line, finding.end_line, finding.callee,
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "- {} (L{}-{}) -> {} [via {}]",
-                finding.name,
-                finding.start_line,
-                finding.end_line,
-                finding.callee,
-                finding.adapters.join(""),
-            );
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -145,7 +55,7 @@ mod tests {
     use agent_hooks::claude_code::HookContext;
     use serde_json::json;
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn ctx(cwd: PathBuf) -> HookContext {
         HookContext {
