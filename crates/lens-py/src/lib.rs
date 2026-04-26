@@ -9,6 +9,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod attrs;
 mod parser;
 
-pub use parser::{PythonParseError, PythonParser};
+pub use parser::{PythonParseError, PythonParser, extract_functions_excluding_tests};
