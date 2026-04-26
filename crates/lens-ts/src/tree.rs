@@ -19,10 +19,6 @@ pub fn function_body_tree(body: &FunctionBody) -> TreeNode {
     node_with("FunctionBody", body.statements.iter().map(stmt_tree))
 }
 
-pub fn expression_tree(expr: &Expression) -> TreeNode {
-    expr_tree(expr)
-}
-
 /// Build a label-only node and attach the given children. Centralising the
 /// boilerplate keeps each match arm to a single expression.
 fn node_with(label: &str, children: impl IntoIterator<Item = TreeNode>) -> TreeNode {
@@ -129,7 +125,7 @@ fn for_init_tree(init: &ForStatementInit) -> TreeNode {
     }
 }
 
-fn expr_tree(expr: &Expression) -> TreeNode {
+pub fn expr_tree(expr: &Expression) -> TreeNode {
     match expr {
         // Identifiers and literals — values matter for APTED's value-level
         // matching, so they are passed through verbatim.

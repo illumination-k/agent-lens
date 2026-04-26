@@ -20,7 +20,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use crate::line_index::LineIndex;
-use crate::tree::{expression_tree, function_body_tree};
+use crate::tree::{expr_tree, function_body_tree};
 
 /// TypeScript / JavaScript parser. Stateless; configurable per call via
 /// `SourceType` (defaults to `.ts`).
@@ -115,7 +115,7 @@ fn statement_tree(stmt: &Statement) -> TreeNode {
     // labelling consistent across `parse` and `extract_functions`.
     let mut node = TreeNode::new("Stmt", "");
     if let Statement::ExpressionStatement(e) = stmt {
-        node.push_child(expression_tree(&e.expression));
+        node.push_child(expr_tree(&e.expression));
     } else if let Some(body) = stmt_block_body(stmt) {
         for s in body {
             node.push_child(statement_tree(s));
