@@ -40,12 +40,14 @@ pub enum OutputFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceLang {
     Rust,
+    Python,
 }
 
 impl SourceLang {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "rs" => Some(Self::Rust),
+            "py" => Some(Self::Python),
             _ => None,
         }
     }

@@ -1,4 +1,4 @@
-//! Python-language adapter for `agent-lens` similarity analysis.
+//! Python-language adapter for `agent-lens` analyzers.
 //!
 //! Implements [`lens_domain::LanguageParser`] on top of the
 //! [`ruff_python_parser`], extracting every top-level `def` / `async def`
@@ -9,6 +9,8 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod complexity;
 mod parser;
 
+pub use complexity::{ComplexityError, extract_complexity_units};
 pub use parser::{PythonParseError, PythonParser};

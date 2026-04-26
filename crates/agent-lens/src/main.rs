@@ -189,7 +189,7 @@ enum AnalyzeCommand {
     /// Max Nesting, Halstead Volume, Maintainability Index) for a source
     /// file.
     ///
-    /// The parser is chosen from the file extension (`.rs` today). The JSON
+    /// The parser is chosen from the file extension (`.rs`, `.py`). The JSON
     /// format is the default machine-readable output; `--format md` emits a
     /// compact summary tuned for LLM context.
     Complexity {

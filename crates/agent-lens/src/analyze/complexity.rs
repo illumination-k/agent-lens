@@ -34,6 +34,8 @@ impl ComplexityAnalyzer {
         let functions = match lang {
             SourceLang::Rust => lens_rust::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::Python => lens_py::extract_complexity_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
         let report = Report::new(path, &functions);
         match format {
