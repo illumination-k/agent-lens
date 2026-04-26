@@ -66,6 +66,7 @@ pub fn calculate_tsed(a: &TreeNode, b: &TreeNode, opts: &TSEDOptions) -> f64 {
 mod tests {
     use super::*;
     use crate::tree::TreeNode;
+    use rstest::rstest;
 
     fn leaf(label: &str) -> TreeNode {
         TreeNode::leaf(label)
@@ -75,12 +76,35 @@ mod tests {
         TreeNode::with_children(label, "", children)
     }
 
-    #[test]
-    fn identical_trees_return_one() {
-        let a = parent("Root", vec![leaf("A"), leaf("B")]);
-        let b = parent("Root", vec![leaf("A"), leaf("B")]);
+    /// Identity always returns 1.0, including the empty / single-leaf edge
+    /// cases that would otherwise hit the `max_size == 0` divide-by-zero
+    /// guard.
+    #[rstest]
+    #[case::small_pair(
+        parent("Root", vec![leaf("A"), leaf("B")]),
+        parent("Root", vec![leaf("A"), leaf("B")]),
+    )]
+    #[case::empty_pair(TreeNode::leaf(""), TreeNode::leaf(""))]
+    #[case::single_leaf_pair(leaf("X"), leaf("X"))]
+    fn identical_trees_score_one(#[case] a: TreeNode, #[case] b: TreeNode) {
         let sim = calculate_tsed(&a, &b, &TSEDOptions::default());
-        assert!((sim - 1.0).abs() < 1e-9);
+        assert!((sim - 1.0).abs() < 1e-9, "got {sim}");
+    }
+
+    /// The score must stay clamped to `[0.0, 1.0]` for any pair, including
+    /// fully-disjoint same-size trees and asymmetric tiny-vs-medium pairs.
+    #[rstest]
+    #[case::same_size_disjoint(
+        parent("A", vec![leaf("x"); 10]),
+        parent("B", vec![leaf("y"); 10]),
+    )]
+    #[case::asymmetric_disjoint(
+        parent("Root", vec![leaf("A")]),
+        parent("Other", vec![leaf("B"), leaf("C"), leaf("D")]),
+    )]
+    fn similarity_stays_in_unit_interval(#[case] a: TreeNode, #[case] b: TreeNode) {
+        let sim = calculate_tsed(&a, &b, &TSEDOptions::default());
+        assert!((0.0..=1.0).contains(&sim), "got {sim}");
     }
 
     #[test]
@@ -123,24 +147,6 @@ mod tests {
             with_penalty < without_penalty,
             "with={with_penalty}, without={without_penalty}"
         );
-    }
-
-    #[test]
-    fn similarity_is_bounded() {
-        let a = parent("A", vec![leaf("x"); 10]);
-        let b = parent("B", vec![leaf("y"); 10]);
-        let sim = calculate_tsed(&a, &b, &TSEDOptions::default());
-        assert!((0.0..=1.0).contains(&sim));
-    }
-
-    #[test]
-    fn empty_trees_are_identical() {
-        // max_size == 0 short-circuits to 1.0; without this the score would
-        // divide by zero.
-        let a = TreeNode::leaf("");
-        let b = TreeNode::leaf("");
-        let sim = calculate_tsed(&a, &b, &TSEDOptions::default());
-        assert!((sim - 1.0).abs() < 1e-9, "got {sim}");
     }
 
     #[test]

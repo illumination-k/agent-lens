@@ -122,6 +122,7 @@ fn node_key(a: &TreeNode, b: &TreeNode) -> MemoKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn leaf(label: &str) -> TreeNode {
         TreeNode::leaf(label)
@@ -138,23 +139,22 @@ mod tests {
         assert_eq!(compute_edit_distance(&a, &b, &APTEDOptions::default()), 0.0);
     }
 
-    #[test]
-    fn single_rename_has_rename_cost() {
+    /// One mismatched leaf should cost exactly `rename_cost` — provided the
+    /// configured cost is still cheaper than `delete_cost + insert_cost`,
+    /// otherwise the optimal path would route around rename entirely.
+    #[rstest]
+    #[case::default_cost(1.0)]
+    #[case::reduced_cost(0.25)]
+    #[case::raised_but_below_indel(1.5)]
+    fn single_rename_charges_rename_cost(#[case] rename_cost: f64) {
         let a = parent("Root", vec![leaf("A")]);
         let b = parent("Root", vec![leaf("B")]);
-        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
-        assert!((d - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn insertion_counts_subtree_size() {
-        let a = parent("Root", vec![leaf("A")]);
-        let b = parent(
-            "Root",
-            vec![leaf("A"), parent("B", vec![leaf("C"), leaf("D")])],
-        );
-        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
-        assert!((d - 3.0).abs() < 1e-9);
+        let opts = APTEDOptions {
+            rename_cost,
+            ..APTEDOptions::default()
+        };
+        let d = compute_edit_distance(&a, &b, &opts);
+        assert!((d - rename_cost).abs() < 1e-9, "got {d}");
     }
 
     #[test]
@@ -175,59 +175,71 @@ mod tests {
         assert!((compute_edit_distance(&a, &b, &opts) - 1.0).abs() < 1e-9);
     }
 
-    #[test]
-    fn deleting_multiple_children_sums_subtree_sizes() {
-        let a = parent("Root", vec![leaf("A"), leaf("B"), leaf("C")]);
-        let b = parent("Root", vec![]);
-        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
-        assert!((d - 3.0).abs() < 1e-9, "got {d}");
-    }
-
-    #[test]
-    fn inserting_multiple_children_sums_subtree_sizes() {
-        let a = parent("Root", vec![]);
-        let b = parent(
-            "Root",
-            vec![leaf("A"), parent("B", vec![leaf("C"), leaf("D")])],
-        );
-        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
-        assert!((d - 4.0).abs() < 1e-9, "got {d}");
-    }
-
-    #[test]
-    fn delete_cost_scales_distance() {
-        let a = parent("Root", vec![leaf("A")]);
-        let b = parent("Root", vec![]);
-        let opts = APTEDOptions {
-            delete_cost: 2.5,
-            ..Default::default()
-        };
+    /// Insertion and deletion both charge `cost * subtree_size`. Cases cover
+    /// the default unit costs, scaled per-op costs, and the rename-locked-out
+    /// path that forces the body of `align_children` through its delete /
+    /// insert branches (regression coverage for size × cost mutations).
+    #[rstest]
+    #[case::default_delete_three(
+        APTEDOptions::default(),
+        parent("Root", vec![leaf("A"), leaf("B"), leaf("C")]),
+        parent("Root", vec![]),
+        3.0,
+    )]
+    #[case::default_insert_subtree(
+        APTEDOptions::default(),
+        parent("Root", vec![leaf("A")]),
+        parent("Root", vec![leaf("A"), parent("B", vec![leaf("C"), leaf("D")])]),
+        3.0,
+    )]
+    #[case::scaled_delete_one(
+        APTEDOptions { delete_cost: 2.5, ..APTEDOptions::default() },
+        parent("Root", vec![leaf("A")]),
+        parent("Root", vec![]),
+        2.5,
+    )]
+    #[case::scaled_insert_one(
+        APTEDOptions { insert_cost: 3.0, ..APTEDOptions::default() },
+        parent("Root", vec![]),
+        parent("Root", vec![leaf("A")]),
+        3.0,
+    )]
+    #[case::body_delete_chosen_over_rename(
+        APTEDOptions { delete_cost: 1.5, ..APTEDOptions::default() },
+        parent("Root", vec![leaf("A"), leaf("B")]),
+        parent("Root", vec![]),
+        3.0,
+    )]
+    #[case::body_delete_branch_size_times_cost(
+        APTEDOptions {
+            rename_cost: 10.0,
+            delete_cost: 2.0,
+            insert_cost: 2.0,
+            ..APTEDOptions::default()
+        },
+        parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]),
+        parent("Root", vec![leaf("X")]),
+        4.0,
+    )]
+    #[case::body_insert_branch_size_times_cost(
+        APTEDOptions {
+            rename_cost: 10.0,
+            delete_cost: 2.0,
+            insert_cost: 2.0,
+            ..APTEDOptions::default()
+        },
+        parent("Root", vec![leaf("X")]),
+        parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]),
+        4.0,
+    )]
+    fn indel_cost_scales_with_subtree_size(
+        #[case] opts: APTEDOptions,
+        #[case] a: TreeNode,
+        #[case] b: TreeNode,
+        #[case] expected: f64,
+    ) {
         let d = compute_edit_distance(&a, &b, &opts);
-        assert!((d - 2.5).abs() < 1e-9, "got {d}");
-    }
-
-    #[test]
-    fn insert_cost_scales_distance() {
-        let a = parent("Root", vec![]);
-        let b = parent("Root", vec![leaf("A")]);
-        let opts = APTEDOptions {
-            insert_cost: 3.0,
-            ..Default::default()
-        };
-        let d = compute_edit_distance(&a, &b, &opts);
-        assert!((d - 3.0).abs() < 1e-9, "got {d}");
-    }
-
-    #[test]
-    fn rename_cost_scales_distance() {
-        let a = parent("Root", vec![leaf("A")]);
-        let b = parent("Root", vec![leaf("B")]);
-        let opts = APTEDOptions {
-            rename_cost: 0.25,
-            ..Default::default()
-        };
-        let d = compute_edit_distance(&a, &b, &opts);
-        assert!((d - 0.25).abs() < 1e-9, "got {d}");
+        assert!((d - expected).abs() < 1e-9, "got {d}");
     }
 
     #[test]
@@ -255,57 +267,5 @@ mod tests {
         };
         let d = compute_edit_distance(&a, &b, &opts);
         assert!((d - 1.5).abs() < 1e-9, "got {d}");
-    }
-
-    #[test]
-    fn body_chooses_delete_when_cheaper_than_rename() {
-        // Both children of `a` mismatch every child of `b`, but `b` is empty
-        // so the only path is to delete every child of `a` — exercising the
-        // dp[i - 1][j] + delete_cost branch with j = 0 throughout.
-        let a = parent("Root", vec![leaf("A"), leaf("B")]);
-        let b = parent("Root", vec![]);
-        let opts = APTEDOptions {
-            delete_cost: 1.5,
-            ..Default::default()
-        };
-        let d = compute_edit_distance(&a, &b, &opts);
-        assert!((d - 3.0).abs() < 1e-9, "got {d}");
-    }
-
-    #[test]
-    fn body_delete_branch_uses_size_times_delete_cost() {
-        // Force the body of align_children to take the `dp[i - 1][j] + size *
-        // delete_cost` branch by making rename so expensive that deleting the
-        // mismatched extra children is always cheaper. With size = 1 across
-        // the board, only a non-unit delete_cost can distinguish `*` from
-        // `/` or `+`.
-        let a = parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]);
-        let b = parent("Root", vec![leaf("X")]);
-        let opts = APTEDOptions {
-            rename_cost: 10.0,
-            delete_cost: 2.0,
-            insert_cost: 2.0,
-            ..Default::default()
-        };
-        let d = compute_edit_distance(&a, &b, &opts);
-        // X aligns with X for free, then Y and Z get deleted at cost 2 each.
-        assert!((d - 4.0).abs() < 1e-9, "got {d}");
-    }
-
-    #[test]
-    fn body_insert_branch_uses_size_times_insert_cost() {
-        // Mirror image of the delete-branch test: force the insert path in
-        // the body of align_children with a non-unit insert_cost so the `*`
-        // can't be confused with `/` (1 / 1 == 1 * 1 hides the mutation).
-        let a = parent("Root", vec![leaf("X")]);
-        let b = parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]);
-        let opts = APTEDOptions {
-            rename_cost: 10.0,
-            delete_cost: 2.0,
-            insert_cost: 2.0,
-            ..Default::default()
-        };
-        let d = compute_edit_distance(&a, &b, &opts);
-        assert!((d - 4.0).abs() < 1e-9, "got {d}");
     }
 }
