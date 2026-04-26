@@ -16,8 +16,9 @@ use agent_hooks::Hook;
 use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
-    CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_THRESHOLD,
-    HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
+    CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_MIN_LINES,
+    DEFAULT_SIMILARITY_THRESHOLD, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer,
+    WrapperAnalyzer,
 };
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
@@ -247,15 +248,18 @@ enum AnalyzeCommand {
         #[arg(long)]
         top: Option<usize>,
     },
-    /// Report near-duplicate function pairs in a source file.
+    /// Report near-duplicate function pairs.
     ///
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep) and reports cross-file pairs alongside in-file ones.
     /// Function bodies are compared via TSED on their normalised AST and
     /// reported when their similarity is at or above `--threshold`. The
-    /// parser is chosen from the file extension (`.rs` today). The JSON
-    /// format is the default machine-readable output; `--format md` emits
-    /// a compact summary tuned for LLM context.
+    /// parser is chosen from each file extension (`.rs` / `.ts` / `.py`).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
     Similarity {
-        /// Path to a source file to analyze.
+        /// Path to a source file or a directory to analyze.
         path: PathBuf,
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
@@ -275,6 +279,12 @@ enum AnalyzeCommand {
         /// the PostToolUse `similarity` hook.
         #[arg(long, default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
         threshold: f64,
+        /// Minimum source line count for a function to be considered.
+        /// Functions shorter than this are dropped before pairwise
+        /// comparison; mirrors `similarity-ts`'s `--min-lines` knob and
+        /// keeps trivial getters / one-liners out of the report.
+        #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
+        min_lines: usize,
     },
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
@@ -360,7 +370,10 @@ impl AnalyzeCommand {
                 diff_only,
                 exclude_tests,
                 threshold,
-            } => Self::run_similarity(path, format, diff_only, exclude_tests, threshold)?,
+                min_lines,
+            } => {
+                Self::run_similarity(path, format, diff_only, exclude_tests, threshold, min_lines)?
+            }
             Self::Wrapper {
                 path,
                 format,
@@ -415,11 +428,13 @@ impl AnalyzeCommand {
         diff_only: bool,
         exclude_tests: bool,
         threshold: f64,
+        min_lines: usize,
     ) -> Result<String, Box<dyn std::error::Error>> {
         Ok(SimilarityAnalyzer::new()
             .with_threshold(threshold)
             .with_diff_only(diff_only)
             .with_exclude_tests(exclude_tests)
+            .with_min_lines(min_lines)
             .analyze(&path, format)?)
     }
 
@@ -678,6 +693,8 @@ mod tests {
             "md",
             "--diff-only",
             "--exclude-tests",
+            "--min-lines",
+            "8",
         ])
         .expect("clean parse");
         let Command::Analyze(AnalyzeCommand::Similarity {
@@ -686,6 +703,7 @@ mod tests {
             diff_only,
             exclude_tests,
             threshold,
+            min_lines,
         }) = cli.command
         else {
             panic!("expected analyze similarity");
@@ -695,6 +713,7 @@ mod tests {
         assert!(diff_only);
         assert!(exclude_tests);
         assert!((threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(min_lines, 8);
     }
 
     #[test]

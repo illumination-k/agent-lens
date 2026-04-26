@@ -1,17 +1,20 @@
-//! `analyze similarity` — surface near-duplicate function pairs in a Rust
-//! source file.
+//! `analyze similarity` — surface near-duplicate function pairs.
 //!
-//! Today the analyzer is single-file, single-language: pass it a `.rs` path
-//! and it reports every pair of functions whose TSED similarity score is at
-//! or above the configured threshold. Output is JSON by default; the
-//! markdown mode emits a compact summary tuned for LLM context windows
+//! Accepts either a single source file or a directory. When the input is a
+//! directory the analyzer walks it recursively (respecting `.gitignore`
+//! via the `ignore` crate, the same one used by ripgrep), parses every
+//! supported file, and reports cross-file pairs in addition to in-file
+//! ones — modelled on `similarity-ts` (mizchi). Output is JSON by default;
+//! the markdown mode emits a compact summary tuned for LLM context windows
 //! rather than for humans, in line with the project's "agent-friendly lint"
 //! ethos.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
+use ignore::WalkBuilder;
+use lens_domain::{FunctionDef, LanguageParser, TSEDOptions, calculate_tsed};
 use lens_rust::{RustParser, extract_functions_excluding_tests};
 use serde::Serialize;
 
@@ -22,6 +25,11 @@ use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ran
 /// same pairs that show up in the hook's transcript message.
 pub const DEFAULT_THRESHOLD: f64 = 0.85;
 
+/// Default minimum line count for a function to be considered. Mirrors the
+/// `--min-lines` default in `similarity-ts`: tiny functions (one-liners,
+/// trivial getters) form too many spurious matches.
+pub const DEFAULT_MIN_LINES: usize = 5;
+
 /// Analyzer entry point. Holds the threshold and TSED options so per-run
 /// configuration can be threaded through `analyze` without changing the
 /// CLI surface.
@@ -31,10 +39,11 @@ pub struct SimilarityAnalyzer {
     opts: TSEDOptions,
     diff_only: bool,
     exclude_tests: bool,
+    min_lines: usize,
 }
 
 /// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
-/// forwarding any `///` docs through `$attr`. Used to keep the trio of
+/// forwarding any `///` docs through `$attr`. Used to keep the family of
 /// `SimilarityAnalyzer::with_*` setters from drifting out of shape.
 macro_rules! with_setter {
     ($(#[$attr:meta])* fn $name:ident, $field:ident: $ty:ty) => {
@@ -53,6 +62,7 @@ impl SimilarityAnalyzer {
             opts: TSEDOptions::default(),
             diff_only: false,
             exclude_tests: false,
+            min_lines: DEFAULT_MIN_LINES,
         }
     }
 
@@ -77,27 +87,19 @@ impl SimilarityAnalyzer {
         fn with_exclude_tests, exclude_tests: bool
     }
 
+    with_setter! {
+        /// Skip functions shorter than this many source lines. `similarity-ts`
+        /// uses the same idea: tiny one-liners produce too many spurious
+        /// matches to be useful, so the default is `DEFAULT_MIN_LINES`.
+        fn with_min_lines, min_lines: usize
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let (lang, source) = read_source(path)?;
-        let functions = extract_functions(lang, &source, self.exclude_tests)?;
-        let changed = if self.diff_only {
-            changed_line_ranges(path)
-        } else {
-            Vec::new()
-        };
-        let pairs = if self.diff_only {
-            find_similar_functions(&functions, self.threshold, &self.opts)
-                .into_iter()
-                .filter(|pair| {
-                    overlaps_any(pair.a.start_line, pair.a.end_line, &changed)
-                        || overlaps_any(pair.b.start_line, pair.b.end_line, &changed)
-                })
-                .collect()
-        } else {
-            find_similar_functions(&functions, self.threshold, &self.opts)
-        };
-        let report = Report::new(path, self.threshold, functions.len(), &pairs);
+        let corpus = self.collect_corpus(path)?;
+        let function_count = corpus.len();
+        let pairs = self.find_pairs(&corpus);
+        let report = Report::new(path, self.threshold, self.min_lines, function_count, &pairs);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
@@ -105,16 +107,149 @@ impl SimilarityAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
     }
+
+    /// Collect every function under `path` into a flat corpus, tagging each
+    /// with the file it came from. Single-file inputs return a 1-element
+    /// per-file slice; directory inputs walk recursively, honouring
+    /// `.gitignore`.
+    fn collect_corpus(&self, path: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+        if path.is_dir() {
+            self.collect_directory(path)
+        } else {
+            self.collect_file(path, None)
+        }
+    }
+
+    fn collect_directory(&self, root: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+        let mut out = Vec::new();
+        for entry in WalkBuilder::new(root).build() {
+            let entry = entry.map_err(|e| AnalyzerError::Io {
+                path: root.to_path_buf(),
+                source: std::io::Error::other(e),
+            })?;
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let p = entry.path();
+            if SourceLang::from_path(p).is_none() {
+                continue;
+            }
+            // Display paths relative to the walk root so cross-file pair
+            // reports stay readable when the analyzer is pointed at a
+            // deep directory.
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            out.extend(self.collect_file(p, Some(rel))?);
+        }
+        Ok(out)
+    }
+
+    fn collect_file(
+        &self,
+        path: &Path,
+        rel_override: Option<String>,
+    ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+        let (lang, source) = read_source(path)?;
+        let funcs = extract_functions(lang, &source, self.exclude_tests)?;
+        let rel = rel_override.unwrap_or_else(|| path.display().to_string());
+        Ok(funcs
+            .into_iter()
+            .map(|def| OwnedFunction {
+                file: path.to_path_buf(),
+                rel_path: rel.clone(),
+                def,
+            })
+            .collect())
+    }
+
+    /// Pairwise TSED over the corpus, applying `min_lines` and `diff_only`
+    /// filters. Inlined rather than calling [`lens_domain::find_similar_functions`]
+    /// so the per-pair file metadata stays attached without a second lookup.
+    fn find_pairs<'a>(&self, corpus: &'a [OwnedFunction]) -> Vec<PairView<'a>> {
+        let changed_by_file = if self.diff_only {
+            collect_changed_ranges(corpus)
+        } else {
+            HashMap::new()
+        };
+
+        let mut pairs = Vec::new();
+        for (i, a) in corpus.iter().enumerate() {
+            if a.def.line_count() < self.min_lines {
+                continue;
+            }
+            for b in &corpus[i + 1..] {
+                if b.def.line_count() < self.min_lines {
+                    continue;
+                }
+                let similarity = calculate_tsed(&a.def.tree, &b.def.tree, &self.opts);
+                if similarity < self.threshold {
+                    continue;
+                }
+                if self.diff_only && !pair_touches_changes(a, b, &changed_by_file) {
+                    continue;
+                }
+                pairs.push(PairView {
+                    a: FunctionRef::from(a),
+                    b: FunctionRef::from(b),
+                    similarity,
+                });
+            }
+        }
+        pairs.sort_by(|x, y| {
+            y.similarity
+                .partial_cmp(&x.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pairs
+    }
 }
 
-fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
-    ranges.iter().any(|r| r.overlaps(start, end))
+fn collect_changed_ranges(corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
+    let mut by_file: HashMap<PathBuf, Vec<LineRange>> = HashMap::new();
+    for f in corpus {
+        if !by_file.contains_key(&f.file) {
+            by_file.insert(f.file.clone(), changed_line_ranges(&f.file));
+        }
+    }
+    by_file
+}
+
+fn pair_touches_changes(
+    a: &OwnedFunction,
+    b: &OwnedFunction,
+    changed: &HashMap<PathBuf, Vec<LineRange>>,
+) -> bool {
+    function_touches_changes(a, changed) || function_touches_changes(b, changed)
+}
+
+fn function_touches_changes(f: &OwnedFunction, changed: &HashMap<PathBuf, Vec<LineRange>>) -> bool {
+    changed.get(&f.file).is_some_and(|ranges| {
+        ranges
+            .iter()
+            .any(|r| r.overlaps(f.def.start_line, f.def.end_line))
+    })
 }
 
 impl Default for SimilarityAnalyzer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A single function plus the file it originated from. The corpus that
+/// drives pairwise similarity is a flat `Vec<OwnedFunction>` so cross-file
+/// pairs are just regular pairs with different `file`s.
+#[derive(Debug)]
+struct OwnedFunction {
+    /// Filesystem path used for `git diff` lookups.
+    file: PathBuf,
+    /// Display path (relative to the walk root for directory mode).
+    rel_path: String,
+    def: FunctionDef,
 }
 
 fn extract_functions(
@@ -162,26 +297,30 @@ fn extract_functions(
 
 #[derive(Debug, Serialize)]
 struct Report<'a> {
-    file: String,
+    /// Input path: a single source file, or the root directory walked.
+    root: String,
     function_count: usize,
     threshold: f64,
+    min_lines: usize,
     pair_count: usize,
-    pairs: Vec<PairView<'a>>,
+    pairs: &'a [PairView<'a>],
 }
 
 impl<'a> Report<'a> {
     fn new(
         path: &Path,
         threshold: f64,
+        min_lines: usize,
         function_count: usize,
-        pairs: &'a [SimilarPair<'a>],
+        pairs: &'a [PairView<'a>],
     ) -> Self {
         Self {
-            file: path.display().to_string(),
+            root: path.display().to_string(),
             function_count,
             threshold,
+            min_lines,
             pair_count: pairs.len(),
-            pairs: pairs.iter().map(PairView::from).collect(),
+            pairs,
         }
     }
 }
@@ -193,53 +332,47 @@ struct PairView<'a> {
     similarity: f64,
 }
 
-impl<'a> From<&SimilarPair<'a>> for PairView<'a> {
-    fn from(pair: &SimilarPair<'a>) -> Self {
-        Self {
-            a: FunctionRef::from(pair.a),
-            b: FunctionRef::from(pair.b),
-            similarity: pair.similarity,
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct FunctionRef<'a> {
+    file: &'a str,
     name: &'a str,
     start_line: usize,
     end_line: usize,
 }
 
-impl<'a> From<&'a FunctionDef> for FunctionRef<'a> {
-    fn from(f: &'a FunctionDef) -> Self {
+impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
+    fn from(f: &'a OwnedFunction) -> Self {
         Self {
-            name: f.name.as_str(),
-            start_line: f.start_line,
-            end_line: f.end_line,
+            file: f.rel_path.as_str(),
+            name: f.def.name.as_str(),
+            start_line: f.def.start_line,
+            end_line: f.def.end_line,
         }
     }
 }
 
 fn format_markdown(report: &Report<'_>) -> String {
     let mut out = format!(
-        "# Similarity report: {} ({} function(s), threshold {:.2})\n",
-        report.file, report.function_count, report.threshold,
+        "# Similarity report: {} ({} function(s), threshold {:.2}, min lines {})\n",
+        report.root, report.function_count, report.threshold, report.min_lines,
     );
     if report.pairs.is_empty() {
         out.push_str("\n_No similar function pairs at or above threshold._\n");
         return out;
     }
     let _ = writeln!(out, "\n## {} similar pair(s)", report.pair_count);
-    for pair in &report.pairs {
+    for pair in report.pairs {
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
         let _ = writeln!(
             out,
-            "- `{}` (L{}-{}) <-> `{}` (L{}-{}): {:.0}% similar",
+            "- {}:`{}` (L{}-{}) <-> {}:`{}` (L{}-{}): {:.0}% similar",
+            pair.a.file,
             pair.a.name,
             pair.a.start_line,
             pair.a.end_line,
+            pair.b.file,
             pair.b.name,
             pair.b.start_line,
             pair.b.end_line,
@@ -259,14 +392,30 @@ mod tests {
     /// Two near-identical function bodies — guaranteed to score above any
     /// modest threshold. Used by the report-rendering and
     /// threshold-suppression tests so a single source string drives both
-    /// success-path checks.
+    /// success-path checks. Keep each body at >= DEFAULT_MIN_LINES so the
+    /// default min-lines filter doesn't suppress them.
     const PAIRED_FUNCTIONS: &str = r#"
-fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
-fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
+fn alpha(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
 "#;
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         path
@@ -288,6 +437,11 @@ fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
             .collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
+        // Each function reference now carries a file path so cross-file
+        // pairs from directory mode are unambiguous; assert the field is
+        // present even for single-file input.
+        assert!(pairs[0]["a"]["file"].as_str().is_some());
+        assert!(pairs[0]["b"]["file"].as_str().is_some());
     }
 
     fn assert_markdown_pair_report(out: &str) {
@@ -320,7 +474,12 @@ fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
     fn empty_report_when_no_pairs_above_threshold() {
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
-fn alpha() -> i32 { 42 }
+fn alpha() -> i32 {
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    a + b + c
+}
 fn beta(xs: &[i32]) -> i32 {
     let mut total = 0;
     for x in xs {
@@ -351,6 +510,35 @@ fn beta(xs: &[i32]) -> i32 {
     }
 
     #[test]
+    fn min_lines_filters_short_functions() {
+        // Two parallel one-line bodies form a similar pair only at the
+        // permissive default min-lines; raising it past the function's
+        // line count drops them from the corpus before TSED runs.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+fn alpha(x: i32) -> i32 { x + 1 }
+fn beta(x: i32)  -> i32 { x + 1 }
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let permissive = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_min_lines(1)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&permissive).unwrap();
+        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+
+        let strict = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_min_lines(5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&strict).unwrap();
+        assert_eq!(parsed["pair_count"], 0);
+    }
+
+    #[test]
     fn exclude_tests_drops_test_module_pairs_from_report() {
         // Two parallel `#[test]` fixtures alongside a single
         // production function. Without `--exclude-tests` the two test
@@ -358,12 +546,30 @@ fn beta(xs: &[i32]) -> i32 {
         // similarity is computed and `pair_count` falls to zero.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
-fn production(x: i32) -> i32 { x + 1 }
+fn production(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
 
 #[cfg(test)]
 mod tests {
-    fn alpha() -> i32 { 1 + 2 }
-    fn beta()  -> i32 { 1 + 2 }
+    fn alpha() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
+    fn beta() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
 }
 "#;
         let file = write_file(dir.path(), "lib.rs", src);
@@ -441,10 +647,16 @@ def production(xs):
     return total
 
 def test_alpha():
-    assert 1 + 1 == 2
+    a = 1
+    b = 2
+    c = 3
+    assert a + b + c == 6
 
 def test_beta():
-    assert 1 + 1 == 2
+    a = 1
+    b = 2
+    c = 3
+    assert a + b + c == 6
 "#;
         let file = write_file(dir.path(), "lib.py", src);
 
@@ -466,14 +678,127 @@ def test_beta():
     }
 
     #[test]
+    fn directory_mode_reports_cross_file_pairs() {
+        // Two near-identical functions split across two files: only
+        // visible to the analyzer once it walks the directory.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            r#"
+fn alpha(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+"#,
+        );
+        write_file(
+            dir.path(),
+            "nested/b.rs",
+            r#"
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+"#,
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 2);
+        assert_eq!(parsed["pair_count"], 1);
+        let pair = &parsed["pairs"][0];
+        let files = [
+            pair["a"]["file"].as_str().unwrap(),
+            pair["b"]["file"].as_str().unwrap(),
+        ];
+        assert!(files.contains(&"a.rs"));
+        assert!(files.contains(&"nested/b.rs"));
+    }
+
+    #[test]
+    fn directory_mode_skips_unsupported_extensions_and_gitignored_files() {
+        // `.gitignore` should be honoured (the `ignore` walker is
+        // gitignore-aware out of the box), and unsupported extensions
+        // should be silently skipped.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            r#"
+fn alpha(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+"#,
+        );
+        write_file(
+            dir.path(),
+            "ignored.rs",
+            r#"
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+"#,
+        );
+        write_file(dir.path(), "notes.txt", "not a source file");
+        write_file(dir.path(), ".gitignore", "ignored.rs\n");
+
+        // The `ignore` crate honours .gitignore only inside a git repo
+        // by default; bootstrap one so the test exercises the gitignore
+        // path rather than just the extension filter.
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 1, "got {parsed}");
+    }
+
+    #[test]
     fn diff_only_filters_to_pairs_touching_changed_lines() {
         let dir = tempfile::tempdir().unwrap();
         let file = write_file(
             dir.path(),
             "lib.rs",
             r#"
-fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
-fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
+fn alpha(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
 "#,
         );
         run_git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -486,8 +811,20 @@ fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
             dir.path(),
             "lib.rs",
             r#"
-fn alpha(x: i32) -> i32 { let y = x + 10; let z = y * 2; z }
-fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
+fn alpha(x: i32) -> i32 {
+    let a = x + 10;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
 "#,
         );
 
@@ -553,6 +890,7 @@ fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
         let dir = tempfile::tempdir().unwrap();
         let path = setup(dir.path());
         let err = SimilarityAnalyzer::new()
+            .with_min_lines(1)
             .analyze(&path, OutputFormat::Json)
             .unwrap_err();
         assert!(matches_expected(&err), "unexpected error variant: {err}");
