@@ -8,6 +8,7 @@
 
 pub mod cohesion;
 pub mod complexity;
+pub mod context_span;
 pub mod coupling;
 pub mod hotspot;
 pub mod similarity;
@@ -18,6 +19,7 @@ use std::process::Command;
 
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
+pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::{CouplingAnalyzer, CouplingAnalyzerError};
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use similarity::{

@@ -16,9 +16,9 @@ use agent_hooks::Hook;
 use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
-    CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_MIN_LINES,
-    DEFAULT_SIMILARITY_THRESHOLD, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer,
-    WrapperAnalyzer,
+    CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
+    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, HotspotAnalyzer, OutputFormat,
+    SimilarityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
@@ -224,6 +224,24 @@ enum AnalyzeCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
+    /// Report each module's transitive outgoing dependency closure
+    /// (its "context span").
+    ///
+    /// For every module in a Rust crate, lists the directly-depended
+    /// modules, the modules reachable through one or more outgoing
+    /// edges, and the count of distinct source files those modules
+    /// span. Useful as an "onboarding cost" estimate — how many files
+    /// an agent must open to reason about a given module. `path` may
+    /// be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
+    /// containing one.
+    ContextSpan {
+        /// Path to a `.rs` crate root or a directory containing
+        /// `src/lib.rs` or `src/main.rs`.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for `.rs` files, asks `git` how many commits each
@@ -358,6 +376,7 @@ impl AnalyzeCommand {
                 diff_only,
             } => Self::run_complexity(path, format, diff_only)?,
             Self::Coupling { path, format } => Self::run_coupling(path, format)?,
+            Self::ContextSpan { path, format } => Self::run_context_span(path, format)?,
             Self::Hotspot {
                 path,
                 format,
@@ -407,6 +426,13 @@ impl AnalyzeCommand {
         format: OutputFormat,
     ) -> Result<String, Box<dyn std::error::Error>> {
         Ok(CouplingAnalyzer::new().analyze(&path, format)?)
+    }
+
+    fn run_context_span(
+        path: PathBuf,
+        format: OutputFormat,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(ContextSpanAnalyzer::new().analyze(&path, format)?)
     }
 
     fn run_hotspot(
@@ -749,6 +775,24 @@ mod tests {
         };
         assert_eq!(path, PathBuf::from("."));
         assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_context_span_with_md_format() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "context-span",
+            "src/lib.rs",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::ContextSpan { path, format }) = cli.command else {
+            panic!("expected analyze context-span");
+        };
+        assert_eq!(path, PathBuf::from("src/lib.rs"));
+        assert_eq!(format, OutputFormat::Md);
     }
 
     #[test]

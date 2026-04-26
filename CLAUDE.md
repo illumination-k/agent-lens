@@ -56,9 +56,11 @@ All tools are managed by mise. Run `mise install` to install them.
      Halstead / Maintainability Index）
    - **Coupling**（モジュール間 Number of Couplings / Fan-In / Fan-Out /
      Henry-Kafura IFC）
+   - **Hotspot**（git の churn × 複雑度で「触るべき/危険な場所」を可視化）
+   - **Context Span**（モジュールを理解するのに辿る必要があるモジュール／
+     ファイル数。`coupling` の依存グラフの推移閉包）
 
    実装候補（後述「指標カタログ」）：
-   - **Hotspot**（git の churn × 複雑度で「触るべき/危険な場所」を可視化）
    - **Temporal Coupling**（git 履歴で同時に変更されやすいファイル対）
    - **Code Age / Ownership**（最終変更日と作者の偏り）
    - **Public API Surface**（pub 境界の広さと churn・破壊的変更リスク）
@@ -91,7 +93,9 @@ agent-lens
 └── analyze                         # オンデマンド解析（stdin 不要）
     ├── cohesion <path>             # impl 単位の LCOM4 凝集度
     ├── complexity <path>           # 関数単位の CC / Cognitive / Nesting / Halstead / MI
+    ├── context-span <path>         # モジュールごとの推移閉包（読むべきファイル数）
     ├── coupling <path>             # モジュール間 Fan-In / Fan-Out / IFC
+    ├── hotspot <path> [--since W] [--top N]
     ├── similarity <path> [--threshold N]
     └── wrapper <path>
 ```
@@ -117,7 +121,9 @@ Cargo workspace。役割が違うものは crate を分け、`agent-lens` バイ
 │   │       ├── analyze/            # 各 analyzer サブコマンド
 │   │       │   ├── cohesion.rs
 │   │       │   ├── complexity.rs
+│   │       │   ├── context_span.rs
 │   │       │   ├── coupling.rs
+│   │       │   ├── hotspot.rs
 │   │       │   ├── similarity.rs
 │   │       │   └── wrapper.rs
 │   │       └── hooks/              # PostToolUse handler。core/ は両エージェント共通の土台
@@ -209,6 +215,12 @@ Cargo workspace。役割が違うものは crate を分け、`agent-lens` バイ
   Coupling（distinct シンボル数）を算出。クレートルート (`src/lib.rs` /
   `src/main.rs`) から `mod foo;` を辿り、`use` / 関数呼び出し / 型参照 /
   `impl OtherTrait for MyType` をエッジとして集める
+- **Context Span**: `coupling` の依存グラフを再利用し、各モジュールから
+  outgoing edges に沿って到達できる他モジュールを BFS で集めて返す。
+  CLI 層では到達モジュール集合を `CrateModule.file` 経由でファイル
+  パスにマップし、自身の所属ファイルを除いた**ユニークなファイル数**を
+  「読むべきファイル数」として併記する。サイクルがあっても始点モジュールは
+  自身の集合に含めない
 
 ### 追加候補の指標カタログ
 
@@ -251,12 +263,15 @@ Cargo workspace。役割が違うものは crate を分け、`agent-lens` バイ
 
 #### LLM コンテキスト系（agent-lens 独自色）
 
-| 指標            | 一行定義                                               | 入力       | 難易度 |
-| --------------- | ------------------------------------------------------ | ---------- | ------ |
-| Token Budget    | tokenizer 換算でファイル/モジュールの実トークン数      | tokenizer  | 低     |
-| Context Span    | 関数を理解するのに辿る必要があるファイル数（推移閉包） | 依存グラフ | 中     |
-| Doc Coverage    | pub item の `///` 付与率                               | AST        | 低     |
-| Onboarding Cost | 複雑度＋依存幅＋doc 不足の合成スコア                   | 複合       | 中     |
+| 指標            | 一行定義                                          | 入力      | 難易度 |
+| --------------- | ------------------------------------------------- | --------- | ------ |
+| Token Budget    | tokenizer 換算でファイル/モジュールの実トークン数 | tokenizer | 低     |
+| Doc Coverage    | pub item の `///` 付与率                          | AST       | 低     |
+| Onboarding Cost | 複雑度＋依存幅＋doc 不足の合成スコア              | 複合      | 中     |
+
+> Context Span は `analyze context-span` として実装済み。Onboarding Cost は
+> `complexity` × `context-span` × `doc-coverage` の合成として、Doc Coverage が
+> 入った時点で組み立てられる。
 
 > 「人間向け lint」と違い、ここでの判断軸は **agent の意思決定に効くか** と
 > **入力が現実的か**。コメント密度のような表層指標や、研究寄りの ML ベース
