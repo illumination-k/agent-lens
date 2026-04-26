@@ -9,9 +9,9 @@ workspace = true
 
 [dependencies]
 lens-domain = { path = "../lens-domain", version = "0.1.0" }
-oxc_allocator = "0.127"
-oxc_ast = "0.127"
-oxc_ast_visit = "0.127"
-oxc_parser = "0.127"
-oxc_span = "0.127"
+oxc_allocator = "0.100"
+oxc_ast = "0.100"
+oxc_ast_visit = "0.100"
+oxc_parser = "0.100"
+oxc_span = "0.100"
 thiserror = { workspace = true }
