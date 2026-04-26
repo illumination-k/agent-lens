@@ -192,7 +192,7 @@ fn push_variable_declarator(
     out: &mut Vec<FunctionComplexity>,
 ) {
     let Some(init) = &decl.init else { return };
-    let BindingPattern::BindingIdentifier(id) = &decl.id else {
+    let Some(id) = decl.id.get_binding_identifier() else {
         return;
     };
     let name = id.name.to_string();

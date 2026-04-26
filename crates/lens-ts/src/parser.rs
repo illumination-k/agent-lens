@@ -44,6 +44,8 @@ pub enum TsParseError {
         /// callers that want structured errors should reach for the
         /// underlying parser directly.
         message: String,
+        #[source]
+        source: std::io::Error,
     },
 }
 
@@ -58,7 +60,8 @@ impl TsParseError {
             .map(|e| format!("{e}"))
             .collect::<Vec<_>>()
             .join("\n");
-        Self::Parse { message }
+        let source = std::io::Error::other(message.clone());
+        Self::Parse { message, source }
     }
 }
 
@@ -252,7 +255,7 @@ fn collect_variable_declarator(
     let Some(init) = &decl.init else {
         return;
     };
-    let BindingPattern::BindingIdentifier(id) = &decl.id else {
+    let Some(id) = decl.id.get_binding_identifier() else {
         return;
     };
     match init {
