@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
-use lens_rust::RustParser;
+use lens_rust::{RustParser, extract_functions_excluding_tests};
 use serde::Serialize;
 
 use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
@@ -30,6 +30,7 @@ pub struct SimilarityAnalyzer {
     threshold: f64,
     opts: TSEDOptions,
     diff_only: bool,
+    exclude_tests: bool,
 }
 
 impl SimilarityAnalyzer {
@@ -38,6 +39,7 @@ impl SimilarityAnalyzer {
             threshold: DEFAULT_THRESHOLD,
             opts: TSEDOptions::default(),
             diff_only: false,
+            exclude_tests: false,
         }
     }
 
@@ -55,10 +57,20 @@ impl SimilarityAnalyzer {
         self
     }
 
+    /// Drop test scaffolding before computing similarity. Filters out
+    /// `#[test]` / `#[rstest]` / `#[<runner>::test]` functions and items
+    /// inside `#[cfg(test)] mod` blocks. Table-driven tests otherwise
+    /// dominate the noise floor with parallel-but-distinct fixtures
+    /// that aren't refactor candidates.
+    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+        self.exclude_tests = exclude_tests;
+        self
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let (lang, source) = read_source(path)?;
-        let functions = extract_functions(lang, &source)?;
+        let functions = extract_functions(lang, &source, self.exclude_tests)?;
         let changed = if self.diff_only {
             changed_line_ranges(path)
         } else {
@@ -95,13 +107,22 @@ impl Default for SimilarityAnalyzer {
     }
 }
 
-fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>, AnalyzerError> {
+fn extract_functions(
+    lang: SourceLang,
+    source: &str,
+    exclude_tests: bool,
+) -> Result<Vec<FunctionDef>, AnalyzerError> {
     match lang {
         SourceLang::Rust => {
-            let mut parser = RustParser::new();
-            parser
-                .extract_functions(source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            if exclude_tests {
+                extract_functions_excluding_tests(source)
+                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            } else {
+                let mut parser = RustParser::new();
+                parser
+                    .extract_functions(source)
+                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            }
         }
     }
 }
@@ -294,6 +315,41 @@ fn beta(xs: &[i32]) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["pair_count"], 0);
+    }
+
+    #[test]
+    fn exclude_tests_drops_test_module_pairs_from_report() {
+        // Two parallel `#[test]` fixtures alongside a single
+        // production function. Without `--exclude-tests` the two test
+        // bodies form a similar pair; with it they're filtered before
+        // similarity is computed and `pair_count` falls to zero.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+fn production(x: i32) -> i32 { x + 1 }
+
+#[cfg(test)]
+mod tests {
+    fn alpha() -> i32 { 1 + 2 }
+    fn beta()  -> i32 { 1 + 2 }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let with_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
+        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+
+        let without_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_exclude_tests(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
+        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["function_count"], 1);
     }
 
     #[test]

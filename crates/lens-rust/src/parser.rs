@@ -4,7 +4,9 @@ use lens_domain::{FunctionDef, LanguageParser, TreeNode};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
-use syn::{ImplItem, Item, ItemFn, ItemImpl, ItemTrait, TraitItem};
+use syn::{ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemTrait, TraitItem};
+
+use crate::attrs::{has_cfg_test, is_test_function};
 
 /// A Rust-language parser backed by [`syn`].
 ///
@@ -41,35 +43,78 @@ impl LanguageParser for RustParser {
     }
 
     fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        let file = syn::parse_file(source)?;
-        let mut out = Vec::new();
-        for item in &file.items {
-            collect_item(item, &mut out);
-        }
-        Ok(out)
+        extract_with(source, ExtractOptions::default())
     }
 }
 
-fn collect_item(item: &Item, out: &mut Vec<FunctionDef>) {
+/// Like [`RustParser::extract_functions`] but drops anything tagged as a
+/// unit test: free functions with `#[test]` / `#[rstest]` /
+/// `#[<runner>::test]` attributes, and items inside `#[cfg(test)] mod`
+/// blocks.
+///
+/// Used by analysers (similarity, future cohesion / complexity reports)
+/// that want to look at production code only — table-driven tests
+/// otherwise dominate the noise floor with parallel-but-distinct
+/// fixtures that aren't refactor candidates.
+pub fn extract_functions_excluding_tests(source: &str) -> Result<Vec<FunctionDef>, RustParseError> {
+    extract_with(
+        source,
+        ExtractOptions {
+            exclude_tests: true,
+        },
+    )
+}
+
+#[derive(Default, Clone, Copy)]
+struct ExtractOptions {
+    exclude_tests: bool,
+}
+
+fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, RustParseError> {
+    let file = syn::parse_file(source)?;
+    let mut out = Vec::new();
+    for item in &file.items {
+        collect_item(item, &mut out, opts);
+    }
+    Ok(out)
+}
+
+fn collect_item(item: &Item, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
     match item {
-        Item::Fn(item_fn) => out.push(function_def_from_fn(item_fn)),
-        Item::Impl(item_impl) => collect_impl(item_impl, out),
-        Item::Trait(item_trait) => collect_trait(item_trait, out),
-        Item::Mod(item_mod) => {
-            if let Some((_, items)) = &item_mod.content {
-                for nested in items {
-                    collect_item(nested, out);
-                }
+        Item::Fn(item_fn) => {
+            if opts.exclude_tests && is_test_function(&item_fn.attrs) {
+                return;
             }
+            out.push(function_def_from_fn(item_fn));
         }
+        Item::Impl(item_impl) => collect_impl(item_impl, out, opts),
+        Item::Trait(item_trait) => collect_trait(item_trait, out, opts),
+        Item::Mod(item_mod) => collect_mod(item_mod, out, opts),
         _ => {}
     }
 }
 
-fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<FunctionDef>) {
+fn collect_mod(item_mod: &ItemMod, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
+    if opts.exclude_tests && has_cfg_test(&item_mod.attrs) {
+        return;
+    }
+    if let Some((_, items)) = &item_mod.content {
+        for nested in items {
+            collect_item(nested, out, opts);
+        }
+    }
+}
+
+fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
+    if opts.exclude_tests && has_cfg_test(&item_impl.attrs) {
+        return;
+    }
     let self_name = type_path_last_ident(&item_impl.self_ty);
     for impl_item in &item_impl.items {
         if let ImplItem::Fn(method) = impl_item {
+            if opts.exclude_tests && is_test_function(&method.attrs) {
+                continue;
+            }
             let qualified = qualify_name(self_name.as_deref(), &method.sig.ident.to_string());
             out.push(FunctionDef {
                 name: qualified,
@@ -81,13 +126,19 @@ fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<FunctionDef>) {
     }
 }
 
-fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<FunctionDef>) {
+fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
+    if opts.exclude_tests && has_cfg_test(&item_trait.attrs) {
+        return;
+    }
     let trait_name = item_trait.ident.to_string();
     for trait_item in &item_trait.items {
         if let TraitItem::Fn(method) = trait_item {
             let Some(block) = &method.default else {
                 continue;
             };
+            if opts.exclude_tests && is_test_function(&method.attrs) {
+                continue;
+            }
             let qualified = qualify_name(Some(&trait_name), &method.sig.ident.to_string());
             out.push(FunctionDef {
                 name: qualified,
@@ -303,6 +354,52 @@ fn recursive(n: u32) -> u32 {
         assert!(
             sim < 0.8,
             "expected structurally different functions to score < 0.8, got {sim}"
+        );
+    }
+
+    #[test]
+    fn excluding_tests_drops_cfg_test_modules_and_test_attributed_fns() {
+        // Production code surrounded by every shape `--exclude-tests`
+        // is supposed to filter: a `#[test]` free fn, a `#[rstest]` fn,
+        // a `mod tests` gated by `#[cfg(test)]`, and an `impl` block
+        // gated the same way. Only `production` should survive.
+        let src = r#"
+fn production(x: i32) -> i32 { x + 1 }
+
+#[test]
+fn unit_test() { assert_eq!(production(0), 1); }
+
+#[rstest]
+fn parameterised_test() { assert_eq!(production(0), 1); }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn helper() -> i32 { production(0) }
+    fn other_helper() -> i32 { production(1) }
+}
+
+struct Bag;
+#[cfg(test)]
+impl Bag {
+    fn fixture() -> Self { Self }
+}
+"#;
+        let funcs = extract_functions_excluding_tests(src).unwrap();
+        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["production"]);
+    }
+
+    #[test]
+    fn excluding_tests_keeps_default_extraction_behaviour_with_no_test_attrs() {
+        // No #[test], no `mod tests`. The filter should be a no-op so
+        // the public surface still reports every production function.
+        let src = "fn a() {}\nfn b() {}\n";
+        let baseline = parse_functions(src);
+        let filtered = extract_functions_excluding_tests(src).unwrap();
+        assert_eq!(
+            baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
         );
     }
 

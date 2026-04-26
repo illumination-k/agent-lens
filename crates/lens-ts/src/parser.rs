@@ -12,6 +12,10 @@
 //! recursively, mirroring how `lens-rust` walks inline `mod foo {}`.
 //! Functions defined *inside* another function body are deliberately
 //! left out; their containing function is the unit of analysis.
+//!
+//! The actual AST traversal lives in [`crate::walk`]; this module is the
+//! [`LanguageParser`]-shaped adapter that converts each visited
+//! [`crate::walk::FunctionItem`] into a [`FunctionDef`].
 
 use lens_domain::{FunctionDef, LanguageParser, TreeNode};
 use oxc_allocator::Allocator;
@@ -21,6 +25,7 @@ use oxc_span::SourceType;
 
 use crate::line_index::LineIndex;
 use crate::tree::{expr_tree, function_body_tree};
+use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
 /// TypeScript / JavaScript parser. Stateless; configurable per call via
 /// `SourceType` (defaults to `.ts`).
@@ -96,11 +101,25 @@ impl LanguageParser for TypeScriptParser {
             ));
         }
         let line_index = LineIndex::new(source);
-        let mut out = Vec::new();
-        for stmt in &ret.program.body {
-            collect_stmt(stmt, None, &line_index, &mut out);
-        }
-        Ok(out)
+        let mut visitor = FunctionDefCollector::default();
+        walk_program(&ret.program, &line_index, &mut visitor);
+        Ok(visitor.out)
+    }
+}
+
+#[derive(Default)]
+struct FunctionDefCollector {
+    out: Vec<FunctionDef>,
+}
+
+impl FunctionVisitor for FunctionDefCollector {
+    fn on_function(&mut self, item: FunctionItem<'_>) {
+        self.out.push(FunctionDef {
+            name: item.name,
+            start_line: item.start_line,
+            end_line: item.end_line,
+            tree: function_body_tree(item.body),
+        });
     }
 }
 
@@ -126,192 +145,11 @@ fn stmt_block_body<'a>(stmt: &'a Statement<'a>) -> Option<&'a [Statement<'a>]> {
     }
 }
 
-fn collect_stmt(
-    stmt: &Statement,
-    owner: Option<&str>,
-    line_index: &LineIndex,
-    out: &mut Vec<FunctionDef>,
-) {
-    match stmt {
-        Statement::FunctionDeclaration(f) => {
-            if let Some(def) = function_def_from_function(f, owner, line_index) {
-                out.push(def);
-            }
-        }
-        Statement::ClassDeclaration(c) => collect_class(c, line_index, out),
-        Statement::VariableDeclaration(v) => {
-            for d in &v.declarations {
-                collect_variable_declarator(d, line_index, out);
-            }
-        }
-        Statement::ExportNamedDeclaration(e) => {
-            if let Some(decl) = &e.declaration {
-                collect_decl(decl, owner, line_index, out);
-            }
-        }
-        Statement::ExportDefaultDeclaration(e) => match &e.declaration {
-            ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                if let Some(def) = function_def_from_function(f, owner, line_index) {
-                    out.push(def);
-                }
-            }
-            ExportDefaultDeclarationKind::ClassDeclaration(c) => collect_class(c, line_index, out),
-            _ => {}
-        },
-        Statement::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                collect_module_body(body, line_index, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_decl(
-    decl: &Declaration,
-    owner: Option<&str>,
-    line_index: &LineIndex,
-    out: &mut Vec<FunctionDef>,
-) {
-    match decl {
-        Declaration::FunctionDeclaration(f) => {
-            if let Some(def) = function_def_from_function(f, owner, line_index) {
-                out.push(def);
-            }
-        }
-        Declaration::ClassDeclaration(c) => collect_class(c, line_index, out),
-        Declaration::VariableDeclaration(v) => {
-            for d in &v.declarations {
-                collect_variable_declarator(d, line_index, out);
-            }
-        }
-        Declaration::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                collect_module_body(body, line_index, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_module_body(
-    body: &TSModuleDeclarationBody,
-    line_index: &LineIndex,
-    out: &mut Vec<FunctionDef>,
-) {
-    match body {
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                collect_stmt(stmt, None, line_index, out);
-            }
-        }
-        TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-            if let Some(body) = &nested.body {
-                collect_module_body(body, line_index, out);
-            }
-        }
-    }
-}
-
-fn collect_class(class: &Class, line_index: &LineIndex, out: &mut Vec<FunctionDef>) {
-    let class_name = class
-        .id
-        .as_ref()
-        .map(|i| i.name.as_str())
-        .unwrap_or("anonymous");
-    for elem in &class.body.body {
-        if let ClassElement::MethodDefinition(m) = elem
-            && let Some(name) = method_key_name(&m.key)
-        {
-            let qualified = format!("{class_name}::{name}");
-            if let Some(body) = &m.value.body {
-                let start_line = line_index.line(m.span.start);
-                let end_line = line_index.line(m.span.end);
-                out.push(FunctionDef {
-                    name: qualified,
-                    start_line,
-                    end_line,
-                    tree: function_body_tree(body),
-                });
-            }
-        }
-    }
-}
-
-fn method_key_name(key: &PropertyKey) -> Option<String> {
-    match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-        PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name)),
-        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-        _ => None,
-    }
-}
-
-fn collect_variable_declarator(
-    decl: &VariableDeclarator,
-    line_index: &LineIndex,
-    out: &mut Vec<FunctionDef>,
-) {
-    let Some(init) = &decl.init else {
-        return;
-    };
-    let Some(id) = decl.id.get_binding_identifier() else {
-        return;
-    };
-    match init {
-        Expression::ArrowFunctionExpression(arrow) => {
-            let start_line = line_index.line(decl.span.start);
-            let end_line = line_index.line(arrow.body.span.end);
-            out.push(FunctionDef {
-                name: id.name.to_string(),
-                start_line,
-                end_line,
-                tree: function_body_tree(&arrow.body),
-            });
-        }
-        Expression::FunctionExpression(f) => {
-            if let Some(body) = &f.body {
-                let start_line = line_index.line(decl.span.start);
-                let end_line = line_index.line(body.span.end);
-                out.push(FunctionDef {
-                    name: id.name.to_string(),
-                    start_line,
-                    end_line,
-                    tree: function_body_tree(body),
-                });
-            }
-        }
-        _ => {}
-    }
-}
-
-fn function_def_from_function(
-    func: &Function,
-    owner: Option<&str>,
-    line_index: &LineIndex,
-) -> Option<FunctionDef> {
-    let body = func.body.as_ref()?;
-    let raw_name = func
-        .id
-        .as_ref()
-        .map(|i| i.name.as_str())
-        .unwrap_or("anonymous");
-    let name = match owner {
-        Some(o) => format!("{o}::{raw_name}"),
-        None => raw_name.to_owned(),
-    };
-    Some(FunctionDef {
-        name,
-        start_line: line_index.line(func.span.start),
-        end_line: line_index.line(body.span.end),
-        tree: function_body_tree(body),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use lens_domain::{TSEDOptions, calculate_tsed, find_similar_functions};
+    use rstest::rstest;
 
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = TypeScriptParser::new();
@@ -357,54 +195,29 @@ class Foo {
         assert_eq!(names, ["Foo::bar", "Foo::baz"]);
     }
 
-    #[test]
-    fn extracts_arrow_const_binding() {
-        let src = "const add = (a: number, b: number): number => a + b;\n";
+    /// Each binding form should produce exactly one [`FunctionDef`] with
+    /// the binding's identifier as its name. The cases share a body so a
+    /// single rstest captures them without leaving 5 near-identical
+    /// `extracts_*` tests for the similarity analyzer to flag.
+    #[rstest]
+    #[case::arrow_const_binding("const add = (a: number, b: number): number => a + b;\n", "add")]
+    #[case::function_expression_let_binding("let f = function () { return 1; };\n", "f")]
+    #[case::function_inside_namespace(
+        "namespace inner {\n    export function hidden(): number { return 0; }\n}\n",
+        "hidden"
+    )]
+    #[case::exported_function_declaration(
+        "export function exported(): number { return 1; }\n",
+        "exported"
+    )]
+    #[case::function_overload_signatures_skipped(
+        "function f(x: number): number;\nfunction f(x: string): string;\nfunction f(x: any): any { return x; }\n",
+        "f"
+    )]
+    fn extracts_single_named_function(#[case] src: &str, #[case] expected_name: &str) {
         let funcs = parse_functions(src);
-        assert_eq!(funcs.len(), 1);
-        assert_eq!(funcs[0].name, "add");
-    }
-
-    #[test]
-    fn extracts_function_expression_let_binding() {
-        let src = "let f = function () { return 1; };\n";
-        let funcs = parse_functions(src);
-        assert_eq!(funcs.len(), 1);
-        assert_eq!(funcs[0].name, "f");
-    }
-
-    #[test]
-    fn extracts_functions_inside_namespace() {
-        let src = r#"
-namespace inner {
-    export function hidden(): number { return 0; }
-}
-"#;
-        let funcs = parse_functions(src);
-        assert_eq!(funcs.len(), 1);
-        assert_eq!(funcs[0].name, "hidden");
-    }
-
-    #[test]
-    fn extracts_exported_function_declaration() {
-        let src = "export function exported(): number { return 1; }\n";
-        let funcs = parse_functions(src);
-        assert_eq!(funcs.len(), 1);
-        assert_eq!(funcs[0].name, "exported");
-    }
-
-    #[test]
-    fn skips_function_overload_signatures() {
-        // Overload signatures have no body and should be ignored; only
-        // the implementation function is reported.
-        let src = r#"
-function f(x: number): number;
-function f(x: string): string;
-function f(x: any): any { return x; }
-"#;
-        let funcs = parse_functions(src);
-        assert_eq!(funcs.len(), 1);
-        assert_eq!(funcs[0].name, "f");
+        assert_eq!(funcs.len(), 1, "expected one function in: {src}");
+        assert_eq!(funcs[0].name, expected_name);
     }
 
     #[test]

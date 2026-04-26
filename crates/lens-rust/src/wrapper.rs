@@ -12,10 +12,11 @@ use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Block, Expr, ExprCall, ExprMethodCall, FnArg, ImplItem, Item, ItemImpl, ItemMod,
-    ItemTrait, Meta, Pat, PatIdent, Signature, Stmt, TraitItem, UnOp,
+    Block, Expr, ExprCall, ExprMethodCall, FnArg, ImplItem, Item, ItemImpl, ItemMod, ItemTrait,
+    Pat, PatIdent, Signature, Stmt, TraitItem, UnOp,
 };
 
+use crate::attrs::has_cfg_test;
 use crate::parser::RustParseError;
 
 /// One thin-wrapper finding: a function that just forwards to `callee`
@@ -139,21 +140,6 @@ fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<WrapperFinding>) {
             out.push(finding);
         }
     }
-}
-
-/// True iff one of `attrs` is `#[cfg(test)]` (the canonical guard around
-/// unit-test modules). Anything more elaborate (`cfg(any(test, feature
-/// = "..."))` etc.) falls through and is treated as production code.
-fn has_cfg_test(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        let Meta::List(list) = &attr.meta else {
-            return false;
-        };
-        if !list.path.is_ident("cfg") {
-            return false;
-        }
-        list.tokens.to_string().trim() == "test"
-    })
 }
 
 fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
@@ -384,6 +370,7 @@ fn passthrough_ident(expr: &Expr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn run(src: &str) -> Vec<WrapperFinding> {
         find_wrappers(src).unwrap()
@@ -451,80 +438,34 @@ impl Service {
         assert_eq!(findings[0].adapters, vec![".expect()".to_string()]);
     }
 
-    #[test]
-    fn detects_with_explicit_return() {
-        let src = "fn a(x: i32) -> i32 { return b(x); }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
+    /// Pure passthrough variants: each body forwards arguments to a
+    /// single tail call in a different shape (explicit `return`, borrow
+    /// / deref of args, reordering). The detector should report `a`
+    /// in every case — the only thing that varies is the source.
+    #[rstest]
+    #[case::explicit_return("fn a(x: i32) -> i32 { return b(x); }\n")]
+    #[case::borrow_and_deref_args("fn a(x: i32, y: i32) -> i32 { b(&x, *y) }\n")]
+    #[case::reordered_args("fn a(x: i32, y: i32) -> i32 { b(y, x) }\n")]
+    fn detects_passthrough_variant(#[case] src: &str) {
+        assert_eq!(names(&run(src)), ["a"]);
     }
 
-    #[test]
-    fn allows_borrow_and_deref_args() {
-        let src = "fn a(x: i32, y: i32) -> i32 { b(&x, *y) }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-    }
-
-    #[test]
-    fn accepts_reordered_args() {
-        let src = "fn a(x: i32, y: i32) -> i32 { b(y, x) }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-    }
-
-    #[test]
-    fn rejects_arg_transformation() {
-        let src = "fn a(x: i32) -> i32 { b(x + 1) }\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_multi_statement_body() {
-        let src = "fn a(x: i32) -> i32 { let y = x; b(y) }\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_literal_only_body() {
-        let src = "fn a() -> i32 { 42 }\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_empty_body() {
-        let src = "fn a() {}\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_unrelated_arg_name() {
-        let src = "fn a(x: i32) -> i32 { b(y) }\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_arity_mismatch_too_few() {
-        let src = "fn a(x: i32) -> i32 { b() }\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_arity_mismatch_too_many() {
-        let src = "fn a(x: i32) -> i32 { b(x, x) }\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_branching_body() {
-        let src = "fn a(x: i32) -> i32 { if x > 0 { b(x) } else { c(x) } }\n";
-        assert!(run(src).is_empty());
-    }
-
-    #[test]
-    fn rejects_chain_receiver_call() {
-        // foo(x).bar(x) — bar's receiver is itself a call, not a passthrough.
-        let src = "fn a(x: i32) -> i32 { foo(x).bar(x) }\n";
-        assert!(run(src).is_empty());
+    /// Body shapes that disqualify a function from being a wrapper. The
+    /// detector must return an empty report for each — the names label
+    /// the rejection reason for at-a-glance failure attribution.
+    #[rstest]
+    #[case::arg_transformation("fn a(x: i32) -> i32 { b(x + 1) }\n")]
+    #[case::multi_statement_body("fn a(x: i32) -> i32 { let y = x; b(y) }\n")]
+    #[case::literal_only_body("fn a() -> i32 { 42 }\n")]
+    #[case::empty_body("fn a() {}\n")]
+    #[case::unrelated_arg_name("fn a(x: i32) -> i32 { b(y) }\n")]
+    #[case::arity_mismatch_too_few("fn a(x: i32) -> i32 { b() }\n")]
+    #[case::arity_mismatch_too_many("fn a(x: i32) -> i32 { b(x, x) }\n")]
+    #[case::branching_body("fn a(x: i32) -> i32 { if x > 0 { b(x) } else { c(x) } }\n")]
+    // foo(x).bar(x) — bar's receiver is itself a call, not a passthrough.
+    #[case::chain_receiver_call("fn a(x: i32) -> i32 { foo(x).bar(x) }\n")]
+    fn rejects_non_wrapper_shape(#[case] src: &str) {
+        assert!(run(src).is_empty(), "expected no wrapper for: {src}");
     }
 
     #[test]
@@ -578,43 +519,30 @@ mod tests {
         assert_eq!(names(&findings), ["shim"]);
     }
 
-    #[test]
-    fn skips_from_trait_impl() {
-        // `impl From<X> for Err` bodies are forwarding by design — the
-        // trait spec leaves no room for non-trivial logic that wouldn't
-        // belong in a constructor instead.
-        let src = r#"
+    /// `impl <Trait> for T` bodies whose `(trait, method)` pair is on
+    /// the boilerplate skip list must drop out. Without that filter
+    /// each of these forwarding bodies would otherwise trip the wrapper
+    /// detector — there's no non-forwarding implementation that would
+    /// be idiomatic.
+    #[rstest]
+    #[case::from_trait(
+        r#"
 struct Err;
 impl From<std::io::Error> for Err {
     fn from(e: std::io::Error) -> Self { Self::Io(e) }
 }
-"#;
-        // Without the boilerplate filter this would surface as a wrapper
-        // (single-tail forwarding call with passthrough arg). With it the
-        // From impl drops out entirely.
-        assert!(run(src).is_empty(), "From::from should not be flagged");
-    }
-
-    #[test]
-    fn skips_default_trait_impl() {
-        // `impl Default for T { fn default() -> Self { Self::new() } }`
-        // is the canonical pattern when `new()` is the real constructor.
-        let src = r#"
+"#
+    )]
+    #[case::default_trait(
+        r#"
 struct T;
 impl Default for T {
     fn default() -> Self { Self::new() }
 }
-"#;
-        assert!(
-            run(src).is_empty(),
-            "Default::default that calls Self::new should not be flagged",
-        );
-    }
-
-    #[test]
-    fn skips_deref_and_as_ref() {
-        // Deref / AsRef / Borrow are forwarding by definition.
-        let src = r#"
+"#
+    )]
+    #[case::deref_and_as_ref(
+        r#"
 struct W(String);
 impl std::ops::Deref for W {
     type Target = String;
@@ -623,8 +551,14 @@ impl std::ops::Deref for W {
 impl AsRef<str> for W {
     fn as_ref(&self) -> &str { self.0.as_str() }
 }
-"#;
-        assert!(run(src).is_empty());
+"#
+    )]
+    fn skips_boilerplate_trait_methods(#[case] src: &str) {
+        assert!(
+            run(src).is_empty(),
+            "boilerplate trait method must be filtered, got: {:?}",
+            names(&run(src)),
+        );
     }
 
     #[test]

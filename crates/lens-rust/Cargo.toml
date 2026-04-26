@@ -15,4 +15,5 @@ syn = { version = "2", features = ["full", "parsing", "extra-traits", "visit"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+rstest = { workspace = true }
 tempfile = "3"

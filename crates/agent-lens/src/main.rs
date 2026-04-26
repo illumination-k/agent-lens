@@ -264,6 +264,12 @@ enum AnalyzeCommand {
         /// lines in `git diff -U0`.
         #[arg(long)]
         diff_only: bool,
+        /// Drop test scaffolding before computing similarity: free
+        /// functions tagged `#[test]` / `#[rstest]` / `#[<runner>::test]`
+        /// and everything inside a `#[cfg(test)] mod` block. Useful when
+        /// table-driven tests dominate the report.
+        #[arg(long)]
+        exclude_tests: bool,
         /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
         /// this value are reported. Defaults to the same cutoff used by
         /// the PostToolUse `similarity` hook.
@@ -352,8 +358,9 @@ impl AnalyzeCommand {
                 path,
                 format,
                 diff_only,
+                exclude_tests,
                 threshold,
-            } => Self::run_similarity(path, format, diff_only, threshold)?,
+            } => Self::run_similarity(path, format, diff_only, exclude_tests, threshold)?,
             Self::Wrapper {
                 path,
                 format,
@@ -406,11 +413,13 @@ impl AnalyzeCommand {
         path: PathBuf,
         format: OutputFormat,
         diff_only: bool,
+        exclude_tests: bool,
         threshold: f64,
     ) -> Result<String, Box<dyn std::error::Error>> {
         Ok(SimilarityAnalyzer::new()
             .with_threshold(threshold)
             .with_diff_only(diff_only)
+            .with_exclude_tests(exclude_tests)
             .analyze(&path, format)?)
     }
 
