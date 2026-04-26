@@ -25,6 +25,10 @@
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
+//! * [`wrapper`] — thin-wrapper finding shape. Adapters decide what
+//!   counts as a trivial adapter in their grammar; the result type is
+//!   shared so `agent-lens` can dispatch on language without per-adapter
+//!   conversion.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -36,6 +40,7 @@ pub mod function;
 pub mod hotspot;
 pub mod tree;
 pub mod tsed;
+pub mod wrapper;
 
 pub use apted::{APTEDOptions, compute_edit_distance};
 pub use cohesion::{
@@ -50,3 +55,4 @@ pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functi
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed};
+pub use wrapper::WrapperFinding;

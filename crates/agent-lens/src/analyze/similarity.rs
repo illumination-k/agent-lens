@@ -124,6 +124,18 @@ fn extract_functions(
                     .map_err(|e| AnalyzerError::Parse(Box::new(e)))
             }
         }
+        SourceLang::TypeScript => {
+            // `exclude_tests` has no concrete meaning yet for TS — there
+            // is no `#[test]` attribute equivalent. Fall through to the
+            // standard parser; file-pattern based filtering can be
+            // wired later if it proves useful.
+            let mut parser = lens_ts::TypeScriptParser::new();
+            <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
+                &mut parser,
+                source,
+            )
+            .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+        }
     }
 }
 

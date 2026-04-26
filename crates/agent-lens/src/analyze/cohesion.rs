@@ -41,6 +41,8 @@ impl CohesionAnalyzer {
         let mut units = match lang {
             SourceLang::Rust => lens_rust::extract_cohesion_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::TypeScript => lens_ts::extract_cohesion_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
         if self.diff_only {
             let changed = changed_line_ranges(path);

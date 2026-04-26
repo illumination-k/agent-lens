@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-use lens_rust::{WrapperFinding, find_wrappers};
+use lens_domain::WrapperFinding;
 
 use crate::analyze::SourceLang;
 use crate::hooks::core::{EditedSource, HookError};
@@ -45,7 +45,12 @@ impl WrapperCore {
 
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, HookError> {
     match lang {
-        SourceLang::Rust => find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e))),
+        SourceLang::Rust => {
+            lens_rust::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
+        }
+        SourceLang::TypeScript => {
+            lens_ts::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
+        }
     }
 }
 

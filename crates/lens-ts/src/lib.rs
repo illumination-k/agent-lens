@@ -11,11 +11,15 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod cohesion;
 mod complexity;
 mod line_index;
 mod parser;
 mod tree;
 mod walk;
+mod wrapper;
 
+pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use parser::{TsParseError, TypeScriptParser};
+pub use wrapper::find_wrappers;

@@ -41,12 +41,19 @@ pub enum OutputFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceLang {
     Rust,
+    TypeScript,
 }
 
 impl SourceLang {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "rs" => Some(Self::Rust),
+            // `.tsx` / `.mts` / `.cts` parse with a different
+            // `SourceType`; until the lens-ts entry points accept one,
+            // we restrict the TypeScript variant to plain `.ts` so a
+            // user pointing at a `.tsx` file gets a clear
+            // UnsupportedExtension instead of a confusing parse error.
+            "ts" => Some(Self::TypeScript),
             _ => None,
         }
     }
