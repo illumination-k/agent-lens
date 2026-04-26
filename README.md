@@ -127,15 +127,40 @@ If you'd rather edit the file by hand, the equivalent block looks like:
 Codex's hook protocol differs from Claude Code's (every payload carries a
 `model` slug, `apply_patch` can touch multiple files at once, etc.).
 `agent-lens` ships a separate `codex-hook` command tree so the differences
-don't leak into the CLI surface:
+don't leak into the CLI surface.
+
+The fastest way is to let `agent-lens` write the `config.toml` block for you:
+
+```bash
+# User scope: $HOME/.codex/config.toml (Codex's canonical location)
+agent-lens codex-hook setup
+
+# Project scope: <repo-root>/.codex/config.toml — the repo root comes from
+# `git rev-parse --show-toplevel`, with a fallback to `cwd` outside a git tree
+agent-lens codex-hook setup --scope project
+
+# Preview without writing
+agent-lens codex-hook setup --dry-run
+```
+
+The merge is conservative: existing keys and comments are preserved, and a
+`[[hooks.PostToolUse]]` block is appended only for handlers that aren't
+already wired up. Re-running is a no-op once every handler is installed.
+
+If you'd rather edit the file by hand, the equivalent block looks like:
 
 ```toml
 # ~/.codex/config.toml
-[[hooks.post_tool_use]]
-command = ["agent-lens", "codex-hook", "post-tool-use", "similarity"]
+[[hooks.PostToolUse]]
+matcher = "^apply_patch$"
 
-[[hooks.post_tool_use]]
-command = ["agent-lens", "codex-hook", "post-tool-use", "wrapper"]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "agent-lens codex-hook post-tool-use similarity"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "agent-lens codex-hook post-tool-use wrapper"
 ```
 
 ## What's in the box

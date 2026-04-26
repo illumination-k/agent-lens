@@ -9,7 +9,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::io::{self, Read, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agent_hooks::Hook;
@@ -22,6 +22,7 @@ use agent_lens::analyze::{
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
+use agent_lens::hooks::codex::setup::{self as codex_setup, SetupSummary as CodexSetupSummary};
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -115,6 +116,43 @@ enum CodexHookCommand {
     /// Handle a Codex `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(CodexPostToolUseCommand),
+    /// Wire `agent-lens`'s Codex PostToolUse handlers into a Codex
+    /// `config.toml`.
+    ///
+    /// The merge is conservative: existing keys and comments are
+    /// preserved, and a `[[hooks.PostToolUse]]` block is appended only
+    /// for handlers that aren't already wired up. Re-running the
+    /// command is a no-op once every handler is installed.
+    Setup(CodexSetupArgs),
+}
+
+#[derive(Debug, Args)]
+struct CodexSetupArgs {
+    /// Where to install the hooks. `user` writes to
+    /// `$HOME/.codex/config.toml` (Codex's canonical location);
+    /// `project` writes to `<repo-root>/.codex/config.toml`, where
+    /// `repo-root` comes from `git rev-parse --show-toplevel` and
+    /// falls back to the current directory outside a git tree.
+    #[arg(long, value_enum, default_value_t = CodexSetupScope::User)]
+    scope: CodexSetupScope,
+    /// Show the resulting TOML without touching disk.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CodexSetupScope {
+    Project,
+    User,
+}
+
+impl From<CodexSetupScope> for codex_setup::ConfigScope {
+    fn from(value: CodexSetupScope) -> Self {
+        match value {
+            CodexSetupScope::Project => Self::Project,
+            CodexSetupScope::User => Self::User,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -262,6 +300,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
         Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args),
         Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
+        Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
         Command::Analyze(sub) => run_analyze(sub),
     }
 }
@@ -353,6 +392,34 @@ fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
+fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let project_root = git_top_level(&cwd).unwrap_or(cwd);
+    let path = codex_setup::resolve_path(args.scope.into(), &project_root)?;
+    let plan = codex_setup::plan(path)?;
+    let wrote = if args.dry_run {
+        info!(path = %plan.path.display(), "dry-run: leaving config.toml untouched");
+        false
+    } else if plan.changed() {
+        codex_setup::apply(&plan)?;
+        info!(
+            path = %plan.path.display(),
+            added = plan.added_commands.len(),
+            "wrote config.toml",
+        );
+        true
+    } else {
+        info!(path = %plan.path.display(), "config.toml already configured; nothing to do");
+        false
+    };
+    write_stdout_json(&CodexSetupSummary {
+        path: &plan.path,
+        wrote,
+        added_commands: &plan.added_commands,
+        config: &plan.after,
+    })
+}
+
 fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
     let CodexHookInput::PostToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
         return Err("expected a Codex PostToolUse hook payload on stdin".into());
@@ -362,6 +429,28 @@ fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn s
         CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
     };
     write_stdout_json(&output)
+}
+
+/// Resolve the enclosing git repository's top-level directory, or
+/// `None` when `cwd` is not inside a git tree (or `git` isn't on
+/// `PATH`). Used to anchor `--scope project` so the hook lands at the
+/// repo root no matter which subdirectory the user invoked from.
+fn git_top_level(cwd: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
 }
 
 fn read_stdin_json<T: serde::de::DeserializeOwned>() -> Result<T, Box<dyn std::error::Error>> {
