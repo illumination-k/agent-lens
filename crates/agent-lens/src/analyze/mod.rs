@@ -9,6 +9,7 @@
 pub mod cohesion;
 pub mod complexity;
 pub mod coupling;
+pub mod dead_pub;
 pub mod hotspot;
 pub mod similarity;
 pub mod wrapper;
@@ -19,6 +20,7 @@ use std::process::Command;
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use coupling::{CouplingAnalyzer, CouplingAnalyzerError};
+pub use dead_pub::{DeadPubAnalyzer, DeadPubAnalyzerError};
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use similarity::{DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer};
 pub use wrapper::WrapperAnalyzer;

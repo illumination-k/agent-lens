@@ -22,6 +22,9 @@
 //!   Henry-Kafura IFC / Inter-module coupling / Instability / dependency
 //!   cycles. Adapters produce [`CouplingEdge`]s; this module folds them
 //!   into the report.
+//! * [`dead_pub`] — `pub` items that no other module references.
+//!   Adapters surface the [`PublicItem`] list; this module folds the
+//!   coupling edges over it to flag what the rest of the crate ignores.
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
@@ -36,6 +39,7 @@ pub mod apted;
 pub mod cohesion;
 pub mod complexity;
 pub mod coupling;
+pub mod dead_pub;
 pub mod function;
 pub mod hotspot;
 pub mod tree;
@@ -51,6 +55,7 @@ pub use coupling::{
     CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,
     PairCoupling, compute_report,
 };
+pub use dead_pub::{PublicItem, PublicItemKind, find_dead_pub_items};
 pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use tree::TreeNode;

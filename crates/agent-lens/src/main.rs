@@ -17,7 +17,7 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, DEFAULT_SIMILARITY_THRESHOLD,
-    HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
+    DeadPubAnalyzer, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
@@ -223,6 +223,29 @@ enum AnalyzeCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
+    /// Report `pub` items that no other module in the crate references.
+    ///
+    /// Joins the public-item list against the cross-module reference
+    /// graph: anything no edge points at is flagged as a candidate for
+    /// removal or for `pub(crate)` demotion. The signal is precise
+    /// within the crate; for library crates the top-level `pub` items
+    /// in the crate root may still be consumed externally, so they are
+    /// reported with `at_crate_root: true` and can be filtered with
+    /// `--no-crate-root`. `path` may be a `.rs` crate root or a
+    /// directory containing one.
+    DeadPub {
+        /// Path to a `.rs` crate root or a directory containing
+        /// `src/lib.rs` or `src/main.rs`.
+        path: PathBuf,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+        /// Drop crate-root pub items from the report. Useful for
+        /// library crates whose root API is meant for downstream
+        /// consumers the analyzer cannot see.
+        #[arg(long)]
+        no_crate_root: bool,
+    },
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for `.rs` files, asks `git` how many commits each
@@ -348,6 +371,11 @@ impl AnalyzeCommand {
                 diff_only,
             } => Self::run_complexity(path, format, diff_only)?,
             Self::Coupling { path, format } => Self::run_coupling(path, format)?,
+            Self::DeadPub {
+                path,
+                format,
+                no_crate_root,
+            } => Self::run_dead_pub(path, format, no_crate_root)?,
             Self::Hotspot {
                 path,
                 format,
@@ -394,6 +422,16 @@ impl AnalyzeCommand {
         format: OutputFormat,
     ) -> Result<String, Box<dyn std::error::Error>> {
         Ok(CouplingAnalyzer::new().analyze(&path, format)?)
+    }
+
+    fn run_dead_pub(
+        path: PathBuf,
+        format: OutputFormat,
+        no_crate_root: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(DeadPubAnalyzer::new()
+            .with_include_crate_root(!no_crate_root)
+            .analyze(&path, format)?)
     }
 
     fn run_hotspot(
@@ -730,6 +768,48 @@ mod tests {
         };
         assert_eq!(path, PathBuf::from("."));
         assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_dead_pub_with_no_crate_root_flag() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "dead-pub",
+            "src/lib.rs",
+            "--format",
+            "md",
+            "--no-crate-root",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::DeadPub {
+            path,
+            format,
+            no_crate_root,
+        }) = cli.command
+        else {
+            panic!("expected analyze dead-pub");
+        };
+        assert_eq!(path, PathBuf::from("src/lib.rs"));
+        assert_eq!(format, OutputFormat::Md);
+        assert!(no_crate_root);
+    }
+
+    #[test]
+    fn parses_analyze_dead_pub_default_keeps_crate_root() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "dead-pub", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::DeadPub {
+            path,
+            format,
+            no_crate_root,
+        }) = cli.command
+        else {
+            panic!("expected analyze dead-pub");
+        };
+        assert_eq!(path, PathBuf::from("."));
+        assert_eq!(format, OutputFormat::Json);
+        assert!(!no_crate_root);
     }
 
     #[test]

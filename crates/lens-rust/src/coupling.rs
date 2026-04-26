@@ -31,6 +31,8 @@ use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
 use syn::visit::Visit;
 use syn::{ExprPath, Item, ItemImpl, ItemUse, TypePath, UseTree};
 
+use crate::attrs::has_cfg_test;
+
 /// Failures raised while walking a crate's module tree.
 #[derive(Debug, thiserror::Error)]
 pub enum CouplingError {
@@ -77,6 +79,13 @@ pub struct CrateModule {
     /// path here.
     pub file: PathBuf,
     pub items: Vec<Item>,
+    /// True iff this module — or any ancestor — was declared with
+    /// `#[cfg(test)]`. The flag propagates because flattening the tree
+    /// otherwise loses the gate: an analyzer walking
+    /// `crate::a::tests::nested` could not tell that everything inside
+    /// it is unit-test scaffolding once `Item::Mod` has been popped
+    /// out.
+    pub cfg_test: bool,
 }
 
 /// Build the module tree rooted at `root`.
@@ -90,13 +99,14 @@ pub struct CrateModule {
 /// presentation order can re-sort the result.
 pub fn build_module_tree(root: &Path) -> Result<Vec<CrateModule>, CouplingError> {
     let mut out = Vec::new();
-    walk_file(root, ModulePath::new("crate"), &mut out)?;
+    walk_file(root, ModulePath::new("crate"), false, &mut out)?;
     Ok(out)
 }
 
 fn walk_file(
     file: &Path,
     mod_path: ModulePath,
+    inherited_cfg_test: bool,
     out: &mut Vec<CrateModule>,
 ) -> Result<(), CouplingError> {
     let source = std::fs::read_to_string(file).map_err(|source| CouplingError::Io {
@@ -107,11 +117,12 @@ fn walk_file(
         path: file.to_path_buf(),
         source,
     })?;
-    let items = split_modules(parsed.items, &mod_path, file, out)?;
+    let items = split_modules(parsed.items, &mod_path, file, inherited_cfg_test, out)?;
     out.push(CrateModule {
         path: mod_path,
         file: file.to_path_buf(),
         items,
+        cfg_test: inherited_cfg_test,
     });
     Ok(())
 }
@@ -119,11 +130,14 @@ fn walk_file(
 /// Walk `items` in-place: any `Item::Mod` entry is popped out into its
 /// own [`CrateModule`] (recursing for inline content, descending to disk
 /// for file-backed declarations) and removed from the returned `Vec`.
-/// Non-mod items pass through unchanged.
+/// Non-mod items pass through unchanged. `inherited_cfg_test` carries
+/// the parent's `#[cfg(test)]` state: once the gate appears anywhere on
+/// the path, every descendant inherits it.
 fn split_modules(
     items: Vec<Item>,
     parent: &ModulePath,
     parent_file: &Path,
+    inherited_cfg_test: bool,
     out: &mut Vec<CrateModule>,
 ) -> Result<Vec<Item>, CouplingError> {
     let mut kept: Vec<Item> = Vec::with_capacity(items.len());
@@ -131,13 +145,21 @@ fn split_modules(
         match item {
             Item::Mod(item_mod) => {
                 let child_path = parent.child(&item_mod.ident.to_string());
+                let child_cfg_test = inherited_cfg_test || has_cfg_test(&item_mod.attrs);
                 match item_mod.content {
                     Some((_, inline_items)) => {
-                        let leaf = split_modules(inline_items, &child_path, parent_file, out)?;
+                        let leaf = split_modules(
+                            inline_items,
+                            &child_path,
+                            parent_file,
+                            child_cfg_test,
+                            out,
+                        )?;
                         out.push(CrateModule {
                             path: child_path,
                             file: parent_file.to_path_buf(),
                             items: leaf,
+                            cfg_test: child_cfg_test,
                         });
                     }
                     None => {
@@ -150,7 +172,7 @@ fn split_modules(
                                 .unwrap_or_else(|| Path::new("."))
                                 .to_path_buf(),
                         })?;
-                        walk_file(&resolved, child_path, out)?;
+                        walk_file(&resolved, child_path, child_cfg_test, out)?;
                     }
                 }
             }
@@ -538,6 +560,47 @@ mod tests {
         let lib = write_file(dir.path(), "lib.rs", "fn solo() {}\n");
         let tree = build_module_tree(&lib).unwrap();
         assert_eq!(paths(&tree), vec!["crate"]);
+        assert!(!tree[0].cfg_test, "crate root is not a test module");
+    }
+
+    #[test]
+    fn cfg_test_propagates_into_inline_module_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+            pub fn alive() {}
+            #[cfg(test)]
+            mod tests {
+                fn helper() {}
+                mod nested {
+                    fn deeper() {}
+                }
+            }
+            "#,
+        );
+        let tree = build_module_tree(&lib).unwrap();
+        let by_path: std::collections::HashMap<&str, bool> =
+            tree.iter().map(|m| (m.path.as_str(), m.cfg_test)).collect();
+        assert_eq!(by_path.get("crate"), Some(&false));
+        assert_eq!(by_path.get("crate::tests"), Some(&true));
+        // The nested module inherits the gate even though its own
+        // declaration carries no `#[cfg(test)]`.
+        assert_eq!(by_path.get("crate::tests::nested"), Some(&true));
+    }
+
+    #[test]
+    fn cfg_test_propagates_into_file_backed_module_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "#[cfg(test)]\npub mod tests;\n");
+        write_file(dir.path(), "tests.rs", "pub fn fixture() {}\n");
+        let tree = build_module_tree(&lib).unwrap();
+        let tests = tree
+            .iter()
+            .find(|m| m.path.as_str() == "crate::tests")
+            .unwrap();
+        assert!(tests.cfg_test, "file-backed cfg(test) module inherits gate");
     }
 
     #[test]

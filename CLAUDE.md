@@ -56,6 +56,10 @@ All tools are managed by mise. Run `mise install` to install them.
      Halstead / Maintainability Index）
    - **Coupling**（モジュール間 Number of Couplings / Fan-In / Fan-Out /
      Henry-Kafura IFC）
+   - **Dead Pub**（クレート内のどのモジュールからも参照されない `pub` 項目を
+     検出。`coupling` の参照グラフを再利用し、`pub fn` / `struct` / `enum`
+     / `trait` / `type` / `const` / `static` / `union` / `#[macro_export]`
+     を対象とする）
 
    実装候補（後述「指標カタログ」）：
    - **Hotspot**（git の churn × 複雑度で「触るべき/危険な場所」を可視化）
@@ -63,7 +67,6 @@ All tools are managed by mise. Run `mise install` to install them.
    - **Code Age / Ownership**（最終変更日と作者の偏り）
    - **Public API Surface**（pub 境界の広さと churn・破壊的変更リスク）
    - **Doc Coverage**（pub item の `///` カバレッジ）
-   - **Dead / Unused public**（呼ばれない pub 項目）
    - **Token Budget**（tokenizer 換算でのファイルサイズと context window フィット）
    - その他、agent が推論するのに有用な指標は随時追加
 
@@ -92,6 +95,7 @@ agent-lens
     ├── cohesion <path>             # impl 単位の LCOM4 凝集度
     ├── complexity <path>           # 関数単位の CC / Cognitive / Nesting / Halstead / MI
     ├── coupling <path>             # モジュール間 Fan-In / Fan-Out / IFC
+    ├── dead-pub <path> [--no-crate-root]  # クレート内未参照 pub 項目
     ├── similarity <path> [--threshold N]
     └── wrapper <path>
 ```
@@ -118,6 +122,7 @@ Cargo workspace。役割が違うものは crate を分け、`agent-lens` バイ
 │   │       │   ├── cohesion.rs
 │   │       │   ├── complexity.rs
 │   │       │   ├── coupling.rs
+│   │       │   ├── dead_pub.rs
 │   │       │   ├── similarity.rs
 │   │       │   └── wrapper.rs
 │   │       └── hooks/              # PostToolUse handler。core/ は両エージェント共通の土台
@@ -209,6 +214,14 @@ Cargo workspace。役割が違うものは crate を分け、`agent-lens` バイ
   Coupling（distinct シンボル数）を算出。クレートルート (`src/lib.rs` /
   `src/main.rs`) から `mod foo;` を辿り、`use` / 関数呼び出し / 型参照 /
   `impl OtherTrait for MyType` をエッジとして集める
+- **Dead Pub**: `coupling` の参照グラフを再利用し、`pub` で公開しているが
+  クレート内のどのモジュールからも参照されていない項目を検出。対象は
+  `pub fn` / `struct` / `enum` / `trait` / `type` / `const` / `static` /
+  `union` / `#[macro_export]`。inherent method や trait 連想項目は親型の
+  生死に従わせるため個別追跡しない。`pub use` の glob (`use mod::*`) は
+  対象モジュールの全 pub 項目を保守的に live 扱い。クレートルート直下の
+  pub 項目はライブラリの外部 API として残ることが多いので、JSON では
+  `at_crate_root: true` を付与し、`--no-crate-root` で除外できる
 
 ### 追加候補の指標カタログ
 
@@ -243,9 +256,9 @@ Cargo workspace。役割が違うものは crate を分け、`agent-lens` バイ
 | Instability (I = Ce/(Ca+Ce)) | パッケージ単位の変更しやすさ          | 依存グラフ     | 中     |
 | Cyclic dependencies          | モジュール間循環依存（SCC 検出）      | 依存グラフ     | 中     |
 | Public API Surface           | pub 項目の数とシグネチャ複雑度・churn | AST + git      | 中     |
-| Dead / Unused public         | 外から呼ばれない pub 項目             | AST + 呼出解析 | 中     |
 
-> Fan-In / Fan-Out / Henry-Kafura IFC は `analyze coupling` として実装済み。
+> Fan-In / Fan-Out / Henry-Kafura IFC は `analyze coupling` として、
+> 「外から呼ばれない pub 項目」検出は `analyze dead-pub` として実装済み。
 > 上記 Instability・Cyclic dependencies は同じ `coupling` モジュールの依存
 > グラフを再利用して追加できる。
 
