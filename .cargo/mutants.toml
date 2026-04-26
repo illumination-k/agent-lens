@@ -14,3 +14,21 @@ minimum_test_timeout = 60
 exclude_globs = [
   "crates/agent-lens/src/main.rs",
 ]
+
+# Skip functions whose only contract is to populate Halstead operator/operand
+# label keys. Mutating their bodies just renames a map key and has no
+# observable effect on the cyclomatic / cognitive / nesting numbers an
+# analyzer is judged on, so a missed mutant here is a known equivalent
+# rather than a real test gap. The `enter_nest` boundary is similarly
+# equivalent: writing `>=` instead of `>` produces the same final
+# `max_nesting` value, just with one extra idempotent write.
+exclude_re = [
+  # complexity: per-stmt / per-expr Halstead label dispatchers
+  "ComplexityVisitor::record_stmt_halstead",
+  "ComplexityVisitor::record_expr_halstead",
+  "ComplexityVisitor::record_finally",
+  "ComplexityVisitor::enter_nest",
+  # complexity: pure label-mapping helpers
+  "cmp_op_str",
+  "number_literal_repr",
+]

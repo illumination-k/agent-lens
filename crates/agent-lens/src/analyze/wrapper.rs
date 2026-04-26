@@ -40,15 +40,7 @@ impl WrapperAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let (lang, source) = read_source(path)?;
-        let mut findings = run_wrappers(lang, &source).map_err(|e| match e {
-            // Python doesn't have wrapper detection yet; surface the
-            // standard "this analyzer can't take that file" error so
-            // the user sees the same shape they'd get for a `.txt`.
-            WrapperRunError::UnsupportedLang => AnalyzerError::UnsupportedExtension {
-                path: path.to_path_buf(),
-            },
-            WrapperRunError::Parse(inner) => AnalyzerError::Parse(inner),
-        })?;
+        let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
         if self.diff_only {
             let changed = changed_line_ranges(path);
             findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
@@ -67,20 +59,15 @@ fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
     ranges.iter().any(|r| r.overlaps(start, end))
 }
 
-enum WrapperRunError {
-    UnsupportedLang,
-    Parse(Box<dyn std::error::Error + Send + Sync>),
-}
+type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
-fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, WrapperRunError> {
+fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, BoxedError> {
     match lang {
-        SourceLang::Rust => {
-            lens_rust::find_wrappers(source).map_err(|e| WrapperRunError::Parse(Box::new(e)))
-        }
+        SourceLang::Rust => lens_rust::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
         SourceLang::TypeScript => {
-            lens_ts::find_wrappers(source).map_err(|e| WrapperRunError::Parse(Box::new(e)))
+            lens_ts::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError)
         }
-        SourceLang::Python => Err(WrapperRunError::UnsupportedLang),
+        SourceLang::Python => lens_py::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
     }
 }
 
@@ -252,6 +239,27 @@ fn alpha(xs: &[i32]) -> i32 {
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, AnalyzerError::UnsupportedExtension { .. }));
+    }
+
+    #[test]
+    fn python_wrapper_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "
+def render(x):
+    return internal_render(x)
+
+def meaningful(x):
+    y = x + 1
+    return y * 2
+";
+        let file = write_file(dir.path(), "lib.py", src);
+        let json = WrapperAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["wrapper_count"], 1);
+        assert_eq!(parsed["wrappers"][0]["name"], "render");
+        assert_eq!(parsed["wrappers"][0]["callee"], "internal_render");
     }
 
     #[test]

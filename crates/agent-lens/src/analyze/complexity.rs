@@ -45,14 +45,8 @@ impl ComplexityAnalyzer {
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
             SourceLang::TypeScript => lens_ts::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            // lens-py only implements similarity today; until a Python
-            // complexity extractor lands, route `.py` to the same error
-            // shape unsupported extensions go through.
-            SourceLang::Python => {
-                return Err(AnalyzerError::UnsupportedExtension {
-                    path: path.to_path_buf(),
-                });
-            }
+            SourceLang::Python => lens_py::extract_complexity_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
         if self.diff_only {
             let changed = changed_line_ranges(path);
@@ -360,6 +354,31 @@ fn dispatch(n: i32) -> i32 {
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, AnalyzerError::UnsupportedExtension { .. }));
+    }
+
+    #[test]
+    fn python_function_metrics_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "
+def simple():
+    pass
+
+def branchy(n):
+    if n > 0:
+        return 1
+    elif n < 0:
+        return -1
+    else:
+        return 0
+";
+        let file = write_file(dir.path(), "lib.py", src);
+        let json = ComplexityAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 2);
+        // base 1 + if + elif = 3
+        assert_eq!(parsed["summary"]["cyclomatic_max"], 3);
     }
 
     #[test]

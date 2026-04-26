@@ -9,6 +9,7 @@ use crate::attrs::{
     class_inherits_test_case, has_pytest_decorator, has_unittest_skip_decorator,
     name_looks_like_test_class, name_looks_like_test_function,
 };
+use crate::line_index::LineIndex;
 
 /// A Python-language parser backed by [`ruff_python_parser`].
 ///
@@ -161,35 +162,6 @@ fn qualify_name(owner: Option<&str>, method: &str) -> String {
     match owner {
         Some(owner) => format!("{owner}::{method}"),
         None => method.to_owned(),
-    }
-}
-
-/// Maps byte offsets in the source to 1-based line numbers.
-struct LineIndex {
-    /// Byte offset of the start of each line. Always begins with `0`.
-    line_starts: Vec<u32>,
-}
-
-impl LineIndex {
-    fn new(source: &str) -> Self {
-        let mut line_starts = Vec::with_capacity(source.len() / 32 + 1);
-        line_starts.push(0u32);
-        for (i, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
-                let next = u32::try_from(i + 1).unwrap_or(u32::MAX);
-                line_starts.push(next);
-            }
-        }
-        Self { line_starts }
-    }
-
-    /// 1-based line number containing the given byte offset.
-    fn line_of(&self, offset: usize) -> usize {
-        let target = u32::try_from(offset).unwrap_or(u32::MAX);
-        match self.line_starts.binary_search(&target) {
-            Ok(idx) => idx + 1,
-            Err(idx) => idx,
-        }
     }
 }
 
