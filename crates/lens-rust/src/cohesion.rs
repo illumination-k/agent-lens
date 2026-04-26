@@ -402,4 +402,48 @@ impl ModulePath {
         let err = extract_cohesion_units("fn ??? {").unwrap_err();
         assert!(matches!(err, CohesionError::Syn(_)));
     }
+
+    #[test]
+    fn cohesion_error_display_includes_inner_message() {
+        let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
+        let err = CohesionError::Syn(parse_err);
+        let msg = err.to_string();
+        assert!(msg.contains("failed to parse Rust source"), "got {msg}");
+    }
+
+    #[test]
+    fn cohesion_error_source_is_the_underlying_syn_error() {
+        use std::error::Error as _;
+        let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
+        let err = CohesionError::Syn(parse_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn field_access_on_non_self_receiver_is_not_counted_as_self_field() {
+        // `is_self_expr` distinguishes `self.x` from `other.x`. A method
+        // that only touches another struct's fields must produce an empty
+        // field set; otherwise it would spuriously share state with any
+        // sibling that uses a same-named field.
+        let src = r#"
+struct Other { tag: i32 }
+struct Foo { tag: i32 }
+impl Foo {
+    fn external(&self, o: &Other) -> i32 { o.tag }
+    fn local(&self) -> i32 { self.tag }
+}
+"#;
+        let u = unit(src);
+        let external = u.methods.iter().find(|m| m.name == "external").unwrap();
+        let local = u.methods.iter().find(|m| m.name == "local").unwrap();
+        assert!(
+            external.fields.is_empty(),
+            "external.fields should be empty, got {:?}",
+            external.fields,
+        );
+        assert_eq!(local.fields, vec!["tag"]);
+        // The two methods do not share any self field, so they form
+        // separate components.
+        assert_eq!(u.lcom4(), 2);
+    }
 }

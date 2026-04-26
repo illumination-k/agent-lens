@@ -384,6 +384,21 @@ fn f(x: i32) -> i32 {
 "#);
         // 1 (base) + 1 (if) + 1 (`>` is binary but not && / ||, so no bump)
         assert_eq!(f.cyclomatic, 2);
+        // Plain `else` adds +1 to cognitive on top of the +1 for the `if`.
+        assert_eq!(f.cognitive, 2);
+    }
+
+    #[test]
+    fn if_without_else_does_not_pay_else_penalty() {
+        let f = one(r#"
+fn f(x: i32) -> i32 {
+    if x > 0 { return 1; }
+    0
+}
+"#);
+        assert_eq!(f.cyclomatic, 2);
+        // No else branch ⇒ no extra +1 for the bare-else path.
+        assert_eq!(f.cognitive, 1);
     }
 
     #[test]
@@ -556,5 +571,142 @@ fn add(a: i32, b: i32) -> i32 {
     fn empty_file_yields_no_units() {
         let units = extract("// just a comment\n");
         assert!(units.is_empty());
+    }
+
+    #[test]
+    fn complexity_error_display_includes_inner_message() {
+        let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
+        let err = ComplexityError::Syn(parse_err);
+        let msg = err.to_string();
+        assert!(msg.contains("failed to parse Rust source"), "got {msg}");
+    }
+
+    #[test]
+    fn complexity_error_source_is_the_underlying_syn_error() {
+        use std::error::Error as _;
+        let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
+        let err = ComplexityError::Syn(parse_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn while_loop_adds_one_to_cyclomatic_and_cognitive() {
+        let f = one(r#"
+fn f() {
+    let mut i = 0;
+    while i < 10 { i += 1; }
+}
+"#);
+        assert_eq!(f.cyclomatic, 2, "1 base + 1 while");
+        assert_eq!(f.cognitive, 1, "while at nest 0 contributes 1");
+        assert_eq!(f.max_nesting, 1);
+    }
+
+    #[test]
+    fn while_loop_inside_if_pays_nesting_penalty() {
+        let f = one(r#"
+fn f(go: bool) {
+    if go {
+        let mut i = 0;
+        while i < 10 { i += 1; }
+    }
+}
+"#);
+        // 1 (base) + 1 (if) + 1 (while) = 3
+        assert_eq!(f.cyclomatic, 3);
+        // if at nest 0 → +1; while at nest 1 → +(1+1) = 2; total 3.
+        assert_eq!(f.cognitive, 3);
+        assert_eq!(f.max_nesting, 2);
+    }
+
+    #[test]
+    fn for_loop_adds_one_to_cyclomatic_and_cognitive() {
+        let f = one(r#"
+fn f() {
+    for _ in 0..5 {}
+}
+"#);
+        assert_eq!(f.cyclomatic, 2);
+        assert_eq!(f.cognitive, 1);
+        assert_eq!(f.max_nesting, 1);
+    }
+
+    #[test]
+    fn for_loop_inside_if_pays_nesting_penalty() {
+        let f = one(r#"
+fn f(go: bool) {
+    if go {
+        for _ in 0..5 {}
+    }
+}
+"#);
+        // 1 (if at nest 0) + 2 (for at nest 1) = 3
+        assert_eq!(f.cognitive, 3);
+        assert_eq!(f.cyclomatic, 3);
+    }
+
+    #[test]
+    fn loop_adds_one_to_cyclomatic_and_cognitive() {
+        let f = one(r#"
+fn f() {
+    loop { break; }
+}
+"#);
+        assert_eq!(f.cyclomatic, 2);
+        assert_eq!(f.cognitive, 1);
+        assert_eq!(f.max_nesting, 1);
+    }
+
+    #[test]
+    fn loop_inside_if_pays_nesting_penalty() {
+        let f = one(r#"
+fn f(go: bool) {
+    if go {
+        loop { break; }
+    }
+}
+"#);
+        // 1 (if) + 2 (loop at nest 1) = 3
+        assert_eq!(f.cognitive, 3);
+        assert_eq!(f.cyclomatic, 3);
+    }
+
+    #[test]
+    fn match_at_top_level_charges_one_for_cognitive_regardless_of_arm_count() {
+        let f = one(r#"
+fn f(n: i32) -> i32 {
+    match n { 0 => 0, 1 => 1, _ => 2 }
+}
+"#);
+        // base 1 + (3 arms - 1) = 3
+        assert_eq!(f.cyclomatic, 3);
+        // Sonar: a top-level match contributes exactly +1, not one per arm.
+        assert_eq!(f.cognitive, 1);
+    }
+
+    #[test]
+    fn match_inside_if_pays_nesting_penalty_only_once() {
+        let f = one(r#"
+fn f(n: i32) -> i32 {
+    if n >= 0 {
+        match n { 0 => 0, 1 => 1, _ => 2 }
+    } else {
+        -1
+    }
+}
+"#);
+        // 1 (if) + 1 (else) + (1 + 1 nest) (match) = 4
+        assert_eq!(f.cognitive, 4);
+        // base 1 + 1 (if) + 2 (match arms-1) = 4
+        assert_eq!(f.cyclomatic, 4);
+    }
+
+    #[test]
+    fn each_logical_operator_bumps_cognitive_by_one() {
+        let f = one("fn f(a: bool, b: bool, c: bool) -> bool { a && b || c }");
+        // base 1 + 1 (&&) + 1 (||) = 3 cyclomatic
+        assert_eq!(f.cyclomatic, 3);
+        // && / || each add +1 to cognitive (no nesting penalty).
+        assert_eq!(f.cognitive, 2);
     }
 }

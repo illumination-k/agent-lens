@@ -81,3 +81,61 @@ impl From<ReadEditedSourceError> for HookError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn hook_error_io_display_includes_path_and_source() {
+        let err = HookError::Io {
+            path: PathBuf::from("/tmp/missing.rs"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/missing.rs"), "got {msg}");
+        assert!(msg.contains("missing"), "got {msg}");
+        assert!(msg.starts_with("failed to read"), "got {msg}");
+    }
+
+    #[test]
+    fn hook_error_parse_display_includes_inner() {
+        let err = HookError::Parse(Box::<dyn std::error::Error + Send + Sync>::from(
+            "syntax".to_owned(),
+        ));
+        let msg = err.to_string();
+        assert!(msg.contains("syntax"), "got {msg}");
+        assert!(msg.starts_with("failed to parse"), "got {msg}");
+    }
+
+    #[test]
+    fn hook_error_io_source_is_present() {
+        let err = HookError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn hook_error_parse_source_is_present() {
+        let err = HookError::Parse(Box::<dyn std::error::Error + Send + Sync>::from(
+            "boom".to_owned(),
+        ));
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn read_edited_source_error_converts_to_hook_io_error() {
+        let read_err = ReadEditedSourceError {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        let hook_err: HookError = read_err.into();
+        assert!(matches!(hook_err, HookError::Io { .. }));
+        let msg = hook_err.to_string();
+        assert!(msg.contains("/tmp/x"), "got {msg}");
+        assert!(msg.contains("denied"), "got {msg}");
+    }
+}

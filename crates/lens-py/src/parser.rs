@@ -420,6 +420,102 @@ def recursive(n):
         );
     }
 
+    fn parse_tree(src: &str) -> TreeNode {
+        let mut parser = PythonParser::new();
+        parser.parse(src).unwrap()
+    }
+
+    fn find_label<'a>(node: &'a TreeNode, label: &str) -> Option<&'a TreeNode> {
+        if node.label == label {
+            return Some(node);
+        }
+        for c in &node.children {
+            if let Some(found) = find_label(c, label) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn parse_records_function_def_label_and_name_value() {
+        let tree = parse_tree("def hello():\n    pass\n");
+        let func = find_label(&tree, "FunctionDef").expect("FunctionDef present");
+        assert_eq!(
+            func.value, "hello",
+            "FunctionDef should expose its name as the node value",
+        );
+    }
+
+    #[test]
+    fn parse_records_class_def_label_and_name_value() {
+        let tree = parse_tree("class Bar:\n    pass\n");
+        let class = find_label(&tree, "ClassDef").expect("ClassDef present");
+        assert_eq!(class.value, "Bar");
+    }
+
+    #[test]
+    fn parse_records_name_expression_with_identifier() {
+        let tree = parse_tree("x = y\n");
+        let name = find_label(&tree, "Name").expect("Name node present");
+        // `y` is a Name expression in the RHS; the identifier becomes the value.
+        assert!(
+            name.value == "y" || name.value == "x",
+            "Name node value should be the identifier (got {:?})",
+            name.value,
+        );
+    }
+
+    #[test]
+    fn parse_records_attribute_expression_with_attr_name() {
+        let tree = parse_tree("y = obj.field\n");
+        let attr = find_label(&tree, "Attribute").expect("Attribute node present");
+        // The attribute name (right-hand side of the dot) is the value.
+        assert_eq!(attr.value, "field");
+    }
+
+    #[test]
+    fn parse_walks_into_expressions_so_call_nodes_appear() {
+        // visit_expr must descend; if it short-circuits, `Call` (and its
+        // children) never enter the tree.
+        let tree = parse_tree("x = f(1)\n");
+        assert!(
+            find_label(&tree, "Call").is_some(),
+            "Call expression should be present in the tree",
+        );
+    }
+
+    #[test]
+    fn parse_finishes_into_a_single_root_for_multi_statement_input() {
+        // `finish` unwinds the stack until exactly one node remains. With
+        // a multi-statement program it must still return the `Module` root,
+        // not the most recently pushed child.
+        let tree = parse_tree("x = 1\ny = 2\nz = 3\n");
+        assert_eq!(tree.label, "Module");
+        // The Module has at least the three Assign children visible.
+        let assign_count = tree.children.iter().filter(|c| c.label == "Assign").count();
+        assert!(
+            assign_count >= 3,
+            "expected at least 3 Assign children under root, got {assign_count} ({tree:?})",
+        );
+    }
+
+    #[test]
+    fn parse_distinguishes_for_while_and_if_labels() {
+        let src = "
+for x in xs:
+    pass
+while True:
+    pass
+if cond:
+    pass
+";
+        let tree = parse_tree(src);
+        assert!(find_label(&tree, "For").is_some(), "For label missing");
+        assert!(find_label(&tree, "While").is_some(), "While label missing");
+        assert!(find_label(&tree, "If").is_some(), "If label missing");
+    }
+
     #[test]
     fn find_similar_functions_reports_clone_pair() {
         let src = "

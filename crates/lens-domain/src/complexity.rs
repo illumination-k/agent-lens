@@ -169,6 +169,31 @@ mod tests {
     }
 
     #[test]
+    fn vocabulary_sums_distinct_operators_and_operands() {
+        // Use unequal counts so the sum and the product can never collapse
+        // onto the same value.
+        let h = HalsteadCounts {
+            distinct_operators: 3,
+            distinct_operands: 5,
+            total_operators: 0,
+            total_operands: 0,
+        };
+        assert_eq!(h.vocabulary(), 8);
+    }
+
+    #[test]
+    fn length_sums_total_operators_and_operands() {
+        // Same shape: pick coprime values so + and * give different totals.
+        let h = HalsteadCounts {
+            distinct_operators: 0,
+            distinct_operands: 0,
+            total_operators: 3,
+            total_operands: 5,
+        };
+        assert_eq!(h.length(), 8);
+    }
+
+    #[test]
     fn halstead_volume_uses_n_log2_n() {
         // N = 8, n = 4 → V = 8 * log2(4) = 16
         let h = HalsteadCounts {

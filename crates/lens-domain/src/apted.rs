@@ -253,6 +253,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_left_against_multiple_right_charges_full_insert_chain() {
+        // align_children([], [X, Y, Z]) only ever populates the dp[0] row;
+        // the final answer is `dp[0][m]`. This test forces that path so
+        // that dp[0][j] depends on dp[0][j - 1], not on dp[0][j], guarding
+        // against mutations of the `j - 1` index.
+        let a = parent("Root", vec![]);
+        let b = parent("Root", vec![leaf("X"), leaf("Y"), leaf("Z")]);
+        let d = compute_edit_distance(&a, &b, &APTEDOptions::default());
+        assert!((d - 3.0).abs() < 1e-9, "got {d}");
+    }
+
+    #[test]
     fn body_picks_minimum_of_delete_insert_rename() {
         // Make rename strictly cheaper than delete+insert so the body of
         // align_children is forced to take the rename branch and consume

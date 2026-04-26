@@ -569,6 +569,116 @@ mod tests {
     }
 
     #[test]
+    fn coupling_error_io_display_includes_path_and_source() {
+        let err = CouplingAnalyzerError::Io {
+            path: PathBuf::from("/tmp/missing.rs"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/missing.rs"), "got {msg}");
+        assert!(msg.contains("missing"), "got {msg}");
+        assert!(msg.starts_with("failed to read"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_parse_display_includes_path_and_source() {
+        let err = CouplingAnalyzerError::Parse {
+            path: PathBuf::from("/tmp/bad.rs"),
+            source: Box::<dyn std::error::Error + Send + Sync>::from("syntax".to_owned()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/bad.rs"), "got {msg}");
+        assert!(msg.contains("syntax"), "got {msg}");
+        assert!(msg.starts_with("failed to parse"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_unsupported_root_display_includes_path() {
+        let err = CouplingAnalyzerError::UnsupportedRoot {
+            path: PathBuf::from("/tmp/odd"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/odd"), "got {msg}");
+        assert!(msg.contains("no usable Rust crate root"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_missing_mod_display_includes_parent_name_and_path() {
+        let err = CouplingAnalyzerError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "ghost".to_owned(),
+            near: PathBuf::from("/tmp/proj"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("crate"), "got {msg}");
+        assert!(msg.contains("ghost"), "got {msg}");
+        assert!(msg.contains("/tmp/proj"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_serialize_display_includes_inner() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = CouplingAnalyzerError::Serialize(serde_err);
+        let msg = err.to_string();
+        assert!(msg.contains("serialize"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_io_source_is_present() {
+        use std::error::Error as _;
+        let err = CouplingAnalyzerError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("denied"),
+        };
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn coupling_error_parse_source_is_present() {
+        use std::error::Error as _;
+        let err = CouplingAnalyzerError::Parse {
+            path: PathBuf::from("/tmp/x"),
+            source: Box::<dyn std::error::Error + Send + Sync>::from("boom".to_owned()),
+        };
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn coupling_error_serialize_source_is_present() {
+        use std::error::Error as _;
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = CouplingAnalyzerError::Serialize(serde_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn coupling_error_variants_without_source_return_none() {
+        use std::error::Error as _;
+        let err = CouplingAnalyzerError::UnsupportedRoot {
+            path: PathBuf::from("/tmp/x"),
+        };
+        assert!(err.source().is_none());
+        let err = CouplingAnalyzerError::MissingMod {
+            parent: "crate".into(),
+            name: "ghost".into(),
+            near: PathBuf::from("/tmp"),
+        };
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn coupling_format_optional_f64_renders_some_with_precision() {
+        assert_eq!(format_optional_f64(Some(0.5), 2), "0.50");
+        assert_eq!(format_optional_f64(Some(1.0), 0), "1");
+    }
+
+    #[test]
+    fn coupling_format_optional_f64_renders_none_as_n_a() {
+        assert_eq!(format_optional_f64(None, 0), "n/a");
+        assert_eq!(format_optional_f64(None, 4), "n/a");
+    }
+
+    #[test]
     fn markdown_report_renders_cycles_when_present() {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "lib.rs", "pub mod a;\npub mod b;\n");
