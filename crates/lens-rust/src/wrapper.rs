@@ -12,8 +12,8 @@ use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{
-    Block, Expr, ExprCall, ExprMethodCall, FnArg, ImplItem, Item, ItemImpl, ItemTrait, Pat,
-    PatIdent, Signature, Stmt, TraitItem, UnOp,
+    Attribute, Block, Expr, ExprCall, ExprMethodCall, FnArg, ImplItem, Item, ItemImpl, ItemMod,
+    ItemTrait, Meta, Pat, PatIdent, Signature, Stmt, TraitItem, UnOp,
 };
 
 use crate::parser::RustParseError;
@@ -49,6 +49,25 @@ const TRIVIAL_NULLARY_ADAPTERS: &[&str] = &[
 /// (e.g. `expect("msg")`).
 const TRIVIAL_LITERAL_ADAPTERS: &[&str] = &["expect"];
 
+/// `(trait_name, method_name)` pairs whose forwarding bodies are
+/// idiomatic boilerplate, not refactoring opportunities. The trait spec
+/// itself dictates the signature, so the only reasonable implementation
+/// is to forward — flagging these would just add noise to the report.
+///
+/// Match is on the last segment of the trait path (e.g. `From` for
+/// `std::convert::From`), so users don't need to spell out the full
+/// import path.
+const BOILERPLATE_TRAIT_METHODS: &[(&str, &str)] = &[
+    ("From", "from"),
+    ("Default", "default"),
+    ("Deref", "deref"),
+    ("DerefMut", "deref_mut"),
+    ("Borrow", "borrow"),
+    ("BorrowMut", "borrow_mut"),
+    ("AsRef", "as_ref"),
+    ("AsMut", "as_mut"),
+];
+
 /// Walk the file and return every function whose body is just a
 /// forwarding call.
 pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError> {
@@ -63,28 +82,46 @@ pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError
 fn collect_item(item: &Item, out: &mut Vec<WrapperFinding>) {
     match item {
         Item::Fn(item_fn) => {
-            if let Some(finding) = analyze_fn(None, &item_fn.sig, &item_fn.block) {
+            if let Some(finding) = analyze_fn(None, None, &item_fn.sig, &item_fn.block) {
                 out.push(finding);
             }
         }
         Item::Impl(item_impl) => collect_impl(item_impl, out),
         Item::Trait(item_trait) => collect_trait(item_trait, out),
-        Item::Mod(item_mod) => {
-            if let Some((_, items)) = &item_mod.content {
-                for nested in items {
-                    collect_item(nested, out);
-                }
-            }
-        }
+        Item::Mod(item_mod) => collect_mod(item_mod, out),
         _ => {}
+    }
+}
+
+fn collect_mod(item_mod: &ItemMod, out: &mut Vec<WrapperFinding>) {
+    // Skip `#[cfg(test)] mod tests { ... }` (and any other cfg(test)-gated
+    // module). Test helpers are forwarding by design — they exist to
+    // shorten call sites in `assert_eq!` lines, not because the wrapped
+    // function needed an extra layer. Reporting them is pure noise.
+    if has_cfg_test(&item_mod.attrs) {
+        return;
+    }
+    if let Some((_, items)) = &item_mod.content {
+        for nested in items {
+            collect_item(nested, out);
+        }
     }
 }
 
 fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<WrapperFinding>) {
     let self_name = type_path_last_ident(&item_impl.self_ty);
+    let trait_name = item_impl
+        .trait_
+        .as_ref()
+        .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
     for impl_item in &item_impl.items {
         if let ImplItem::Fn(method) = impl_item
-            && let Some(finding) = analyze_fn(self_name.as_deref(), &method.sig, &method.block)
+            && let Some(finding) = analyze_fn(
+                self_name.as_deref(),
+                trait_name.as_deref(),
+                &method.sig,
+                &method.block,
+            )
         {
             out.push(finding);
         }
@@ -96,11 +133,27 @@ fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<WrapperFinding>) {
     for trait_item in &item_trait.items {
         if let TraitItem::Fn(method) = trait_item
             && let Some(block) = &method.default
-            && let Some(finding) = analyze_fn(Some(&trait_name), &method.sig, block)
+            && let Some(finding) =
+                analyze_fn(Some(&trait_name), Some(&trait_name), &method.sig, block)
         {
             out.push(finding);
         }
     }
+}
+
+/// True iff one of `attrs` is `#[cfg(test)]` (the canonical guard around
+/// unit-test modules). Anything more elaborate (`cfg(any(test, feature
+/// = "..."))` etc.) falls through and is treated as production code.
+fn has_cfg_test(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        if !list.path.is_ident("cfg") {
+            return false;
+        }
+        list.tokens.to_string().trim() == "test"
+    })
 }
 
 fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
@@ -122,7 +175,16 @@ fn qualify_name(owner: Option<&str>, method: &str) -> String {
     }
 }
 
-fn analyze_fn(owner: Option<&str>, sig: &Signature, block: &Block) -> Option<WrapperFinding> {
+fn analyze_fn(
+    owner: Option<&str>,
+    trait_name: Option<&str>,
+    sig: &Signature,
+    block: &Block,
+) -> Option<WrapperFinding> {
+    let method_name = sig.ident.to_string();
+    if is_boilerplate_trait_method(trait_name, &method_name) {
+        return None;
+    }
     let tail = single_tail_expr(block)?;
     let (core, adapters) = peel_adapters(tail);
     let (callee, call_args) = core_call(core)?;
@@ -131,12 +193,21 @@ fn analyze_fn(owner: Option<&str>, sig: &Signature, block: &Block) -> Option<Wra
         return None;
     }
     Some(WrapperFinding {
-        name: qualify_name(owner, &sig.ident.to_string()),
+        name: qualify_name(owner, &method_name),
         start_line: sig.span().start().line,
         end_line: block.span().end().line,
         callee,
         adapters,
     })
+}
+
+fn is_boilerplate_trait_method(trait_name: Option<&str>, method: &str) -> bool {
+    let Some(trait_name) = trait_name else {
+        return false;
+    };
+    BOILERPLATE_TRAIT_METHODS
+        .iter()
+        .any(|&(t, m)| t == trait_name && m == method)
 }
 
 /// Return the single tail expression of a block, ignoring an optional
@@ -485,5 +556,89 @@ mod inner {
 "#;
         let findings = run(src);
         assert_eq!(names(&findings), ["shim"]);
+    }
+
+    #[test]
+    fn skips_cfg_test_modules() {
+        // `mod tests` under `#[cfg(test)]` is full of forwarding helpers
+        // by construction; flagging them is noise, not signal.
+        let src = r#"
+fn shim(x: i32) -> i32 { core(x) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn run(s: &str) -> Vec<i32> { core_helper(s).unwrap() }
+    fn extract(s: &str) -> Vec<i32> { core_helper(s).unwrap() }
+}
+"#;
+        let findings = run(src);
+        // Only the production-side `shim` survives; `run` and `extract`
+        // are dropped because they live inside `#[cfg(test)]`.
+        assert_eq!(names(&findings), ["shim"]);
+    }
+
+    #[test]
+    fn skips_from_trait_impl() {
+        // `impl From<X> for Err` bodies are forwarding by design — the
+        // trait spec leaves no room for non-trivial logic that wouldn't
+        // belong in a constructor instead.
+        let src = r#"
+struct Err;
+impl From<std::io::Error> for Err {
+    fn from(e: std::io::Error) -> Self { Self::Io(e) }
+}
+"#;
+        // Without the boilerplate filter this would surface as a wrapper
+        // (single-tail forwarding call with passthrough arg). With it the
+        // From impl drops out entirely.
+        assert!(run(src).is_empty(), "From::from should not be flagged");
+    }
+
+    #[test]
+    fn skips_default_trait_impl() {
+        // `impl Default for T { fn default() -> Self { Self::new() } }`
+        // is the canonical pattern when `new()` is the real constructor.
+        let src = r#"
+struct T;
+impl Default for T {
+    fn default() -> Self { Self::new() }
+}
+"#;
+        assert!(
+            run(src).is_empty(),
+            "Default::default that calls Self::new should not be flagged",
+        );
+    }
+
+    #[test]
+    fn skips_deref_and_as_ref() {
+        // Deref / AsRef / Borrow are forwarding by definition.
+        let src = r#"
+struct W(String);
+impl std::ops::Deref for W {
+    type Target = String;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl AsRef<str> for W {
+    fn as_ref(&self) -> &str { self.0.as_str() }
+}
+"#;
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_skip_inherent_method_named_from() {
+        // The boilerplate filter is keyed on `(trait, method)`, so an
+        // inherent `fn from(...)` (not part of `impl From for ...`)
+        // should still be reported.
+        let src = r#"
+struct T;
+impl T {
+    fn from(s: &str) -> Self { build(s) }
+}
+"#;
+        let findings = run(src);
+        assert_eq!(names(&findings), ["T::from"]);
     }
 }
