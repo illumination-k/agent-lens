@@ -33,6 +33,19 @@ pub struct SimilarityAnalyzer {
     exclude_tests: bool,
 }
 
+/// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
+/// forwarding any `///` docs through `$attr`. Used to keep the trio of
+/// `SimilarityAnalyzer::with_*` setters from drifting out of shape.
+macro_rules! with_setter {
+    ($(#[$attr:meta])* fn $name:ident, $field:ident: $ty:ty) => {
+        $(#[$attr])*
+        pub fn $name(mut self, $field: $ty) -> Self {
+            self.$field = $field;
+            self
+        }
+    };
+}
+
 impl SimilarityAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -43,28 +56,25 @@ impl SimilarityAnalyzer {
         }
     }
 
-    /// Override the similarity threshold. Callers passing a non-default
-    /// value via `--threshold` go through here.
-    pub fn with_threshold(mut self, threshold: f64) -> Self {
-        self.threshold = threshold;
-        self
+    with_setter! {
+        /// Override the similarity threshold. Callers passing a non-default
+        /// value via `--threshold` go through here.
+        fn with_threshold, threshold: f64
     }
 
-    /// Restrict reports to pairs where at least one function intersects
-    /// an unstaged changed line in `git diff -U0`.
-    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
-        self.diff_only = diff_only;
-        self
+    with_setter! {
+        /// Restrict reports to pairs where at least one function intersects
+        /// an unstaged changed line in `git diff -U0`.
+        fn with_diff_only, diff_only: bool
     }
 
-    /// Drop test scaffolding before computing similarity. Filters out
-    /// `#[test]` / `#[rstest]` / `#[<runner>::test]` functions and items
-    /// inside `#[cfg(test)] mod` blocks. Table-driven tests otherwise
-    /// dominate the noise floor with parallel-but-distinct fixtures
-    /// that aren't refactor candidates.
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.exclude_tests = exclude_tests;
-        self
+    with_setter! {
+        /// Drop test scaffolding before computing similarity. Filters out
+        /// `#[test]` / `#[rstest]` / `#[<runner>::test]` functions and items
+        /// inside `#[cfg(test)] mod` blocks. Table-driven tests otherwise
+        /// dominate the noise floor with parallel-but-distinct fixtures
+        /// that aren't refactor candidates.
+        fn with_exclude_tests, exclude_tests: bool
     }
 
     /// Read `path`, analyze it, and produce a report in `format`.

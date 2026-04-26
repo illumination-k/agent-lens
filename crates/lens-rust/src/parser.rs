@@ -110,20 +110,11 @@ fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<FunctionDef>, opts: ExtractO
         return;
     }
     let self_name = type_path_last_ident(&item_impl.self_ty);
-    for impl_item in &item_impl.items {
-        if let ImplItem::Fn(method) = impl_item {
-            if opts.exclude_tests && is_test_function(&method.attrs) {
-                continue;
-            }
-            let qualified = qualify_name(self_name.as_deref(), &method.sig.ident.to_string());
-            out.push(FunctionDef {
-                name: qualified,
-                start_line: line_of(&method.sig),
-                end_line: line_of_end(&method.block),
-                tree: token_stream_to_tree("Block", method.block.to_token_stream()),
-            });
-        }
-    }
+    let methods = item_impl.items.iter().filter_map(|item| match item {
+        ImplItem::Fn(method) => Some((method.attrs.as_slice(), &method.sig, &method.block)),
+        _ => None,
+    });
+    push_methods(self_name.as_deref(), methods, out, opts);
 }
 
 fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
@@ -131,22 +122,35 @@ fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<FunctionDef>, opts: Extra
         return;
     }
     let trait_name = item_trait.ident.to_string();
-    for trait_item in &item_trait.items {
-        if let TraitItem::Fn(method) = trait_item {
-            let Some(block) = &method.default else {
-                continue;
-            };
-            if opts.exclude_tests && is_test_function(&method.attrs) {
-                continue;
-            }
-            let qualified = qualify_name(Some(&trait_name), &method.sig.ident.to_string());
-            out.push(FunctionDef {
-                name: qualified,
-                start_line: line_of(&method.sig),
-                end_line: line_of_end(block),
-                tree: token_stream_to_tree("Block", block.to_token_stream()),
-            });
+    let methods = item_trait.items.iter().filter_map(|item| match item {
+        TraitItem::Fn(method) => method
+            .default
+            .as_ref()
+            .map(|block| (method.attrs.as_slice(), &method.sig, block)),
+        _ => None,
+    });
+    push_methods(Some(&trait_name), methods, out, opts);
+}
+
+/// Push every `(attrs, sig, block)` triple that survives the
+/// `exclude_tests` filter as a [`FunctionDef`] qualified by `owner`
+/// (e.g. `Foo::bar` for `impl Foo`, `Tr::baz` for `trait Tr`).
+fn push_methods<'a>(
+    owner: Option<&str>,
+    methods: impl IntoIterator<Item = (&'a [syn::Attribute], &'a syn::Signature, &'a syn::Block)>,
+    out: &mut Vec<FunctionDef>,
+    opts: ExtractOptions,
+) {
+    for (attrs, sig, block) in methods {
+        if opts.exclude_tests && is_test_function(attrs) {
+            continue;
         }
+        out.push(FunctionDef {
+            name: qualify_name(owner, &sig.ident.to_string()),
+            start_line: line_of(sig),
+            end_line: line_of_end(block),
+            tree: token_stream_to_tree("Block", block.to_token_stream()),
+        });
     }
 }
 
