@@ -8,6 +8,9 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/illumination-k/agent-lens"
 
+[workspace.dependencies]
+rstest = "0.26"
+
 [workspace.lints.clippy]
 print_stdout = "deny"
 print_stderr = "deny"

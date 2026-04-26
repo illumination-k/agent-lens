@@ -170,8 +170,18 @@ fn format_markdown(report: &Report<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::io::Write;
     use std::path::PathBuf;
+
+    /// Two near-identical function bodies — guaranteed to score above any
+    /// modest threshold. Used by the report-rendering and
+    /// threshold-suppression tests so a single source string drives both
+    /// success-path checks.
+    const PAIRED_FUNCTIONS: &str = r#"
+fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
+fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
+"#;
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
@@ -180,19 +190,8 @@ mod tests {
         path
     }
 
-    #[test]
-    fn json_report_lists_pairs_above_threshold() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = r#"
-fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
-fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
-"#;
-        let file = write_file(dir.path(), "lib.rs", src);
-        let json = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    fn assert_json_pair_report(out: &str) {
+        let parsed: serde_json::Value = serde_json::from_str(out).unwrap();
         assert_eq!(parsed["function_count"], 2);
         assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
         let pairs = parsed["pairs"].as_array().unwrap();
@@ -209,23 +208,30 @@ fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
         assert!(names.contains(&"beta"));
     }
 
-    #[test]
-    fn markdown_report_renders_pair_lines() {
+    fn assert_markdown_pair_report(out: &str) {
+        assert!(out.contains("Similarity report"));
+        assert!(out.contains("similar pair"));
+        assert!(out.contains("alpha"));
+        assert!(out.contains("beta"));
+        assert!(out.contains("% similar"));
+    }
+
+    /// Both output formats must surface the matched function names; only the
+    /// shape of the rendered report differs.
+    #[rstest]
+    #[case::json(OutputFormat::Json, assert_json_pair_report)]
+    #[case::markdown(OutputFormat::Md, assert_markdown_pair_report)]
+    fn report_renders_paired_functions(
+        #[case] format: OutputFormat,
+        #[case] assert_report: fn(&str),
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let src = r#"
-fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
-fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
-"#;
-        let file = write_file(dir.path(), "lib.rs", src);
-        let md = SimilarityAnalyzer::new()
+        let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
+        let out = SimilarityAnalyzer::new()
             .with_threshold(0.5)
-            .analyze(&file, OutputFormat::Md)
+            .analyze(&file, format)
             .unwrap();
-        assert!(md.contains("Similarity report"));
-        assert!(md.contains("similar pair"));
-        assert!(md.contains("alpha"));
-        assert!(md.contains("beta"));
-        assert!(md.contains("% similar"));
+        assert_report(&out);
     }
 
     #[test]
@@ -253,11 +259,7 @@ fn beta(xs: &[i32]) -> i32 {
     #[test]
     fn threshold_override_suppresses_all_pairs() {
         let dir = tempfile::tempdir().unwrap();
-        let src = r#"
-fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }
-fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
-"#;
-        let file = write_file(dir.path(), "lib.rs", src);
+        let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
         let json = SimilarityAnalyzer::new()
             .with_threshold(1.5)
             .analyze(&file, OutputFormat::Json)
@@ -266,34 +268,43 @@ fn beta(x: i32)  -> i32 { let y = x + 1; let z = y * 2; z }
         assert_eq!(parsed["pair_count"], 0);
     }
 
-    #[test]
-    fn unknown_extension_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = write_file(dir.path(), "notes.txt", "hello");
-        let err = SimilarityAnalyzer::new()
-            .analyze(&file, OutputFormat::Json)
-            .unwrap_err();
-        assert!(matches!(err, AnalyzerError::UnsupportedExtension { .. }));
+    fn setup_unsupported_extension(dir: &Path) -> PathBuf {
+        write_file(dir, "notes.txt", "hello")
     }
 
-    #[test]
-    fn missing_file_surfaces_io_error() {
-        let err = SimilarityAnalyzer::new()
-            .analyze(
-                Path::new("/definitely/does/not/exist.rs"),
-                OutputFormat::Json,
-            )
-            .unwrap_err();
-        assert!(matches!(err, AnalyzerError::Io { .. }));
+    fn setup_missing_file(_dir: &Path) -> PathBuf {
+        PathBuf::from("/definitely/does/not/exist.rs")
     }
 
-    #[test]
-    fn invalid_rust_surfaces_parse_error() {
+    fn setup_invalid_rust(dir: &Path) -> PathBuf {
+        write_file(dir, "broken.rs", "fn ??? {")
+    }
+
+    /// All recoverable failure modes route through `AnalyzerError`. Rather
+    /// than spinning up a dedicated test per variant, drive the same
+    /// `analyze` call and assert on the matching enum arm.
+    #[rstest]
+    #[case::unsupported_extension(
+        setup_unsupported_extension,
+        |e: &AnalyzerError| matches!(e, AnalyzerError::UnsupportedExtension { .. }),
+    )]
+    #[case::missing_file(
+        setup_missing_file,
+        |e: &AnalyzerError| matches!(e, AnalyzerError::Io { .. }),
+    )]
+    #[case::parse_failure(
+        setup_invalid_rust,
+        |e: &AnalyzerError| matches!(e, AnalyzerError::Parse(_)),
+    )]
+    fn analyze_surfaces_error_variants(
+        #[case] setup: fn(&Path) -> PathBuf,
+        #[case] matches_expected: fn(&AnalyzerError) -> bool,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let file = write_file(dir.path(), "broken.rs", "fn ??? {");
+        let path = setup(dir.path());
         let err = SimilarityAnalyzer::new()
-            .analyze(&file, OutputFormat::Json)
+            .analyze(&path, OutputFormat::Json)
             .unwrap_err();
-        assert!(matches!(err, AnalyzerError::Parse(_)));
+        assert!(matches_expected(&err), "unexpected error variant: {err}");
     }
 }
