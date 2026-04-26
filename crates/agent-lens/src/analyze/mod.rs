@@ -22,7 +22,10 @@ pub use complexity::ComplexityAnalyzer;
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::{CouplingAnalyzer, CouplingAnalyzerError};
 pub use hotspot::{HotspotAnalyzer, HotspotError};
-pub use similarity::{DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer};
+pub use similarity::{
+    DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
+    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer,
+};
 pub use wrapper::WrapperAnalyzer;
 
 /// Output format shared across analyzers.

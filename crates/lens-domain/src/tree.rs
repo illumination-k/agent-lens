@@ -9,6 +9,23 @@
 /// The tree is built bottom-up by language-specific parsers. Nodes own their
 /// children directly; no shared ownership is needed because we only read
 /// trees during comparison.
+///
+/// # Examples
+///
+/// ```
+/// use lens_domain::TreeNode;
+///
+/// let tree = TreeNode::with_children(
+///     "Root",
+///     "",
+///     vec![
+///         TreeNode::leaf("A"),
+///         TreeNode::with_children("B", "", vec![TreeNode::leaf("C")]),
+///     ],
+/// );
+/// assert_eq!(tree.subtree_size(), 4);
+/// assert_eq!(tree.children.len(), 2);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeNode {
     pub label: String,
