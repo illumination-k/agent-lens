@@ -22,6 +22,10 @@
 //!   Henry-Kafura IFC / Inter-module coupling / Instability / dependency
 //!   cycles. Adapters produce [`CouplingEdge`]s; this module folds them
 //!   into the report.
+//! * [`context_span`] — for each module, the transitive closure of its
+//!   outgoing dependencies. Reuses the [`CouplingEdge`] graph and
+//!   answers "how many other modules must I read to fully understand
+//!   this one".
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
@@ -35,6 +39,7 @@
 pub mod apted;
 pub mod cohesion;
 pub mod complexity;
+pub mod context_span;
 pub mod coupling;
 pub mod function;
 pub mod hotspot;
@@ -47,6 +52,7 @@ pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };
 pub use complexity::{FunctionComplexity, HalsteadCounts};
+pub use context_span::{ContextSpanReport, ModuleContextSpan, compute_context_spans};
 pub use coupling::{
     CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,
     PairCoupling, compute_report,
