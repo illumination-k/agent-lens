@@ -335,46 +335,93 @@ impl AnalyzeCommand {
                 path,
                 format,
                 diff_only,
-            } => CohesionAnalyzer::new()
-                .with_diff_only(diff_only)
-                .analyze(&path, format)?,
+            } => Self::run_cohesion(path, format, diff_only)?,
             Self::Complexity {
                 path,
                 format,
                 diff_only,
-            } => ComplexityAnalyzer::new()
-                .with_diff_only(diff_only)
-                .analyze(&path, format)?,
-            Self::Coupling { path, format } => CouplingAnalyzer::new().analyze(&path, format)?,
+            } => Self::run_complexity(path, format, diff_only)?,
+            Self::Coupling { path, format } => Self::run_coupling(path, format)?,
             Self::Hotspot {
                 path,
                 format,
                 since,
                 top,
-            } => {
-                let mut analyzer = HotspotAnalyzer::new().with_top(top);
-                if let Some(s) = since {
-                    analyzer = analyzer.with_since(s);
-                }
-                analyzer.analyze(&path, format)?
-            }
+            } => Self::run_hotspot(path, format, since, top)?,
             Self::Similarity {
                 path,
                 format,
                 diff_only,
                 threshold,
-            } => SimilarityAnalyzer::new()
-                .with_threshold(threshold)
-                .with_diff_only(diff_only)
-                .analyze(&path, format)?,
+            } => Self::run_similarity(path, format, diff_only, threshold)?,
             Self::Wrapper {
                 path,
                 format,
                 diff_only,
-            } => WrapperAnalyzer::new()
-                .with_diff_only(diff_only)
-                .analyze(&path, format)?,
+            } => Self::run_wrapper(path, format, diff_only)?,
         })
+    }
+
+    fn run_cohesion(
+        path: PathBuf,
+        format: OutputFormat,
+        diff_only: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(CohesionAnalyzer::new()
+            .with_diff_only(diff_only)
+            .analyze(&path, format)?)
+    }
+
+    fn run_complexity(
+        path: PathBuf,
+        format: OutputFormat,
+        diff_only: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(ComplexityAnalyzer::new()
+            .with_diff_only(diff_only)
+            .analyze(&path, format)?)
+    }
+
+    fn run_coupling(
+        path: PathBuf,
+        format: OutputFormat,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(CouplingAnalyzer::new().analyze(&path, format)?)
+    }
+
+    fn run_hotspot(
+        path: PathBuf,
+        format: OutputFormat,
+        since: Option<String>,
+        top: Option<usize>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let analyzer = match since {
+            Some(s) => HotspotAnalyzer::new().with_top(top).with_since(s),
+            None => HotspotAnalyzer::new().with_top(top),
+        };
+        Ok(analyzer.analyze(&path, format)?)
+    }
+
+    fn run_similarity(
+        path: PathBuf,
+        format: OutputFormat,
+        diff_only: bool,
+        threshold: f64,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(SimilarityAnalyzer::new()
+            .with_threshold(threshold)
+            .with_diff_only(diff_only)
+            .analyze(&path, format)?)
+    }
+
+    fn run_wrapper(
+        path: PathBuf,
+        format: OutputFormat,
+        diff_only: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(WrapperAnalyzer::new()
+            .with_diff_only(diff_only)
+            .analyze(&path, format)?)
     }
 }
 
@@ -403,21 +450,18 @@ fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let path = setup::resolve_path(args.scope.into(), &cwd)?;
     let plan = setup::plan(path)?;
-    let wrote = if args.dry_run {
-        info!(path = %plan.path.display(), "dry-run: leaving settings.json untouched");
-        false
-    } else if plan.changed() {
-        setup::apply(&plan)?;
-        info!(
-            path = %plan.path.display(),
-            added = plan.added_commands.len(),
-            "wrote settings.json",
-        );
-        true
-    } else {
-        info!(path = %plan.path.display(), "settings.json already configured; nothing to do");
-        false
-    };
+    let wrote = apply_setup_plan(
+        args.dry_run,
+        plan.changed(),
+        SetupApplyContext {
+            path: &plan.path,
+            added_commands: plan.added_commands.len(),
+            dry_run_message: "dry-run: leaving settings.json untouched",
+            wrote_message: "wrote settings.json",
+            unchanged_message: "settings.json already configured; nothing to do",
+        },
+        || setup::apply(&plan).map_err(Into::into),
+    )?;
     write_stdout_json(&SetupSummary {
         path: &plan.path,
         wrote,
@@ -431,27 +475,58 @@ fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn std::error::
     let project_root = git_top_level(&cwd).unwrap_or(cwd);
     let path = codex_setup::resolve_path(args.scope.into(), &project_root)?;
     let plan = codex_setup::plan(path)?;
-    let wrote = if args.dry_run {
-        info!(path = %plan.path.display(), "dry-run: leaving config.toml untouched");
-        false
-    } else if plan.changed() {
-        codex_setup::apply(&plan)?;
-        info!(
-            path = %plan.path.display(),
-            added = plan.added_commands.len(),
-            "wrote config.toml",
-        );
-        true
-    } else {
-        info!(path = %plan.path.display(), "config.toml already configured; nothing to do");
-        false
-    };
+    let wrote = apply_setup_plan(
+        args.dry_run,
+        plan.changed(),
+        SetupApplyContext {
+            path: &plan.path,
+            added_commands: plan.added_commands.len(),
+            dry_run_message: "dry-run: leaving config.toml untouched",
+            wrote_message: "wrote config.toml",
+            unchanged_message: "config.toml already configured; nothing to do",
+        },
+        || codex_setup::apply(&plan).map_err(Into::into),
+    )?;
     write_stdout_json(&CodexSetupSummary {
         path: &plan.path,
         wrote,
         added_commands: &plan.added_commands,
         config: &plan.after,
     })
+}
+
+fn apply_setup_plan(
+    dry_run: bool,
+    changed: bool,
+    context: SetupApplyContext<'_>,
+    apply: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if dry_run {
+        info!(path = %context.path.display(), "{}", context.dry_run_message);
+        return Ok(false);
+    }
+
+    if !changed {
+        info!(path = %context.path.display(), "{}", context.unchanged_message);
+        return Ok(false);
+    }
+
+    apply()?;
+    info!(
+        path = %context.path.display(),
+        added = context.added_commands,
+        "{}",
+        context.wrote_message,
+    );
+    Ok(true)
+}
+
+struct SetupApplyContext<'a> {
+    path: &'a Path,
+    added_commands: usize,
+    dry_run_message: &'static str,
+    wrote_message: &'static str,
+    unchanged_message: &'static str,
 }
 
 fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
