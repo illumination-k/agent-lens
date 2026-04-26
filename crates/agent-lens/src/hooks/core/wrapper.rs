@@ -46,6 +46,7 @@ impl WrapperCore {
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, HookError> {
     match lang {
         SourceLang::Rust => find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e))),
+        SourceLang::TypeScript => Ok(Vec::new()),
     }
 }
 

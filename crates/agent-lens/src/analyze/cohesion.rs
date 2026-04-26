@@ -32,6 +32,11 @@ impl CohesionAnalyzer {
         let units = match lang {
             SourceLang::Rust => lens_rust::extract_cohesion_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::TypeScript => {
+                return Err(AnalyzerError::UnsupportedExtension {
+                    path: path.to_path_buf(),
+                });
+            }
         };
         let report = Report::new(path, &units);
         match format {

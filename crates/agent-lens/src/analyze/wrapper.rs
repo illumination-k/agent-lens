@@ -45,6 +45,7 @@ impl WrapperAnalyzer {
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, AnalyzerError> {
     match lang {
         SourceLang::Rust => find_wrappers(source).map_err(|e| AnalyzerError::Parse(Box::new(e))),
+        SourceLang::TypeScript => Ok(Vec::new()),
     }
 }
 

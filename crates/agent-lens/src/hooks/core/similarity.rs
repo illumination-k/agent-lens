@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
 use lens_rust::RustParser;
+use lens_ts::TypeScriptParser;
 
 use crate::analyze::SourceLang;
 use crate::hooks::core::{EditedSource, HookError};
@@ -70,6 +71,12 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>,
     match lang {
         SourceLang::Rust => {
             let mut parser = RustParser::new();
+            parser
+                .extract_functions(source)
+                .map_err(|e| HookError::Parse(Box::new(e)))
+        }
+        SourceLang::TypeScript => {
+            let mut parser = TypeScriptParser::new();
             parser
                 .extract_functions(source)
                 .map_err(|e| HookError::Parse(Box::new(e)))

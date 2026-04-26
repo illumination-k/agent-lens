@@ -13,6 +13,7 @@ use std::path::Path;
 
 use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
 use lens_rust::RustParser;
+use lens_ts::TypeScriptParser;
 use serde::Serialize;
 
 use super::{AnalyzerError, OutputFormat, SourceLang, read_source};
@@ -71,6 +72,12 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>,
     match lang {
         SourceLang::Rust => {
             let mut parser = RustParser::new();
+            parser
+                .extract_functions(source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+        }
+        SourceLang::TypeScript => {
+            let mut parser = TypeScriptParser::new();
             parser
                 .extract_functions(source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))
@@ -266,6 +273,30 @@ fn beta(xs: &[i32]) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["pair_count"], 0);
+    }
+
+    #[test]
+    fn typescript_file_is_analyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+function alpha(xs: number[]): number {
+    let total = 0;
+    for (const x of xs) { total += x; }
+    return total;
+}
+function beta(ys: number[]): number {
+    let sum = 0;
+    for (const y of ys) { sum += y; }
+    return sum;
+}
+"#;
+        let file = write_file(dir.path(), "lib.ts", src);
+        let out = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
     }
 
     fn setup_unsupported_extension(dir: &Path) -> PathBuf {

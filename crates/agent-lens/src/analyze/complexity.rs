@@ -34,6 +34,8 @@ impl ComplexityAnalyzer {
         let functions = match lang {
             SourceLang::Rust => lens_rust::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::TypeScript => lens_ts::extract_complexity_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
         let report = Report::new(path, &functions);
         match format {
@@ -354,6 +356,24 @@ fn dispatch(n: i32) -> i32 {
             .analyze(&file, OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, AnalyzerError::Parse(_)));
+    }
+
+    #[test]
+    fn typescript_file_is_analyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+function f(n: number): number {
+  if (n > 0) { return 1; }
+  return 0;
+}
+"#;
+        let file = write_file(dir.path(), "logic.ts", src);
+        let json = ComplexityAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 1);
+        assert_eq!(parsed["summary"]["cyclomatic_max"], 2);
     }
 
     #[test]

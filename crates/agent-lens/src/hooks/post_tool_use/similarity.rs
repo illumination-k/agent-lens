@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn ignores_unknown_extensions() {
-        for ext in ["README.md", "notes.txt", "script.py", "app.ts"] {
+        for ext in ["README.md", "notes.txt", "script.py"] {
             assert_no_op("Write", json!({ "file_path": ext }));
         }
     }
@@ -153,6 +153,28 @@ mod tests {
             "message should describe similarity: {msg}"
         );
         assert!(out.decision.is_none());
+    }
+
+    #[test]
+    fn typescript_extension_triggers_ts_parser() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"
+            function alpha(xs: number[]): number { let y = 0; for (const x of xs) { y += x; } return y; }
+            function beta(xs: number[]): number { let y = 0; for (const x of xs) { y += x; } return y; }
+        "#;
+        let file = write_file(dir.path(), "lib.ts", source);
+
+        let hook = SimilarityHook::new().with_threshold(0.5);
+        let input = PostToolUseInput {
+            context: ctx(dir.path().to_path_buf()),
+            tool_name: "Write".into(),
+            tool_input: json!({"file_path": file.file_name().unwrap().to_str().unwrap()}),
+            tool_response: json!({"success": true}),
+        };
+        let out = hook.handle(input).unwrap();
+        let msg = out.common.system_message.expect("expected a report");
+        assert!(msg.contains("alpha"), "message should mention alpha: {msg}");
+        assert!(msg.contains("beta"), "message should mention beta: {msg}");
     }
 
     #[test]
