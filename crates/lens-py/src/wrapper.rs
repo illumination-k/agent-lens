@@ -569,4 +569,81 @@ def sample(x):
         let src = "def a(x):\n    return b(x, mode='r')\n";
         assert!(run(src).is_empty());
     }
+
+    #[test]
+    fn method_call_with_positional_arg_is_not_treated_as_trivial_adapter() {
+        // `is_trivial_method_call` rejects calls that have *either*
+        // positional args or keyword args. If the `||` were silently
+        // tightened to `&&` the method `.encode("utf-8")` would slip
+        // through (positional only, no kwargs) and `a` would be
+        // reported as a wrapper with adapter `.encode()`.
+        let src = "def a(x):\n    return b(x).encode(\"utf-8\")\n";
+        assert!(
+            run(src).is_empty(),
+            ".encode(arg) is not a trivial nullary adapter and a should not be flagged",
+        );
+    }
+
+    #[test]
+    fn method_call_with_keyword_arg_is_not_treated_as_trivial_adapter() {
+        // Mirror of the positional-arg case; keyword-only args must
+        // also disqualify a call from the trivial-adapter list.
+        let src = "def a(x):\n    return b(x).encode(encoding=\"utf-8\")\n";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn unary_builtin_with_extra_positional_arg_is_not_treated_as_adapter() {
+        // `is_trivial_unary_builtin` rejects unless arity is exactly
+        // 1 *and* keywords are empty. Tightening the `||` to `&&`
+        // would let a 2-arg `int(x, base)` slip through and turn
+        // `def a(x): return int(x, 16)` into a flagged wrapper.
+        let src = "def a(x):\n    return int(x, 16)\n";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn unary_builtin_with_keyword_arg_is_not_treated_as_adapter() {
+        // Same gate, keyword-arg side.
+        let src = "def a(x):\n    return int(x, base=16)\n";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn vararg_alongside_passthrough_param_is_rejected() {
+        // `def a(x, *xs): return b(x)` looks like a passthrough on
+        // `x`, but the presence of `*xs` means the function is not a
+        // pure forwarder — extra arguments are silently dropped.
+        // `collect_param_idents` rejects on either `vararg` or
+        // `kwarg`; tightening that `||` to `&&` would let `*xs`
+        // alone slip through and incorrectly report `a`.
+        let src = "def a(x, *xs):\n    return b(x)\n";
+        assert!(
+            run(src).is_empty(),
+            "vararg-bearing function must not be reported as a wrapper",
+        );
+    }
+
+    #[test]
+    fn kwarg_alongside_passthrough_param_is_rejected() {
+        // Mirror of the vararg case for `**kw`.
+        let src = "def a(x, **kw):\n    return b(x)\n";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn kwonly_alongside_passthrough_param_is_rejected() {
+        // `collect_param_idents` rejects on either `kwonlyargs` or
+        // `posonlyargs`; tightening that `||` to `&&` would let a
+        // kwonly-only signature slip through.
+        let src = "def a(x, *, y):\n    return b(x)\n";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn posonly_alongside_passthrough_param_is_rejected() {
+        // Mirror of the kwonly case for positional-only params.
+        let src = "def a(x, /, y):\n    return b(y)\n";
+        assert!(run(src).is_empty());
+    }
 }

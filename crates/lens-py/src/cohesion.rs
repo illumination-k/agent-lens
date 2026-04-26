@@ -292,6 +292,53 @@ class Foo:
     }
 
     #[test]
+    fn qualified_staticmethod_decorator_is_recognised() {
+        // `@some_alias.staticmethod` is the `Expr::Attribute` arm of
+        // `decorator_name`. If that arm is ever deleted, the alias
+        // path is no longer recognised and the decorated method
+        // sneaks back into the cohesion unit.
+        let src = "
+class Foo:
+    @abc.staticmethod
+    def make():
+        return Foo()
+    def get(self):
+        return self.n
+    def set(self, n):
+        self.n = n
+";
+        let u = unit(src);
+        assert_eq!(u.methods.len(), 2);
+        for m in &u.methods {
+            assert_ne!(m.name, "make");
+        }
+    }
+
+    #[test]
+    fn called_decorator_is_recognised_via_callee() {
+        // `@staticmethod()` is the `Expr::Call` arm of
+        // `decorator_name`: it unwraps to the callee `staticmethod`
+        // before checking the leaf name. Deleting that arm would
+        // leave the decoration unrecognised and the method would
+        // appear in the cohesion unit.
+        let src = "
+class Foo:
+    @staticmethod()
+    def make():
+        return Foo()
+    def get(self):
+        return self.n
+    def set(self, n):
+        self.n = n
+";
+        let u = unit(src);
+        assert_eq!(u.methods.len(), 2);
+        for m in &u.methods {
+            assert_ne!(m.name, "make");
+        }
+    }
+
+    #[test]
     fn classmethods_are_excluded() {
         let src = "
 class Foo:

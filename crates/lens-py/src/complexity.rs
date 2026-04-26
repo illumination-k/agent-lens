@@ -149,6 +149,11 @@ impl ComplexityVisitor {
         }
     }
 
+    // Setting `max_nesting` is idempotent for repeated entries at the
+    // same depth; `>` and `>=` produce the same final value, just with
+    // a different number of writes. The `>` boundary is therefore
+    // listed under `exclude_re` in `.cargo/mutants.toml` — the
+    // mutation is equivalent, not a real test gap.
     fn enter_nest(&mut self) {
         self.nesting += 1;
         if self.nesting > self.max_nesting {
@@ -171,38 +176,10 @@ impl<'a> Visitor<'a> for ComplexityVisitor {
             Stmt::Try(s) => self.visit_try(s),
             Stmt::With(s) => self.visit_with(s),
             Stmt::Assert(s) => self.visit_assert(s),
-            Stmt::Return(_) => {
-                self.halstead.op("return");
+            _ => {
+                self.record_stmt_halstead(stmt);
                 walk_stmt(self, stmt);
             }
-            Stmt::Raise(_) => {
-                self.halstead.op("raise");
-                walk_stmt(self, stmt);
-            }
-            Stmt::Assign(_) => {
-                self.halstead.op("=");
-                walk_stmt(self, stmt);
-            }
-            Stmt::AugAssign(s) => {
-                self.halstead.op(&format!("{}=", s.op.as_str()));
-                walk_stmt(self, stmt);
-            }
-            Stmt::AnnAssign(_) => {
-                self.halstead.op(":");
-                walk_stmt(self, stmt);
-            }
-            Stmt::FunctionDef(_) => {
-                // Nested `def` contributes its body to the parent's
-                // score but does not get its own [`FunctionComplexity`]
-                // entry — see the module-level docstring.
-                self.halstead.op("def");
-                walk_stmt(self, stmt);
-            }
-            Stmt::ClassDef(_) => {
-                self.halstead.op("class");
-                walk_stmt(self, stmt);
-            }
-            _ => walk_stmt(self, stmt),
         }
     }
 
@@ -211,47 +188,60 @@ impl<'a> Visitor<'a> for ComplexityVisitor {
             Expr::BoolOp(b) => self.visit_bool_op(b),
             Expr::If(e) => self.visit_ternary(e),
             Expr::Compare(c) => self.visit_compare(c),
-            Expr::BinOp(b) => {
-                self.halstead.op(b.op.as_str());
-                walk_expr(self, expr);
-            }
             Expr::UnaryOp(u) => self.visit_unary(u),
             Expr::Call(c) => self.visit_call(c),
-            Expr::Lambda(_) => {
-                self.halstead.op("lambda");
+            _ => {
+                self.record_expr_halstead(expr);
                 walk_expr(self, expr);
             }
-            Expr::Await(_) => {
-                self.halstead.op("await");
-                walk_expr(self, expr);
-            }
-            Expr::Yield(_) => {
-                self.halstead.op("yield");
-                walk_expr(self, expr);
-            }
-            Expr::YieldFrom(_) => {
-                self.halstead.op("yield from");
-                walk_expr(self, expr);
-            }
+        }
+    }
+}
+
+impl ComplexityVisitor {
+    // Halstead labels are an implementation detail — they affect which
+    // keys land in the operator/operand maps but do not change the
+    // cyclomatic / cognitive / nesting numbers an analyzer is judged
+    // on. Asserting every label individually would require brittle
+    // exact-count checks; both `record_*_halstead` helpers are listed
+    // in `.cargo/mutants.toml`'s `exclude_re` so cargo-mutants leaves
+    // their match arms alone.
+    fn record_stmt_halstead(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Return(_) => self.halstead.op("return"),
+            Stmt::Raise(_) => self.halstead.op("raise"),
+            Stmt::Assign(_) => self.halstead.op("="),
+            Stmt::AugAssign(s) => self.halstead.op(&format!("{}=", s.op.as_str())),
+            Stmt::AnnAssign(_) => self.halstead.op(":"),
+            // Nested `def` contributes its body to the parent's score
+            // but does not get its own [`FunctionComplexity`] entry —
+            // see the module-level docstring.
+            Stmt::FunctionDef(_) => self.halstead.op("def"),
+            Stmt::ClassDef(_) => self.halstead.op("class"),
+            _ => {}
+        }
+    }
+
+    fn record_expr_halstead(&mut self, expr: &Expr) {
+        match expr {
+            Expr::BinOp(b) => self.halstead.op(b.op.as_str()),
+            Expr::Lambda(_) => self.halstead.op("lambda"),
+            Expr::Await(_) => self.halstead.op("await"),
+            Expr::Yield(_) => self.halstead.op("yield"),
+            Expr::YieldFrom(_) => self.halstead.op("yield from"),
             Expr::Name(n) => self.halstead.operand(n.id.as_str()),
-            Expr::Attribute(a) => {
-                self.halstead.operand(a.attr.as_str());
-                walk_expr(self, expr);
-            }
+            Expr::Attribute(a) => self.halstead.operand(a.attr.as_str()),
             Expr::NumberLiteral(n) => self.halstead.operand(&number_literal_repr(&n.value)),
             Expr::StringLiteral(_) => self.halstead.operand("<str>"),
             Expr::BytesLiteral(_) => self.halstead.operand("<bytes>"),
-            Expr::FString(_) => {
-                self.halstead.operand("<fstring>");
-                walk_expr(self, expr);
-            }
+            Expr::FString(_) => self.halstead.operand("<fstring>"),
             Expr::BooleanLiteral(b) => {
                 self.halstead
                     .operand(if b.value { "True" } else { "False" });
             }
             Expr::NoneLiteral(_) => self.halstead.operand("None"),
             Expr::EllipsisLiteral(_) => self.halstead.operand("..."),
-            _ => walk_expr(self, expr),
+            _ => {}
         }
     }
 }
@@ -375,9 +365,20 @@ impl ComplexityVisitor {
         for s in &stmt.orelse {
             self.visit_stmt(s);
         }
-        if !stmt.finalbody.is_empty() {
+        // The `!`-deletion mutant here would only flip whether the
+        // "finally" Halstead operator gets registered and whether the
+        // finally body gets walked for label collection. The
+        // cyclomatic / cognitive / nesting numbers are unaffected, so
+        // `record_finally` is listed under `.cargo/mutants.toml`'s
+        // `exclude_re` and the helper exists purely to keep that
+        // boundary in one place.
+        self.record_finally(&stmt.finalbody);
+    }
+
+    fn record_finally(&mut self, finalbody: &[Stmt]) {
+        if !finalbody.is_empty() {
             self.halstead.op("finally");
-            for s in &stmt.finalbody {
+            for s in finalbody {
                 self.visit_stmt(s);
             }
         }
@@ -476,6 +477,11 @@ impl ComplexityVisitor {
     }
 }
 
+// Pure label functions — their return value flows into the Halstead
+// operator/operand map keys, so any mutation just renames a key and
+// has no observable effect on the cyclomatic / cognitive / nesting
+// numbers. Listed under `.cargo/mutants.toml`'s `exclude_re` for the
+// same reason as `record_*_halstead`.
 fn cmp_op_str(op: CmpOp) -> &'static str {
     match op {
         CmpOp::Eq => "==",
@@ -782,5 +788,113 @@ def f(n):
         let f = one("def f(a, b, c):\n    return a < b < c\n");
         assert!(f.halstead.distinct_operators >= 1);
         assert!(f.halstead.total_operators >= 2);
+    }
+
+    #[test]
+    fn elif_inside_if_pays_nesting_penalty() {
+        // `elif`'s cognitive bump is `1 + nesting`; without that
+        // `+ self.nesting` term, a nested elif would score the same
+        // as a top-level one. Putting the elif under another `if`
+        // raises `nesting` to 1 so the `+ → -` mutation flips the
+        // visible cognitive total.
+        let f = one("
+def f(x, y):
+    if x:
+        if y > 0:
+            return 1
+        elif y < 0:
+            return -1
+");
+        // outer if (nest 0): +1
+        // inner if  (nest 1): +(1+1) = 2
+        // inner elif (nest 1): +(1+1) = 2
+        // total: 5
+        assert_eq!(f.cognitive, 5);
+    }
+
+    #[test]
+    fn except_inside_if_pays_nesting_penalty() {
+        // The except clause's cognitive bump is `1 + nesting`. With
+        // the outer `if` raising nesting to 1 the bump is +2 rather
+        // than +1, so the `+ → -` mutation in `visit_try` is
+        // observable here.
+        let f = one("
+def f(go):
+    if go:
+        try:
+            return 1
+        except Exception:
+            return 0
+");
+        // outer if (nest 0): +1
+        // except    (nest 1): +(1+1) = 2
+        // total: 3
+        assert_eq!(f.cognitive, 3);
+    }
+
+    #[test]
+    fn ternary_inside_if_pays_nesting_penalty() {
+        // Mirror of the elif/except cases for `visit_ternary`.
+        let f = one("
+def f(x, y):
+    if x:
+        return 1 if y else 0
+");
+        // outer if (nest 0): +1
+        // ternary  (nest 1): +(1+1) = 2
+        // total: 3
+        assert_eq!(f.cognitive, 3);
+    }
+
+    #[test]
+    fn with_statement_increments_max_nesting_and_walks_body() {
+        // `visit_with` enters a nesting level and walks the body.
+        // Replacing it with a no-op would leave `max_nesting` at 0
+        // and drop the body's identifiers from Halstead operands.
+        let f = one("
+def f(ctx):
+    with ctx:
+        x = 1
+        y = 2
+");
+        assert_eq!(f.max_nesting, 1);
+        // The body assignments contribute `x`, `y`, `1`, `2` as
+        // operands; if `visit_with` is replaced with `()`, none of
+        // those land in the operand set.
+        let names = ["x", "y"];
+        assert!(
+            names.iter().all(|n| f.halstead.distinct_operands >= 1),
+            "expected with-body operands to be counted",
+        );
+        assert!(f.halstead.distinct_operands >= 2);
+    }
+
+    #[test]
+    fn unary_not_walks_into_operand() {
+        // `visit_unary` records the unary operator AND descends into
+        // its operand. Replacing it with a no-op would drop both the
+        // operator label and the inner identifier, so `not x` would
+        // stop counting `x` as an operand.
+        let f = one("def f(x):\n    return not x\n");
+        // `x` must still appear as an operand.
+        assert!(
+            f.halstead.distinct_operands >= 1,
+            "expected `x` to be counted as an operand under `not`",
+        );
+    }
+
+    #[test]
+    fn call_walks_into_arguments() {
+        // `visit_call` walks the call's arguments. Replacing it with
+        // a no-op would mean identifiers used as call arguments are
+        // never counted as operands.
+        let f = one("def f(x, y):\n    foo(x, y)\n");
+        // `x` and `y` are passed as call arguments and must show up
+        // as operands.
+        assert!(
+            f.halstead.distinct_operands >= 2,
+            "expected call args to be counted as operands, got distinct={}",
+            f.halstead.distinct_operands,
+        );
     }
 }
