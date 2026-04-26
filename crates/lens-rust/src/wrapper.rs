@@ -8,6 +8,7 @@
 //! transformations, literal arguments) keep the function out of the
 //! report.
 
+use lens_domain::WrapperFinding;
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -18,17 +19,6 @@ use syn::{
 
 use crate::attrs::has_cfg_test;
 use crate::parser::RustParseError;
-
-/// One thin-wrapper finding: a function that just forwards to `callee`
-/// (optionally through a chain of trivial `adapters`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WrapperFinding {
-    pub name: String,
-    pub start_line: usize,
-    pub end_line: usize,
-    pub callee: String,
-    pub adapters: Vec<String>,
-}
 
 /// Method names with no arguments that we treat as "no semantic content":
 /// type/borrow coercions and single-call result unwrapping.

@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_rust::{WrapperFinding, find_wrappers};
+use lens_domain::WrapperFinding;
 use serde::Serialize;
 
 use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
@@ -61,7 +61,12 @@ fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
 
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, AnalyzerError> {
     match lang {
-        SourceLang::Rust => find_wrappers(source).map_err(|e| AnalyzerError::Parse(Box::new(e))),
+        SourceLang::Rust => {
+            lens_rust::find_wrappers(source).map_err(|e| AnalyzerError::Parse(Box::new(e)))
+        }
+        SourceLang::TypeScript => {
+            lens_ts::find_wrappers(source).map_err(|e| AnalyzerError::Parse(Box::new(e)))
+        }
     }
 }
 

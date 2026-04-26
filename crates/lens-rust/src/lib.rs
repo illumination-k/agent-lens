@@ -19,5 +19,6 @@ mod wrapper;
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use coupling::{CouplingError, CrateModule, build_module_tree, extract_edges};
+pub use lens_domain::WrapperFinding;
 pub use parser::{RustParseError, RustParser, extract_functions_excluding_tests};
-pub use wrapper::{WrapperFinding, find_wrappers};
+pub use wrapper::find_wrappers;

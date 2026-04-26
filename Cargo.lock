@@ -18,6 +18,7 @@ dependencies = [
  "clap",
  "lens-domain",
  "lens-rust",
+ "lens-ts",
  "rstest",
  "serde",
  "serde_json",
