@@ -40,7 +40,15 @@ impl WrapperAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let (lang, source) = read_source(path)?;
-        let mut findings = run_wrappers(lang, &source)?;
+        let mut findings = run_wrappers(lang, &source).map_err(|e| match e {
+            // Python doesn't have wrapper detection yet; surface the
+            // standard "this analyzer can't take that file" error so
+            // the user sees the same shape they'd get for a `.txt`.
+            WrapperRunError::UnsupportedLang => AnalyzerError::UnsupportedExtension {
+                path: path.to_path_buf(),
+            },
+            WrapperRunError::Parse(inner) => AnalyzerError::Parse(inner),
+        })?;
         if self.diff_only {
             let changed = changed_line_ranges(path);
             findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
@@ -59,14 +67,20 @@ fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
     ranges.iter().any(|r| r.overlaps(start, end))
 }
 
-fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, AnalyzerError> {
+enum WrapperRunError {
+    UnsupportedLang,
+    Parse(Box<dyn std::error::Error + Send + Sync>),
+}
+
+fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, WrapperRunError> {
     match lang {
         SourceLang::Rust => {
-            lens_rust::find_wrappers(source).map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            lens_rust::find_wrappers(source).map_err(|e| WrapperRunError::Parse(Box::new(e)))
         }
         SourceLang::TypeScript => {
-            lens_ts::find_wrappers(source).map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            lens_ts::find_wrappers(source).map_err(|e| WrapperRunError::Parse(Box::new(e)))
         }
+        SourceLang::Python => Err(WrapperRunError::UnsupportedLang),
     }
 }
 

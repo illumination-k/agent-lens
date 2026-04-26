@@ -51,6 +51,11 @@ fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, H
         SourceLang::TypeScript => {
             lens_ts::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
+        // No wrapper detection for Python yet. Returning an empty list
+        // keeps the PostToolUse hook silent on `.py` edits instead of
+        // erroring out, since the similarity hook still has work to do
+        // for the same file.
+        SourceLang::Python => Ok(Vec::new()),
     }
 }
 

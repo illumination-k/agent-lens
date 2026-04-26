@@ -136,6 +136,17 @@ fn extract_functions(
             )
             .map_err(|e| AnalyzerError::Parse(Box::new(e)))
         }
+        SourceLang::Python => {
+            if exclude_tests {
+                lens_py::extract_functions_excluding_tests(source)
+                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            } else {
+                let mut parser = lens_py::PythonParser::new();
+                parser
+                    .extract_functions(source)
+                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
+            }
+        }
     }
 }
 
@@ -346,6 +357,86 @@ mod tests {
 }
 "#;
         let file = write_file(dir.path(), "lib.rs", src);
+
+        let with_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
+        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+
+        let without_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_exclude_tests(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
+        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["function_count"], 1);
+    }
+
+    #[test]
+    fn report_renders_paired_python_functions() {
+        // Two structurally identical Python functions — guaranteed to
+        // score above the 0.5 threshold and exercise the lens-py
+        // dispatch added alongside the Rust / TS arms.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+def alpha(xs):
+    total = 0
+    for x in xs:
+        total += x
+    return total
+
+def beta(ys):
+    sum_ = 0
+    for y in ys:
+        sum_ += y
+    return sum_
+"#;
+        let file = write_file(dir.path(), "lib.py", src);
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 2);
+        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+        let names: Vec<&str> = parsed["pairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|p| {
+                [
+                    p["a"]["name"].as_str().unwrap(),
+                    p["b"]["name"].as_str().unwrap(),
+                ]
+            })
+            .collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+    }
+
+    #[test]
+    fn exclude_tests_drops_python_test_functions_from_report() {
+        // pytest-style `test_*` functions form a parallel pair next to
+        // a single production function; `--exclude-tests` should drop
+        // them via `lens_py::extract_functions_excluding_tests`.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+def production(xs):
+    total = 0
+    for x in xs:
+        total += x
+    return total
+
+def test_alpha():
+    assert 1 + 1 == 2
+
+def test_beta():
+    assert 1 + 1 == 2
+"#;
+        let file = write_file(dir.path(), "lib.py", src);
 
         let with_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)

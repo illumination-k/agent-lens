@@ -42,6 +42,7 @@ pub enum OutputFormat {
 pub enum SourceLang {
     Rust,
     TypeScript,
+    Python,
 }
 
 impl SourceLang {
@@ -54,6 +55,7 @@ impl SourceLang {
             // user pointing at a `.tsx` file gets a clear
             // UnsupportedExtension instead of a confusing parse error.
             "ts" => Some(Self::TypeScript),
+            "py" => Some(Self::Python),
             _ => None,
         }
     }

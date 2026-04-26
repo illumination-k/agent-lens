@@ -82,6 +82,12 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>,
             )
             .map_err(|e| HookError::Parse(Box::new(e)))
         }
+        SourceLang::Python => {
+            let mut parser = lens_py::PythonParser::new();
+            parser
+                .extract_functions(source)
+                .map_err(|e| HookError::Parse(Box::new(e)))
+        }
     }
 }
 
