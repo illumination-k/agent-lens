@@ -20,6 +20,21 @@ pub struct FunctionDef {
 }
 
 impl FunctionDef {
+    /// Lines spanned by the function, inclusive of both endpoints.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use lens_domain::{FunctionDef, TreeNode};
+    ///
+    /// let f = FunctionDef {
+    ///     name: "f".into(),
+    ///     start_line: 5,
+    ///     end_line: 10,
+    ///     tree: TreeNode::leaf("Block"),
+    /// };
+    /// assert_eq!(f.line_count(), 6);
+    /// ```
     pub fn line_count(&self) -> usize {
         self.end_line.saturating_sub(self.start_line) + 1
     }
