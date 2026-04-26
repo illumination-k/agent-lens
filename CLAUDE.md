@@ -263,11 +263,11 @@ Cargo workspace。役割が違うものは crate を分け、`agent-lens` バイ
 
 #### LLM コンテキスト系（agent-lens 独自色）
 
-| 指標            | 一行定義                                               | 入力       | 難易度 |
-| --------------- | ------------------------------------------------------ | ---------- | ------ |
-| Token Budget    | tokenizer 換算でファイル/モジュールの実トークン数      | tokenizer  | 低     |
-| Doc Coverage    | pub item の `///` 付与率                               | AST        | 低     |
-| Onboarding Cost | 複雑度＋依存幅＋doc 不足の合成スコア                   | 複合       | 中     |
+| 指標            | 一行定義                                          | 入力      | 難易度 |
+| --------------- | ------------------------------------------------- | --------- | ------ |
+| Token Budget    | tokenizer 換算でファイル/モジュールの実トークン数 | tokenizer | 低     |
+| Doc Coverage    | pub item の `///` 付与率                          | AST       | 低     |
+| Onboarding Cost | 複雑度＋依存幅＋doc 不足の合成スコア              | 複合      | 中     |
 
 > Context Span は `analyze context-span` として実装済み。Onboarding Cost は
 > `complexity` × `context-span` × `doc-coverage` の合成として、Doc Coverage が
