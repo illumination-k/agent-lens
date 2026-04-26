@@ -859,14 +859,15 @@ def f(ctx):
 ");
         assert_eq!(f.max_nesting, 1);
         // The body assignments contribute `x`, `y`, `1`, `2` as
-        // operands; if `visit_with` is replaced with `()`, none of
-        // those land in the operand set.
-        let names = ["x", "y"];
+        // operands; if `visit_with` is replaced with `()` the body
+        // is never walked, so none of those land in the operand
+        // set. A minimum of two distinct operands is enough to make
+        // the no-op replacement observable.
         assert!(
-            names.iter().all(|n| f.halstead.distinct_operands >= 1),
-            "expected with-body operands to be counted",
+            f.halstead.distinct_operands >= 2,
+            "expected with-body operands `x` and `y` to be counted, got distinct={}",
+            f.halstead.distinct_operands,
         );
-        assert!(f.halstead.distinct_operands >= 2);
     }
 
     #[test]
