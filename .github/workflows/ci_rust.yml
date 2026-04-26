@@ -11,6 +11,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      id-token: write
     env:
       MISE_ENV: rust
     steps:
@@ -27,3 +28,15 @@ jobs:
 
       - name: CI
         run: mise run ci:rust
+
+      - name: Generate coverage report
+        run: cargo llvm-cov nextest --locked --all-features --workspace --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          use_oidc: true
+          files: lcov.info
+          flags: rust
+          fail_ci_if_error: true
+          verbose: true
