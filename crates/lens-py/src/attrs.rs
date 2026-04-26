@@ -183,6 +183,12 @@ mod tests {
     #[case::expected_failure("@unittest.expectedFailure\ndef foo(): pass\n", true)]
     #[case::no_decorator("def foo(): pass\n", false)]
     #[case::unrelated("@my_decorator\ndef foo(): pass\n", false)]
+    // Multi-segment path whose tail name happens to match the unittest
+    // skip family but whose root isn't `unittest`. Covers the
+    // `path[0] == "unittest"` match guard against a mutant that
+    // replaces it with `true` (which would falsely classify
+    // `@asyncio.skip` as an `@unittest.skip`).
+    #[case::tail_match_non_unittest_root("@asyncio.skip\ndef foo(): pass\n", false)]
     fn has_unittest_skip_decorator_recognises_canonical_shapes(
         #[case] src: &str,
         #[case] expected: bool,

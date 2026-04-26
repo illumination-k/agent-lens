@@ -463,7 +463,10 @@ mod tests {
         // Production code surrounded by every shape `--exclude-tests`
         // is supposed to filter: a pytest test fn, a pytest fixture,
         // a `pytest.mark.*` test, a `Test*` class, and a `unittest.TestCase`
-        // subclass. Only `production` should survive.
+        // subclass. `production` and `Service::compute` should survive —
+        // including the production class method covers `is_test_class`'s
+        // negative branch (a mutant that always returns `true` would drop
+        // the method and fail the assertion).
         let src = "
 import pytest
 import unittest
@@ -482,6 +485,10 @@ def sample():
 def test_param(x):
     assert production(x) > 0
 
+class Service:
+    def compute(self, x):
+        return production(x)
+
 class TestThing:
     def helper(self):
         return production(0)
@@ -496,7 +503,7 @@ def disabled():
 ";
         let funcs = extract_functions_excluding_tests(src).unwrap();
         let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["production"]);
+        assert_eq!(names, ["production", "Service::compute"]);
     }
 
     #[test]
