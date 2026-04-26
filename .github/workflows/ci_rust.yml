@@ -21,6 +21,12 @@ jobs:
 
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
 
+      # mise's rust plugin doesn't reliably honour the `components`
+      # setting in mise.rust.toml when `version = "latest"` resolves to a
+      # toolchain rustup hasn't seen before, so install them explicitly.
+      - name: Ensure Rust components
+        run: rustup component add clippy rustfmt llvm-tools-preview
+
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Build
