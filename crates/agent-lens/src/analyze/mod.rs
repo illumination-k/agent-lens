@@ -114,3 +114,83 @@ pub fn read_source(path: &Path) -> Result<(SourceLang, String), AnalyzerError> {
     })?;
     Ok((lang, source))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+    use std::io;
+
+    #[test]
+    fn analyzer_error_io_display_includes_path_and_source() {
+        let err = AnalyzerError::Io {
+            path: PathBuf::from("/tmp/nope.rs"),
+            source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/nope.rs"), "got {msg}");
+        assert!(msg.contains("missing"), "got {msg}");
+        assert!(msg.starts_with("failed to read"), "got {msg}");
+    }
+
+    #[test]
+    fn analyzer_error_unsupported_extension_display_includes_path() {
+        let err = AnalyzerError::UnsupportedExtension {
+            path: PathBuf::from("/tmp/file.txt"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/file.txt"), "got {msg}");
+        assert!(msg.contains("unsupported file extension"), "got {msg}");
+    }
+
+    #[test]
+    fn analyzer_error_parse_display_includes_inner() {
+        let err = AnalyzerError::Parse(Box::<dyn std::error::Error + Send + Sync>::from(
+            "boom".to_owned(),
+        ));
+        let msg = err.to_string();
+        assert!(msg.contains("boom"), "got {msg}");
+        assert!(msg.contains("parse"), "got {msg}");
+    }
+
+    #[test]
+    fn analyzer_error_serialize_display_includes_inner() {
+        // Force a serde_json error by parsing invalid JSON.
+        let serde_err = serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err();
+        let err = AnalyzerError::Serialize(serde_err);
+        let msg = err.to_string();
+        assert!(msg.contains("serialize"), "got {msg}");
+    }
+
+    #[test]
+    fn analyzer_error_io_source_is_present() {
+        let err = AnalyzerError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn analyzer_error_parse_source_is_present() {
+        let err = AnalyzerError::Parse(Box::<dyn std::error::Error + Send + Sync>::from(
+            "boom".to_owned(),
+        ));
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn analyzer_error_serialize_source_is_present() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err();
+        let err = AnalyzerError::Serialize(serde_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn analyzer_error_unsupported_extension_has_no_source() {
+        let err = AnalyzerError::UnsupportedExtension {
+            path: PathBuf::from("/tmp/x.txt"),
+        };
+        assert!(err.source().is_none());
+    }
+}

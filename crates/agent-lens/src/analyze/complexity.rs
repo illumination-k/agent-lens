@@ -128,10 +128,9 @@ fn percentile(sorted: &[u32], p: u32) -> u32 {
     if sorted.is_empty() {
         return 0;
     }
+    let p = p.min(100);
     let n = sorted.len();
-    let idx = ((p as usize * n).div_ceil(100))
-        .saturating_sub(1)
-        .min(n - 1);
+    let idx = ((p as usize * n).div_ceil(100)).saturating_sub(1);
     sorted[idx]
 }
 
@@ -361,12 +360,34 @@ fn dispatch(n: i32) -> i32 {
     fn percentile_picks_nearest_rank() {
         let sorted = [1, 2, 3, 4, 5];
         assert_eq!(percentile(&sorted, 100), 5);
+        assert_eq!(percentile(&sorted, 95), 5);
         assert_eq!(percentile(&sorted, 50), 3);
+        assert_eq!(percentile(&sorted, 25), 2);
         assert_eq!(percentile(&sorted, 0), 1);
     }
 
     #[test]
     fn percentile_on_empty_slice_returns_zero() {
         assert_eq!(percentile(&[], 50), 0);
+    }
+
+    #[test]
+    fn percentile_clamps_out_of_range_p_to_last() {
+        // p > 100 should not panic and should saturate at the last element.
+        let sorted = [1, 2, 3, 4, 5];
+        assert_eq!(percentile(&sorted, 150), 5);
+    }
+
+    #[test]
+    fn format_optional_f64_renders_some_with_precision() {
+        assert_eq!(format_optional_f64(Some(1.234), 1), "1.2");
+        assert_eq!(format_optional_f64(Some(1.234), 0), "1");
+        assert_eq!(format_optional_f64(Some(1.0), 2), "1.00");
+    }
+
+    #[test]
+    fn format_optional_f64_renders_none_as_n_a() {
+        assert_eq!(format_optional_f64(None, 0), "n/a");
+        assert_eq!(format_optional_f64(None, 3), "n/a");
     }
 }

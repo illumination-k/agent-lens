@@ -641,4 +641,55 @@ impl T {
         let findings = run(src);
         assert_eq!(names(&findings), ["T::from"]);
     }
+
+    #[test]
+    fn boilerplate_filter_requires_both_trait_and_method_match() {
+        // `From::other` shares the trait but not the method name; if the
+        // filter degenerated to "trait OR method matches" it would drop
+        // this finding. The forwarding shape qualifies as a wrapper, so
+        // it must surface.
+        let src = r#"
+struct T;
+impl From<i32> for T {
+    fn other(x: i32) -> Self { build(x) }
+}
+"#;
+        let findings = run(src);
+        assert_eq!(
+            names(&findings),
+            ["T::other"],
+            "From::other shares trait but not method, must still report",
+        );
+    }
+
+    #[test]
+    fn boilerplate_filter_requires_both_trait_and_method_match_other_side() {
+        // Symmetric case: trait `Other` shares the method name `from`
+        // with the boilerplate list but the trait doesn't. Must still
+        // report — only `(From, from)` is the boilerplate combo.
+        let src = r#"
+struct T;
+impl Other<i32> for T {
+    fn from(x: i32) -> Self { build(x) }
+}
+"#;
+        let findings = run(src);
+        assert_eq!(
+            names(&findings),
+            ["T::from"],
+            "Other::from shares method but not trait, must still report",
+        );
+    }
+
+    #[test]
+    fn parenthesised_adapter_chain_is_peeled() {
+        // `(b(x).unwrap())` — the call sits inside parentheses, then
+        // `.unwrap()`. `peel_adapters` must descend into Expr::Paren so
+        // the underlying call is exposed and the wrapper is detected.
+        let src = "fn a(x: i32) -> i32 { (b(x)).unwrap() }\n";
+        let findings = run(src);
+        assert_eq!(names(&findings), ["a"]);
+        assert_eq!(findings[0].callee, "b");
+        assert_eq!(findings[0].adapters, vec![".unwrap()".to_string()]);
+    }
 }

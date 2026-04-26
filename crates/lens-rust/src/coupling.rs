@@ -1013,4 +1013,70 @@ mod tests {
             EdgeKind::Use
         ));
     }
+
+    #[test]
+    fn coupling_error_io_display_includes_path_and_source() {
+        let err = CouplingError::Io {
+            path: PathBuf::from("/tmp/x.rs"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/x.rs"), "got {msg}");
+        assert!(msg.contains("missing"), "got {msg}");
+        assert!(msg.starts_with("failed to read"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_parse_display_includes_path_and_inner() {
+        let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
+        let err = CouplingError::Parse {
+            path: PathBuf::from("/tmp/x.rs"),
+            source: parse_err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/x.rs"), "got {msg}");
+        assert!(msg.starts_with("failed to parse"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_missing_mod_display_includes_parent_name_and_path() {
+        let err = CouplingError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "ghost".to_owned(),
+            near: PathBuf::from("/tmp/proj"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("crate::ghost"), "got {msg}");
+        assert!(msg.contains("ghost.rs"), "got {msg}");
+        assert!(msg.contains("ghost/mod.rs"), "got {msg}");
+        assert!(msg.contains("/tmp/proj"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_io_and_parse_have_source() {
+        use std::error::Error as _;
+        let io_err = CouplingError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(io_err.source().is_some());
+
+        let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
+        let parse_err = CouplingError::Parse {
+            path: PathBuf::from("/tmp/x"),
+            source: parse_err,
+        };
+        assert!(parse_err.source().is_some());
+    }
+
+    #[test]
+    fn coupling_error_missing_mod_has_no_source() {
+        use std::error::Error as _;
+        let err = CouplingError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "ghost".to_owned(),
+            near: PathBuf::from("/tmp"),
+        };
+        assert!(err.source().is_none());
+    }
 }

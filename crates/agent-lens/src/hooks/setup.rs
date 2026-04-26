@@ -477,6 +477,94 @@ mod tests {
     }
 
     #[test]
+    fn setup_error_home_not_found_display_is_descriptive() {
+        let err = SetupError::HomeNotFound;
+        let msg = err.to_string();
+        assert!(msg.contains("$HOME"), "got {msg}");
+        assert!(msg.contains("user-scope"), "got {msg}");
+    }
+
+    #[test]
+    fn setup_error_io_display_includes_path_and_source() {
+        let err = SetupError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/x"), "got {msg}");
+        assert!(msg.contains("denied"), "got {msg}");
+        assert!(msg.contains("failed to access"), "got {msg}");
+    }
+
+    #[test]
+    fn setup_error_invalid_json_display_includes_path() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = SetupError::InvalidJson {
+            path: PathBuf::from("/tmp/settings.json"),
+            source: serde_err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/settings.json"), "got {msg}");
+        assert!(msg.contains("not valid JSON"), "got {msg}");
+    }
+
+    #[test]
+    fn setup_error_unexpected_shape_display_includes_field() {
+        let err = SetupError::UnexpectedShape {
+            path: PathBuf::from("/tmp/settings.json"),
+            field: "hooks.PostToolUse",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/settings.json"), "got {msg}");
+        assert!(msg.contains(".hooks.PostToolUse"), "got {msg}");
+    }
+
+    #[test]
+    fn setup_error_io_and_invalid_json_have_source() {
+        use std::error::Error as _;
+        let io_err = SetupError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(io_err.source().is_some());
+
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let json_err = SetupError::InvalidJson {
+            path: PathBuf::from("/tmp/x"),
+            source: serde_err,
+        };
+        assert!(json_err.source().is_some());
+    }
+
+    #[test]
+    fn setup_error_variants_without_source_return_none() {
+        use std::error::Error as _;
+        let err = SetupError::HomeNotFound;
+        assert!(err.source().is_none());
+        let err = SetupError::UnexpectedShape {
+            path: PathBuf::from("/tmp/x"),
+            field: "hooks",
+        };
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn read_existing_propagates_non_not_found_io_errors() {
+        // Pointing at a directory rather than a file makes
+        // `fs::read_to_string` fail with an ErrorKind other than NotFound
+        // (typically IsADirectory on Linux). The match guard must NOT
+        // swallow this as "no settings file" — it has to surface as Io.
+        let dir = TempDir::new().unwrap();
+        let plan_dir = dir.path().join(".claude/settings.json");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        let err = plan(plan_dir).unwrap_err();
+        assert!(
+            matches!(err, SetupError::Io { .. }),
+            "expected Io error for directory-as-file, got {err:?}",
+        );
+    }
+
+    #[test]
     fn has_command_prefix_only_matches_at_argument_boundary() {
         assert!(has_command_prefix(
             "agent-lens hook post-tool-use similarity",

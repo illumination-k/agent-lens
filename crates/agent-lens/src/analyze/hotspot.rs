@@ -534,5 +534,195 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0]["path"], "src/a.rs");
         assert!(files[0]["commits"].as_u64().unwrap() >= 2);
+        // Single-file path must still extract complexity (cognitive_max > 0
+        // for the nested-if body).
+        assert!(files[0]["cognitive_max"].as_u64().unwrap() > 0);
+        assert!(files[0]["function_count"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn complexity_metrics_are_included_for_walked_rust_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        let a = files.iter().find(|f| f["path"] == "src/a.rs").unwrap();
+        // a.rs has nested ifs, so cognitive_max must be > 0. This guards
+        // against `collect_complexity` or `walk_rust_files` short-circuiting.
+        assert!(
+            a["cognitive_max"].as_u64().unwrap() > 0,
+            "expected non-zero cognitive complexity, got {a:?}",
+        );
+        assert!(a["function_count"].as_u64().unwrap() >= 1);
+        assert!(a["loc"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn non_rust_files_are_excluded_from_complexity_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        // Add a non-Rust file alongside the .rs files. It must not appear
+        // in the complexity rollup (function_count = 0) even if churn
+        // mentions it later — but here it is uncommitted so the report
+        // should not mention it at all.
+        write_file(dir.path(), "src/notes.txt", "just text\n");
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert!(
+            files.iter().all(|f| f["path"] != "src/notes.txt"),
+            "non-Rust file leaked into report: {files:?}",
+        );
+    }
+
+    #[test]
+    fn skip_dirs_are_not_descended() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        // Drop a Rust file under target/ — it should be ignored by the
+        // walker even though it has the right extension.
+        write_file(
+            dir.path(),
+            "target/generated.rs",
+            "pub fn deep() -> i32 { if 1 > 0 { 1 } else { 0 } }\n",
+        );
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert!(
+            files.iter().all(|f| f["path"] != "target/generated.rs"),
+            "target/ file leaked into report: {files:?}",
+        );
+    }
+
+    #[test]
+    fn dotfile_directories_are_not_descended() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        // Add a Rust file under a hidden dir — it must be skipped.
+        write_file(
+            dir.path(),
+            ".hidden/extra.rs",
+            "pub fn h() -> i32 { if 1 > 0 { 1 } else { 0 } }\n",
+        );
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert!(
+            files.iter().all(|f| f["path"] != ".hidden/extra.rs"),
+            "dotfile dir leaked into report: {files:?}",
+        );
+    }
+
+    #[test]
+    fn pointing_at_non_rust_file_yields_no_complexity_entry() {
+        // Single-file path: must skip when extension is not Rust. After
+        // the walker exits, only the churn side could contribute and the
+        // file is not committed, so the report must be empty.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        let txt = write_file(dir.path(), "loose.txt", "hello\n");
+        let json = HotspotAnalyzer::new()
+            .analyze(&txt, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // The non-Rust file is not committed, so it must not appear via
+        // churn either; the file list is empty.
+        assert_eq!(parsed["file_count"], 0);
+    }
+
+    #[test]
+    fn with_top_caps_the_markdown_table() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        let md = HotspotAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        // src/b.rs must NOT appear as a row when top=1 (only top-ranked
+        // src/a.rs survives the cap).
+        assert!(md.contains("Top 1 hotspots"), "got {md}");
+        assert!(md.contains("| src/a.rs |"), "got {md}");
+        assert!(!md.contains("| src/b.rs |"), "got {md}");
+    }
+
+    #[test]
+    fn hotspot_error_io_display_includes_path_and_source() {
+        let err = HotspotError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/x"), "got {msg}");
+        assert!(msg.contains("missing"), "got {msg}");
+        assert!(msg.starts_with("failed to read"), "got {msg}");
+    }
+
+    #[test]
+    fn hotspot_error_git_display_trims_stderr() {
+        let err = HotspotError::Git {
+            stderr: "fatal: not a git repo\n".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("fatal: not a git repo"), "got {msg}");
+        assert!(!msg.ends_with('\n'), "trailing newline should be trimmed");
+    }
+
+    #[test]
+    fn hotspot_error_not_in_git_repo_display_includes_path() {
+        let err = HotspotError::NotInGitRepo {
+            path: PathBuf::from("/tmp/lonely"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/lonely"), "got {msg}");
+        assert!(msg.contains("not inside a git working tree"), "got {msg}");
+    }
+
+    #[test]
+    fn hotspot_error_serialize_display_includes_inner() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = HotspotError::Serialize(serde_err);
+        let msg = err.to_string();
+        assert!(msg.contains("serialize"), "got {msg}");
+    }
+
+    #[test]
+    fn hotspot_error_io_source_is_present() {
+        use std::error::Error as _;
+        let err = HotspotError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn hotspot_error_serialize_source_is_present() {
+        use std::error::Error as _;
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = HotspotError::Serialize(serde_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn hotspot_error_variants_without_source_return_none() {
+        use std::error::Error as _;
+        let err = HotspotError::Git {
+            stderr: "fatal".to_owned(),
+        };
+        assert!(err.source().is_none());
+        let err = HotspotError::NotInGitRepo {
+            path: PathBuf::from("/tmp"),
+        };
+        assert!(err.source().is_none());
     }
 }
