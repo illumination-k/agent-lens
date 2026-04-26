@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn ignores_unknown_extensions() {
-        for ext in ["README.md", "notes.txt", "script.py", "app.go"] {
+        for ext in ["README.md", "notes.txt", "app.go"] {
             assert_no_op("Write", json!({ "file_path": ext }));
         }
     }

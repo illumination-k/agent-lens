@@ -43,6 +43,14 @@ impl CohesionAnalyzer {
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
             SourceLang::TypeScript => lens_ts::extract_cohesion_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            // lens-py only implements similarity today; until a Python
+            // cohesion extractor lands, route `.py` to the same error
+            // shape unsupported extensions go through.
+            SourceLang::Python => {
+                return Err(AnalyzerError::UnsupportedExtension {
+                    path: path.to_path_buf(),
+                });
+            }
         };
         if self.diff_only {
             let changed = changed_line_ranges(path);

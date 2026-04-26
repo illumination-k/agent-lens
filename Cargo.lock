@@ -17,6 +17,7 @@ dependencies = [
  "agent-hooks",
  "clap",
  "lens-domain",
+ "lens-py",
  "lens-rust",
  "lens-ts",
  "rstest",
