@@ -32,17 +32,27 @@ use syn::visit::Visit;
 use syn::{ExprPath, Item, ItemImpl, ItemUse, TypePath, UseTree};
 
 /// Failures raised while walking a crate's module tree.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CouplingError {
     /// Reading a `.rs` file failed.
+    #[error("failed to read {path:?}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
     /// `syn` rejected the file's contents.
-    Parse { path: PathBuf, source: syn::Error },
+    #[error("failed to parse {path:?}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: syn::Error,
+    },
     /// `mod foo;` was declared but neither `foo.rs` nor `foo/mod.rs` was
     /// found in the parent directory.
+    #[error(
+        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
+    )]
     MissingMod {
         /// Module path of the declaring parent (e.g. `crate::a`).
         parent: String,
@@ -51,33 +61,6 @@ pub enum CouplingError {
         /// Directory that was probed for the missing file.
         near: PathBuf,
     },
-}
-
-impl std::fmt::Display for CouplingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
-            Self::Parse { path, source } => {
-                write!(f, "failed to parse {}: {source}", path.display())
-            }
-            Self::MissingMod { parent, name, near } => write!(
-                f,
-                "module `{parent}::{name}` declared but neither {0}.rs nor {0}/mod.rs found in {1}",
-                name,
-                near.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CouplingError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse { source, .. } => Some(source),
-            Self::MissingMod { .. } => None,
-        }
-    }
 }
 
 /// One node in a Rust module tree.

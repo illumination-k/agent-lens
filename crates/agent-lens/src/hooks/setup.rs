@@ -63,53 +63,27 @@ pub struct SetupSummary<'a> {
     pub settings: &'a Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SetupError {
     /// `$HOME` is not set, so the user-scope path can't be resolved.
+    #[error("$HOME is not set; cannot resolve user-scope settings.json")]
     HomeNotFound,
+    #[error("failed to access {path:?}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
+    #[error("{path:?} is not valid JSON: {source}")]
     InvalidJson {
         path: PathBuf,
+        #[source]
         source: serde_json::Error,
     },
     /// A field along the `hooks.PostToolUse[].hooks[].command` path has
     /// the wrong JSON type for us to merge into safely.
+    #[error("{path:?} has an unexpected shape at .{field}")]
     UnexpectedShape { path: PathBuf, field: &'static str },
-}
-
-impl std::fmt::Display for SetupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::HomeNotFound => {
-                write!(
-                    f,
-                    "$HOME is not set; cannot resolve user-scope settings.json"
-                )
-            }
-            Self::Io { path, source } => {
-                write!(f, "failed to access {}: {source}", path.display())
-            }
-            Self::InvalidJson { path, source } => {
-                write!(f, "{} is not valid JSON: {source}", path.display())
-            }
-            Self::UnexpectedShape { path, field } => {
-                write!(f, "{} has an unexpected shape at .{field}", path.display())
-            }
-        }
-    }
-}
-
-impl std::error::Error for SetupError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::InvalidJson { source, .. } => Some(source),
-            Self::HomeNotFound | Self::UnexpectedShape { .. } => None,
-        }
-    }
 }
 
 /// Resolve the on-disk `settings.json` path for the requested scope.

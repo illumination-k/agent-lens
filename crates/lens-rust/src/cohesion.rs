@@ -20,31 +20,10 @@ use syn::{
 };
 
 /// Failures produced while extracting cohesion units.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CohesionError {
-    Syn(syn::Error),
-}
-
-impl std::fmt::Display for CohesionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Syn(e) => write!(f, "failed to parse Rust source: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for CohesionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Syn(e) => Some(e),
-        }
-    }
-}
-
-impl From<syn::Error> for CohesionError {
-    fn from(value: syn::Error) -> Self {
-        Self::Syn(value)
-    }
+    #[error("failed to parse Rust source: {0}")]
+    Syn(#[from] syn::Error),
 }
 
 /// Extract one [`CohesionUnit`] per `impl` block in `source`.

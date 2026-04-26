@@ -12,6 +12,7 @@ lens-domain = { path = "../lens-domain", version = "0.1.0" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 syn = { version = "2", features = ["full", "parsing", "extra-traits", "visit"] }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -34,63 +34,38 @@ use serde::Serialize;
 use super::{OutputFormat, SourceLang};
 
 /// Errors raised while running the coupling analyzer.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CouplingAnalyzerError {
+    #[error("failed to read {path:?}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
     },
+    #[error("failed to parse {path:?}: {source}")]
     Parse {
         path: PathBuf,
+        #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The provided path exists but isn't a `.rs` file or a directory
     /// containing a recognisable crate root.
-    UnsupportedRoot {
-        path: PathBuf,
-    },
+    #[error(
+        "no usable Rust crate root found at {path:?}; pass a .rs file or a directory containing src/lib.rs or src/main.rs"
+    )]
+    UnsupportedRoot { path: PathBuf },
     /// `mod foo;` was declared in a parent file but neither `foo.rs` nor
     /// `foo/mod.rs` could be found.
+    #[error(
+        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
+    )]
     MissingMod {
         parent: String,
         name: String,
         near: PathBuf,
     },
-    Serialize(serde_json::Error),
-}
-
-impl std::fmt::Display for CouplingAnalyzerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
-            Self::Parse { path, source } => {
-                write!(f, "failed to parse {}: {source}", path.display())
-            }
-            Self::UnsupportedRoot { path } => write!(
-                f,
-                "no usable Rust crate root found at {}; pass a .rs file or a directory containing src/lib.rs or src/main.rs",
-                path.display()
-            ),
-            Self::MissingMod { parent, name, near } => write!(
-                f,
-                "module `{parent}::{name}` declared but neither {0}.rs nor {0}/mod.rs found in {1}",
-                name,
-                near.display()
-            ),
-            Self::Serialize(e) => write!(f, "failed to serialize report: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for CouplingAnalyzerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse { source, .. } => Some(source.as_ref()),
-            Self::Serialize(e) => Some(e),
-            Self::UnsupportedRoot { .. } | Self::MissingMod { .. } => None,
-        }
-    }
+    #[error("failed to serialize report: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 impl From<RustCouplingError> for CouplingAnalyzerError {

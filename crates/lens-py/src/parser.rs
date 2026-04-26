@@ -20,31 +20,10 @@ impl PythonParser {
 }
 
 /// Parse failures surfaced by [`PythonParser`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PythonParseError {
-    Parse(ParseError),
-}
-
-impl std::fmt::Display for PythonParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Parse(e) => write!(f, "failed to parse Python source: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for PythonParseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Parse(e) => Some(e),
-        }
-    }
-}
-
-impl From<ParseError> for PythonParseError {
-    fn from(value: ParseError) -> Self {
-        Self::Parse(value)
-    }
+    #[error("failed to parse Python source: {0}")]
+    Parse(#[from] ParseError),
 }
 
 impl LanguageParser for PythonParser {

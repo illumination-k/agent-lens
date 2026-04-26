@@ -35,31 +35,10 @@ use crate::line_index::LineIndex;
 use crate::parser::TsParseError;
 
 /// Failures produced while extracting complexity units.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ComplexityError {
-    Parse(TsParseError),
-}
-
-impl std::fmt::Display for ComplexityError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Parse(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for ComplexityError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Parse(e) => Some(e),
-        }
-    }
-}
-
-impl From<TsParseError> for ComplexityError {
-    fn from(value: TsParseError) -> Self {
-        Self::Parse(value)
-    }
+    #[error(transparent)]
+    Parse(#[from] TsParseError),
 }
 
 /// Extract one [`FunctionComplexity`] per function-shaped item in `source`.
