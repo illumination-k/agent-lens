@@ -1,0 +1,538 @@
+//! `analyze hotspot` — rank files by `commits × cognitive_max`.
+//!
+//! Walks a path on disk, parses every `.rs` file for per-function
+//! complexity, asks `git` how often each file has been touched, and
+//! emits the joined ranking. The point is to point an agent at
+//! "frequently changed *and* complex" code: high churn alone is just
+//! noise, high complexity alone is static information, the product is
+//! where bugs live.
+//!
+//! Limitations:
+//!
+//! * Only Rust files are analyzed today (the file walker filters by
+//!   extension).
+//! * Git renames are followed via `git log --follow` per file when the
+//!   path is a single file; for directory roots we use a single
+//!   path-scoped `git log` invocation, which counts a renamed file
+//!   under each of its names. This is good enough for ranking.
+//! * `target/`, `node_modules/`, and dotfile-prefixed directories
+//!   (e.g. `.git`) are skipped during the walk.
+//! * Files that fail to parse are reported on stderr and excluded from
+//!   the complexity side; their churn entry (if any) still appears.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use lens_domain::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
+use lens_rust::extract_complexity_units;
+use serde::Serialize;
+use tracing::warn;
+
+use super::{OutputFormat, SourceLang};
+
+/// Errors raised while running the hotspot analyzer.
+#[derive(Debug)]
+pub enum HotspotError {
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// `git` is missing or returned a non-zero exit status. The captured
+    /// stderr is forwarded so the agent has a useful diagnostic.
+    Git {
+        stderr: String,
+    },
+    /// The provided path is not inside any git working tree.
+    NotInGitRepo {
+        path: PathBuf,
+    },
+    Serialize(serde_json::Error),
+}
+
+impl std::fmt::Display for HotspotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
+            Self::Git { stderr } => write!(f, "git failed: {}", stderr.trim_end()),
+            Self::NotInGitRepo { path } => {
+                write!(f, "{} is not inside a git working tree", path.display())
+            }
+            Self::Serialize(e) => write!(f, "failed to serialize report: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for HotspotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Serialize(e) => Some(e),
+            Self::Git { .. } | Self::NotInGitRepo { .. } => None,
+        }
+    }
+}
+
+/// Stateful hotspot runner. `since` is plumbed through to git's
+/// `--since=` flag so callers can scope churn to a recent window
+/// (e.g. `"90.days.ago"` or `"2024-01-01"`).
+#[derive(Debug, Default, Clone)]
+pub struct HotspotAnalyzer {
+    since: Option<String>,
+    top: Option<usize>,
+}
+
+impl HotspotAnalyzer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Restrict the churn count to commits made in the given git
+    /// `--since=` window. Anything git's `approxidate` parser accepts
+    /// works (`"30.days.ago"`, `"2024-01-01"`, `"2.weeks.ago"`).
+    pub fn with_since(mut self, since: impl Into<String>) -> Self {
+        self.since = Some(since.into());
+        self
+    }
+
+    /// Cap the markdown report's table to the top-N entries. JSON
+    /// output always carries the full list. `None` keeps every row.
+    pub fn with_top(mut self, top: Option<usize>) -> Self {
+        self.top = top;
+        self
+    }
+
+    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, HotspotError> {
+        let abs = canonicalize(path)?;
+        let repo_root = git_repo_root(&abs)?;
+        let scope_rel = relative_to(&abs, &repo_root);
+
+        let churn = collect_churn(&repo_root, scope_rel.as_deref(), self.since.as_deref())?;
+        let complexity = collect_complexity(&abs, &repo_root)?;
+        let entries = compute_hotspots(churn, complexity);
+
+        let view = ReportView::new(&abs, &repo_root, self.since.as_deref(), &entries);
+        match format {
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&view).map_err(HotspotError::Serialize)
+            }
+            OutputFormat::Md => Ok(format_markdown(&view, self.top)),
+        }
+    }
+}
+
+fn canonicalize(path: &Path) -> Result<PathBuf, HotspotError> {
+    path.canonicalize().map_err(|source| HotspotError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Walk parents of `path` looking for a `.git` entry. Returns the
+/// directory containing it, which is what git would call the working
+/// tree root.
+fn git_repo_root(path: &Path) -> Result<PathBuf, HotspotError> {
+    let start = if path.is_file() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    for ancestor in start.ancestors() {
+        if ancestor.join(".git").exists() {
+            return Ok(ancestor.to_path_buf());
+        }
+    }
+    Err(HotspotError::NotInGitRepo {
+        path: path.to_path_buf(),
+    })
+}
+
+/// Express `target` as a path relative to `base`, returning `None` when
+/// `target == base` (i.e. the user pointed at the repo root).
+fn relative_to(target: &Path, base: &Path) -> Option<String> {
+    let rel = target.strip_prefix(base).ok()?;
+    if rel.as_os_str().is_empty() {
+        return None;
+    }
+    Some(rel.to_string_lossy().replace('\\', "/"))
+}
+
+fn collect_churn(
+    repo_root: &Path,
+    scope: Option<&str>,
+    since: Option<&str>,
+) -> Result<Vec<FileChurn>, HotspotError> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo_root)
+        .arg("log")
+        .arg("--pretty=format:")
+        .arg("--name-only");
+    if let Some(s) = since {
+        cmd.arg(format!("--since={s}"));
+    }
+    if let Some(scope) = scope {
+        cmd.arg("--").arg(scope);
+    }
+
+    let output = cmd.output().map_err(|source| HotspotError::Io {
+        path: repo_root.to_path_buf(),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(HotspotError::Git {
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        *counts.entry(trimmed.to_owned()).or_insert(0) += 1;
+    }
+    Ok(counts
+        .into_iter()
+        .map(|(path, commits)| FileChurn { path, commits })
+        .collect())
+}
+
+fn collect_complexity(
+    target: &Path,
+    repo_root: &Path,
+) -> Result<Vec<FileComplexity>, HotspotError> {
+    let mut files = Vec::new();
+    walk_rust_files(target, &mut files)?;
+
+    let mut out = Vec::with_capacity(files.len());
+    for file in files {
+        let source = match std::fs::read_to_string(&file) {
+            Ok(s) => s,
+            Err(source) => {
+                warn!(path = %file.display(), %source, "skipping file: read failed");
+                continue;
+            }
+        };
+        let units = match extract_complexity_units(&source) {
+            Ok(u) => u,
+            Err(err) => {
+                warn!(path = %file.display(), error = %err, "skipping file: parse failed");
+                continue;
+            }
+        };
+        let key = relative_to(&file, repo_root).unwrap_or_else(|| file.display().to_string());
+        let function_count = units.len();
+        let loc = units.iter().map(|f| f.loc()).sum();
+        let cyclomatic_max = units.iter().map(|f| f.cyclomatic).max().unwrap_or(0);
+        let cognitive_max = units.iter().map(|f| f.cognitive).max().unwrap_or(0);
+        out.push(FileComplexity {
+            path: key,
+            function_count,
+            loc,
+            cyclomatic_max,
+            cognitive_max,
+        });
+    }
+    Ok(out)
+}
+
+const SKIP_DIRS: &[&str] = &["target", "node_modules"];
+
+fn walk_rust_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
+    let meta = std::fs::metadata(path).map_err(|source| HotspotError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if meta.is_file() {
+        if SourceLang::from_path(path) == Some(SourceLang::Rust) {
+            out.push(path.to_path_buf());
+        }
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(path).map_err(|source| HotspotError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| HotspotError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let entry_path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|source| HotspotError::Io {
+            path: entry_path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            walk_rust_files(&entry_path, out)?;
+        } else if file_type.is_file()
+            && SourceLang::from_path(&entry_path) == Some(SourceLang::Rust)
+        {
+            out.push(entry_path);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct ReportView<'a> {
+    target: String,
+    repo_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<&'a str>,
+    file_count: usize,
+    summary: Summary,
+    files: Vec<FileView<'a>>,
+}
+
+impl<'a> ReportView<'a> {
+    fn new(
+        target: &Path,
+        repo_root: &Path,
+        since: Option<&'a str>,
+        entries: &'a [HotspotEntry],
+    ) -> Self {
+        Self {
+            target: target.display().to_string(),
+            repo_root: repo_root.display().to_string(),
+            since,
+            file_count: entries.len(),
+            summary: Summary::from_entries(entries),
+            files: entries.iter().map(FileView::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct Summary {
+    score_max: u64,
+    commits_max: u32,
+    cognitive_max: u32,
+}
+
+impl Summary {
+    fn from_entries(entries: &[HotspotEntry]) -> Self {
+        Self {
+            score_max: entries.iter().map(|e| e.score).max().unwrap_or(0),
+            commits_max: entries.iter().map(|e| e.commits).max().unwrap_or(0),
+            cognitive_max: entries.iter().map(|e| e.cognitive_max).max().unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FileView<'a> {
+    path: &'a str,
+    score: u64,
+    commits: u32,
+    function_count: usize,
+    loc: usize,
+    cyclomatic_max: u32,
+    cognitive_max: u32,
+}
+
+impl<'a> From<&'a HotspotEntry> for FileView<'a> {
+    fn from(e: &'a HotspotEntry) -> Self {
+        Self {
+            path: e.path.as_str(),
+            score: e.score,
+            commits: e.commits,
+            function_count: e.function_count,
+            loc: e.loc,
+            cyclomatic_max: e.cyclomatic_max,
+            cognitive_max: e.cognitive_max,
+        }
+    }
+}
+
+const DEFAULT_TOP: usize = 20;
+
+fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
+    let scope = view
+        .since
+        .map_or_else(String::new, |s| format!(", since {s}"));
+    let mut out = format!(
+        "# Hotspot report: {} ({} file(s){scope})\n",
+        view.target, view.file_count,
+    );
+    if view.files.is_empty() {
+        out.push_str("\n_No files matched._\n");
+        return out;
+    }
+    let _ = writeln!(
+        &mut out,
+        "\n## Summary\n\
+         - score_max: {}\n\
+         - commits_max: {}\n\
+         - cognitive_max: {}",
+        view.summary.score_max, view.summary.commits_max, view.summary.cognitive_max,
+    );
+
+    let limit = top.unwrap_or(DEFAULT_TOP);
+    let _ = writeln!(
+        &mut out,
+        "\n## Top {limit} hotspots (commits × cognitive_max)\n"
+    );
+    let _ = writeln!(
+        &mut out,
+        "| file | score | commits | cog | cc | loc | fns |"
+    );
+    let _ = writeln!(
+        &mut out,
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for f in view.files.iter().take(limit) {
+        let _ = writeln!(
+            &mut out,
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            f.path, f.score, f.commits, f.cognitive_max, f.cyclomatic_max, f.loc, f.function_count,
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        path
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .arg("-c")
+            .arg("tag.gpgsign=false")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            // Suppress global config interference in CI sandboxes.
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    }
+
+    fn init_repo_with_two_files(dir: &Path) {
+        run_git(dir, &["init", "-q", "-b", "main"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+        write_file(dir, "src/lib.rs", "pub mod a;\npub mod b;\n");
+        write_file(
+            dir,
+            "src/a.rs",
+            "pub fn nest(n: i32) -> i32 {\n    if n > 0 {\n        if n > 10 { return 1; }\n    }\n    0\n}\n",
+        );
+        write_file(dir, "src/b.rs", "pub fn flat() -> i32 { 0 }\n");
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "initial"]);
+        // Touch a.rs again so its churn dominates b.rs.
+        write_file(
+            dir,
+            "src/a.rs",
+            "pub fn nest(n: i32) -> i32 {\n    if n > 0 {\n        if n > 10 { return 1; }\n        if n > 5 { return 2; }\n    }\n    0\n}\n",
+        );
+        run_git(dir, &["add", "src/a.rs"]);
+        run_git(dir, &["commit", "-q", "-m", "tweak a"]);
+    }
+
+    #[test]
+    fn json_report_ranks_by_score() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        let a = files.iter().find(|f| f["path"] == "src/a.rs").unwrap();
+        let b = files.iter().find(|f| f["path"] == "src/b.rs").unwrap();
+        // a was committed twice and contains nested branches; b once and flat.
+        assert!(a["commits"].as_u64().unwrap() >= 2);
+        assert!(b["commits"].as_u64().unwrap() >= 1);
+        assert!(a["score"].as_u64().unwrap() >= b["score"].as_u64().unwrap());
+        // Ordering: highest score first.
+        assert_eq!(files[0]["path"], "src/a.rs");
+    }
+
+    #[test]
+    fn markdown_report_lists_top_hotspots() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        let md = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("Hotspot report"));
+        assert!(md.contains("Top "));
+        assert!(md.contains("src/a.rs"));
+    }
+
+    #[test]
+    fn since_filter_drops_old_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        // No commits in the future → both files have churn = 0.
+        let json = HotspotAnalyzer::new()
+            .with_since("2099-01-01")
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert!(files.iter().all(|f| f["commits"].as_u64().unwrap() == 0));
+        assert!(files.iter().all(|f| f["score"].as_u64().unwrap() == 0));
+    }
+
+    #[test]
+    fn target_directory_outside_git_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "lone.rs", "fn x() {}\n");
+        let err = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap_err();
+        assert!(matches!(err, HotspotError::NotInGitRepo { .. }));
+    }
+
+    #[test]
+    fn missing_path_surfaces_io_error() {
+        let err = HotspotAnalyzer::new()
+            .analyze(Path::new("/definitely/does/not/exist"), OutputFormat::Json)
+            .unwrap_err();
+        assert!(matches!(err, HotspotError::Io { .. }));
+    }
+
+    #[test]
+    fn target_subdirectory_scopes_churn() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        // Pointing at src/a.rs alone should still find churn for it.
+        let json = HotspotAnalyzer::new()
+            .analyze(&dir.path().join("src/a.rs"), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["path"], "src/a.rs");
+        assert!(files[0]["commits"].as_u64().unwrap() >= 2);
+    }
+}

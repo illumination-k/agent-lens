@@ -1,10 +1,12 @@
 //! `analyze coupling` — module-level coupling metrics for a Rust crate.
 //!
 //! Walks a single crate from a `.rs` root, builds the module tree, then
-//! reports five metrics derived from the cross-module reference graph:
+//! reports the metrics derived from the cross-module reference graph:
 //! Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
-//! Information Flow Complexity, and per-pair Inter-module Coupling
-//! (distinct shared symbols). JSON is the default machine-readable
+//! Information Flow Complexity, per-pair Inter-module Coupling
+//! (distinct shared symbols), Robert C. Martin's Instability
+//! `I = Ce / (Ca + Ce)`, and the strongly connected components of the
+//! dependency graph (cycles). JSON is the default machine-readable
 //! output; `--format md` emits a compact summary tuned for LLM context
 //! windows rather than for humans.
 //!
@@ -23,7 +25,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use lens_domain::{
-    CouplingEdge, CouplingReport, ModuleMetrics, ModulePath, PairCoupling, compute_report,
+    CouplingEdge, CouplingReport, DependencyCycle, ModuleMetrics, ModulePath, PairCoupling,
+    compute_report,
 };
 use lens_rust::{CouplingError as RustCouplingError, build_module_tree, extract_edges};
 use serde::Serialize;
@@ -178,9 +181,11 @@ struct ReportView<'a> {
     crate_root: String,
     module_count: usize,
     edge_count: usize,
+    cycle_count: usize,
     modules: Vec<ModuleView<'a>>,
     edges: Vec<EdgeView<'a>>,
     pairs: Vec<PairView<'a>>,
+    cycles: Vec<CycleView<'a>>,
 }
 
 impl<'a> ReportView<'a> {
@@ -189,9 +194,11 @@ impl<'a> ReportView<'a> {
             crate_root: root.display().to_string(),
             module_count: report.modules.len(),
             edge_count: report.number_of_couplings,
+            cycle_count: report.cycles.len(),
             modules: report.modules.iter().map(ModuleView::from).collect(),
             edges: report.edges.iter().map(EdgeView::from).collect(),
             pairs: report.pairs.iter().map(PairView::from).collect(),
+            cycles: report.cycles.iter().map(CycleView::from).collect(),
         }
     }
 }
@@ -202,6 +209,10 @@ struct ModuleView<'a> {
     fan_in: usize,
     fan_out: usize,
     ifc: u64,
+    /// Robert C. Martin's instability `I = Ce / (Ca + Ce)`. Omitted from
+    /// JSON when the module has no edges (so the ratio is undefined).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instability: Option<f64>,
 }
 
 impl<'a> From<&'a ModuleMetrics> for ModuleView<'a> {
@@ -211,6 +222,22 @@ impl<'a> From<&'a ModuleMetrics> for ModuleView<'a> {
             fan_in: m.fan_in,
             fan_out: m.fan_out,
             ifc: m.ifc,
+            instability: m.instability,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CycleView<'a> {
+    size: usize,
+    members: Vec<&'a str>,
+}
+
+impl<'a> From<&'a DependencyCycle> for CycleView<'a> {
+    fn from(c: &'a DependencyCycle) -> Self {
+        Self {
+            size: c.members.len(),
+            members: c.members.iter().map(ModulePath::as_str).collect(),
         }
     }
 }
@@ -255,14 +282,15 @@ const TOP_PAIRS_LIMIT: usize = 10;
 
 fn format_markdown(view: &ReportView<'_>) -> String {
     let mut out = format!(
-        "# Coupling report: {} ({} module(s), {} edge(s))\n",
-        view.crate_root, view.module_count, view.edge_count,
+        "# Coupling report: {} ({} module(s), {} edge(s), {} cycle(s))\n",
+        view.crate_root, view.module_count, view.edge_count, view.cycle_count,
     );
     if view.modules.is_empty() {
         out.push_str("\n_No modules discovered._\n");
         return out;
     }
     render_modules_table(&mut out, &view.modules);
+    render_cycles(&mut out, &view.cycles);
     render_pairs(&mut out, &view.pairs);
     out
 }
@@ -272,8 +300,8 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView<'_>]) {
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
     let _ = writeln!(out, "\n## Modules (by IFC desc)\n");
-    let _ = writeln!(out, "| module | fan_in | fan_out | ifc |");
-    let _ = writeln!(out, "| --- | ---: | ---: | ---: |");
+    let _ = writeln!(out, "| module | fan_in | fan_out | ifc | instability |");
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
     let mut sorted: Vec<&ModuleView<'_>> = modules.iter().collect();
     sorted.sort_by(|a, b| {
         b.ifc
@@ -285,9 +313,23 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView<'_>]) {
     for m in sorted {
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} |",
-            m.path, m.fan_in, m.fan_out, m.ifc
+            "| {} | {} | {} | {} | {} |",
+            m.path,
+            m.fan_in,
+            m.fan_out,
+            m.ifc,
+            format_optional_f64(m.instability, 2),
         );
+    }
+}
+
+fn render_cycles(out: &mut String, cycles: &[CycleView<'_>]) {
+    if cycles.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n## Dependency cycles\n");
+    for c in cycles {
+        let _ = writeln!(out, "- {} module(s): {}", c.size, c.members.join(" → "));
     }
 }
 
@@ -298,6 +340,13 @@ fn render_pairs(out: &mut String, pairs: &[PairView<'_>]) {
     let _ = writeln!(out, "\n## Top coupled pairs\n");
     for p in pairs.iter().take(TOP_PAIRS_LIMIT) {
         let _ = writeln!(out, "- {} ↔ {} ({} symbol(s))", p.a, p.b, p.shared_symbols);
+    }
+}
+
+fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
+    match v {
+        Some(x) => format!("{x:.precision$}"),
+        None => "n/a".to_owned(),
     }
 }
 
@@ -472,5 +521,71 @@ mod tests {
             .analyze(&lib, OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, CouplingAnalyzerError::Parse { .. }));
+    }
+
+    #[test]
+    fn json_report_records_instability_for_directional_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = small_crate(dir.path());
+        let json = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules = parsed["modules"].as_array().unwrap();
+        let a = modules.iter().find(|m| m["path"] == "crate::a").unwrap();
+        let b = modules.iter().find(|m| m["path"] == "crate::b").unwrap();
+        // a is only depended on (Ce=0, Ca>0), so I = 0.
+        assert_eq!(a["instability"].as_f64().unwrap(), 0.0);
+        // b only depends on others (Ca=0, Ce>0), so I = 1.
+        assert_eq!(b["instability"].as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn json_report_lists_cycles_when_modules_form_an_scc() {
+        let dir = tempfile::tempdir().unwrap();
+        // a → b via Foo, b → a via Bar — a two-node cycle.
+        write_file(dir.path(), "lib.rs", "pub mod a;\npub mod b;\n");
+        write_file(
+            dir.path(),
+            "a.rs",
+            "use crate::b::Bar;\npub struct Foo;\nfn _x(_b: Bar) {}\n",
+        );
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::a::Foo;\npub struct Bar;\nfn _y(_f: Foo) {}\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(&dir.path().join("lib.rs"), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cycle_count"], 1);
+        let cycles = parsed["cycles"].as_array().unwrap();
+        assert_eq!(cycles.len(), 1);
+        let members = cycles[0]["members"].as_array().unwrap();
+        let names: Vec<&str> = members.iter().map(|m| m.as_str().unwrap()).collect();
+        assert!(names.contains(&"crate::a"));
+        assert!(names.contains(&"crate::b"));
+    }
+
+    #[test]
+    fn markdown_report_renders_cycles_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "lib.rs", "pub mod a;\npub mod b;\n");
+        write_file(
+            dir.path(),
+            "a.rs",
+            "use crate::b::Bar;\npub struct Foo;\nfn _x(_b: Bar) {}\n",
+        );
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::a::Foo;\npub struct Bar;\nfn _y(_f: Foo) {}\n",
+        );
+        let md = CouplingAnalyzer::new()
+            .analyze(&dir.path().join("lib.rs"), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("Dependency cycles"));
+        assert!(md.contains("instability"));
     }
 }

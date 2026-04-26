@@ -9,6 +9,7 @@
 pub mod cohesion;
 pub mod complexity;
 pub mod coupling;
+pub mod hotspot;
 pub mod similarity;
 pub mod wrapper;
 
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use coupling::{CouplingAnalyzer, CouplingAnalyzerError};
+pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use similarity::{DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer};
 pub use wrapper::WrapperAnalyzer;
 
