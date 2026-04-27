@@ -152,9 +152,8 @@ enum PostToolUseCommand {
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts`).
-    /// Python is recognised but currently produces no findings. Files
-    /// with an unsupported extension are ignored silently.
+    /// The parser is chosen from the file extension (`.rs` / `.ts` /
+    /// `.py`). Files with an unsupported extension are ignored silently.
     Wrapper,
 }
 
@@ -220,9 +219,8 @@ enum CodexPostToolUseCommand {
     /// trivial adapters, is just a forwarding call to another function.
     ///
     /// Runs against every file Codex's `apply_patch` just touched. The
-    /// parser is chosen from each file's extension (`.rs` / `.ts`);
-    /// Python is recognised but currently produces no findings. Files
-    /// with an unsupported extension are ignored silently.
+    /// parser is chosen from each file's extension (`.rs` / `.ts` /
+    /// `.py`). Files with an unsupported extension are ignored silently.
     Wrapper,
 }
 

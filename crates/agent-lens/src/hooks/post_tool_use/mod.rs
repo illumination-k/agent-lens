@@ -338,6 +338,39 @@ fn meaningful(x: i32) -> i32 { let y = x + 1; y * 2 }
     }
 
     #[test]
+    fn wrapper_python_extension_triggers_wrapper_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "
+def render(x):
+    return internal_render(x)
+
+def meaningful(x):
+    y = x + 1
+    return y * 2
+";
+        let file = write_file(dir.path(), "lib.py", source);
+
+        let hook = WrapperHook::new();
+        let input = payload(
+            dir.path().to_path_buf(),
+            "Write",
+            json!({"file_path": file.file_name().unwrap().to_str().unwrap()}),
+        );
+        let out = hook.handle(input).unwrap();
+        let msg = out.common.system_message.expect("expected a report");
+        assert!(msg.contains("render"), "should mention render: {msg}");
+        assert!(
+            msg.contains("internal_render"),
+            "should mention forwarding target: {msg}",
+        );
+        assert!(
+            !msg.contains("meaningful"),
+            "should not flag the function with real logic: {msg}",
+        );
+        assert!(out.decision.is_none());
+    }
+
+    #[test]
     fn wrapper_report_includes_adapter_chain() {
         let dir = tempfile::tempdir().unwrap();
         let source = "fn shim(x: i32) -> u64 { compute(x).unwrap().into() }\n";
