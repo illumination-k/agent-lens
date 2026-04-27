@@ -354,10 +354,14 @@ fn dispatch(n: i32) -> i32 {
 
     #[test]
     fn python_function_metrics_are_reported() {
+        // `simple` returns a literal rather than `pass`-only so that
+        // the lens-py stub filter (Protocol / abstract / `pass`-only)
+        // doesn't drop it before complexity is measured. A `pass` body
+        // would now read as a stub.
         let dir = tempfile::tempdir().unwrap();
         let src = "
 def simple():
-    pass
+    return 0
 
 def branchy(n):
     if n > 0:

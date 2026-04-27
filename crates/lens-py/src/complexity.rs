@@ -34,6 +34,7 @@ use ruff_python_ast::{
 };
 use ruff_python_parser::{ParseError, parse_module};
 
+use crate::attrs::{inherits_protocol, is_stub_function};
 use crate::line_index::LineIndex;
 
 /// Failures produced while extracting complexity units.
@@ -64,6 +65,11 @@ fn collect_stmt(
 ) {
     match stmt {
         Stmt::FunctionDef(func) => {
+            // Stubs all score CC=1, cognitive=0; reporting them just
+            // inflates the table with rows that carry no signal.
+            if is_stub_function(func) {
+                return;
+            }
             let name = qualify(owner, func.name.as_str());
             out.push(analyze(&name, func, lines));
         }
@@ -73,6 +79,11 @@ fn collect_stmt(
 }
 
 fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<FunctionComplexity>) {
+    // Protocol classes are pure declarations — every method body is a
+    // `...` stub. Drop the whole subtree.
+    if inherits_protocol(class) {
+        return;
+    }
     let class_name = class.name.as_str();
     for inner in &class.body {
         collect_stmt(inner, Some(class_name), lines, out);
@@ -631,11 +642,13 @@ def nested(n):
 
     #[test]
     fn class_methods_get_qualified_names() {
+        // Real body: a `pass`-only method now reads as a stub and is
+        // dropped before complexity is measured.
         let units = extract(
             "
 class Foo:
     def bar(self):
-        pass
+        return 1
 ",
         );
         assert_eq!(units.len(), 1);
@@ -708,6 +721,71 @@ def add(a, b):
     fn empty_file_yields_no_units() {
         let units = extract("# nothing here\n");
         assert!(units.is_empty());
+    }
+
+    #[test]
+    fn protocol_class_methods_are_filtered() {
+        // PEP 544 Protocol methods all score CC=1 / cognitive=0 — the
+        // floor of the metric. Including them inflates the table with
+        // rows that carry no signal.
+        let units = extract(
+            "
+from typing import Protocol
+
+class Service(Protocol):
+    def handle(self, x): ...
+    def close(self): ...
+",
+        );
+        assert!(units.is_empty());
+    }
+
+    #[test]
+    fn abstractmethod_and_overload_are_filtered() {
+        // Mixed module: only the concrete free function should appear.
+        let units = extract(
+            "
+from abc import abstractmethod
+from typing import overload
+
+@overload
+def stub_overload(x: int) -> int: ...
+
+class Animal:
+    @abstractmethod
+    def speak(self): ...
+    def common(self):
+        return 1
+
+def real(x):
+    return x + 1
+",
+        );
+        let names: Vec<_> = units.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Animal::common", "real"]);
+    }
+
+    #[test]
+    fn stub_bodied_functions_are_filtered() {
+        // `pass` / `...` / docstring / `raise NotImplementedError`
+        // bodies are stubs even without a decorator. None of them
+        // should land in the complexity report.
+        let units = extract(
+            "
+def pass_only():
+    pass
+def ellipsis_only():
+    ...
+def docstring_only():
+    \"\"\"docs\"\"\"
+def not_implemented():
+    raise NotImplementedError
+def real():
+    return 1
+",
+        );
+        let names: Vec<_> = units.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["real"]);
     }
 
     #[test]

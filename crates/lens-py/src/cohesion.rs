@@ -27,7 +27,9 @@ use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{Decorator, Expr, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_parser::{ParseError, parse_module};
 
-use crate::attrs::{class_inherits_test_case, name_looks_like_test_class};
+use crate::attrs::{
+    class_inherits_test_case, inherits_protocol, is_stub_function, name_looks_like_test_class,
+};
 use crate::line_index::LineIndex;
 
 /// Failures produced while extracting cohesion units.
@@ -54,6 +56,12 @@ pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, Cohesio
 }
 
 fn unit_from_class(class: &StmtClassDef, lines: &LineIndex) -> Option<CohesionUnit> {
+    // Protocol classes describe a structural contract; their cohesion
+    // is meaningless and every method body is a `...` stub. Drop the
+    // unit the same way test classes are dropped below.
+    if inherits_protocol(class) {
+        return None;
+    }
     if name_looks_like_test_class(&class.name) || class_inherits_test_case(class) {
         return None;
     }
@@ -63,7 +71,7 @@ fn unit_from_class(class: &StmtClassDef, lines: &LineIndex) -> Option<CohesionUn
         .body
         .iter()
         .filter_map(|stmt| match stmt {
-            Stmt::FunctionDef(f) if is_instance_method(f) => Some(f),
+            Stmt::FunctionDef(f) if is_instance_method(f) && !is_stub_function(f) => Some(f),
             _ => None,
         })
         .collect();
@@ -258,12 +266,15 @@ class Thing:
 
     #[test]
     fn calls_via_self_method_form_an_edge() {
+        // `helper` needs a real body: a `pass`-only method now reads
+        // as a stub and is dropped before cohesion is measured, which
+        // would also strip it from `outer`'s set of in-unit calls.
         let src = "
 class Foo:
     def outer(self):
         self.helper()
     def helper(self):
-        pass
+        return 1
 ";
         let u = unit(src);
         assert_eq!(u.lcom4(), 1);
@@ -433,6 +444,46 @@ class Foo(unittest.TestCase):
 ";
         let units = extract_cohesion_units(src).unwrap();
         assert!(units.is_empty());
+    }
+
+    #[test]
+    fn protocol_classes_are_skipped() {
+        // PEP 544 Protocol classes describe a structural contract;
+        // their cohesion is meaningless and every body is a `...` stub
+        // that would be filtered anyway. Drop the whole class.
+        let src = "
+from typing import Protocol
+
+class Service(Protocol):
+    def handle(self, x): ...
+    def close(self): ...
+";
+        let units = extract_cohesion_units(src).unwrap();
+        assert!(units.is_empty());
+    }
+
+    #[test]
+    fn abstract_methods_are_excluded_from_cohesion_unit() {
+        // `@abstractmethod`-decorated methods inside a regular class
+        // (e.g. an ABC subclass with mixed concrete + abstract methods)
+        // must not pollute the cohesion graph. Only `concrete` and
+        // `also_concrete` should be visible to LCOM4.
+        let src = "
+from abc import abstractmethod
+
+class Service:
+    @abstractmethod
+    def stub(self): ...
+
+    def concrete(self):
+        return self.x
+    def also_concrete(self):
+        return self.x
+";
+        let u = unit(src);
+        let names: Vec<&str> = u.methods.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["concrete", "also_concrete"]);
+        assert_eq!(u.lcom4(), 1);
     }
 
     #[test]

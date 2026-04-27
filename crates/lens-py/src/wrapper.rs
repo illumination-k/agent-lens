@@ -23,8 +23,8 @@ use ruff_python_ast::{
 use ruff_python_parser::{ParseError, parse_module};
 
 use crate::attrs::{
-    class_inherits_test_case, has_pytest_decorator, has_unittest_skip_decorator,
-    name_looks_like_test_class, name_looks_like_test_function,
+    class_inherits_test_case, has_pytest_decorator, has_unittest_skip_decorator, inherits_protocol,
+    is_stub_function, name_looks_like_test_class, name_looks_like_test_function,
 };
 use crate::line_index::LineIndex;
 
@@ -79,6 +79,12 @@ fn collect_stmt(
 ) {
     match stmt {
         Stmt::FunctionDef(func) => {
+            // Stub-shaped functions (Protocol / abstract / overload /
+            // pass / ... / docstring / raise NotImplementedError) carry
+            // no body to forward — flagging them is noise.
+            if is_stub_function(func) {
+                return;
+            }
             if is_test_function(func) {
                 return;
             }
@@ -92,6 +98,12 @@ fn collect_stmt(
 }
 
 fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<WrapperFinding>) {
+    // Protocol classes are pure declarations; every method is a stub by
+    // definition. Drop the whole subtree the same way test classes are
+    // dropped above.
+    if inherits_protocol(class) {
+        return;
+    }
     if name_looks_like_test_class(&class.name) || class_inherits_test_case(class) {
         return;
     }
@@ -491,6 +503,55 @@ import unittest
 class Foo(unittest.TestCase):
     def helper(self, x):
         return underlying(self, x)
+";
+        let findings = run(src);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn methods_inside_protocol_class_are_not_reported() {
+        // PEP 544 Protocol classes describe a structural contract; the
+        // bodies are stubs by design. Even if a body looks superficially
+        // like a forwarding call, reporting it as a wrapper is noise.
+        let src = "
+from typing import Protocol
+
+class Service(Protocol):
+    def handle(self, x):
+        return self.inner.handle(x)
+";
+        let findings = run(src);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn abstractmethod_decorated_methods_are_not_reported() {
+        // A method decorated with `@abstractmethod` is a stub even if
+        // it carries a real-looking body. Mirrors how `lens-rust` skips
+        // trait method declarations without a `default` body.
+        let src = "
+from abc import abstractmethod
+
+class Service:
+    @abstractmethod
+    def handle(self, x):
+        return self.inner.handle(x)
+";
+        let findings = run(src);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn overload_decorated_functions_are_not_reported() {
+        // `@overload` declarations are typing-only stubs. Even if the
+        // body is a forwarding call (sometimes added to satisfy the
+        // type-checker), they must not be reported as wrappers.
+        let src = "
+from typing import overload
+
+@overload
+def f(x):
+    return b(x)
 ";
         let findings = run(src);
         assert!(findings.is_empty());
