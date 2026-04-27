@@ -1,15 +1,17 @@
-//! `analyze cohesion` — surface LCOM4 cohesion units for a Rust source file.
+//! `analyze cohesion` — surface LCOM4 cohesion units.
 //!
-//! Today the analyzer is single-file, single-language: pass it a `.rs` path
-//! and it reports every `impl` block in the file along with the connected
-//! components of its method-cohesion graph. Output is JSON by default; the
-//! markdown mode emits a compact summary tuned for LLM context windows
+//! Accepts either a single source file or a directory. When the input is a
+//! directory the analyzer walks it recursively (respecting `.gitignore`
+//! via the `ignore` crate, the same one used by ripgrep), parses every
+//! supported file, and groups findings per file. Output is JSON by default;
+//! the markdown mode emits a compact summary tuned for LLM context windows
 //! rather than for humans, in line with the project's "agent-friendly lint"
 //! ethos.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
+use ignore::WalkBuilder;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
@@ -40,20 +42,8 @@ impl CohesionAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let (lang, source) = read_source(path)?;
-        let mut units = match lang {
-            SourceLang::Rust => lens_rust::extract_cohesion_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::TypeScript => lens_ts::extract_cohesion_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Python => lens_py::extract_cohesion_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-        };
-        if self.diff_only {
-            let changed = changed_line_ranges(path);
-            units.retain(|u| overlaps_any(u.start_line, u.end_line, &changed));
-        }
-        let report = Report::new(path, &units);
+        let files = self.collect_file_reports(path)?;
+        let report = Report::new(path, &files);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
@@ -61,25 +51,137 @@ impl CohesionAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
     }
+
+    /// Resolve `path` to a list of per-file reports. Single-file inputs
+    /// produce a one-element vec; directory inputs walk recursively,
+    /// honouring `.gitignore`. Files with no units are dropped so the
+    /// output stays signal-dense.
+    fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+        if path.is_dir() {
+            self.collect_directory(path)
+        } else {
+            Ok(self.analyze_file(path, None)?.into_iter().collect())
+        }
+    }
+
+    fn collect_directory(&self, root: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+        let mut out = Vec::new();
+        for entry in WalkBuilder::new(root).build() {
+            let entry = entry.map_err(|e| AnalyzerError::Io {
+                path: root.to_path_buf(),
+                source: std::io::Error::other(e),
+            })?;
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let p = entry.path();
+            if SourceLang::from_path(p).is_none() {
+                continue;
+            }
+            // Display paths relative to the walk root so per-file entries
+            // stay readable when the analyzer is pointed at a deep
+            // directory.
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if let Some(report) = self.analyze_file(p, Some(rel))? {
+                out.push(report);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Analyze a single file. Returns `None` when the file has no
+    /// units (after filtering), so empty entries don't pollute the
+    /// directory-mode report.
+    fn analyze_file(
+        &self,
+        path: &Path,
+        rel_override: Option<String>,
+    ) -> Result<Option<FileReport>, AnalyzerError> {
+        let (lang, source) = read_source(path)?;
+        let mut units = extract_units(lang, &source).map_err(AnalyzerError::Parse)?;
+        if self.diff_only {
+            let changed = changed_line_ranges(path);
+            units.retain(|u| overlaps_any(u.start_line, u.end_line, &changed));
+        }
+        if units.is_empty() {
+            return Ok(None);
+        }
+        let display_path = rel_override.unwrap_or_else(|| path.display().to_string());
+        Ok(Some(FileReport {
+            file: display_path,
+            units,
+        }))
+    }
 }
 
 fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
     ranges.iter().any(|r| r.overlaps(start, end))
 }
 
+type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+
+fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, BoxedError> {
+    match lang {
+        SourceLang::Rust => {
+            lens_rust::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
+        }
+        SourceLang::TypeScript => {
+            lens_ts::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
+        }
+        SourceLang::Python => {
+            lens_py::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
+        }
+    }
+}
+
+/// Per-file slice of the report. Owns the display path so directory mode
+/// can attach a path relative to the walk root without storing the original
+/// `PathBuf`.
+#[derive(Debug)]
+struct FileReport {
+    file: String,
+    units: Vec<CohesionUnit>,
+}
+
 #[derive(Debug, Serialize)]
 struct Report<'a> {
-    file: String,
+    /// Input path: a single source file, or the root directory walked.
+    root: String,
+    file_count: usize,
+    unit_count: usize,
+    files: Vec<FileView<'a>>,
+}
+
+impl<'a> Report<'a> {
+    fn new(path: &Path, files: &'a [FileReport]) -> Self {
+        let unit_count = files.iter().map(|f| f.units.len()).sum();
+        Self {
+            root: path.display().to_string(),
+            file_count: files.len(),
+            unit_count,
+            files: files.iter().map(FileView::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FileView<'a> {
+    file: &'a str,
     unit_count: usize,
     units: Vec<UnitView<'a>>,
 }
 
-impl<'a> Report<'a> {
-    fn new(path: &Path, units: &'a [CohesionUnit]) -> Self {
+impl<'a> From<&'a FileReport> for FileView<'a> {
+    fn from(f: &'a FileReport) -> Self {
         Self {
-            file: path.display().to_string(),
-            unit_count: units.len(),
-            units: units.iter().map(UnitView::from).collect(),
+            file: f.file.as_str(),
+            unit_count: f.units.len(),
+            units: f.units.iter().map(UnitView::from).collect(),
         }
     }
 }
@@ -155,15 +257,18 @@ impl<'a> From<&'a lens_domain::MethodCohesion> for MethodView<'a> {
 
 fn format_markdown(report: &Report<'_>) -> String {
     let mut out = format!(
-        "# Cohesion report: {} ({} unit(s))\n",
-        report.file, report.unit_count,
+        "# Cohesion report: {} ({} file(s), {} unit(s))\n",
+        report.root, report.file_count, report.unit_count,
     );
-    if report.units.is_empty() {
+    if report.unit_count == 0 {
         out.push_str("\n_No `impl` blocks with instance methods._\n");
         return out;
     }
-    for unit in &report.units {
-        render_unit(&mut out, unit);
+    for file in &report.files {
+        let _ = writeln!(out, "\n## {} ({} unit(s))", file.file, file.unit_count);
+        for unit in &file.units {
+            render_unit(&mut out, unit);
+        }
     }
     out
 }
@@ -179,11 +284,11 @@ fn render_unit(out: &mut String, unit: &UnitView<'_>) {
     // `unwrap_used` lint.
     let _ = writeln!(
         out,
-        "\n## {header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
+        "- {header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
         unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
     );
     for component in &unit.components {
-        let _ = writeln!(out, "- {{{}}}", component.join(", "));
+        let _ = writeln!(out, "  - {{{}}}", component.join(", "));
     }
 }
 
@@ -195,6 +300,9 @@ mod tests {
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         path
@@ -216,11 +324,13 @@ impl Thing {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["unit_count"], 1);
-        assert_eq!(parsed["units"][0]["lcom4"], 2);
-        assert_eq!(parsed["units"][0]["type_name"], "Thing");
-        assert_eq!(parsed["units"][0]["kind"], "inherent");
+        assert_eq!(parsed["file_count"], 1);
+        let units = parsed["files"][0]["units"].as_array().unwrap();
+        assert_eq!(units[0]["lcom4"], 2);
+        assert_eq!(units[0]["type_name"], "Thing");
+        assert_eq!(units[0]["kind"], "inherent");
         // Two methods, two disjoint fields → LCOM96 = 1.0.
-        let lcom96 = parsed["units"][0]["lcom96"].as_f64().unwrap();
+        let lcom96 = units[0]["lcom96"].as_f64().unwrap();
         assert!((lcom96 - 1.0).abs() < 1e-9, "got {lcom96}");
     }
 
@@ -239,7 +349,7 @@ impl Foo {
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(parsed["units"][0]["lcom96"].is_null());
+        assert!(parsed["files"][0]["units"][0]["lcom96"].is_null());
     }
 
     #[test]
@@ -306,8 +416,8 @@ class Counter:
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["unit_count"], 1);
-        assert_eq!(parsed["units"][0]["type_name"], "Counter");
-        assert_eq!(parsed["units"][0]["lcom4"], 1);
+        assert_eq!(parsed["files"][0]["units"][0]["type_name"], "Counter");
+        assert_eq!(parsed["files"][0]["units"][0]["lcom4"], 1);
     }
 
     #[test]
@@ -376,7 +486,110 @@ impl B { fn get(&self) -> i32 { self.y } }
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["unit_count"], 1);
-        assert_eq!(parsed["units"][0]["type_name"], "A");
+        assert_eq!(parsed["files"][0]["units"][0]["type_name"], "A");
+    }
+
+    #[test]
+    fn directory_mode_groups_units_per_file() {
+        // Two files with one `impl` each — the analyzer should walk the
+        // directory and surface both, grouped per file.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            r#"
+struct A { x: i32, y: i32 }
+impl A {
+    fn gx(&self) -> i32 { self.x }
+    fn gy(&self) -> i32 { self.y }
+}
+"#,
+        );
+        write_file(
+            dir.path(),
+            "nested/b.rs",
+            r#"
+struct B { z: i32 }
+impl B { fn gz(&self) -> i32 { self.z } }
+"#,
+        );
+
+        let json = CohesionAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["file_count"], 2);
+        assert_eq!(parsed["unit_count"], 2);
+        let files = parsed["files"].as_array().unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f["file"].as_str().unwrap()).collect();
+        assert!(names.contains(&"a.rs"));
+        assert!(names.contains(&"nested/b.rs"));
+    }
+
+    #[test]
+    fn directory_mode_skips_unsupported_extensions_and_gitignored_files() {
+        // `.gitignore` should be honoured (the `ignore` walker is
+        // gitignore-aware out of the box), and unsupported extensions
+        // should be silently skipped.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            r#"
+struct A { x: i32 }
+impl A { fn gx(&self) -> i32 { self.x } }
+"#,
+        );
+        write_file(
+            dir.path(),
+            "ignored.rs",
+            r#"
+struct B { y: i32 }
+impl B { fn gy(&self) -> i32 { self.y } }
+"#,
+        );
+        write_file(dir.path(), "notes.txt", "not a source file");
+        write_file(dir.path(), ".gitignore", "ignored.rs\n");
+
+        // The `ignore` crate honours .gitignore only inside a git repo
+        // by default; bootstrap one so the test exercises the gitignore
+        // path rather than just the extension filter.
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let json = CohesionAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["file_count"], 1, "got {parsed}");
+        assert_eq!(parsed["files"][0]["file"], "a.rs");
+    }
+
+    #[test]
+    fn directory_mode_drops_files_without_units() {
+        // Two files: one with an `impl`, one with only free functions.
+        // The latter should be dropped to keep the report signal-dense.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "with_impl.rs",
+            r#"
+struct A { x: i32 }
+impl A { fn gx(&self) -> i32 { self.x } }
+"#,
+        );
+        write_file(dir.path(), "no_impl.rs", "fn solo() {}\n");
+
+        let json = CohesionAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["file_count"], 1);
+        assert_eq!(parsed["files"][0]["file"], "with_impl.rs");
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
