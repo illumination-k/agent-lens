@@ -47,27 +47,26 @@ pub enum OutputFormat {
 ///
 /// Centralising the extension → language mapping keeps every analyzer in
 /// sync when a new language gets wired up; analyzers only need to add a
-/// `match` arm for the new variant.
+/// `match` arm for the new variant. The TypeScript variant carries a
+/// [`lens_ts::Dialect`] so the same dispatch covers `.ts` / `.tsx` /
+/// `.jsx` / `.js` / `.mjs` / `.cjs` without re-deriving it at every call
+/// site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceLang {
     Rust,
-    TypeScript,
+    TypeScript(lens_ts::Dialect),
     Python,
 }
 
 impl SourceLang {
     pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "rs" => Some(Self::Rust),
-            // `.tsx` / `.mts` / `.cts` parse with a different
-            // `SourceType`; until the lens-ts entry points accept one,
-            // we restrict the TypeScript variant to plain `.ts` so a
-            // user pointing at a `.tsx` file gets a clear
-            // UnsupportedExtension instead of a confusing parse error.
-            "ts" => Some(Self::TypeScript),
-            "py" => Some(Self::Python),
-            _ => None,
+        if ext == "rs" {
+            return Some(Self::Rust);
         }
+        if ext == "py" {
+            return Some(Self::Python);
+        }
+        lens_ts::Dialect::from_extension(ext).map(Self::TypeScript)
     }
 
     pub fn from_path(path: &Path) -> Option<Self> {
@@ -295,6 +294,36 @@ mod tests {
     use std::error::Error as _;
     use std::io;
     use std::io::Write;
+
+    #[test]
+    fn source_lang_from_extension_covers_ts_family() {
+        // Each TS / JS extension must round-trip through the dialect
+        // mapping, otherwise analyzers would silently reject the file
+        // with `UnsupportedExtension` before reaching the parser.
+        for (ext, expected) in [
+            ("ts", lens_ts::Dialect::Ts),
+            ("tsx", lens_ts::Dialect::Tsx),
+            ("mts", lens_ts::Dialect::Mts),
+            ("cts", lens_ts::Dialect::Cts),
+            ("js", lens_ts::Dialect::Js),
+            ("jsx", lens_ts::Dialect::Jsx),
+            ("mjs", lens_ts::Dialect::Mjs),
+            ("cjs", lens_ts::Dialect::Cjs),
+        ] {
+            assert_eq!(
+                SourceLang::from_extension(ext),
+                Some(SourceLang::TypeScript(expected)),
+                "extension {ext} should map to dialect {expected:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn source_lang_from_extension_keeps_other_languages() {
+        assert_eq!(SourceLang::from_extension("rs"), Some(SourceLang::Rust));
+        assert_eq!(SourceLang::from_extension("py"), Some(SourceLang::Python));
+        assert_eq!(SourceLang::from_extension("md"), None);
+    }
 
     #[test]
     fn analyzer_error_io_display_includes_path_and_source() {

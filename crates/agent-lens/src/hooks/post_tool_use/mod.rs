@@ -215,6 +215,32 @@ mod tests {
     }
 
     #[test]
+    fn similarity_tsx_extension_routes_through_typescript_parser() {
+        // A `.tsx` file must reach the TypeScript parser with the JSX
+        // dialect on. Without dialect threading, the wrapper component
+        // would either be filtered out as unsupported or fail to parse
+        // when oxc hits `<div />`.
+        let dir = tempfile::tempdir().unwrap();
+        let source = "\
+function add(a: number, b: number): number { return a + b; }
+function plus(a: number, b: number): number { return a + b; }
+function Comp(): JSX.Element { return <div />; }
+";
+        let file = write_file(dir.path(), "App.tsx", source);
+
+        let hook = SimilarityHook::new().with_threshold(0.5);
+        let input = payload(
+            dir.path().to_path_buf(),
+            "Write",
+            json!({"file_path": file.file_name().unwrap().to_str().unwrap()}),
+        );
+        let out = hook.handle(input).unwrap();
+        let msg = out.common.system_message.expect("expected a report");
+        assert!(msg.contains("add"), "should mention add: {msg}");
+        assert!(msg.contains("plus"), "should mention plus: {msg}");
+    }
+
+    #[test]
     fn similarity_resolves_relative_path_against_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("src");

@@ -67,9 +67,8 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionCompl
         SourceLang::Rust => {
             lens_rust::extract_complexity_units(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
-        SourceLang::TypeScript => {
-            lens_ts::extract_complexity_units(source).map_err(|e| HookError::Parse(Box::new(e)))
-        }
+        SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(source, dialect)
+            .map_err(|e| HookError::Parse(Box::new(e))),
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| HookError::Parse(Box::new(e)))
         }

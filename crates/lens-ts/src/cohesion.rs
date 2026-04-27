@@ -33,11 +33,11 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
+use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 
 use crate::line_index::LineIndex;
-use crate::parser::TsParseError;
+use crate::parser::{Dialect, TsParseError};
 
 /// Failures produced while extracting cohesion units.
 #[derive(Debug, thiserror::Error)]
@@ -55,9 +55,12 @@ const MODULE_UNIT_NAME: &str = "<module>";
 /// instance method) plus one module-level unit per scope (file root and
 /// each `namespace` / `module` block) that has at least one top-level
 /// function.
-pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, CohesionError> {
+pub fn extract_cohesion_units(
+    source: &str,
+    dialect: Dialect,
+) -> Result<Vec<CohesionUnit>, CohesionError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.errors.is_empty() {
         return Err(CohesionError::Parse(TsParseError::from_diagnostics(
             ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
@@ -756,14 +759,14 @@ mod tests {
     use super::*;
 
     fn unit(src: &str) -> CohesionUnit {
-        let mut units = extract_cohesion_units(src).unwrap();
+        let mut units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         units.retain(|u| !matches!(u.kind, CohesionUnitKind::Module));
         assert_eq!(units.len(), 1, "expected exactly one class");
         units.remove(0)
     }
 
     fn module_unit(src: &str) -> CohesionUnit {
-        extract_cohesion_units(src)
+        extract_cohesion_units(src, Dialect::Ts)
             .unwrap()
             .into_iter()
             .find(|u| matches!(u.kind, CohesionUnitKind::Module))
@@ -922,7 +925,7 @@ namespace inner {
     }
 }
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].type_name, "Foo");
     }
@@ -936,7 +939,7 @@ export class Foo {
     set(v: number) { this.n = v; }
 }
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].type_name, "Foo");
     }
@@ -950,7 +953,7 @@ export default class Foo {
     set(v: number) { this.n = v; }
 }
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].type_name, "Foo");
     }
@@ -963,7 +966,7 @@ class Foo {
     static b(): void {}
 }
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert!(units.is_empty());
     }
 
@@ -991,20 +994,20 @@ class Foo {
         let src = r#"
 const F = class { get(): number { return 1; } };
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert!(units.is_empty());
     }
 
     #[test]
     fn invalid_source_surfaces_parse_error() {
-        let err = extract_cohesion_units("class ??? {").unwrap_err();
+        let err = extract_cohesion_units("class ??? {", Dialect::Ts).unwrap_err();
         assert!(matches!(err, CohesionError::Parse(_)));
     }
 
     #[test]
     fn cohesion_error_source_is_present() {
         use std::error::Error as _;
-        let err = extract_cohesion_units("class ??? {").unwrap_err();
+        let err = extract_cohesion_units("class ??? {", Dialect::Ts).unwrap_err();
         assert!(err.source().is_some());
     }
 
@@ -1132,7 +1135,7 @@ class Counter {
     get(): number { return this.n; }
 }
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert_eq!(units.len(), 1);
         assert!(matches!(units[0].kind, CohesionUnitKind::Inherent));
     }
@@ -1149,7 +1152,7 @@ namespace inner {
     export function get(): number { return counter; }
 }
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         let module_units: Vec<&CohesionUnit> = units
             .iter()
             .filter(|u| matches!(u.kind, CohesionUnitKind::Module))
@@ -1168,7 +1171,7 @@ import { foo } from "bar";
 type T = number;
 interface I { x: number; }
 "#;
-        let units = extract_cohesion_units(src).unwrap();
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert!(units.is_empty());
     }
 
