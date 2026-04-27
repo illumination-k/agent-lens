@@ -10,7 +10,7 @@ Two analyzers cover the "is this already written?" question:
 - `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ). Functions shorter than `--min-lines` (default `5`) are skipped to keep getters and one-liners out of the report.
 - `wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
 
-Both analyzers parse Rust, TypeScript / JavaScript, and Python (parser is selected from the file extension). `similarity` accepts either a single file or a directory; in directory mode it walks recursively (respecting `.gitignore` like ripgrep) and reports cross-file pairs alongside in-file ones. `wrapper` is single-file.
+Both analyzers parse Rust, TypeScript / JavaScript, and Python (parser is selected from the file extension). Each accepts either a single file or a directory; in directory mode they walk recursively (respecting `.gitignore` like ripgrep) and group findings per file. `similarity` additionally reports cross-file pairs alongside in-file ones; `wrapper` reports per-file only.
 
 ## Workflow
 
@@ -35,18 +35,14 @@ agent-lens analyze wrapper    <path> --diff-only --format md
 
 ### 3. If the user is auditing a whole file or crate
 
-`similarity` accepts a directory, so you don't need to loop manually. Cross-file pairs are reported alongside in-file ones:
+Both analyzers accept a directory, so you don't need to loop manually:
 
 ```bash
 agent-lens analyze similarity crates/<name>/src --format md
+agent-lens analyze wrapper    crates/<name>/src --format md
 ```
 
-For `wrapper` (single-file only), iterate:
-
-```bash
-find crates/<name>/src -name '*.rs' -print0 | xargs -0 -n1 \
-  agent-lens analyze wrapper --format md
-```
+`similarity` reports cross-file pairs alongside in-file ones; `wrapper` reports per-file (its detection is single-function, so cross-file pairings don't apply).
 
 ## Tuning the threshold
 

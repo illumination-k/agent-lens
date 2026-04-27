@@ -19,7 +19,7 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | How many files must I read to understand a module?  | `context-span` | crate root or directory                    |
 | Where do churn and complexity collide?              | `hotspot`      | git-tracked file or directory              |
 
-`similarity` / `wrapper` / `cohesion` / `complexity` work on Rust, TypeScript / JavaScript, and Python. `coupling`, `context-span`, and `hotspot` (Rust filter) are Rust-only.
+`similarity` / `wrapper` / `cohesion` / `complexity` / `hotspot` work on Rust, TypeScript / JavaScript, and Python. `coupling` and `context-span` are Rust-only (they need a crate root — `src/lib.rs` or `src/main.rs`).
 
 ## Output format
 
