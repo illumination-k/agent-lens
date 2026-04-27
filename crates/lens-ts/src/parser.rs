@@ -594,4 +594,168 @@ function c(n: number): number {
             .collect();
         assert!(names.contains(&("a", "b")) || names.contains(&("b", "a")));
     }
+
+    fn parse_tsx_functions(src: &str) -> Vec<FunctionDef> {
+        let mut parser = TypeScriptParser::with_dialect(Dialect::Tsx);
+        parser.extract_functions(src).unwrap()
+    }
+
+    /// Regression for issue #65: every TSX component used to collapse to a
+    /// single `Expr` leaf during AST normalisation, so a tiny wrapper and a
+    /// page bristling with markup both scored 1.0 against each other. With
+    /// JSX subtrees lowered structurally, the small wrapper and the large
+    /// page must not be reported as clones.
+    #[test]
+    fn small_and_large_tsx_components_do_not_score_as_clones() {
+        let src = r#"
+function Checkbox(props: { checked: boolean }) {
+    return <input type="checkbox" checked={props.checked} />;
+}
+
+function MethodologyPage() {
+    return (
+        <article>
+            <header><h1>Methodology</h1><p>An overview.</p></header>
+            <section><h2>Step one</h2><p>First we look at inputs.</p></section>
+            <section><h2>Step two</h2><p>Then we score them.</p></section>
+            <section><h2>Step three</h2><ul><li>case a</li><li>case b</li></ul></section>
+            <footer><p>End.</p></footer>
+        </article>
+    );
+}
+"#;
+        let funcs = parse_tsx_functions(src);
+        assert_eq!(funcs.len(), 2);
+        let pairs = find_similar_functions(&funcs, 0.85, &TSEDOptions::default());
+        assert!(
+            pairs.is_empty(),
+            "small wrapper must not cluster with a large page: {:?}",
+            pairs
+                .iter()
+                .map(|p| (p.a.name.as_str(), p.b.name.as_str(), p.similarity))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Before the fix, every `function () { return <X />; }` body lowered
+    /// to `FunctionBody → Return → Expr`, so two unrelated components
+    /// scored an exact 1.0 against each other. Pin the regression: even
+    /// small components must not score a perfect 1.0 unless their JSX is
+    /// genuinely identical.
+    #[test]
+    fn distinct_minimal_tsx_components_are_not_perfect_clones() {
+        let src = r#"
+function Checkbox() { return <input type="checkbox" />; }
+function Spinner() { return <svg><circle r={4} /></svg>; }
+"#;
+        let funcs = parse_tsx_functions(src);
+        let pairs = find_similar_functions(&funcs, 0.99, &TSEDOptions::default());
+        assert!(
+            pairs.is_empty(),
+            "structurally different JSX bodies must not be reported as 1.0 clones: {:?}",
+            pairs
+                .iter()
+                .map(|p| (p.a.name.as_str(), p.b.name.as_str(), p.similarity))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Two React components whose JSX really is identical apart from
+    /// identifier values (a fair clone) should still be flagged.
+    #[test]
+    fn structurally_identical_tsx_components_are_still_clones() {
+        let src = r#"
+function CardA(props: { title: string }) {
+    return <div className="card"><h1>{props.title}</h1><p>body</p></div>;
+}
+
+function CardB(props: { title: string }) {
+    return <div className="card"><h1>{props.title}</h1><p>body</p></div>;
+}
+"#;
+        let funcs = parse_tsx_functions(src);
+        let pairs = find_similar_functions(&funcs, 0.85, &TSEDOptions::default());
+        assert!(
+            !pairs.is_empty(),
+            "structurally identical components should still be reported as similar",
+        );
+    }
+
+    /// JSX fragments and elements lower to different labels, so a
+    /// fragment-bodied component must not score 1.0 against one wrapped
+    /// in a real element.
+    #[test]
+    fn jsx_fragment_does_not_match_element_with_same_children() {
+        let src = r#"
+function Frag() { return <><span>a</span><span>b</span></>; }
+function Wrap() { return <div><span>a</span><span>b</span></div>; }
+"#;
+        let funcs = parse_tsx_functions(src);
+        let pairs = find_similar_functions(&funcs, 0.99, &TSEDOptions::default());
+        assert!(pairs.is_empty(), "fragment vs element must differ");
+    }
+
+    /// Search the lowered tree depth-first for the first node whose label
+    /// matches. Lets the JSX-shape tests below assert on what was emitted
+    /// without depending on the exact path through the AST.
+    fn find_node<'a>(node: &'a TreeNode, label: &str) -> Option<&'a TreeNode> {
+        if node.label == label {
+            return Some(node);
+        }
+        node.children.iter().find_map(|c| find_node(c, label))
+    }
+
+    /// JSX element names must round-trip into the lowered node's value so
+    /// downstream value-aware comparisons can tell `<Foo />` from `<Bar />`
+    /// — pins `jsx_element_name`'s return string against mutation.
+    #[test]
+    fn jsx_element_name_is_preserved_on_lowered_tree() {
+        let src = "function f() { return <Foo />; }\n";
+        let funcs = parse_tsx_functions(src);
+        let tree = &funcs[0].tree;
+        let el = find_node(tree, "JSXElement").expect("JSXElement node");
+        assert_eq!(el.value, "Foo");
+    }
+
+    /// HTML-style lowercase tag names must come through verbatim too —
+    /// covers the `JSXElementName::Identifier` arm of `jsx_element_name`,
+    /// which the `Foo` case (an `IdentifierReference`) misses.
+    #[test]
+    fn jsx_lowercase_element_name_is_preserved() {
+        let src = "function f() { return <div />; }\n";
+        let funcs = parse_tsx_functions(src);
+        let el = find_node(&funcs[0].tree, "JSXElement").expect("JSXElement node");
+        assert_eq!(el.value, "div");
+    }
+
+    /// Member-style element names (`<Foo.Bar />`, `<Foo.Bar.Baz />`) must
+    /// be flattened with dots so the lowered value uniquely identifies the
+    /// component path — pins `jsx_member_expression_name`'s output.
+    #[test]
+    fn jsx_member_element_name_uses_dotted_path() {
+        let src = "function f() { return <Foo.Bar.Baz />; }\n";
+        let funcs = parse_tsx_functions(src);
+        let el = find_node(&funcs[0].tree, "JSXElement").expect("JSXElement node");
+        assert_eq!(el.value, "Foo.Bar.Baz");
+    }
+
+    /// Fragments must lower to a `JSXFragment` node carrying their child
+    /// arity rather than collapsing to the catch-all `Expr` leaf — pins
+    /// the dedicated `Expression::JSXFragment` arm in `expr_tree`.
+    #[test]
+    fn jsx_fragment_lowers_to_dedicated_node_with_children() {
+        let src = "function f() { return <><span>a</span><span>b</span></>; }\n";
+        let funcs = parse_tsx_functions(src);
+        let tree = &funcs[0].tree;
+        let frag = find_node(tree, "JSXFragment").expect("JSXFragment node");
+        assert_eq!(
+            frag.children.len(),
+            2,
+            "fragment must carry its two child elements as structural children",
+        );
+        assert!(
+            find_node(tree, "Expr").is_none(),
+            "fragment must not fall through to the generic `Expr` leaf",
+        );
+    }
 }

@@ -5,12 +5,18 @@
 //! and literals carry their textual value as `value` so APTED's optional
 //! value-level matching can distinguish them.
 //!
-//! Coverage is intentionally pragmatic: control flow, expressions, and
-//! literals are mapped explicitly; less-frequent forms (decorators,
-//! TypeScript-only type-level constructs, JSX) collapse to a generic
-//! label so they still take up structural space without each node kind
-//! demanding its own arm. APTED only needs *consistent* labels to score
-//! similarity, not exhaustive coverage.
+//! Coverage is intentionally pragmatic: control flow, expressions,
+//! literals, and JSX are mapped explicitly; less-frequent forms
+//! (decorators, TypeScript-only type-level constructs) collapse to a
+//! generic label so they still take up structural space without each
+//! node kind demanding its own arm. APTED only needs *consistent*
+//! labels to score similarity, not exhaustive coverage.
+//!
+//! JSX subtrees retain their element name, attribute names, and child
+//! arity so two React components with different markup do not collapse
+//! to the same shape — without that, every `function () { return <X />; }`
+//! body normalises to the same single-leaf return and scores 1.0 against
+//! every other component.
 
 use lens_domain::TreeNode;
 use oxc_ast::ast::*;
@@ -211,7 +217,106 @@ pub fn expr_tree(expr: &Expression) -> TreeNode {
         Expression::ThisExpression(_) => TreeNode::leaf("This"),
         Expression::Super(_) => TreeNode::leaf("Super"),
 
+        // JSX. Without explicit handling these collapse to a single
+        // `Expr` leaf, which makes every React component look identical
+        // to every other one (issue #65).
+        Expression::JSXElement(e) => jsx_element_tree(e),
+        Expression::JSXFragment(f) => jsx_fragment_tree(f),
+
         _ => TreeNode::leaf("Expr"),
+    }
+}
+
+fn jsx_element_tree(el: &JSXElement) -> TreeNode {
+    let name = jsx_element_name(&el.opening_element.name);
+    let mut n = TreeNode::new("JSXElement", name);
+    for attr in &el.opening_element.attributes {
+        n.push_child(jsx_attribute_item_tree(attr));
+    }
+    for child in &el.children {
+        n.push_child(jsx_child_tree(child));
+    }
+    n
+}
+
+fn jsx_fragment_tree(f: &JSXFragment) -> TreeNode {
+    node_with("JSXFragment", f.children.iter().map(jsx_child_tree))
+}
+
+fn jsx_element_name(name: &JSXElementName) -> String {
+    match name {
+        JSXElementName::Identifier(id) => id.name.to_string(),
+        JSXElementName::IdentifierReference(id) => id.name.to_string(),
+        JSXElementName::NamespacedName(n) => {
+            format!("{}:{}", n.namespace.name, n.name.name)
+        }
+        JSXElementName::MemberExpression(m) => jsx_member_expression_name(m),
+        JSXElementName::ThisExpression(_) => "this".to_string(),
+    }
+}
+
+fn jsx_member_expression_name(m: &JSXMemberExpression) -> String {
+    let object = match &m.object {
+        JSXMemberExpressionObject::IdentifierReference(id) => id.name.to_string(),
+        JSXMemberExpressionObject::MemberExpression(inner) => jsx_member_expression_name(inner),
+        JSXMemberExpressionObject::ThisExpression(_) => "this".to_string(),
+    };
+    format!("{}.{}", object, m.property.name)
+}
+
+fn jsx_attribute_item_tree(item: &JSXAttributeItem) -> TreeNode {
+    match item {
+        JSXAttributeItem::Attribute(a) => jsx_attribute_tree(a),
+        JSXAttributeItem::SpreadAttribute(s) => {
+            node_with("JSXSpreadAttr", [expr_tree(&s.argument)])
+        }
+    }
+}
+
+fn jsx_attribute_tree(a: &JSXAttribute) -> TreeNode {
+    let name = match &a.name {
+        JSXAttributeName::Identifier(id) => id.name.to_string(),
+        JSXAttributeName::NamespacedName(n) => {
+            format!("{}:{}", n.namespace.name, n.name.name)
+        }
+    };
+    let mut n = TreeNode::new("JSXAttr", name);
+    if let Some(value) = &a.value {
+        n.push_child(jsx_attribute_value_tree(value));
+    }
+    n
+}
+
+fn jsx_attribute_value_tree(value: &JSXAttributeValue) -> TreeNode {
+    match value {
+        JSXAttributeValue::StringLiteral(s) => TreeNode::new("Lit", s.value.as_str()),
+        JSXAttributeValue::ExpressionContainer(c) => jsx_expression_tree(&c.expression),
+        JSXAttributeValue::Element(e) => jsx_element_tree(e),
+        JSXAttributeValue::Fragment(f) => jsx_fragment_tree(f),
+    }
+}
+
+fn jsx_child_tree(child: &JSXChild) -> TreeNode {
+    match child {
+        JSXChild::Text(_) => TreeNode::leaf("JSXText"),
+        JSXChild::Element(e) => jsx_element_tree(e),
+        JSXChild::Fragment(f) => jsx_fragment_tree(f),
+        JSXChild::ExpressionContainer(c) => {
+            node_with("JSXExprContainer", [jsx_expression_tree(&c.expression)])
+        }
+        JSXChild::Spread(s) => node_with("JSXSpreadChild", [expr_tree(&s.expression)]),
+    }
+}
+
+fn jsx_expression_tree(expr: &JSXExpression) -> TreeNode {
+    match expr {
+        JSXExpression::EmptyExpression(_) => TreeNode::leaf("JSXEmpty"),
+        // `JSXExpression` inherits all `Expression` variants via `inherit_variants!`,
+        // so the conversion routes them through the standard expression lowering.
+        other => match other.as_expression() {
+            Some(e) => expr_tree(e),
+            None => TreeNode::leaf("JSXEmpty"),
+        },
     }
 }
 
