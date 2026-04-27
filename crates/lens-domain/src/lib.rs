@@ -77,4 +77,4 @@ pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use naming::qualify;
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};
-pub use wrapper::{WrapperFinding, args_pass_through_by};
+pub use wrapper::{ReuseMetrics, WrapperFinding, args_pass_through_by};

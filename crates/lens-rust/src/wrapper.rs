@@ -156,6 +156,8 @@ fn analyze_fn(
         end_line: block.span().end().line,
         callee,
         adapters,
+        statement_count: block.stmts.len(),
+        reuse: None,
     })
 }
 

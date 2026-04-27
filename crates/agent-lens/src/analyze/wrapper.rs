@@ -8,10 +8,11 @@
 //! context windows rather than for humans, in line with the project's
 //! "agent-friendly lint" ethos.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::WrapperFinding;
+use lens_domain::{ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
 use super::{
@@ -76,33 +77,158 @@ impl WrapperAnalyzer {
     /// output stays signal-dense.
     fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
         let filter = self.path_filter.compile(path)?;
-        let mut out = Vec::new();
+        // Pass 1: produce wrapper findings AND a call-site index for
+        // every supported source file. Splitting it from the metric
+        // rollup lets reuse metrics see calls in files that themselves
+        // contain no wrappers.
+        let mut per_files: Vec<PerFile> = Vec::new();
         for source_file in collect_source_files(path, &filter)? {
-            if let Some(report) = self.analyze_file(&source_file)? {
-                out.push(report);
+            if let Some(per) = self.scan_file(&source_file)? {
+                per_files.push(per);
             }
         }
-        Ok(out)
+        // Reuse metrics are workspace-wide by construction. A
+        // single-file input only sees calls inside that one file, so
+        // every cross-file rollup would trivially be 0. To avoid
+        // emitting that misleading "0 sites" signal we leave reuse at
+        // `None` in single-file mode and only annotate when the input
+        // path is a directory.
+        if path.is_dir() {
+            annotate_reuse(&mut per_files);
+        }
+        Ok(per_files
+            .into_iter()
+            .filter_map(PerFile::into_report)
+            .collect())
     }
 
-    /// Analyze a single file. Returns `None` when the file has no
-    /// wrappers (after filtering), so empty entries don't pollute the
-    /// directory-mode report.
-    fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
+    /// Walk a single file, returning the per-file slice (wrappers +
+    /// call sites) used by `collect_file_reports`. Files with neither
+    /// a wrapper nor a call site are dropped at the next stage.
+    fn scan_file(&self, file: &SourceFile) -> Result<Option<PerFile>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
         let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
         if self.diff_only {
             let changed = changed_line_ranges(&file.path);
             findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
         }
-        if findings.is_empty() {
+        // Call sites are only used by the reuse-metrics pass, which is
+        // a Rust-only signal today — the TS / Py adapters do not yet
+        // expose a call-site index, so non-Rust files get an empty
+        // list. Wrappers in those files surface with `reuse = None`
+        // (the annotation pass keys off `reuse_eligible`).
+        let (calls, reuse_eligible) = if matches!(lang, SourceLang::Rust) {
+            let calls = lens_rust::extract_call_sites(&source).map_err(|e| {
+                AnalyzerError::Parse(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            })?;
+            (calls, true)
+        } else {
+            (Vec::new(), false)
+        };
+        if findings.is_empty() && calls.is_empty() {
             return Ok(None);
         }
-        Ok(Some(FileReport {
+        Ok(Some(PerFile {
             file: file.display_path.clone(),
             findings,
+            calls,
+            reuse_eligible,
         }))
     }
+}
+
+/// Pass-1 row: a file that may carry wrappers, call sites, or both.
+/// Files with neither are dropped before the row is built.
+struct PerFile {
+    file: String,
+    findings: Vec<WrapperFinding>,
+    calls: Vec<lens_rust::CallSite>,
+    /// Whether reuse metrics should be attached to this file's
+    /// findings. False for languages without a call-site visitor (TS /
+    /// Py today) so their findings keep `reuse = None` instead of
+    /// emitting "0 sites" rollups derived from an empty index.
+    reuse_eligible: bool,
+}
+
+impl PerFile {
+    /// Drop the call-site auxiliary data and convert into the
+    /// presentation-side [`FileReport`]. Files whose findings list ended
+    /// up empty (only call sites, no wrappers) are filtered out — the
+    /// report exists to surface wrappers, not raw call indices.
+    fn into_report(self) -> Option<FileReport> {
+        if self.findings.is_empty() {
+            return None;
+        }
+        Some(FileReport {
+            file: self.file,
+            findings: self.findings,
+        })
+    }
+}
+
+/// Walk every wrapper finding across `per_files` and populate its
+/// [`ReuseMetrics`] from the merged call-site index. Findings whose
+/// host file is not `reuse_eligible` (non-Rust today) are skipped so
+/// their `reuse` stays at `None` instead of emitting misleading
+/// "0 sites" rollups derived from an empty per-file index.
+fn annotate_reuse(per_files: &mut [PerFile]) {
+    // callee_name -> Vec<(file_index, caller_name)>. Owned keys so the
+    // index doesn't keep `per_files` borrowed when we re-walk to write
+    // back the metrics.
+    let mut index: HashMap<String, Vec<(usize, Option<String>)>> = HashMap::new();
+    for (idx, per) in per_files.iter().enumerate() {
+        for site in &per.calls {
+            let Some(name) = site.callee_name.as_deref() else {
+                continue;
+            };
+            index
+                .entry(name.to_owned())
+                .or_default()
+                .push((idx, site.caller_name.clone()));
+        }
+    }
+    let file_paths: Vec<String> = per_files.iter().map(|p| p.file.clone()).collect();
+    for (idx, per) in per_files.iter_mut().enumerate() {
+        if !per.reuse_eligible {
+            continue;
+        }
+        let host_file = file_paths[idx].as_str();
+        for finding in &mut per.findings {
+            let last_segment = name_last_segment(&finding.name);
+            let buckets = index.get(last_segment).cloned().unwrap_or_default();
+            // Drop self-references: a call to the wrapper from
+            // *inside* the wrapper itself doesn't represent reuse,
+            // it's the wrapper's own body. (Recursion on a trivial
+            // forwarder is unusual but possible.)
+            let buckets: Vec<_> = buckets
+                .into_iter()
+                .filter(|(_, caller)| caller.as_deref() != Some(finding.name.as_str()))
+                .collect();
+            let call_sites = buckets.len();
+            let same_file_only = buckets.iter().all(|(file_idx, _)| {
+                file_paths.get(*file_idx).map(String::as_str) == Some(host_file)
+            });
+            // Distinct callers: pair each call site with `(file, caller)`.
+            // Buckets with `caller = None` still count as one
+            // anonymous caller per file (top-level references in a
+            // `const` initialiser, etc.), so a wrapper used only at
+            // module scope doesn't mis-report 0 callers.
+            let callers: std::collections::HashSet<(usize, Option<String>)> =
+                buckets.iter().cloned().collect();
+            finding.reuse = Some(ReuseMetrics {
+                call_sites,
+                unique_callers: callers.len(),
+                same_file_only,
+            });
+        }
+    }
+}
+
+/// Strip qualifier prefixes from a wrapper's `name` to get the bare
+/// last segment that appears at every call site (`Service::handle` →
+/// `handle`).
+fn name_last_segment(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(_, last)| last)
 }
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
@@ -171,6 +297,22 @@ struct WrapperView<'a> {
     end_line: usize,
     callee: &'a str,
     adapters: &'a [String],
+    statement_count: usize,
+    /// Workspace-wide reuse metrics. `null` when the finding came from
+    /// a single-file run, or from a language whose adapter does not
+    /// yet expose a call-site index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reuse: Option<ReuseView>,
+}
+
+/// JSON-facing mirror of [`ReuseMetrics`]. Defined locally so the
+/// output schema stays under this analyzer's control even if the
+/// domain type grows fields.
+#[derive(Debug, Serialize)]
+struct ReuseView {
+    call_sites: usize,
+    unique_callers: usize,
+    same_file_only: bool,
 }
 
 impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
@@ -181,6 +323,12 @@ impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
             end_line: f.end_line,
             callee: f.callee.as_str(),
             adapters: &f.adapters,
+            statement_count: f.statement_count,
+            reuse: f.reuse.as_ref().map(|r| ReuseView {
+                call_sites: r.call_sites,
+                unique_callers: r.unique_callers,
+                same_file_only: r.same_file_only,
+            }),
         }
     }
 }
@@ -204,23 +352,33 @@ fn format_markdown(report: &Report<'_>) -> String {
             file.file, file.wrapper_count
         );
         for w in &file.wrappers {
-            if w.adapters.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "- `{}` (L{}-{}) -> {}",
-                    w.name, w.start_line, w.end_line, w.callee,
-                );
+            // Body shape: callee chain plus optional adapter suffix.
+            let body = if w.adapters.is_empty() {
+                format!("-> {}", w.callee)
             } else {
-                let _ = writeln!(
-                    out,
-                    "- `{}` (L{}-{}) -> {} [via {}]",
-                    w.name,
-                    w.start_line,
-                    w.end_line,
-                    w.callee,
-                    w.adapters.join(""),
-                );
-            }
+                format!("-> {} [via {}]", w.callee, w.adapters.join(""))
+            };
+            // Reuse suffix: only attached when the finding had reuse
+            // metrics (directory mode + Rust today). Kept terse so the
+            // line stays scannable at agent-context density.
+            let suffix = match &w.reuse {
+                Some(r) => format!(
+                    "  \u{2022} {} site(s), {} caller(s), {}",
+                    r.call_sites,
+                    r.unique_callers,
+                    if r.same_file_only {
+                        "same-file"
+                    } else {
+                        "cross-file"
+                    },
+                ),
+                None => String::new(),
+            };
+            let _ = writeln!(
+                out,
+                "- `{}` (L{}-{}) {}{}",
+                w.name, w.start_line, w.end_line, body, suffix,
+            );
         }
     }
     out
@@ -557,6 +715,160 @@ fn meaningful(xs: &[i32]) -> i32 {
             .map(|f| f["file"].as_str().unwrap())
             .collect();
         assert!(!files.contains(&"src/generated.rs"));
+    }
+
+    #[test]
+    fn directory_mode_populates_reuse_metrics_across_files() {
+        // Two files: `wrap.rs` defines `render` (a wrapper). `caller.rs`
+        // calls it from `consumer`. The wrapper itself is not called
+        // from inside `wrap.rs`, so reuse spans one cross-file caller.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "wrap.rs",
+            "fn render(x: &str) -> String { internal_render(x) }\n",
+        );
+        write_file(
+            dir.path(),
+            "caller.rs",
+            "fn consumer() { let _ = render(\"hi\"); }\n",
+        );
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let wrappers = parsed["files"][0]["wrappers"].as_array().unwrap();
+        let render = wrappers
+            .iter()
+            .find(|w| w["name"] == "render")
+            .expect("render wrapper missing");
+        assert_eq!(render["statement_count"], 1);
+        let reuse = &render["reuse"];
+        assert_eq!(reuse["call_sites"], 1);
+        assert_eq!(reuse["unique_callers"], 1);
+        assert_eq!(reuse["same_file_only"], false);
+    }
+
+    #[test]
+    fn directory_mode_marks_same_file_only_when_caller_is_local() {
+        // A wrapper used only inside its own file: `same_file_only` is
+        // true and the caller count is 1. This is the canonical "low
+        // reuse, low blast radius" finding the agent should treat as
+        // safe to inline.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn render(x: &str) -> String { internal_render(x) }
+fn consumer() { let _ = render("hi"); }
+"#,
+        );
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let render = parsed["files"][0]["wrappers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["name"] == "render")
+            .expect("render wrapper missing");
+        let reuse = &render["reuse"];
+        assert_eq!(reuse["call_sites"], 1);
+        assert_eq!(reuse["unique_callers"], 1);
+        assert_eq!(reuse["same_file_only"], true);
+    }
+
+    #[test]
+    fn directory_mode_zero_call_sites_for_unused_wrapper() {
+        // A wrapper that nothing else in the tree calls: `call_sites`
+        // is 0. `same_file_only` is `true` by convention (the empty
+        // call set trivially satisfies "all calls are local"), and the
+        // agent reads it together with the count rather than in
+        // isolation.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "wrap.rs",
+            "fn unused(x: &str) -> String { internal_render(x) }\n",
+        );
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let reuse = &parsed["files"][0]["wrappers"][0]["reuse"];
+        assert_eq!(reuse["call_sites"], 0);
+        assert_eq!(reuse["unique_callers"], 0);
+        assert_eq!(reuse["same_file_only"], true);
+    }
+
+    #[test]
+    fn single_file_mode_leaves_reuse_unset() {
+        // With a single source file as the input there is no
+        // workspace to enumerate calls across, so `reuse` is omitted
+        // from the JSON entirely (the field is `Option` and skipped
+        // when None).
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            "fn render(x: &str) -> String { internal_render(x) }\n",
+        );
+        let json = WrapperAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let render = &parsed["files"][0]["wrappers"][0];
+        assert_eq!(render["statement_count"], 1);
+        assert!(render.get("reuse").is_none_or(|v| v.is_null()));
+    }
+
+    #[test]
+    fn directory_mode_excludes_self_recursive_calls_from_reuse() {
+        // A pathological wrapper that recurses on itself shouldn't
+        // double-count its own body as reuse. The recursive call is
+        // dropped from the bucket so call_sites stays 0.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "wrap.rs",
+            "fn render(x: &str) -> String { render(x) }\n",
+        );
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let reuse = &parsed["files"][0]["wrappers"][0]["reuse"];
+        assert_eq!(reuse["call_sites"], 0);
+    }
+
+    #[test]
+    fn markdown_directory_report_renders_reuse_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "wrap.rs",
+            "fn render(x: &str) -> String { internal_render(x) }\n",
+        );
+        write_file(
+            dir.path(),
+            "caller.rs",
+            "fn consumer() { let _ = render(\"hi\"); }\n",
+        );
+
+        let md = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        // The reuse rollup is rendered as a terse trailing chip after
+        // the body so the line stays scannable. Format details (bullet
+        // glyph, exact wording) may shift; check for the count and the
+        // cross-file marker.
+        assert!(md.contains("1 site"), "missing reuse count: {md}");
+        assert!(md.contains("cross-file"), "missing locality: {md}");
     }
 
     fn run_git(dir: &Path, args: &[&str]) {

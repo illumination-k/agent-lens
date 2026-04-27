@@ -15,6 +15,16 @@
 /// the final body reads as `callee(args)` followed by each adapter in
 /// `adapters` joined together. An empty `adapters` means the body was a
 /// bare `callee(args)` call.
+///
+/// The remaining fields surface the three "wrapper-ness" axes an agent
+/// uses to triage findings:
+///
+/// * **Thin** — `statement_count` (always 1 today, but explicit so a
+///   future relaxation of detection can vary it).
+/// * **Low semantic delta** — `adapters` (empty = pure delegation;
+///   non-empty = a short chain of trivial coercions / unwraps).
+/// * **Low reuse** — `reuse`, populated only when the analyzer ran
+///   over a directory and could enumerate cross-file call sites.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrapperFinding {
     pub name: String,
@@ -24,6 +34,38 @@ pub struct WrapperFinding {
     pub end_line: usize,
     pub callee: String,
     pub adapters: Vec<String>,
+    /// Number of statements in the function body. Today the detector
+    /// only accepts single-statement bodies, so this is always 1; the
+    /// field is exposed so agents reading the output can confirm the
+    /// "thin" axis without having to re-derive it from line ranges.
+    pub statement_count: usize,
+    /// Workspace-wide usage of this wrapper, if measured. `None` when
+    /// the analyzer ran on a single file (the call-site universe was
+    /// not enumerated).
+    pub reuse: Option<ReuseMetrics>,
+}
+
+/// "Low reuse" axis for a wrapper: how many places call it, how many
+/// distinct callers there are, and whether every caller lives in the
+/// wrapper's own file.
+///
+/// All three numbers are computed by name-matching across the walked
+/// directory, so they are heuristic — same-named methods on different
+/// types collapse into the same bucket. Treat the result as guidance
+/// for an agent, not a precise call graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReuseMetrics {
+    /// Total call sites of this wrapper across the walked directory,
+    /// excluding calls written inside the wrapper itself.
+    pub call_sites: usize,
+    /// Distinct caller functions across those call sites. Top-level
+    /// references (e.g. inside a `const` initialiser) are counted as
+    /// one anonymous caller per file.
+    pub unique_callers: usize,
+    /// `true` iff every call site was found in the same file as the
+    /// wrapper definition. `true` with `call_sites == 0` means the
+    /// wrapper is unused inside the walked tree.
+    pub same_file_only: bool,
 }
 
 /// True iff `args` are exactly `params` in order, each appearing once.
