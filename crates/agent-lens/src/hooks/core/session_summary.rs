@@ -234,3 +234,123 @@ fn format_cycle(cycle: &DependencyCycle) -> String {
         .collect();
     format!("{} module(s): {}", cycle.members.len(), names.join(" → "))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lens_domain::ModulePath;
+
+    fn module(path: &str, fan_in: usize, fan_out: usize, ifc: u64) -> ModuleMetrics {
+        ModuleMetrics {
+            path: ModulePath::new(path),
+            fan_in,
+            fan_out,
+            ifc,
+            instability: None,
+        }
+    }
+
+    fn report(modules: Vec<ModuleMetrics>, cycles: Vec<DependencyCycle>) -> CouplingReport {
+        CouplingReport {
+            modules,
+            edges: Vec::new(),
+            pairs: Vec::new(),
+            cycles,
+            number_of_couplings: 0,
+        }
+    }
+
+    #[test]
+    fn top_modules_by_ifc_orders_by_ifc_descending() {
+        let mods = vec![
+            module("crate::a", 1, 1, 1),
+            module("crate::b", 2, 2, 16),
+            module("crate::c", 1, 3, 9),
+        ];
+        let top = top_modules_by_ifc(&mods);
+        let names: Vec<&str> = top.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(names, vec!["crate::b", "crate::c", "crate::a"]);
+    }
+
+    #[test]
+    fn top_modules_by_ifc_drops_zero_ifc_entries() {
+        // Mix of zero-IFC and non-zero modules. The zero entries must be
+        // filtered out — surfacing them would crowd out genuine
+        // bottlenecks. Mutating `> 0` to `== 0`, `< 0`, or `>= 0` flips
+        // which set survives, so this test pins the boundary.
+        let mods = vec![
+            module("crate::leaf", 0, 1, 0),
+            module("crate::root", 1, 0, 0),
+            module("crate::hub", 2, 2, 16),
+        ];
+        let top = top_modules_by_ifc(&mods);
+        let names: Vec<&str> = top.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(names, vec!["crate::hub"]);
+    }
+
+    #[test]
+    fn top_modules_by_ifc_returns_empty_when_all_zero() {
+        let mods = vec![
+            module("crate::leaf", 0, 1, 0),
+            module("crate::root", 1, 0, 0),
+        ];
+        assert!(top_modules_by_ifc(&mods).is_empty());
+    }
+
+    #[test]
+    fn format_cycle_lists_members_with_arrow() {
+        let cycle = DependencyCycle {
+            members: vec![
+                ModulePath::new("crate::a"),
+                ModulePath::new("crate::b"),
+                ModulePath::new("crate::c"),
+            ],
+        };
+        assert_eq!(
+            format_cycle(&cycle),
+            "3 module(s): crate::a → crate::b → crate::c",
+        );
+    }
+
+    #[test]
+    fn format_coupling_includes_top_modules_section_when_non_empty() {
+        let r = report(vec![module("crate::hub", 2, 2, 16)], Vec::new());
+        let out = format_coupling(&r);
+        assert!(out.contains("Top modules by IFC:"), "got {out}");
+        assert!(
+            out.contains("crate::hub (fan_in=2, fan_out=2, ifc=16)"),
+            "got {out}",
+        );
+    }
+
+    #[test]
+    fn format_coupling_omits_top_modules_section_when_only_zero_ifc() {
+        let r = report(vec![module("crate::leaf", 0, 1, 0)], Vec::new());
+        let out = format_coupling(&r);
+        assert!(
+            !out.contains("Top modules by IFC:"),
+            "should skip empty section: {out}",
+        );
+    }
+
+    #[test]
+    fn format_coupling_includes_cycles_section_when_non_empty() {
+        let cycle = DependencyCycle {
+            members: vec![ModulePath::new("crate::a"), ModulePath::new("crate::b")],
+        };
+        let r = report(Vec::new(), vec![cycle]);
+        let out = format_coupling(&r);
+        assert!(out.contains("Dependency cycles:"), "got {out}");
+        assert!(out.contains("crate::a → crate::b"), "got {out}");
+    }
+
+    #[test]
+    fn format_coupling_omits_cycles_section_when_empty() {
+        let r = report(Vec::new(), Vec::new());
+        let out = format_coupling(&r);
+        assert!(
+            !out.contains("Dependency cycles:"),
+            "should skip empty section: {out}",
+        );
+    }
+}
