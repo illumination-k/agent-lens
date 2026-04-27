@@ -1,11 +1,12 @@
-//! Generic PostToolUse hook runners.
+//! Generic hook runners.
 //!
 //! Each agent (Claude Code / Codex) provides a [`HookEnvelope`] that
 //! adapts their input/output shapes to the engine-agnostic
-//! `(Vec<EditedSource>, Option<String>)` flow used by the cores. The
-//! [`SimilarityHook`] / [`WrapperHook`] structs here are then a single
-//! generic implementation parameterised on the envelope, replacing the
-//! near-identical per-agent boilerplate.
+//! `Vec<EditedSource> -> Option<String>` flow used by the cores. Each
+//! analyser ([`SimilarityCore`], [`WrapperCore`], [`ComplexityCore`],
+//! [`CohesionCore`]) implements [`HookCore`] so a single
+//! [`CoreHook<C, E>`] handles all 4 × 2 combinations and the per-hook
+//! types are just type aliases.
 
 use std::marker::PhantomData;
 
@@ -41,219 +42,111 @@ pub trait HookEnvelope {
     fn wrap_report(report: String) -> Self::Output;
 }
 
-/// Similarity hook generic over the engine envelope.
-pub struct SimilarityHook<E: HookEnvelope> {
-    core: SimilarityCore,
+/// One analyser core (similarity, wrapper, complexity, cohesion) reduced
+/// to the surface the runner needs.
+///
+/// Implementing this on each `…Core` lets [`CoreHook`] be generic over
+/// the analyser as well as the engine envelope, so the per-hook structs
+/// collapse to a single struct plus type aliases.
+pub trait HookCore: Default + Clone + std::fmt::Debug {
+    /// Analyse every prepared source and produce a single report, or
+    /// `None` when there is nothing to surface.
+    fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError>;
+}
+
+impl HookCore for SimilarityCore {
+    fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError> {
+        SimilarityCore::run(self, sources)
+    }
+}
+
+impl HookCore for WrapperCore {
+    fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError> {
+        WrapperCore::run(self, sources)
+    }
+}
+
+impl HookCore for ComplexityCore {
+    fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError> {
+        ComplexityCore::run(self, sources)
+    }
+}
+
+impl HookCore for CohesionCore {
+    fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError> {
+        CohesionCore::run(self, sources)
+    }
+}
+
+/// Hook generic over both the analyser core and the engine envelope.
+///
+/// One implementation drives all 4 × 2 hook combinations: each per-hook
+/// struct is a type alias over `CoreHook<TheirCore, TheirEnvelope>`.
+pub struct CoreHook<C: HookCore, E: HookEnvelope> {
+    core: C,
     _envelope: PhantomData<fn() -> E>,
 }
 
-impl<E: HookEnvelope> SimilarityHook<E> {
-    /// Construct a handler with the default similarity threshold and TSED
-    /// options.
+impl<C: HookCore, E: HookEnvelope> CoreHook<C, E> {
     pub fn new() -> Self {
         Self {
-            core: SimilarityCore::new(),
+            core: C::default(),
             _envelope: PhantomData,
         }
     }
+}
 
+impl<C: HookCore, E: HookEnvelope> Default for CoreHook<C, E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<C: HookCore, E: HookEnvelope> std::fmt::Debug for CoreHook<C, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreHook")
+            .field("core", &self.core)
+            .finish()
+    }
+}
+
+impl<C: HookCore, E: HookEnvelope> Clone for CoreHook<C, E> {
+    fn clone(&self) -> Self {
+        Self {
+            core: self.core.clone(),
+            _envelope: PhantomData,
+        }
+    }
+}
+
+impl<C: HookCore, E: HookEnvelope> Hook for CoreHook<C, E> {
+    type Input = E::Input;
+    type Output = E::Output;
+    type Error = HookError;
+
+    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
+        let sources = E::prepare_sources(&input)?;
+        match self.core.run(&sources)? {
+            Some(report) => Ok(E::wrap_report(report)),
+            None => Ok(E::Output::default()),
+        }
+    }
+}
+
+/// Similarity hook generic over the engine envelope.
+pub type SimilarityHook<E> = CoreHook<SimilarityCore, E>;
+/// Wrapper-detection hook generic over the engine envelope.
+pub type WrapperHook<E> = CoreHook<WrapperCore, E>;
+/// Per-function complexity hook generic over the engine envelope.
+pub type ComplexityHook<E> = CoreHook<ComplexityCore, E>;
+/// `impl`-block cohesion hook generic over the engine envelope.
+pub type CohesionHook<E> = CoreHook<CohesionCore, E>;
+
+impl<E: HookEnvelope> CoreHook<SimilarityCore, E> {
     /// Override the similarity threshold. Useful for tests; the binary
     /// currently always uses the default.
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.core = self.core.with_threshold(threshold);
         self
-    }
-}
-
-impl<E: HookEnvelope> Default for SimilarityHook<E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<E: HookEnvelope> std::fmt::Debug for SimilarityHook<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SimilarityHook")
-            .field("core", &self.core)
-            .finish()
-    }
-}
-
-impl<E: HookEnvelope> Clone for SimilarityHook<E> {
-    fn clone(&self) -> Self {
-        Self {
-            core: self.core.clone(),
-            _envelope: PhantomData,
-        }
-    }
-}
-
-impl<E: HookEnvelope> Hook for SimilarityHook<E> {
-    type Input = E::Input;
-    type Output = E::Output;
-    type Error = HookError;
-
-    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
-        let sources = E::prepare_sources(&input)?;
-        match self.core.run(&sources)? {
-            Some(report) => Ok(E::wrap_report(report)),
-            None => Ok(E::Output::default()),
-        }
-    }
-}
-
-/// Wrapper-detection hook generic over the engine envelope.
-pub struct WrapperHook<E: HookEnvelope> {
-    core: WrapperCore,
-    _envelope: PhantomData<fn() -> E>,
-}
-
-impl<E: HookEnvelope> WrapperHook<E> {
-    pub fn new() -> Self {
-        Self {
-            core: WrapperCore::new(),
-            _envelope: PhantomData,
-        }
-    }
-}
-
-impl<E: HookEnvelope> Default for WrapperHook<E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<E: HookEnvelope> std::fmt::Debug for WrapperHook<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WrapperHook")
-            .field("core", &self.core)
-            .finish()
-    }
-}
-
-impl<E: HookEnvelope> Clone for WrapperHook<E> {
-    fn clone(&self) -> Self {
-        Self {
-            core: self.core.clone(),
-            _envelope: PhantomData,
-        }
-    }
-}
-
-impl<E: HookEnvelope> Hook for WrapperHook<E> {
-    type Input = E::Input;
-    type Output = E::Output;
-    type Error = HookError;
-
-    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
-        let sources = E::prepare_sources(&input)?;
-        match self.core.run(&sources)? {
-            Some(report) => Ok(E::wrap_report(report)),
-            None => Ok(E::Output::default()),
-        }
-    }
-}
-
-/// Per-function complexity hook generic over the engine envelope.
-pub struct ComplexityHook<E: HookEnvelope> {
-    core: ComplexityCore,
-    _envelope: PhantomData<fn() -> E>,
-}
-
-impl<E: HookEnvelope> ComplexityHook<E> {
-    pub fn new() -> Self {
-        Self {
-            core: ComplexityCore::new(),
-            _envelope: PhantomData,
-        }
-    }
-}
-
-impl<E: HookEnvelope> Default for ComplexityHook<E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<E: HookEnvelope> std::fmt::Debug for ComplexityHook<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ComplexityHook")
-            .field("core", &self.core)
-            .finish()
-    }
-}
-
-impl<E: HookEnvelope> Clone for ComplexityHook<E> {
-    fn clone(&self) -> Self {
-        Self {
-            core: self.core.clone(),
-            _envelope: PhantomData,
-        }
-    }
-}
-
-impl<E: HookEnvelope> Hook for ComplexityHook<E> {
-    type Input = E::Input;
-    type Output = E::Output;
-    type Error = HookError;
-
-    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
-        let sources = E::prepare_sources(&input)?;
-        match self.core.run(&sources)? {
-            Some(report) => Ok(E::wrap_report(report)),
-            None => Ok(E::Output::default()),
-        }
-    }
-}
-
-/// `impl`-block cohesion hook generic over the engine envelope.
-pub struct CohesionHook<E: HookEnvelope> {
-    core: CohesionCore,
-    _envelope: PhantomData<fn() -> E>,
-}
-
-impl<E: HookEnvelope> CohesionHook<E> {
-    pub fn new() -> Self {
-        Self {
-            core: CohesionCore::new(),
-            _envelope: PhantomData,
-        }
-    }
-}
-
-impl<E: HookEnvelope> Default for CohesionHook<E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<E: HookEnvelope> std::fmt::Debug for CohesionHook<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CohesionHook")
-            .field("core", &self.core)
-            .finish()
-    }
-}
-
-impl<E: HookEnvelope> Clone for CohesionHook<E> {
-    fn clone(&self) -> Self {
-        Self {
-            core: self.core.clone(),
-            _envelope: PhantomData,
-        }
-    }
-}
-
-impl<E: HookEnvelope> Hook for CohesionHook<E> {
-    type Input = E::Input;
-    type Output = E::Output;
-    type Error = HookError;
-
-    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
-        let sources = E::prepare_sources(&input)?;
-        match self.core.run(&sources)? {
-            Some(report) => Ok(E::wrap_report(report)),
-            None => Ok(E::Output::default()),
-        }
     }
 }

@@ -26,7 +26,7 @@ const TOP_PER_FILE: usize = 5;
 
 /// Runner for the pre-edit complexity hook.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ComplexityCore;
+pub struct ComplexityCore;
 
 impl ComplexityCore {
     pub fn new() -> Self {

@@ -20,17 +20,23 @@ pub const DEFAULT_THRESHOLD: f64 = 0.85;
 
 /// Configuration plus runner for the similarity hook.
 #[derive(Debug, Clone)]
-pub(crate) struct SimilarityCore {
+pub struct SimilarityCore {
     threshold: f64,
     opts: TSEDOptions,
 }
 
-impl SimilarityCore {
-    pub fn new() -> Self {
+impl Default for SimilarityCore {
+    fn default() -> Self {
         Self {
             threshold: DEFAULT_THRESHOLD,
             opts: TSEDOptions::default(),
         }
+    }
+}
+
+impl SimilarityCore {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_threshold(mut self, threshold: f64) -> Self {
