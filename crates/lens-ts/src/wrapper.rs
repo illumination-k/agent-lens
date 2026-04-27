@@ -20,6 +20,7 @@ use oxc_parser::Parser;
 
 use crate::line_index::LineIndex;
 use crate::parser::{Dialect, TsParseError};
+use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
 /// Method names with no arguments that we treat as "no semantic content":
 /// type/borrow coercions and stringification.
@@ -43,197 +44,40 @@ pub fn find_wrappers(source: &str, dialect: Dialect) -> Result<Vec<WrapperFindin
         ));
     }
     let line_index = LineIndex::new(source);
-    let mut out = Vec::new();
-    for stmt in &ret.program.body {
-        collect_stmt(stmt, &line_index, &mut out);
-    }
-    Ok(out)
+    let mut visitor = WrapperCollector { out: Vec::new() };
+    walk_program(&ret.program, &line_index, &mut visitor);
+    Ok(visitor.out)
 }
 
-fn collect_stmt(stmt: &Statement, line_index: &LineIndex, out: &mut Vec<WrapperFinding>) {
-    match stmt {
-        Statement::FunctionDeclaration(f) => analyze_function(f, None, line_index, out),
-        Statement::ClassDeclaration(c) => collect_class(c, line_index, out),
-        Statement::VariableDeclaration(v) => {
-            for d in &v.declarations {
-                analyze_variable_declarator(d, line_index, out);
-            }
-        }
-        Statement::ExportNamedDeclaration(e) => {
-            if let Some(decl) = &e.declaration {
-                collect_decl(decl, line_index, out);
-            }
-        }
-        Statement::ExportDefaultDeclaration(e) => match &e.declaration {
-            ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                analyze_function(f, None, line_index, out);
-            }
-            ExportDefaultDeclarationKind::ClassDeclaration(c) => collect_class(c, line_index, out),
-            _ => {}
-        },
-        Statement::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                collect_module_body(body, line_index, out);
-            }
-        }
-        _ => {}
-    }
+struct WrapperCollector {
+    out: Vec<WrapperFinding>,
 }
 
-fn collect_decl(decl: &Declaration, line_index: &LineIndex, out: &mut Vec<WrapperFinding>) {
-    match decl {
-        Declaration::FunctionDeclaration(f) => analyze_function(f, None, line_index, out),
-        Declaration::ClassDeclaration(c) => collect_class(c, line_index, out),
-        Declaration::VariableDeclaration(v) => {
-            for d in &v.declarations {
-                analyze_variable_declarator(d, line_index, out);
-            }
-        }
-        Declaration::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                collect_module_body(body, line_index, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_module_body(
-    body: &TSModuleDeclarationBody,
-    line_index: &LineIndex,
-    out: &mut Vec<WrapperFinding>,
-) {
-    match body {
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                collect_stmt(stmt, line_index, out);
-            }
-        }
-        TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-            if let Some(body) = &nested.body {
-                collect_module_body(body, line_index, out);
-            }
-        }
-    }
-}
-
-fn collect_class(class: &Class, line_index: &LineIndex, out: &mut Vec<WrapperFinding>) {
-    let class_name = class
-        .id
-        .as_ref()
-        .map(|i| i.name.as_str())
-        .unwrap_or("anonymous");
-    for elem in &class.body.body {
-        let ClassElement::MethodDefinition(m) = elem else {
-            continue;
-        };
+impl FunctionVisitor for WrapperCollector {
+    fn on_function(&mut self, item: FunctionItem<'_>) {
         // Constructors that just forward `super(...)` are idiomatic
         // boilerplate; flagging them is noise, not signal.
-        if matches!(m.kind, MethodDefinitionKind::Constructor) {
-            continue;
+        if item.is_constructor {
+            return;
         }
-        let Some(name) = method_name(m) else {
-            continue;
+        let params = collect_param_idents(item.params);
+        let Some(tail) = single_block_tail(item.body) else {
+            return;
         };
-        analyze_function_value(
-            &format!("{class_name}::{name}"),
-            &m.value,
-            m.span.start,
-            line_index,
-            out,
-        );
-    }
-}
-
-fn analyze_function(
-    func: &Function,
-    owner: Option<&str>,
-    line_index: &LineIndex,
-    out: &mut Vec<WrapperFinding>,
-) {
-    let Some(id) = &func.id else { return };
-    let raw_name = id.name.as_str();
-    let qualified = match owner {
-        Some(o) => format!("{o}::{raw_name}"),
-        None => raw_name.to_owned(),
-    };
-    analyze_function_value(&qualified, func, func.span.start, line_index, out);
-}
-
-fn analyze_function_value(
-    name: &str,
-    func: &Function,
-    start_offset: u32,
-    line_index: &LineIndex,
-    out: &mut Vec<WrapperFinding>,
-) {
-    let Some(body) = &func.body else { return };
-    let params = collect_param_idents(&func.params);
-    let Some(finding) = analyze(name, body, start_offset, &params, line_index) else {
-        return;
-    };
-    out.push(finding);
-}
-
-fn analyze_variable_declarator(
-    decl: &VariableDeclarator,
-    line_index: &LineIndex,
-    out: &mut Vec<WrapperFinding>,
-) {
-    let Some(init) = &decl.init else { return };
-    let Some(id) = decl.id.get_binding_identifier() else {
-        return;
-    };
-    let name = id.name.to_string();
-    match init {
-        Expression::ArrowFunctionExpression(arrow) => {
-            let params = collect_param_idents(&arrow.params);
-            let body = if arrow.expression {
-                expression_body_tail(&arrow.body)
-            } else {
-                single_block_tail(&arrow.body)
-            };
-            let Some(tail) = body else { return };
-            if let Some(finding) = analyze_tail(
-                &name,
-                tail,
-                decl.span.start,
-                arrow.body.span.end,
-                &params,
-                line_index,
-            ) {
-                out.push(finding);
-            }
+        if let Some(finding) =
+            analyze_tail(&item.name, tail, item.start_line, item.end_line, &params)
+        {
+            self.out.push(finding);
         }
-        Expression::FunctionExpression(f) => {
-            let Some(body) = &f.body else { return };
-            let params = collect_param_idents(&f.params);
-            if let Some(finding) = analyze(&name, body, decl.span.start, &params, line_index) {
-                out.push(finding);
-            }
-        }
-        _ => {}
     }
-}
-
-fn analyze(
-    name: &str,
-    body: &FunctionBody,
-    start_offset: u32,
-    params: &[String],
-    line_index: &LineIndex,
-) -> Option<WrapperFinding> {
-    let tail = single_block_tail(body)?;
-    analyze_tail(name, tail, start_offset, body.span.end, params, line_index)
 }
 
 fn analyze_tail(
     name: &str,
     tail: &Expression,
-    start_offset: u32,
-    end_offset: u32,
+    start_line: usize,
+    end_line: usize,
     params: &[String],
-    line_index: &LineIndex,
 ) -> Option<WrapperFinding> {
     let (core, adapters) = peel_adapters(tail);
     let (callee, args) = core_call(core)?;
@@ -242,19 +86,19 @@ fn analyze_tail(
     }
     Some(WrapperFinding {
         name: name.to_owned(),
-        start_line: line_index.line(start_offset),
-        end_line: line_index.line(end_offset),
+        start_line,
+        end_line,
         callee,
         adapters,
     })
 }
 
-fn method_name(method: &MethodDefinition) -> Option<String> {
-    crate::walk::method_key_name(&method.key)
-}
-
-/// Extract the single tail expression from a block-bodied function:
-/// either `return EXPR;` or a single `EXPR;` expression statement.
+/// Extract the single tail expression from a function body. Both
+/// block-bodied functions (`return EXPR;` or a bare `EXPR;`) and
+/// expression-bodied arrows (`(x) => f(x)`, which oxc still wraps in a
+/// `FunctionBody` carrying a single `ExpressionStatement`) flow through
+/// here — the two `Statement` variants are disjoint, so a single match
+/// covers both shapes.
 fn single_block_tail<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Expression<'a>> {
     let [stmt] = body.statements.as_slice() else {
         return None;
@@ -262,20 +106,6 @@ fn single_block_tail<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Expression<'a
     match stmt {
         Statement::ReturnStatement(ret) => ret.argument.as_ref(),
         Statement::ExpressionStatement(es) => Some(&es.expression),
-        _ => None,
-    }
-}
-
-/// Extract the tail expression from an arrow function with `expression: true`
-/// (e.g. `(x) => f(x)`). oxc still wraps the body in a `FunctionBody`; the
-/// inner statement is an `ExpressionStatement` carrying the expression.
-fn expression_body_tail<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Expression<'a>> {
-    let [stmt] = body.statements.as_slice() else {
-        return None;
-    };
-    match stmt {
-        Statement::ExpressionStatement(es) => Some(&es.expression),
-        Statement::ReturnStatement(ret) => ret.argument.as_ref(),
         _ => None,
     }
 }
