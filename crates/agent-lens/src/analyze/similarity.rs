@@ -18,7 +18,7 @@ use ignore::WalkBuilder;
 use lens_domain::{
     CandidateStrategy, FunctionDef, LanguageParser, SimilarCluster, TSEDOptions,
     calculate_tsed_with_subtree_sizes, cluster_similar_pairs, collect_subtree_sizes,
-    lsh_candidate_pairs,
+    lsh_candidate_pairs_for_trees,
 };
 use lens_rust::{RustParser, extract_functions_excluding_tests};
 use rayon::prelude::*;
@@ -454,12 +454,12 @@ fn candidate_pairs(
         .lsh_min_functions
         .is_some_and(|min_n| eligible_indices.len() >= min_n);
     let (pairs, size_filtered_count) = if use_lsh {
-        let funcs: Vec<FunctionDef> = eligible_indices
+        let trees: Vec<&lens_domain::TreeNode> = eligible_indices
             .iter()
-            .filter_map(|&i| corpus.get(i).map(|f| f.def.clone()))
+            .filter_map(|&i| corpus.get(i).map(|f| &f.def.tree))
             .collect();
         filter_size_compatible_pairs(
-            lsh_candidate_pairs(&funcs, &strategy.lsh)
+            lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
                 .into_iter()
                 .filter_map(|(i, j)| {
                     let a = eligible_indices.get(i).copied()?;

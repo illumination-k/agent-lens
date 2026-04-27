@@ -6,11 +6,34 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 
 fn bench_similarity(c: &mut Criterion) {
-    let corpus = bench_corpus();
+    let small = bench_corpus(2, 16);
+    let medium = bench_corpus(16, 16);
+    let large = bench_corpus(32, 32);
     let analyzer = SimilarityAnalyzer::new();
+
+    c.bench_function("similarity_directory_cartesian_32_functions", |b| {
+        b.iter(|| {
+            let report = match analyzer.analyze(small.path(), OutputFormat::Json) {
+                Ok(report) => report,
+                Err(err) => panic!("similarity benchmark failed: {err}"),
+            };
+            std::hint::black_box(report.len());
+        });
+    });
+
     c.bench_function("similarity_directory_lsh_256_functions", |b| {
         b.iter(|| {
-            let report = match analyzer.analyze(corpus.path(), OutputFormat::Json) {
+            let report = match analyzer.analyze(medium.path(), OutputFormat::Json) {
+                Ok(report) => report,
+                Err(err) => panic!("similarity benchmark failed: {err}"),
+            };
+            std::hint::black_box(report.len());
+        });
+    });
+
+    c.bench_function("similarity_directory_lsh_1024_functions", |b| {
+        b.iter(|| {
+            let report = match analyzer.analyze(large.path(), OutputFormat::Json) {
                 Ok(report) => report,
                 Err(err) => panic!("similarity benchmark failed: {err}"),
             };
@@ -19,22 +42,22 @@ fn bench_similarity(c: &mut Criterion) {
     });
 }
 
-fn bench_corpus() -> TempDir {
+fn bench_corpus(file_count: usize, functions_per_file: usize) -> TempDir {
     let dir = tempfile::tempdir().unwrap_or_else(|err| {
         panic!("failed to create benchmark tempdir: {err}");
     });
-    write_corpus(dir.path()).unwrap_or_else(|err| {
+    write_corpus(dir.path(), file_count, functions_per_file).unwrap_or_else(|err| {
         panic!("failed to write benchmark corpus: {err}");
     });
     dir
 }
 
-fn write_corpus(root: &Path) -> std::io::Result<()> {
-    for file_idx in 0..16 {
+fn write_corpus(root: &Path, file_count: usize, functions_per_file: usize) -> std::io::Result<()> {
+    for file_idx in 0..file_count {
         let path: PathBuf = root.join(format!("module_{file_idx:02}.rs"));
         let mut src = String::new();
-        for fn_idx in 0..16 {
-            let global = file_idx * 16 + fn_idx;
+        for fn_idx in 0..functions_per_file {
+            let global = file_idx * functions_per_file + fn_idx;
             let variant = global % 8;
             let salt = global % 17;
             let _ = writeln!(

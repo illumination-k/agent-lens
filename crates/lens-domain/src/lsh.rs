@@ -65,7 +65,19 @@ impl Default for LshOptions {
 /// guaranteed to be in the output, but the output also contains weakly-
 /// similar pairs that the downstream TSED filter will drop.
 pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<(usize, usize)> {
-    if functions.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
+    let trees: Vec<&TreeNode> = functions.iter().map(|function| &function.tree).collect();
+    lsh_candidate_pairs_for_trees(&trees, opts)
+}
+
+/// Generate candidate pairs for an already-borrowed tree corpus.
+///
+/// This avoids cloning full [`FunctionDef`] values in callers that already
+/// keep their own index mapping, such as directory-level analyzers.
+pub fn lsh_candidate_pairs_for_trees(
+    trees: &[&TreeNode],
+    opts: &LshOptions,
+) -> Vec<(usize, usize)> {
+    if trees.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
         return Vec::new();
     }
     let rows_per_band = opts.num_hashes / opts.num_bands;
@@ -73,10 +85,10 @@ pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<
         return Vec::new();
     }
     let family = HashFamily::new(opts.num_hashes, opts.seed);
-    let signatures: Vec<Vec<u64>> = functions
+    let signatures: Vec<Vec<u64>> = trees
         .iter()
-        .map(|f| {
-            let features = extract_shingles(&f.tree, opts.shingle_size);
+        .map(|tree| {
+            let features = extract_shingles(tree, opts.shingle_size);
             minhash_signature(&features, &family)
         })
         .collect();
@@ -276,6 +288,21 @@ mod tests {
         let first = lsh_candidate_pairs(&funcs, &opts);
         let second = lsh_candidate_pairs(&funcs, &opts);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn borrowed_tree_entrypoint_matches_function_entrypoint() {
+        let funcs = vec![
+            def(&["Let", "Call", "Add", "Return"]),
+            def(&["Let", "Call", "Add", "Return"]),
+            def(&["If", "While", "Match"]),
+        ];
+        let trees: Vec<&TreeNode> = funcs.iter().map(|f| &f.tree).collect();
+        let opts = LshOptions::default();
+        assert_eq!(
+            lsh_candidate_pairs_for_trees(&trees, &opts),
+            lsh_candidate_pairs(&funcs, &opts),
+        );
     }
 
     #[test]
