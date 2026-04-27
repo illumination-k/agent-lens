@@ -168,10 +168,10 @@ pub fn resolve_crate_root(path: &Path) -> Result<PathBuf, CrateAnalyzerError> {
     if meta.is_file() && SourceLang::from_path(path) == Some(SourceLang::Rust) {
         return Ok(path.to_path_buf());
     }
-    if meta.is_dir() {
-        if let Some(probe) = first_existing_file(path, &["src/lib.rs", "src/main.rs"]) {
-            return Ok(probe);
-        }
+    if meta.is_dir()
+        && let Some(probe) = first_existing_file(path, &["src/lib.rs", "src/main.rs"])
+    {
+        return Ok(probe);
     }
     Err(CrateAnalyzerError::UnsupportedRoot {
         path: path.to_path_buf(),

@@ -286,7 +286,7 @@ fn extract_functions(
         SourceLang::TypeScript => extract_typescript(source, exclude_tests),
         SourceLang::Python => extract_python(source, exclude_tests),
     }
-    .map_err(|e| AnalyzerError::Parse(e))
+    .map_err(AnalyzerError::Parse)
 }
 
 type ExtractError = Box<dyn std::error::Error + Send + Sync>;

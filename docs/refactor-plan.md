@@ -6,34 +6,34 @@
 
 ### Top hotspots (`analyze hotspot crates --top 15`)
 
-| 順位 | file                                          | score | commits | cog | cc | loc | fns |
-| ---: | --------------------------------------------- | ----: | ------: | --: | -: | --: | --: |
-|    1 | `agent-lens/src/analyze/similarity.rs`        |   170 |      10 |  17 |  9 | 715 |  33 |
-|    2 | `agent-lens/src/main.rs`                      |    51 |      17 |   3 | 14 | 499 |  45 |
-|    3 | `agent-lens/src/analyze/coupling.rs`          |    45 |       5 |   9 |  7 | 459 |  40 |
-|    4 | `agent-lens/src/analyze/mod.rs`               |    42 |      14 |   3 |  4 | 217 |  20 |
-|    5 | `lens-ts/src/parser.rs`                       |    36 |       6 |   6 |  4 | 276 |  25 |
-|    6 | `lens-rust/src/coupling.rs`                   |    35 |       5 |   7 |  7 | 817 |  61 |
-|    7 | `lens-rust/src/cohesion.rs`                   |    32 |       4 |   8 |  6 | 345 |  25 |
-|    8 | `agent-lens/src/analyze/wrapper.rs`           |    30 |       6 |   5 |  5 | 249 |  19 |
-|    9 | `lens-ts/src/complexity.rs`                   |    30 |       6 |   5 |  4 | 737 |  81 |
-|   10 | `agent-lens/src/analyze/complexity.rs`        |    27 |       9 |   3 |  9 | 364 |  27 |
+| 順位 | file                                   | score | commits | cog | cc | loc | fns |
+| ---: | -------------------------------------- | ----: | ------: | --: | -: | --: | --: |
+|    1 | `agent-lens/src/analyze/similarity.rs` |   170 |      10 |  17 |  9 | 715 |  33 |
+|    2 | `agent-lens/src/main.rs`               |    51 |      17 |   3 | 14 | 499 |  45 |
+|    3 | `agent-lens/src/analyze/coupling.rs`   |    45 |       5 |   9 |  7 | 459 |  40 |
+|    4 | `agent-lens/src/analyze/mod.rs`        |    42 |      14 |   3 |  4 | 217 |  20 |
+|    5 | `lens-ts/src/parser.rs`                |    36 |       6 |   6 |  4 | 276 |  25 |
+|    6 | `lens-rust/src/coupling.rs`            |    35 |       5 |   7 |  7 | 817 |  61 |
+|    7 | `lens-rust/src/cohesion.rs`            |    32 |       4 |   8 |  6 | 345 |  25 |
+|    8 | `agent-lens/src/analyze/wrapper.rs`    |    30 |       6 |   5 |  5 | 249 |  19 |
+|    9 | `lens-ts/src/complexity.rs`            |    30 |       6 |   5 |  4 | 737 |  81 |
+|   10 | `agent-lens/src/analyze/complexity.rs` |    27 |       9 |   3 |  9 | 364 |  27 |
 
 > **読み**: 上位 4 件すべてが `agent-lens` バイナリ crate に集中している。
 > 「複雑な所」と「変更頻度が高い所」が一致しているので、ここに手を入れることで投資対効果が最も高い。
 
 ### 高 cognitive な関数（要分割候補）
 
-| 関数                                              | file                                    | cc | cog | nest |
-| ------------------------------------------------- | --------------------------------------- | -: | --: | ---: |
-| `SimilarityAnalyzer::find_pairs`                  | `agent-lens/src/analyze/similarity.rs`  |  9 |  17 |    3 |
-| `extract_functions`                               | `agent-lens/src/analyze/similarity.rs`  |  6 |  10 |    2 |
-| `resolve_crate_root`                              | `agent-lens/src/analyze/coupling.rs`    |  7 |   9 |    3 |
-| `collect_item`                                    | `lens-rust/src/cohesion.rs`             |  6 |   8 |    3 |
-| `walk_tokens`                                     | `lens-rust/src/complexity.rs`           |  6 |   7 |    3 |
-| `PathResolver::absolutize_super`                  | `lens-rust/src/coupling.rs`             |  4 |   7 |    3 |
-| `collect_churn`                                   | `agent-lens/src/analyze/hotspot.rs`     |  7 |   6 |    2 |
-| `AnalyzeCommand::run`                             | `agent-lens/src/main.rs`                | 14 |   1 |    1 |
+| 関数                             | file                                   | cc | cog | nest |
+| -------------------------------- | -------------------------------------- | -: | --: | ---: |
+| `SimilarityAnalyzer::find_pairs` | `agent-lens/src/analyze/similarity.rs` |  9 |  17 |    3 |
+| `extract_functions`              | `agent-lens/src/analyze/similarity.rs` |  6 |  10 |    2 |
+| `resolve_crate_root`             | `agent-lens/src/analyze/coupling.rs`   |  7 |   9 |    3 |
+| `collect_item`                   | `lens-rust/src/cohesion.rs`            |  6 |   8 |    3 |
+| `walk_tokens`                    | `lens-rust/src/complexity.rs`          |  6 |   7 |    3 |
+| `PathResolver::absolutize_super` | `lens-rust/src/coupling.rs`            |  4 |   7 |    3 |
+| `collect_churn`                  | `agent-lens/src/analyze/hotspot.rs`    |  7 |   6 |    2 |
+| `AnalyzeCommand::run`            | `agent-lens/src/main.rs`               | 14 |   1 |    1 |
 
 ### Coupling のホットスポット (IFC desc)
 
@@ -164,6 +164,7 @@ LCOM4=5 は「フィールド共有がない 5 つの責務が同居している
 ### P0 — boilerplate を畳む（1〜2 日、低リスク）
 
 P0-1. **`hooks/post_tool_use` と `hooks/codex/post_tool_use` のアダプタを統合**
+
 - `core` 側に `OutputWriter` trait を切る:
   ```rust
   trait HookEnvelope {
@@ -178,16 +179,19 @@ P0-1. **`hooks/post_tool_use` と `hooks/codex/post_tool_use` のアダプタを
 - 期待: `analyze similarity` の Hook 系 4 ペア消滅。`hooks/post_tool_use/{similarity,wrapper}.rs` の LOC を -50% 以上。
 
 P0-2. **`hooks/setup.rs` ↔ `hooks/codex/setup.rs` の共通化**
+
 - `resolve_path` / `SetupPlan::changed` / `has_command_prefix` を `hooks/setup_common.rs` に移し、両側で `pub use` する。
 - `extract_file_path` (claude) と `extract_patch_command` (codex) の差は「tool_input の経路」だけ。tool→path のテーブルを作って 1 関数にする。
 - 期待: `setup.rs` の重複 3 ペア消滅。
 
 P0-3. **`analyze/*::{Report::new, format_optional_f64, resolve_crate_root, *AnalyzerError::from}` を共通化**
+
 - 新規ヘルパは作らず、`agent-lens/src/analyze/mod.rs` に `pub(crate)` で `format_optional_f64` と `resolve_crate_root` を移す。
 - `*AnalyzerError::from` は `thiserror` の `#[from]` で生成すれば手書き不要 → boilerplate 関数自体を削除。
 - 期待: similarity report の analyze 内 100% ペア -7 程度減。
 
 P0-4. **`AnalyzeCommand` の dispatch を畳む**
+
 - `AnalyzeCommand::run` は **cyclomatic 14 / cognitive 1** で「直線的に長い」だけ。
   下位の `run_cohesion / run_complexity / run_wrapper` は 100% similar。
 - `Analyzer::run(self, path, format) -> String` 系の小 trait か、
@@ -198,6 +202,7 @@ P0-4. **`AnalyzeCommand` の dispatch を畳む**
 ### P1 — 高リスクファイルの「複雑な関数」を割る（2〜3 日、要テスト）
 
 P1-1. **`SimilarityAnalyzer::find_pairs` (cog=17, nest=3) を分解**
+
 - 現在 1 関数で「フィルタリング・ペア生成・スコアリング・ソート」を全部やっている。
 - 抽出案:
   - `corpus_passes_min_lines(...)`: short-circuit フィルタを iterator メソッドに。
@@ -207,18 +212,22 @@ P1-1. **`SimilarityAnalyzer::find_pairs` (cog=17, nest=3) を分解**
 - 期待: cog 17→6 以下、nest 3→2、関数長 37 行→15 行程度。
 
 P1-2. **`extract_functions` (cog=10) を `corpus.rs` 等に切り出してテスト追加**
+
 - パスの拡張子 → SourceLang → Parser のテーブルが 1 関数に詰まっている。
 - table-driven 化して言語追加時のコストを下げる。
 
 P1-3. **`AnalyzeCommand::run_hotspot` の `since` 場合分けを `with_since(Option<_>)` 内に押し込む**
+
 - `HotspotAnalyzer::with_since(impl Into<Option<String>>)` を生やせば、main.rs の `match since` を消せる。
 
 P1-4. **`resolve_crate_root` (analyze/coupling.rs L128, cog=9) を共通化 + 早期 return 優先**
+
 - P0-3 で共通化したあと、`metadata.is_file() / is_dir()` ぶら下げを `match` 1 段に揃える。
 
 ### P2 — 言語アダプタの共通化（3〜5 日、コア API 変更を伴う）
 
 P2-1. **`lens-domain` に `language_utils` を新設**
+
 - 移動候補:
   - `qualify_name(impl_path, item_name) -> String`
   - `type_path_last_ident(path: &[String]) -> Option<String>`（言語非依存に正規化）
@@ -227,21 +236,26 @@ P2-1. **`lens-domain` に `language_utils` を新設**
 - 期待: `lens-{rust,ts,py}` のヘルパ重複ペア 20+ が消滅。`lens-domain::complexity` の責務が増えるが、言語非依存 metric の置き場として正当。
 
 P2-2. **`args_pass_through` を domain に**
+
 - 形が揃っているのは仕様上当然なので、引数列の structural eq だけ抽出してテストを 1 本に集約。
 
 P2-3. **`lens-ts` の `walk.rs` ↔ `wrapper.rs::collect_*` ↔ `cohesion.rs::collect_module_body` を統合**
+
 - 「decl/stmt/module body を辿って関数を吸い上げる」軸が 3 重実装になっているので、`lens-ts/walk.rs` を **唯一の walker** にして、`wrapper`/`cohesion` 側はコールバックだけ渡す。
 
 ### P3 — 凝集と coupling の整理（数日、設計判断あり）
 
 P3-1. **`EdgeVisitor`（LCOM4=5）を分割**
+
 - 各 `visit_*` を専用の小さな struct に切り出し、親 visitor は `record(target, kind, symbol)` だけを共通インタフェースとして持つ。
 - 期待: LCOM4 5 → 1〜2、`lens-rust/coupling.rs` の cog 上位（`walk_use_tree` cog=5、`split_modules` cog=6）も自然に下がる。
 
 P3-2. **`hooks::core` ハブを軽くする**
+
 - IFC=81 / fan_in=9 は中心ハブとして妥当だが、`HookError` だけ別 mod にすれば「データ型のみを依存先として持つ薄い層」を作れる。`hooks::core::error` に切り出して fan_in を分散。
 
 P3-3. **`lens-ts::parser` (IFC=256) の責務確認**
+
 - IFC 256 は fan_in=4 / fan_out=4 から来ている。Public API として `parser::*` を素通しさせている関数があれば lib.rs に上げて parser 自体は **AST → 内部表現** だけに閉じる。
 
 ### P4 — 既存指標を補強する追加メトリクス（オプション）
@@ -268,13 +282,60 @@ mise run lint && mise run test            # 既存ガード
 
 期待されるデルタ目標（リファクタ完了時点）:
 
-| 指標                                                   | 現状 | 目標 |
-| ------------------------------------------------------ | ---: | ---: |
-| similar pair 数 (`--threshold 0.85 --exclude-tests`)   |  134 |  <60 |
-| `analyze/similarity.rs::find_pairs` cognitive          |   17 |  ≤6  |
-| `main.rs::AnalyzeCommand::run` cyclomatic              |   14 |  ≤5  |
-| `lens-rust/coupling.rs` 上位 LCOM4                     |    5 |  ≤2  |
-| `agent-lens/src/analyze/similarity.rs` LOC             |  715 | ≤500 |
+| 指標                                                 | 現状 | 目標 |
+| ---------------------------------------------------- | ---: | ---: |
+| similar pair 数 (`--threshold 0.85 --exclude-tests`) |  134 |  <60 |
+| `analyze/similarity.rs::find_pairs` cognitive        |   17 |   ≤6 |
+| `main.rs::AnalyzeCommand::run` cyclomatic            |   14 |   ≤5 |
+
+## 6. 実施結果（P0–P3 完了時点）
+
+P0–P3 を実装した時点の `agent-lens` 自身に対する計測値:
+
+| 指標                                                  |   開始 |     P3 終了 |
+| ----------------------------------------------------- | -----: | ----------: |
+| similar pair 数 (`--threshold 0.85 --exclude-tests`)  |    134 |          87 |
+| Top hotspot score                                     |    170 |          80 |
+| `analyze/similarity.rs::find_pairs` cognitive         |     17 |  消滅 (1)\* |
+| `analyze/similarity.rs` 関数あたり最大 cognitive      |     17 |           5 |
+| `analyze/mod.rs::resolve_crate_root` cognitive        |      9 |           5 |
+| `main.rs::AnalyzeCommand::run` cyclomatic             |     14 |    14 (現状維持) |
+| `lens-rust/coupling.rs` 上位 LCOM4                    |      5 |          5\*\* |
+| nextest 合計                                          | 207\*\*\* | 801 (＋ 5 共通化テスト) |
+
+\* `find_pairs` は `candidate_pairs` iterator + `score_pair` filter_map に分割
+され、本体は `cog=1` のフラットなチェーンになった。最大 cog は別の関数
+（`SimilarityAnalyzer::collect_directory`, cog=5）に移っている。
+
+\*\* P3-1 で `visit_expr_path` ↔ `visit_type_path` の 100% 重複は解消したが、
+LCOM4 のメトリクス自体は 5 のまま。これは現在の cohesion analyzer が
+`impl Visit for X` 内のメソッドから `impl X` 内の inherent helper 呼び出しを
+「兄弟呼び出し」として認識しないためで、コードの実質的な凝集は改善している。
+将来 cohesion analyzer をクロス-impl 呼び出しまで追跡するように拡張すれば
+自然に下がる予定。
+
+\*\*\* P0 開始時点で計測した nextest は agent-lens crate 単体（207）。
+P3 終了時点の 801 はワークスペース全体（lens-domain / lens-rust /
+lens-ts / lens-py を含む）。
+
+### 残課題（P4）
+
+P4（Temporal Coupling / Token Budget）は既存メトリクスへのリファクタでなく
+**新規 analyzer の追加** に当たる。リファクタリングのスコープ外として
+未実施。実装時の参考だけ残す:
+
+- **Temporal Coupling**: `git log --name-only` をパースし、ファイル対の
+  共起 commit 数を集計。`compute_temporal_coupling(commit_files, min_co_changes,
+  min_support)` を `lens-domain` に置き、CLI で `analyze temporal-coupling
+  --since 30.days.ago --top 20` を生やす。
+- **Token Budget**: ファイルごとの `chars/4` 概算を出す。pluggable な
+  `Tokenizer` trait を `lens-domain` に置けば、将来 `tiktoken-rs` などの
+  正確なトークナイザを差し替えられる。
+
+> いずれも既存の `analyze hotspot` と同じ「git × ファイル」グルーで実装でき、
+> P0–P3 の整理が乗ったあとなら数百行で追加できる見積もり。
+| `lens-rust/coupling.rs` 上位 LCOM4                   |    5 |   ≤2 |
+| `agent-lens/src/analyze/similarity.rs` LOC           |  715 | ≤500 |
 
 > 重複ペア数は「真の重複が消えたか」と「テスト由来の偽陽性が増えていないか」の 2 つで見る。
 > `--exclude-tests` を付けた値を ground truth にする。
