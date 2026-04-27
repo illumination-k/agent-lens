@@ -694,4 +694,68 @@ function Wrap() { return <div><span>a</span><span>b</span></div>; }
         let pairs = find_similar_functions(&funcs, 0.99, &TSEDOptions::default());
         assert!(pairs.is_empty(), "fragment vs element must differ");
     }
+
+    /// Search the lowered tree depth-first for the first node whose label
+    /// matches. Lets the JSX-shape tests below assert on what was emitted
+    /// without depending on the exact path through the AST.
+    fn find_node<'a>(node: &'a TreeNode, label: &str) -> Option<&'a TreeNode> {
+        if node.label == label {
+            return Some(node);
+        }
+        node.children.iter().find_map(|c| find_node(c, label))
+    }
+
+    /// JSX element names must round-trip into the lowered node's value so
+    /// downstream value-aware comparisons can tell `<Foo />` from `<Bar />`
+    /// — pins `jsx_element_name`'s return string against mutation.
+    #[test]
+    fn jsx_element_name_is_preserved_on_lowered_tree() {
+        let src = "function f() { return <Foo />; }\n";
+        let funcs = parse_tsx_functions(src);
+        let tree = &funcs[0].tree;
+        let el = find_node(tree, "JSXElement").expect("JSXElement node");
+        assert_eq!(el.value, "Foo");
+    }
+
+    /// HTML-style lowercase tag names must come through verbatim too —
+    /// covers the `JSXElementName::Identifier` arm of `jsx_element_name`,
+    /// which the `Foo` case (an `IdentifierReference`) misses.
+    #[test]
+    fn jsx_lowercase_element_name_is_preserved() {
+        let src = "function f() { return <div />; }\n";
+        let funcs = parse_tsx_functions(src);
+        let el = find_node(&funcs[0].tree, "JSXElement").expect("JSXElement node");
+        assert_eq!(el.value, "div");
+    }
+
+    /// Member-style element names (`<Foo.Bar />`, `<Foo.Bar.Baz />`) must
+    /// be flattened with dots so the lowered value uniquely identifies the
+    /// component path — pins `jsx_member_expression_name`'s output.
+    #[test]
+    fn jsx_member_element_name_uses_dotted_path() {
+        let src = "function f() { return <Foo.Bar.Baz />; }\n";
+        let funcs = parse_tsx_functions(src);
+        let el = find_node(&funcs[0].tree, "JSXElement").expect("JSXElement node");
+        assert_eq!(el.value, "Foo.Bar.Baz");
+    }
+
+    /// Fragments must lower to a `JSXFragment` node carrying their child
+    /// arity rather than collapsing to the catch-all `Expr` leaf — pins
+    /// the dedicated `Expression::JSXFragment` arm in `expr_tree`.
+    #[test]
+    fn jsx_fragment_lowers_to_dedicated_node_with_children() {
+        let src = "function f() { return <><span>a</span><span>b</span></>; }\n";
+        let funcs = parse_tsx_functions(src);
+        let tree = &funcs[0].tree;
+        let frag = find_node(tree, "JSXFragment").expect("JSXFragment node");
+        assert_eq!(
+            frag.children.len(),
+            2,
+            "fragment must carry its two child elements as structural children",
+        );
+        assert!(
+            find_node(tree, "Expr").is_none(),
+            "fragment must not fall through to the generic `Expr` leaf",
+        );
+    }
 }
