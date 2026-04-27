@@ -225,16 +225,17 @@ impl SimilarityAnalyzer {
             HashMap::new()
         };
         let use_lsh_profiles = similarity_uses_lsh(eligible_function_count(corpus, self.min_lines));
-        let profiles: Vec<TreeProfile> = corpus
-            .iter()
-            .map(|f| {
-                if use_lsh_profiles {
-                    TreeProfile::from_tree_for_scoring(&f.def.tree)
-                } else {
-                    TreeProfile::from_tree(&f.def.tree)
-                }
-            })
-            .collect();
+        let profiles: Vec<TreeProfile> = if use_lsh_profiles {
+            corpus
+                .par_iter()
+                .map(|f| TreeProfile::from_tree_for_scoring(&f.def.tree))
+                .collect()
+        } else {
+            corpus
+                .iter()
+                .map(|f| TreeProfile::from_tree(&f.def.tree))
+                .collect()
+        };
         let candidate_started = Instant::now();
         let candidates = candidate_pairs(
             corpus,
@@ -298,21 +299,26 @@ impl SimilarityAnalyzer {
                 let Some(profile_b) = profiles.get(j) else {
                     return stats;
                 };
-                let similarity = if trees_match_without_distance(
+                let compare_values = self.opts.apted.compare_values;
+                let similarity = if is_exact_match_without_distance(
+                    profile_a,
+                    profile_b,
                     &a.def.tree,
                     &b.def.tree,
-                    self.opts.apted.compare_values,
+                    compare_values,
                 ) {
                     stats.exact_match_count += 1;
                     1.0
                 } else {
+                    let sizes_a = profile_a.subtree_sizes(&a.def.tree);
+                    let sizes_b = profile_b.subtree_sizes(&b.def.tree);
                     calculate_tsed_with_subtree_sizes(
                         &a.def.tree,
                         &b.def.tree,
                         profile_a.size,
                         profile_b.size,
-                        &profile_a.subtree_sizes,
-                        &profile_b.subtree_sizes,
+                        sizes_a,
+                        sizes_b,
                         &self.opts,
                     )
                 };
@@ -364,6 +370,22 @@ impl SimilarityAnalyzer {
         );
         clusters
     }
+}
+
+fn is_exact_match_without_distance(
+    profile_a: &TreeProfile,
+    profile_b: &TreeProfile,
+    a: &lens_domain::TreeNode,
+    b: &lens_domain::TreeNode,
+    compare_values: bool,
+) -> bool {
+    if profile_a.size != profile_b.size {
+        return false;
+    }
+    if profile_a.exact_hash(compare_values) != profile_b.exact_hash(compare_values) {
+        return false;
+    }
+    trees_match_without_distance(a, b, compare_values)
 }
 
 #[derive(Debug, Default)]
@@ -716,6 +738,83 @@ fn beta(x: i32) -> i32 {
         assert!(matches!(
             filter,
             Some(CheapFilter::LabelMultiset | CheapFilter::PreorderShingle)
+        ));
+    }
+
+    #[test]
+    fn exact_match_shortcut_requires_size_hash_and_tree_match() {
+        let left = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![lens_domain::TreeNode::leaf("Let")],
+        );
+        let same = left.clone();
+        let same_size_different = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![lens_domain::TreeNode::leaf("Return")],
+        );
+        let larger = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![
+                lens_domain::TreeNode::leaf("Let"),
+                lens_domain::TreeNode::leaf("Return"),
+            ],
+        );
+
+        let left_profile = TreeProfile::from_tree_for_scoring(&left);
+        assert!(is_exact_match_without_distance(
+            &left_profile,
+            &TreeProfile::from_tree_for_scoring(&same),
+            &left,
+            &same,
+            false,
+        ));
+        assert!(!is_exact_match_without_distance(
+            &left_profile,
+            &TreeProfile::from_tree_for_scoring(&same_size_different),
+            &left,
+            &same_size_different,
+            false,
+        ));
+        assert!(!is_exact_match_without_distance(
+            &left_profile,
+            &TreeProfile::from_tree_for_scoring(&larger),
+            &left,
+            &larger,
+            false,
+        ));
+    }
+
+    #[test]
+    fn exact_match_shortcut_honors_compare_values() {
+        let left = lens_domain::TreeNode::with_children(
+            "Call",
+            "",
+            vec![lens_domain::TreeNode::new("Ident", "alpha")],
+        );
+        let right = lens_domain::TreeNode::with_children(
+            "Call",
+            "",
+            vec![lens_domain::TreeNode::new("Ident", "beta")],
+        );
+        let left_profile = TreeProfile::from_tree_for_scoring(&left);
+        let right_profile = TreeProfile::from_tree_for_scoring(&right);
+
+        assert!(is_exact_match_without_distance(
+            &left_profile,
+            &right_profile,
+            &left,
+            &right,
+            false,
+        ));
+        assert!(!is_exact_match_without_distance(
+            &left_profile,
+            &right_profile,
+            &left,
+            &right,
+            true,
         ));
     }
 

@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
+use rayon::prelude::*;
+
 use crate::tree::TreeNode;
 
 /// Configuration for [`lsh_candidate_pairs`].
@@ -96,15 +98,26 @@ pub fn lsh_candidate_pairs_for_trees(
         return Vec::new();
     }
     let family = HashFamily::new(opts.num_hashes, opts.seed);
-    let signatures: Vec<Vec<u64>> = trees
-        .iter()
-        .map(|tree| {
-            let features = extract_shingles(tree, opts.shingle_size);
-            minhash_signature(&features, &family)
-        })
-        .collect();
+    let signatures: Vec<Vec<u64>> = if trees.len() >= PARALLEL_SIGNATURE_MIN_TREES {
+        trees
+            .par_iter()
+            .map(|tree| {
+                let features = extract_shingles(tree, opts.shingle_size);
+                minhash_signature(&features, &family)
+            })
+            .collect()
+    } else {
+        trees
+            .iter()
+            .map(|tree| {
+                let features = extract_shingles(tree, opts.shingle_size);
+                minhash_signature(&features, &family)
+            })
+            .collect()
+    };
 
-    let mut buckets: HashMap<(usize, u64), Vec<usize>> = HashMap::new();
+    let mut buckets: HashMap<(usize, u64), Vec<usize>> =
+        HashMap::with_capacity(trees.len().saturating_mul(opts.num_bands));
     for (idx, sig) in signatures.iter().enumerate() {
         for b in 0..opts.num_bands {
             let start = b * rows_per_band;
@@ -140,6 +153,8 @@ pub fn lsh_candidate_pairs_for_trees(
     out.sort();
     out
 }
+
+const PARALLEL_SIGNATURE_MIN_TREES: usize = 64;
 
 /// K-shingle feature set: every k-window over preorder AST labels, hashed
 /// to u64. For trees smaller than `k`, fall back to a single feature
