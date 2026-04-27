@@ -14,7 +14,7 @@ use crate::hooks::core::{EditedSource, HookError};
 /// Runner for the thin-wrapper detection hook. No knobs today; the type
 /// exists so the call shape matches `SimilarityCore`.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct WrapperCore;
+pub struct WrapperCore;
 
 impl WrapperCore {
     pub fn new() -> Self {

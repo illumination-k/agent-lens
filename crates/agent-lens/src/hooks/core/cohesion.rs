@@ -20,7 +20,7 @@ const LCOM4_FLOOR: usize = 2;
 
 /// Runner for the pre-edit cohesion hook.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CohesionCore;
+pub struct CohesionCore;
 
 impl CohesionCore {
     pub fn new() -> Self {
