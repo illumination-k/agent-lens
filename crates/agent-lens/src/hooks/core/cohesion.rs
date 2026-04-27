@@ -51,7 +51,7 @@ impl CohesionCore {
             return Ok(None);
         }
 
-        let header = format!("agent-lens cohesion: {total} incohesive impl block(s) before edit\n");
+        let header = format!("agent-lens cohesion: {total} incohesive unit(s) before edit\n");
         Ok(Some(format!("{header}{body}")))
     }
 }
@@ -81,6 +81,7 @@ fn append_section(out: &mut String, file_path: &str, units: &[&CohesionUnit]) {
             CohesionUnitKind::Trait { trait_name } => {
                 format!("impl {trait_name} for {}", unit.type_name)
             }
+            CohesionUnitKind::Module => format!("module {}", unit.type_name),
         };
         let _ = writeln!(
             out,
@@ -201,5 +202,39 @@ impl Thing {
         let src = rust_src("lib.rs", "fn ??? {");
         let err = CohesionCore::new().run(&[src]).unwrap_err();
         assert!(matches!(err, HookError::Parse(_)));
+    }
+
+    #[test]
+    fn module_unit_is_reported_with_module_prefix() {
+        // Two top-level Python functions split across two unrelated
+        // module-level fields → LCOM4 = 2 → flagged. The header must
+        // say `module <module>`, not `impl <module>`, so the agent
+        // reading the report can tell the granularity apart.
+        let src = EditedSource {
+            rel_path: "lib.py".to_owned(),
+            lang: SourceLang::Python,
+            source: r#"
+counter = 0
+log = []
+
+def bump():
+    global counter
+    counter += 1
+
+def record(s):
+    log.append(s)
+"#
+            .to_owned(),
+        };
+        let out = CohesionCore::new()
+            .run(&[src])
+            .unwrap()
+            .expect("expected a report");
+        assert!(out.contains("lib.py"), "should mention file: {out}");
+        assert!(
+            out.contains("module <module>"),
+            "should label module unit: {out}",
+        );
+        assert!(out.contains("LCOM4=2"), "should report lcom4: {out}");
     }
 }

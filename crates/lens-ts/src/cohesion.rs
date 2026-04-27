@@ -1,4 +1,5 @@
-//! oxc-based cohesion extraction for TypeScript / JavaScript classes.
+//! oxc-based cohesion extraction for TypeScript / JavaScript classes
+//! and modules.
 //!
 //! For every `class` body we collect each instance method's referenced
 //! `this.<field>` accesses (including private `this.#field`) and its
@@ -9,9 +10,21 @@
 //! * a constructor's job is to initialise fields, so it would over-link
 //!   every method through every field it assigns.
 //!
+//! In addition to class units we emit a **module-level** unit per file
+//! and per `namespace` / `module` block: top-level `function`
+//! declarations and `const` / `let` / `var` bindings to arrow / function
+//! expressions act as the methods, top-level `let` / `const` / `var`
+//! bindings to non-function values act as the fields, and free
+//! identifier references / sibling calls form edges. Locally-bound
+//! names inside a function (parameters, body-level `var`/`let`/`const`,
+//! nested function / class declarations, destructuring targets, catch
+//! params) shadow module-level names, so a `const counter = 0` inside
+//! a function is not counted as a reference to the module-level one.
+//!
 //! Calls are matched verbatim against the names of *sibling* methods on
-//! the same class. Calls to anything else are dropped — the cohesion
-//! graph only ever sees in-unit edges, mirroring `lens-rust`.
+//! the same class (or sibling functions on the same module). Calls to
+//! anything else are dropped — the cohesion graph only ever sees
+//! in-unit edges, mirroring `lens-rust`.
 
 use std::collections::HashSet;
 
@@ -20,7 +33,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
+use oxc_syntax::scope::ScopeFlags;
 
 use crate::line_index::LineIndex;
 use crate::parser::TsParseError;
@@ -32,8 +46,15 @@ pub enum CohesionError {
     Parse(#[from] TsParseError),
 }
 
-/// Extract one [`CohesionUnit`] per class in `source` that has at least
-/// one instance method.
+/// Placeholder name used for the program-level (file-root) module unit.
+/// Namespace bodies use the namespace name instead, so this constant
+/// only ever stands in for the file's outermost scope.
+const MODULE_UNIT_NAME: &str = "<module>";
+
+/// Extract one [`CohesionUnit`] per class in `source` (with at least one
+/// instance method) plus one module-level unit per scope (file root and
+/// each `namespace` / `module` block) that has at least one top-level
+/// function.
 pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, CohesionError> {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
@@ -44,10 +65,25 @@ pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, Cohesio
     }
     let line_index = LineIndex::new(source);
     let mut out = Vec::new();
-    for stmt in &ret.program.body {
-        collect_stmt(stmt, &line_index, &mut out);
-    }
+    collect_scope(&ret.program.body, MODULE_UNIT_NAME, &line_index, &mut out);
     Ok(out)
+}
+
+/// Process one lexical scope: emit class units (recursively), recurse
+/// into nested namespaces as their own scopes, and finally emit a module
+/// unit that summarises the top-level functions / fields *of this scope*.
+fn collect_scope(
+    stmts: &[Statement],
+    scope_name: &str,
+    line_index: &LineIndex,
+    out: &mut Vec<CohesionUnit>,
+) {
+    for stmt in stmts {
+        collect_stmt(stmt, line_index, out);
+    }
+    if let Some(unit) = build_module_unit(stmts, scope_name, line_index) {
+        out.push(unit);
+    }
 }
 
 fn collect_stmt(stmt: &Statement, line_index: &LineIndex, out: &mut Vec<CohesionUnit>) {
@@ -70,9 +106,7 @@ fn collect_stmt(stmt: &Statement, line_index: &LineIndex, out: &mut Vec<Cohesion
             }
         }
         Statement::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                collect_module_body(body, line_index, out);
-            }
+            collect_module_declaration(m, line_index, out);
         }
         _ => {}
     }
@@ -86,30 +120,47 @@ fn collect_decl(decl: &Declaration, line_index: &LineIndex, out: &mut Vec<Cohesi
             }
         }
         Declaration::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                collect_module_body(body, line_index, out);
-            }
+            collect_module_declaration(m, line_index, out);
         }
         _ => {}
     }
 }
 
+/// Recurse into a `namespace Foo { ... }` declaration. Each nested
+/// namespace becomes its own scope, named after the namespace
+/// identifier — so `namespace A { namespace B { ... } }` produces
+/// module units named `A` and `B`. Falls back to the file-root
+/// placeholder when the body uses an unnamed shape.
+fn collect_module_declaration(
+    decl: &TSModuleDeclaration,
+    line_index: &LineIndex,
+    out: &mut Vec<CohesionUnit>,
+) {
+    let Some(body) = &decl.body else { return };
+    let name = module_decl_name(&decl.id);
+    collect_module_body(body, &name, line_index, out);
+}
+
 fn collect_module_body(
     body: &TSModuleDeclarationBody,
+    scope_name: &str,
     line_index: &LineIndex,
     out: &mut Vec<CohesionUnit>,
 ) {
     match body {
         TSModuleDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                collect_stmt(stmt, line_index, out);
-            }
+            collect_scope(&block.body, scope_name, line_index, out);
         }
         TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-            if let Some(body) = &nested.body {
-                collect_module_body(body, line_index, out);
-            }
+            collect_module_declaration(nested, line_index, out);
         }
+    }
+}
+
+fn module_decl_name(id: &TSModuleDeclarationName) -> String {
+    match id {
+        TSModuleDeclarationName::Identifier(i) => i.name.to_string(),
+        TSModuleDeclarationName::StringLiteral(s) => s.value.to_string(),
     }
 }
 
@@ -248,14 +299,475 @@ impl<'a> Visit<'a> for ThisRefVisitor {
     }
 }
 
+// ---------- Module-level extraction ----------
+
+/// One top-level function discovered in a scope (file root or
+/// namespace body). Both `function f(...)` declarations and
+/// `const f = () => ...` style bindings are normalised into this shape
+/// so the cohesion walker only has one thing to think about.
+struct ModuleFunction<'a> {
+    name: String,
+    start_line: usize,
+    end_line: usize,
+    params: &'a FormalParameters<'a>,
+    body: &'a FunctionBody<'a>,
+}
+
+/// Build the module unit for a single scope, if any. Returns `None`
+/// when the scope has no top-level function — pure-class files,
+/// pure-type / pure-import files and empty namespaces are skipped.
+fn build_module_unit(
+    stmts: &[Statement],
+    scope_name: &str,
+    line_index: &LineIndex,
+) -> Option<CohesionUnit> {
+    let functions = collect_module_functions(stmts, line_index);
+    if functions.is_empty() {
+        return None;
+    }
+    let module_fields = collect_module_fields(stmts);
+    let sibling_names: HashSet<String> = functions.iter().map(|f| f.name.clone()).collect();
+
+    let cohesions: Vec<MethodCohesion> = functions
+        .iter()
+        .map(|f| module_function_cohesion(f, &module_fields, &sibling_names))
+        .collect();
+
+    let (start_line, end_line) = scope_line_range(stmts, line_index);
+    Some(CohesionUnit::build(
+        CohesionUnitKind::Module,
+        scope_name,
+        start_line,
+        end_line,
+        cohesions,
+    ))
+}
+
+fn scope_line_range(stmts: &[Statement], line_index: &LineIndex) -> (usize, usize) {
+    let Some(first) = stmts.first() else {
+        return (1, 1);
+    };
+    let last = stmts.last().unwrap_or(first);
+    (
+        line_index.line(first.span().start),
+        line_index.line(last.span().end),
+    )
+}
+
+/// Walk one scope's statements and return every top-level function:
+/// `function f(...)` declarations, `const f = () => ...` bindings, and
+/// the same shapes hidden behind an `export` modifier.
+fn collect_module_functions<'a>(
+    stmts: &'a [Statement<'a>],
+    line_index: &LineIndex,
+) -> Vec<ModuleFunction<'a>> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        push_module_functions_from_stmt(stmt, line_index, &mut out);
+    }
+    out
+}
+
+fn push_module_functions_from_stmt<'a>(
+    stmt: &'a Statement<'a>,
+    line_index: &LineIndex,
+    out: &mut Vec<ModuleFunction<'a>>,
+) {
+    match stmt {
+        Statement::FunctionDeclaration(f) => push_function_decl(f, line_index, out),
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                push_var_function(d, line_index, out);
+            }
+        }
+        Statement::ExportNamedDeclaration(e) => {
+            if let Some(decl) = &e.declaration {
+                push_module_functions_from_decl(decl, line_index, out);
+            }
+        }
+        Statement::ExportDefaultDeclaration(e) => {
+            if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &e.declaration {
+                push_function_decl(f, line_index, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_module_functions_from_decl<'a>(
+    decl: &'a Declaration<'a>,
+    line_index: &LineIndex,
+    out: &mut Vec<ModuleFunction<'a>>,
+) {
+    match decl {
+        Declaration::FunctionDeclaration(f) => push_function_decl(f, line_index, out),
+        Declaration::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                push_var_function(d, line_index, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_function_decl<'a>(
+    func: &'a Function<'a>,
+    line_index: &LineIndex,
+    out: &mut Vec<ModuleFunction<'a>>,
+) {
+    let Some(body) = &func.body else { return };
+    let Some(id) = func.id.as_ref() else { return };
+    out.push(ModuleFunction {
+        name: id.name.to_string(),
+        start_line: line_index.line(func.span.start),
+        end_line: line_index.line(body.span.end),
+        params: &func.params,
+        body,
+    });
+}
+
+fn push_var_function<'a>(
+    decl: &'a VariableDeclarator<'a>,
+    line_index: &LineIndex,
+    out: &mut Vec<ModuleFunction<'a>>,
+) {
+    let Some(init) = &decl.init else { return };
+    let Some(id) = decl.id.get_binding_identifier() else {
+        return;
+    };
+    let name = id.name.to_string();
+    match init {
+        Expression::ArrowFunctionExpression(arrow) => {
+            out.push(ModuleFunction {
+                name,
+                start_line: line_index.line(decl.span.start),
+                end_line: line_index.line(arrow.body.span.end),
+                params: &arrow.params,
+                body: &arrow.body,
+            });
+        }
+        Expression::FunctionExpression(f) => {
+            if let Some(body) = &f.body {
+                out.push(ModuleFunction {
+                    name,
+                    start_line: line_index.line(decl.span.start),
+                    end_line: line_index.line(body.span.end),
+                    params: &f.params,
+                    body,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Names of every top-level binding that participates in cohesion as a
+/// "field": `let` / `const` / `var` declarations whose initialiser is
+/// *not* a function. Imports, class declarations and function
+/// declarations are excluded — they are not shared mutable / read state,
+/// they're sibling units of their own.
+fn collect_module_fields(stmts: &[Statement]) -> HashSet<String> {
+    let mut fields = HashSet::new();
+    for stmt in stmts {
+        push_module_fields_from_stmt(stmt, &mut fields);
+    }
+    fields
+}
+
+fn push_module_fields_from_stmt(stmt: &Statement, out: &mut HashSet<String>) {
+    match stmt {
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                push_var_field(d, out);
+            }
+        }
+        Statement::ExportNamedDeclaration(e) => {
+            if let Some(decl) = &e.declaration {
+                push_module_fields_from_decl(decl, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_module_fields_from_decl(decl: &Declaration, out: &mut HashSet<String>) {
+    if let Declaration::VariableDeclaration(v) = decl {
+        for d in &v.declarations {
+            push_var_field(d, out);
+        }
+    }
+}
+
+fn push_var_field(decl: &VariableDeclarator, out: &mut HashSet<String>) {
+    if matches!(
+        decl.init,
+        Some(Expression::ArrowFunctionExpression(_)) | Some(Expression::FunctionExpression(_))
+    ) {
+        return;
+    }
+    collect_binding_pattern_names(&decl.id, out);
+}
+
+/// Pull every plain identifier out of a destructuring pattern. Object,
+/// array and rest patterns are unwound; computed / literal property
+/// keys are skipped because they don't introduce new bindings.
+fn collect_binding_pattern_names(pat: &BindingPattern, out: &mut HashSet<String>) {
+    match pat {
+        BindingPattern::BindingIdentifier(id) => {
+            out.insert(id.name.to_string());
+        }
+        BindingPattern::ObjectPattern(o) => {
+            for prop in &o.properties {
+                collect_binding_pattern_names(&prop.value, out);
+            }
+            if let Some(rest) = &o.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(a) => {
+            for elem in a.elements.iter().flatten() {
+                collect_binding_pattern_names(elem, out);
+            }
+            if let Some(rest) = &a.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(a) => {
+            collect_binding_pattern_names(&a.left, out);
+        }
+    }
+}
+
+fn module_function_cohesion(
+    func: &ModuleFunction,
+    module_fields: &HashSet<String>,
+    siblings: &HashSet<String>,
+) -> MethodCohesion {
+    let locals = collect_local_names(func.params, func.body);
+    let mut visitor = ModuleRefVisitor {
+        module_fields,
+        siblings,
+        locals: &locals,
+        fields: Vec::new(),
+        calls: Vec::new(),
+        in_callee: false,
+    };
+    visitor.visit_function_body(func.body);
+    let mut fields = visitor.fields;
+    fields.sort();
+    fields.dedup();
+    let mut calls = visitor.calls;
+    calls.sort();
+    calls.dedup();
+    MethodCohesion::new(&func.name, func.start_line, func.end_line, fields, calls)
+}
+
+/// Function-local bindings: parameters plus any `var` / `let` / `const`,
+/// nested function / class declaration, catch parameter, or
+/// destructuring target inside the body. Used to decide whether a free
+/// identifier reference resolves to the enclosing module scope or to a
+/// local binding that would shadow it. We do *not* descend into nested
+/// function bodies — those are independent scopes.
+fn collect_local_names(params: &FormalParameters, body: &FunctionBody) -> HashSet<String> {
+    let mut locals = HashSet::new();
+    for item in &params.items {
+        collect_binding_pattern_names(&item.pattern, &mut locals);
+    }
+    if let Some(rest) = &params.rest {
+        collect_binding_pattern_names(&rest.rest.argument, &mut locals);
+    }
+    let mut walker = LocalNameWalker {
+        locals: &mut locals,
+    };
+    for stmt in &body.statements {
+        walker.walk_stmt(stmt);
+    }
+    locals
+}
+
+struct LocalNameWalker<'a> {
+    locals: &'a mut HashSet<String>,
+}
+
+impl LocalNameWalker<'_> {
+    fn walk_stmt(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::VariableDeclaration(v) => {
+                for d in &v.declarations {
+                    collect_binding_pattern_names(&d.id, self.locals);
+                }
+            }
+            Statement::FunctionDeclaration(f) => {
+                if let Some(id) = &f.id {
+                    self.locals.insert(id.name.to_string());
+                }
+                // Don't descend into the function body — its locals
+                // belong to that function's scope.
+            }
+            Statement::ClassDeclaration(c) => {
+                if let Some(id) = &c.id {
+                    self.locals.insert(id.name.to_string());
+                }
+            }
+            Statement::BlockStatement(b) => {
+                for s in &b.body {
+                    self.walk_stmt(s);
+                }
+            }
+            Statement::IfStatement(i) => {
+                self.walk_stmt(&i.consequent);
+                if let Some(alt) = &i.alternate {
+                    self.walk_stmt(alt);
+                }
+            }
+            Statement::WhileStatement(w) => self.walk_stmt(&w.body),
+            Statement::DoWhileStatement(d) => self.walk_stmt(&d.body),
+            Statement::ForStatement(f) => {
+                if let Some(ForStatementInit::VariableDeclaration(v)) = &f.init {
+                    for d in &v.declarations {
+                        collect_binding_pattern_names(&d.id, self.locals);
+                    }
+                }
+                self.walk_stmt(&f.body);
+            }
+            Statement::ForInStatement(f) => {
+                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
+                    for d in &v.declarations {
+                        collect_binding_pattern_names(&d.id, self.locals);
+                    }
+                }
+                self.walk_stmt(&f.body);
+            }
+            Statement::ForOfStatement(f) => {
+                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
+                    for d in &v.declarations {
+                        collect_binding_pattern_names(&d.id, self.locals);
+                    }
+                }
+                self.walk_stmt(&f.body);
+            }
+            Statement::SwitchStatement(s) => {
+                for case in &s.cases {
+                    for cs in &case.consequent {
+                        self.walk_stmt(cs);
+                    }
+                }
+            }
+            Statement::TryStatement(t) => {
+                for s in &t.block.body {
+                    self.walk_stmt(s);
+                }
+                if let Some(handler) = &t.handler {
+                    if let Some(param) = &handler.param {
+                        collect_binding_pattern_names(&param.pattern, self.locals);
+                    }
+                    for s in &handler.body.body {
+                        self.walk_stmt(s);
+                    }
+                }
+                if let Some(finalizer) = &t.finalizer {
+                    for s in &finalizer.body {
+                        self.walk_stmt(s);
+                    }
+                }
+            }
+            Statement::WithStatement(w) => self.walk_stmt(&w.body),
+            Statement::LabeledStatement(l) => self.walk_stmt(&l.body),
+            _ => {}
+        }
+    }
+}
+
+/// Visitor that records (a) free identifier references that resolve to
+/// a module-level field and (b) calls to sibling top-level functions,
+/// in both cases skipping names shadowed by a function-local binding.
+/// Mirrors [`ThisRefVisitor`] but tracks free names instead of `this.x`.
+struct ModuleRefVisitor<'a> {
+    module_fields: &'a HashSet<String>,
+    siblings: &'a HashSet<String>,
+    locals: &'a HashSet<String>,
+    fields: Vec<String>,
+    calls: Vec<String>,
+    in_callee: bool,
+}
+
+impl<'a, 'ast> Visit<'ast> for ModuleRefVisitor<'a> {
+    fn visit_call_expression(&mut self, it: &CallExpression<'ast>) {
+        let prev = self.in_callee;
+        self.in_callee = true;
+        self.visit_expression(&it.callee);
+        self.in_callee = prev;
+        for arg in &it.arguments {
+            self.visit_argument(arg);
+        }
+    }
+
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'ast>) {
+        let name = it.name.as_str();
+        if self.locals.contains(name) {
+            return;
+        }
+        if self.in_callee && self.siblings.contains(name) {
+            self.calls.push(name.to_owned());
+        } else if !self.in_callee && self.module_fields.contains(name) {
+            self.fields.push(name.to_owned());
+        }
+    }
+
+    fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'ast>) {
+        // The property side (`foo.bar`) is not an identifier reference;
+        // we only want the object. Walk the object with `in_callee`
+        // reset so `foo.bar()` doesn't accidentally promote `foo` to a
+        // sibling call.
+        let prev = self.in_callee;
+        self.in_callee = false;
+        self.visit_expression(&it.object);
+        self.in_callee = prev;
+    }
+
+    fn visit_computed_member_expression(&mut self, it: &ComputedMemberExpression<'ast>) {
+        let prev = self.in_callee;
+        self.in_callee = false;
+        self.visit_expression(&it.object);
+        self.visit_expression(&it.expression);
+        self.in_callee = prev;
+    }
+
+    fn visit_private_field_expression(&mut self, it: &PrivateFieldExpression<'ast>) {
+        let prev = self.in_callee;
+        self.in_callee = false;
+        self.visit_expression(&it.object);
+        self.in_callee = prev;
+    }
+
+    fn visit_function(&mut self, _it: &Function<'ast>, _flags: ScopeFlags) {
+        // Don't descend into nested function bodies — they have their
+        // own scope, and the cohesion graph is "what does *this*
+        // function reach".
+    }
+
+    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'ast>) {
+        // Same rationale as visit_function.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn unit(src: &str) -> CohesionUnit {
         let mut units = extract_cohesion_units(src).unwrap();
+        units.retain(|u| !matches!(u.kind, CohesionUnitKind::Module));
         assert_eq!(units.len(), 1, "expected exactly one class");
         units.remove(0)
+    }
+
+    fn module_unit(src: &str) -> CohesionUnit {
+        extract_cohesion_units(src)
+            .unwrap()
+            .into_iter()
+            .find(|u| matches!(u.kind, CohesionUnitKind::Module))
+            .expect("expected a module-level cohesion unit")
     }
 
     #[test]
@@ -502,5 +1014,191 @@ const F = class { get(): number { return 1; } };
         let u = unit(src);
         assert_eq!(u.start_line, 1);
         assert_eq!(u.end_line, 4);
+    }
+
+    // ---------- Module-level cohesion ----------
+
+    #[test]
+    fn module_unit_collapses_when_all_functions_share_a_field() {
+        let src = r#"
+let counter = 0;
+
+function bump(): void { counter += 1; }
+function get(): number { return counter; }
+"#;
+        let u = module_unit(src);
+        assert!(matches!(u.kind, CohesionUnitKind::Module));
+        assert_eq!(u.type_name, "<module>");
+        assert_eq!(u.methods.len(), 2);
+        assert_eq!(u.lcom4(), 1);
+    }
+
+    #[test]
+    fn module_split_responsibilities_show_multiple_components() {
+        let src = r#"
+let counter = 0;
+let log: string[] = [];
+
+function bump(): void { counter += 1; }
+function current(): number { return counter; }
+function record(s: string): void { log.push(s); }
+function dump(): string[] { return log; }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
+    }
+
+    #[test]
+    fn module_arrow_const_acts_as_a_method() {
+        // `const f = () => ...` is a function, not a field. Two such
+        // arrows that share a module-level `let` should collapse to one
+        // component just like `function` declarations.
+        let src = r#"
+let counter = 0;
+
+const bump = (): void => { counter += 1; };
+const get = (): number => counter;
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.methods.len(), 2);
+        assert_eq!(u.lcom4(), 1);
+    }
+
+    #[test]
+    fn module_sibling_call_forms_an_edge() {
+        let src = r#"
+function outer(): number { return helper(); }
+function helper(): number { return 1; }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 1);
+        let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
+        assert_eq!(outer.calls, vec!["helper"]);
+    }
+
+    #[test]
+    fn module_local_declaration_shadows_module_field() {
+        // The function's local `counter` rebinds the name, so the
+        // reference is NOT to the module-level `counter`. Without
+        // shadow-tracking the two functions would spuriously share
+        // and collapse to one component.
+        let src = r#"
+let counter = 0;
+
+function readsModule(): number { return counter; }
+function shadowed(): number {
+    const counter = 99;
+    return counter;
+}
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+    }
+
+    #[test]
+    fn module_param_shadows_module_field() {
+        // A parameter with the same name as a module field shadows it
+        // for that function, so the reference is local.
+        let src = r#"
+let log: string[] = [];
+
+function reader(): string[] { return log; }
+function shadowed(log: string[]): string[] { return log; }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+    }
+
+    #[test]
+    fn module_external_calls_do_not_create_edges() {
+        // `console.log` and `Math.max` are not siblings. Two functions
+        // that both call them must not collapse on that basis.
+        let src = r#"
+function a(): void { console.log(1); }
+function b(): void { console.log(2); }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+    }
+
+    #[test]
+    fn module_unit_is_skipped_for_pure_class_files() {
+        // No top-level function → no module unit, just the class.
+        let src = r#"
+class Counter {
+    n: number = 0;
+    inc(): void { this.n += 1; }
+    get(): number { return this.n; }
+}
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        assert_eq!(units.len(), 1);
+        assert!(matches!(units[0].kind, CohesionUnitKind::Inherent));
+    }
+
+    #[test]
+    fn namespace_gets_its_own_module_unit() {
+        // A `namespace Foo { ... }` body is its own scope; sibling
+        // functions inside it must collapse via the namespace's
+        // own module unit, named after the namespace.
+        let src = r#"
+namespace inner {
+    let counter = 0;
+    export function bump(): void { counter += 1; }
+    export function get(): number { return counter; }
+}
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        let module_units: Vec<&CohesionUnit> = units
+            .iter()
+            .filter(|u| matches!(u.kind, CohesionUnitKind::Module))
+            .collect();
+        assert_eq!(module_units.len(), 1);
+        assert_eq!(module_units[0].type_name, "inner");
+        assert_eq!(module_units[0].lcom4(), 1);
+    }
+
+    #[test]
+    fn module_unit_skips_pure_type_or_import_files() {
+        // A file with only type aliases / interfaces / imports has no
+        // top-level function, so no module unit is emitted.
+        let src = r#"
+import { foo } from "bar";
+type T = number;
+interface I { x: number; }
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        assert!(units.is_empty());
+    }
+
+    #[test]
+    fn module_exported_function_participates() {
+        // `export function f(...)` should be picked up as a sibling,
+        // same as a plain `function f(...)`.
+        let src = r#"
+let counter = 0;
+
+export function bump(): void { counter += 1; }
+export function get(): number { return counter; }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.methods.len(), 2);
+        assert_eq!(u.lcom4(), 1);
+    }
+
+    #[test]
+    fn module_destructured_local_shadows_module_field() {
+        let src = r#"
+let tag = 0;
+
+function reader(): number { return tag; }
+function destructured(o: { tag: number }): number {
+    const { tag } = o;
+    return tag;
+}
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
     }
 }
