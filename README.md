@@ -107,8 +107,9 @@ tarball or `.zip` directly from the
 Stdin is not used; pass a path and pick an output format.
 
 ```bash
-# Find near-duplicate functions in a Rust file (TSED >= 0.85)
+# Find near-duplicate functions in a file or directory (TSED >= 0.85)
 agent-lens analyze similarity src/foo.rs
+agent-lens analyze similarity crates/lens-rust/src
 
 # Same, but emit a compact summary instead of the full JSON
 agent-lens analyze similarity src/foo.rs --format md --threshold 0.9
@@ -116,7 +117,7 @@ agent-lens analyze similarity src/foo.rs --format md --threshold 0.9
 # Analyze only functions touching unstaged diff hunks for this file
 agent-lens analyze similarity src/foo.rs --diff-only
 
-# Cohesion (LCOM4) per impl block
+# Cohesion (LCOM4) per impl block (Rust) / class (TS, Python)
 agent-lens analyze cohesion src/foo.rs
 
 # Cohesion only for impl blocks overlapping `git diff -U0` hunks
@@ -128,8 +129,16 @@ agent-lens analyze complexity src/foo.rs
 # Complexity only for functions overlapping `git diff -U0` hunks
 agent-lens analyze complexity src/foo.rs --diff-only
 
-# Module-level Fan-In / Fan-Out / Henry-Kafura IFC for a Rust crate
+# Module-level Fan-In / Fan-Out / Henry-Kafura IFC, Instability,
+# and cyclic SCCs for a Rust crate
 agent-lens analyze coupling crates/agent-lens
+
+# Per-module transitive dependency closure ("how many files do I need
+# to read to understand this module?")
+agent-lens analyze context-span crates/agent-lens
+
+# Hotspots: rank files by `commits × cognitive_max` (must be in a git tree)
+agent-lens analyze hotspot crates/agent-lens --since 90.days.ago --top 20
 
 # Forwarding wrappers (functions that are just `other(args).into()?` etc.)
 agent-lens analyze wrapper src/foo.rs
@@ -140,9 +149,11 @@ agent-lens analyze wrapper src/foo.rs --diff-only
 
 ### As a Claude Code hook
 
-Wire `agent-lens` into Claude Code by pointing a `PostToolUse` hook at it.
-After every `Edit` / `Write`, the binary reads Claude Code's JSON payload from
-stdin and writes feedback back on stdout.
+Wire `agent-lens` into Claude Code at three event points: a one-shot
+`SessionStart` summary of the repo's hotspots, a `PreToolUse` heads-up about
+complex / low-cohesion code the agent is about to edit, and a `PostToolUse`
+follow-up that flags duplicated or forwarding-only functions in the file the
+agent just changed.
 
 The fastest way is to let `agent-lens` write the `settings.json` block for you:
 
@@ -157,9 +168,10 @@ agent-lens hook setup --scope user
 agent-lens hook setup --dry-run
 ```
 
-The merge is conservative: existing entries are preserved, and a fresh
-`PostToolUse` block is appended only with the commands that aren't already
-wired up. Re-running is a no-op once every handler is installed.
+The merge is conservative: existing entries are preserved, and `SessionStart`
+/ `PreToolUse` / `PostToolUse` blocks are appended only with the commands
+that aren't already wired up. Re-running is a no-op once every handler is
+installed.
 
 If you'd rather edit the file by hand, the equivalent block looks like:
 
@@ -167,6 +179,31 @@ If you'd rather edit the file by hand, the equivalent block looks like:
 // ~/.claude/settings.json (or .claude/settings.json in a project)
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-lens hook session-start summary",
+          },
+        ],
+      },
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-lens hook pre-tool-use complexity",
+          },
+          {
+            "type": "command",
+            "command": "agent-lens hook pre-tool-use cohesion",
+          },
+        ],
+      },
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
@@ -207,14 +244,32 @@ agent-lens codex-hook setup --scope project
 agent-lens codex-hook setup --dry-run
 ```
 
-The merge is conservative: existing keys and comments are preserved, and a
-`[[hooks.PostToolUse]]` block is appended only for handlers that aren't
-already wired up. Re-running is a no-op once every handler is installed.
+The merge is conservative: existing keys and comments are preserved, and
+`[[hooks.SessionStart]]` / `[[hooks.PreToolUse]]` / `[[hooks.PostToolUse]]`
+blocks are appended only for handlers that aren't already wired up.
+Re-running is a no-op once every handler is installed.
 
 If you'd rather edit the file by hand, the equivalent block looks like:
 
 ```toml
 # ~/.codex/config.toml
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "agent-lens codex-hook session-start summary"
+
+[[hooks.PreToolUse]]
+matcher = "^apply_patch$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "agent-lens codex-hook pre-tool-use complexity"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "agent-lens codex-hook pre-tool-use cohesion"
+
 [[hooks.PostToolUse]]
 matcher = "^apply_patch$"
 
@@ -231,26 +286,34 @@ command = "agent-lens codex-hook post-tool-use wrapper"
 
 ### Hook handlers
 
-| Agent       | Event         | Handler      | What it does                                                       |
-| ----------- | ------------- | ------------ | ------------------------------------------------------------------ |
-| Claude Code | `PostToolUse` | `similarity` | Reports near-duplicate function pairs in the file just edited.     |
-| Claude Code | `PostToolUse` | `wrapper`    | Reports thin forwarding functions in the file just edited.         |
-| Codex       | `PostToolUse` | `similarity` | Same, but runs across every file the latest `apply_patch` touched. |
-| Codex       | `PostToolUse` | `wrapper`    | Same, across the touched files.                                    |
+| Agent       | Event           | Handler      | What it does                                                                                              |
+| ----------- | --------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
+| Claude Code | `SessionStart`  | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                                     |
+| Claude Code | `PreToolUse`    | `complexity` | Flags functions in the file about to be edited whose Cyclomatic / Cognitive / Nesting cross a threshold.  |
+| Claude Code | `PreToolUse`    | `cohesion`   | Flags `impl` blocks in the file about to be edited whose LCOM4 is greater than 1 (split-personality).     |
+| Claude Code | `PostToolUse`   | `similarity` | Reports near-duplicate function pairs in the file just edited.                                            |
+| Claude Code | `PostToolUse`   | `wrapper`    | Reports thin forwarding functions in the file just edited.                                                |
+| Codex       | `SessionStart`  | `summary`    | Same hotspot + coupling thumbnail at session start.                                                       |
+| Codex       | `PreToolUse`    | `complexity` | Same complexity heads-up across every file the upcoming `apply_patch` will touch.                         |
+| Codex       | `PreToolUse`    | `cohesion`   | Same LCOM4 heads-up across the touched files.                                                             |
+| Codex       | `PostToolUse`   | `similarity` | Reports near-duplicate function pairs across every file the latest `apply_patch` touched.                 |
+| Codex       | `PostToolUse`   | `wrapper`    | Reports thin forwarding functions across the touched files.                                               |
 
-Schemas for the remaining events (`PreToolUse`, `UserPromptSubmit`, `Stop`,
-`SubagentStop`, Codex's `SessionStart` and `PermissionRequest`) live in the
-`agent-hooks` crate, ready for new handlers to plug into the same plumbing.
+Schemas for the remaining events (`UserPromptSubmit`, `Stop`, `SubagentStop`,
+and Codex's `PermissionRequest`) live in the `agent-hooks` crate, ready for
+new handlers to plug into the same plumbing.
 
 ### Analyzers
 
-| Subcommand   | What it surfaces                                                                                                                         | Languages             |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| `similarity` | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance.                                    | Rust                  |
-| `wrapper`    | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …           | Rust                  |
-| `cohesion`   | LCOM4 per `impl` block (number of connected components in the field-sharing graph).                                                      | Rust                  |
-| `complexity` | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                       | Rust, TS / JS, Python |
-| `coupling`   | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, and per-pair shared-symbol counts. | Rust                  |
+| Subcommand     | What it surfaces                                                                                                                                                                                                                  | Languages             |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| `similarity`   | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                       | Rust, TS / JS, Python |
+| `wrapper`      | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                    | Rust, TS / JS, Python |
+| `cohesion`     | LCOM4 per `impl` block / class (number of connected components in the field-sharing graph).                                                                                                                                       | Rust, TS / JS, Python |
+| `complexity`   | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                | Rust, TS / JS, Python |
+| `coupling`     | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles). | Rust                  |
+| `context-span` | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                         | Rust                  |
+| `hotspot`      | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                  | Rust                  |
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
@@ -275,9 +338,10 @@ Adding a language means writing one adapter crate and wiring it into the
 | TypeScript / JavaScript | [oxc](https://oxc.rs/) (`oxc_parser`, `oxc_ast`)           | `lens-ts`     |
 | Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser) | `lens-py`     |
 
-`similarity`, `wrapper`, `cohesion`, and `coupling` are Rust-only today.
-`complexity` is wired through all three adapter crates and is the easiest path
-to test multi-language coverage.
+`similarity`, `wrapper`, `cohesion`, and `complexity` are wired through all
+three adapter crates. `coupling`, `context-span`, and `hotspot` are Rust-only
+today — they reach into `mod` resolution and the git log in ways the other
+two adapters don't yet replicate.
 
 ## Workspace layout
 
@@ -340,11 +404,10 @@ TruffleHog, SBOM generation, and PR-diff mutation testing
 ## Roadmap
 
 `CLAUDE.md` carries the full catalog of metrics under consideration —
-Hotspot, Temporal Coupling, Code Age / Ownership, Public API Surface, Doc
-Coverage, Dead / Unused `pub`, Token Budget, Context Span, Onboarding Cost,
-Instability, Cyclic Dependencies. They're prioritised by _does this change
-how an agent decides what to do?_ rather than _does it look nice in a
-dashboard?_
+Temporal Coupling, Code Age / Ownership, Public API Surface, Doc Coverage,
+Dead / Unused `pub`, Token Budget, Onboarding Cost. They're prioritised by
+_does this change how an agent decides what to do?_ rather than _does it
+look nice in a dashboard?_
 
 An MCP server front-end is a likely next surface, but the CLI is the source
 of truth.
