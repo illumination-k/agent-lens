@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
 use lens_domain::{
     CandidateStrategy, TSEDOptions, collect_subtree_sizes, lsh_candidate_pairs_for_trees,
@@ -10,8 +11,10 @@ use super::OwnedFunction;
 #[derive(Debug)]
 pub(super) struct TreeProfile {
     pub size: usize,
-    pub subtree_sizes: lens_domain::SubtreeSizes,
+    subtree_sizes: OnceLock<lens_domain::SubtreeSizes>,
     filters: Option<TreeFilterProfile>,
+    exact_hash_ignoring_values: u64,
+    exact_hash_with_values: u64,
 }
 
 #[derive(Debug)]
@@ -30,24 +33,77 @@ impl TreeProfile {
             .copied()
             .unwrap_or(0);
         let filters = TreeFilterProfile::from_tree(tree, size, &subtree_sizes);
+        let exact_hashes = structural_hashes(tree);
         Self {
             size,
-            subtree_sizes,
+            subtree_sizes: initialized_once_lock(subtree_sizes),
             filters: Some(filters),
+            exact_hash_ignoring_values: exact_hashes.ignoring_values,
+            exact_hash_with_values: exact_hashes.with_values,
         }
     }
 
     pub(super) fn from_tree_for_scoring(tree: &lens_domain::TreeNode) -> Self {
-        let subtree_sizes = collect_subtree_sizes(tree);
-        let size = subtree_sizes
-            .get(&(std::ptr::from_ref::<lens_domain::TreeNode>(tree) as usize))
-            .copied()
-            .unwrap_or(0);
+        let exact_hashes = structural_hashes(tree);
         Self {
-            size,
-            subtree_sizes,
+            size: tree.subtree_size(),
+            subtree_sizes: OnceLock::new(),
             filters: None,
+            exact_hash_ignoring_values: exact_hashes.ignoring_values,
+            exact_hash_with_values: exact_hashes.with_values,
         }
+    }
+
+    pub(super) fn subtree_sizes<'a>(
+        &'a self,
+        tree: &lens_domain::TreeNode,
+    ) -> &'a lens_domain::SubtreeSizes {
+        self.subtree_sizes
+            .get_or_init(|| collect_subtree_sizes(tree))
+    }
+
+    pub(super) fn exact_hash(&self, compare_values: bool) -> u64 {
+        if compare_values {
+            self.exact_hash_with_values
+        } else {
+            self.exact_hash_ignoring_values
+        }
+    }
+}
+
+fn initialized_once_lock<T>(value: T) -> OnceLock<T> {
+    let lock = OnceLock::new();
+    let _ = lock.set(value);
+    lock
+}
+
+struct StructuralHashes {
+    ignoring_values: u64,
+    with_values: u64,
+}
+
+fn structural_hashes(tree: &lens_domain::TreeNode) -> StructuralHashes {
+    let mut ignoring_values = std::collections::hash_map::DefaultHasher::new();
+    let mut with_values = std::collections::hash_map::DefaultHasher::new();
+    hash_tree_into(tree, &mut ignoring_values, &mut with_values);
+    StructuralHashes {
+        ignoring_values: ignoring_values.finish(),
+        with_values: with_values.finish(),
+    }
+}
+
+fn hash_tree_into(
+    tree: &lens_domain::TreeNode,
+    ignoring_values: &mut std::collections::hash_map::DefaultHasher,
+    with_values: &mut std::collections::hash_map::DefaultHasher,
+) {
+    tree.label.hash(ignoring_values);
+    tree.label.hash(with_values);
+    tree.value.hash(with_values);
+    tree.children.len().hash(ignoring_values);
+    tree.children.len().hash(with_values);
+    for child in &tree.children {
+        hash_tree_into(child, ignoring_values, with_values);
     }
 }
 
@@ -440,4 +496,99 @@ where
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoring_profile_initializes_subtree_sizes_lazily() {
+        let tree = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![
+                lens_domain::TreeNode::leaf("Let"),
+                lens_domain::TreeNode::with_children(
+                    "If",
+                    "",
+                    vec![lens_domain::TreeNode::leaf("Return")],
+                ),
+            ],
+        );
+        let profile = TreeProfile::from_tree_for_scoring(&tree);
+        assert!(profile.subtree_sizes.get().is_none());
+
+        let sizes = profile.subtree_sizes(&tree);
+        let root_key = std::ptr::from_ref::<lens_domain::TreeNode>(&tree) as usize;
+        assert_eq!(sizes.get(&root_key).copied(), Some(tree.subtree_size()));
+        assert!(profile.subtree_sizes.get().is_some());
+    }
+
+    #[test]
+    fn filter_profile_initializes_subtree_sizes_eagerly() {
+        let tree = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![lens_domain::TreeNode::leaf("Return")],
+        );
+        let profile = TreeProfile::from_tree(&tree);
+
+        assert!(profile.subtree_sizes.get().is_some());
+        assert_eq!(profile.size, tree.subtree_size());
+    }
+
+    #[test]
+    fn exact_hash_distinguishes_structures_and_compare_value_modes() {
+        let left = lens_domain::TreeNode::with_children(
+            "Call",
+            "",
+            vec![lens_domain::TreeNode::new("Ident", "alpha")],
+        );
+        let renamed_value = lens_domain::TreeNode::with_children(
+            "Call",
+            "",
+            vec![lens_domain::TreeNode::new("Ident", "beta")],
+        );
+        let renamed_label = lens_domain::TreeNode::with_children(
+            "Call",
+            "",
+            vec![lens_domain::TreeNode::new("Literal", "alpha")],
+        );
+        let left_profile = TreeProfile::from_tree_for_scoring(&left);
+        let renamed_value_profile = TreeProfile::from_tree_for_scoring(&renamed_value);
+        let renamed_label_profile = TreeProfile::from_tree_for_scoring(&renamed_label);
+
+        assert_eq!(
+            left_profile.exact_hash(false),
+            renamed_value_profile.exact_hash(false)
+        );
+        assert_ne!(
+            left_profile.exact_hash(true),
+            renamed_value_profile.exact_hash(true)
+        );
+        assert_ne!(
+            left_profile.exact_hash(false),
+            renamed_label_profile.exact_hash(false)
+        );
+    }
+
+    #[test]
+    fn structural_hash_can_ignore_values_when_requested() {
+        let left = lens_domain::TreeNode::with_children(
+            "Call",
+            "",
+            vec![lens_domain::TreeNode::new("Ident", "alpha")],
+        );
+        let right = lens_domain::TreeNode::with_children(
+            "Call",
+            "",
+            vec![lens_domain::TreeNode::new("Ident", "beta")],
+        );
+        let left_hashes = structural_hashes(&left);
+        let right_hashes = structural_hashes(&right);
+
+        assert_eq!(left_hashes.ignoring_values, right_hashes.ignoring_values);
+        assert_ne!(left_hashes.with_values, right_hashes.with_values);
+    }
 }
