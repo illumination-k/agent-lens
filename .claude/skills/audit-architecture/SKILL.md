@@ -5,12 +5,13 @@ description: Use when the user wants to evaluate the structural health of a Rust
 
 # Audit module structure with agent-lens
 
-Two analyzers cover the architecture question:
+Three analyzers cover the architecture question:
 
 - `coupling` — module-level metrics for a Rust crate: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles).
-- `cohesion` — per-`impl` LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the `impl` has disjoint responsibilities.
+- `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Built on the same dependency graph as `coupling`.
+- `cohesion` — per-`impl` (Rust) / per-class (TS, Python) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
 
-Both are Rust-only.
+`coupling` and `context-span` are Rust-only (Rust crate dependency graph). `cohesion` runs on Rust, TypeScript / JavaScript, and Python.
 
 ## Workflow
 
@@ -29,9 +30,19 @@ Look for, in order:
 3. **High Fan-Out**. A module that depends on too many others is hard to test in isolation. Often a sign the module is doing orchestration that should be pushed up.
 4. **High Instability with high Fan-In**. Martin's diagnostic: stable hubs (low Instability) are good; unstable hubs (high Instability) are fragile.
 
-### 2. Per-`impl` cohesion
+### 2. Module read-cost (context span)
 
-For the worst-offending modules from step 1 — and any `impl` block the user is about to extend — run `cohesion`:
+Pair `coupling` with `context-span` to estimate how much of the crate an agent must hold in context to safely change a given module:
+
+```bash
+agent-lens analyze context-span crates/agent-lens --format md
+```
+
+A module with a large `files` count is expensive to onboard onto. If a hub from step 1 also has a wide span, splitting the hub gives an outsized win (smaller change, smaller blast radius).
+
+### 3. Per-`impl` / per-class cohesion
+
+For the worst-offending modules from step 1 — and any `impl` block or class the user is about to extend — run `cohesion`:
 
 ```bash
 agent-lens analyze cohesion crates/lens-rust/src/coupling.rs --format md
@@ -47,7 +58,7 @@ agent-lens analyze cohesion <path> --diff-only --format md
 
 …catches the case "I just added a method that uses none of the fields the others use".
 
-### 3. Cross-reference
+### 4. Cross-reference
 
 The two analyzers tell different stories that often line up:
 
@@ -81,4 +92,4 @@ agent-lens analyze cohesion <path> | jq '.units[] | select(.lcom4 >= 2)'
 - The user wants per-function complexity — that's `complexity`, not `coupling`/`cohesion`.
 - The crate is a single file — Fan-In / Fan-Out are degenerate, the report will be empty.
 - The "module structure" question is across crates — coupling is intra-crate today. For inter-crate dependency questions, `cargo tree` is the right tool.
-- The codebase isn't Rust — neither analyzer supports TS/JS/Python yet.
+- The codebase isn't Rust and the question is about coupling / context span — only Rust is supported there. `cohesion` does run on TS/JS/Python.

@@ -7,10 +7,10 @@ description: Use when the user asks to find duplicated, near-duplicate, copy-pas
 
 Two analyzers cover the "is this already written?" question:
 
-- `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ).
+- `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ). Functions shorter than `--min-lines` (default `5`) are skipped to keep getters and one-liners out of the report.
 - `wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
 
-Both analyzers are Rust-only today and operate on a single `.rs` file at a time.
+Both analyzers parse Rust, TypeScript / JavaScript, and Python (parser is selected from the file extension). `similarity` accepts either a single file or a directory; in directory mode it walks recursively (respecting `.gitignore` like ripgrep) and reports cross-file pairs alongside in-file ones. `wrapper` is single-file.
 
 ## Workflow
 
@@ -35,14 +35,18 @@ agent-lens analyze wrapper    <path> --diff-only --format md
 
 ### 3. If the user is auditing a whole file or crate
 
-Loop over `.rs` files. For a crate:
+`similarity` accepts a directory, so you don't need to loop manually. Cross-file pairs are reported alongside in-file ones:
+
+```bash
+agent-lens analyze similarity crates/<name>/src --format md
+```
+
+For `wrapper` (single-file only), iterate:
 
 ```bash
 find crates/<name>/src -name '*.rs' -print0 | xargs -0 -n1 \
-  agent-lens analyze similarity --format md
+  agent-lens analyze wrapper --format md
 ```
-
-Pipe through `grep -A2 '^- '` if you want a flat list across files.
 
 ## Tuning the threshold
 
@@ -69,5 +73,5 @@ This drops `#[test]` / `#[rstest]` / `#[<runner>::test]` free functions and ever
 
 ## Don't reach for it when
 
-- The duplication is across files in different crates — the analyzer is single-file. Run it per file and correlate by hand for now.
 - The "duplication" is structural / architectural (e.g. two services that do the same job) — that's a coupling/coherence question, not a TSED one.
+- The file isn't Rust / TypeScript / JavaScript / Python — the analyzer errors out cleanly on unsupported extensions.

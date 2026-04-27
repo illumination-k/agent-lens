@@ -17,28 +17,22 @@ The PostToolUse hook already runs `similarity` + `wrapper` on every Edit/Write, 
 
 ## Workflow
 
-### 1. Find the touched Rust files
+### 1. Find the touched source files
 
 ```bash
-git diff --name-only --diff-filter=AM | grep -E '\.(rs|ts|tsx|js|py)$'
+git diff --name-only --diff-filter=AM | grep -E '\.(rs|ts|tsx|js|jsx|py)$'
 ```
 
-Filter to `.rs` for `similarity` / `wrapper` / `cohesion`; keep TS/JS/Py paths only for `complexity`.
+All four diff-only analyzers (`similarity`, `wrapper`, `cohesion`, `complexity`) accept Rust, TypeScript / JavaScript, and Python — no need to fan out by extension.
 
 ### 2. Run the diff-scoped analyzers per file
 
-For each Rust file in the diff:
+For each touched source file:
 
 ```bash
 agent-lens analyze similarity <path> --diff-only --format md
 agent-lens analyze wrapper    <path> --diff-only --format md
 agent-lens analyze cohesion   <path> --diff-only --format md
-agent-lens analyze complexity <path> --diff-only --format md
-```
-
-For each TS/JS/Python file in the diff:
-
-```bash
 agent-lens analyze complexity <path> --diff-only --format md
 ```
 
