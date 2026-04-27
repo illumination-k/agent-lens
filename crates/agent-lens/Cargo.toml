@@ -19,14 +19,20 @@ lens-domain = { path = "../lens-domain", version = "0.1.0" }
 lens-py = { path = "../lens-py", version = "0.1.0" }
 lens-rust = { path = "../lens-rust", version = "0.1.0" }
 lens-ts = { path = "../lens-ts", version = "0.1.0" }
+rayon = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = { workspace = true }
 toml_edit = "0.25"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 rstest = { workspace = true }
 serde_json = "1"
 tempfile = "3"
+
+[[bench]]
+name = "similarity"
+harness = false

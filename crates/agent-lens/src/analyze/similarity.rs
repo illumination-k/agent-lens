@@ -12,13 +12,17 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ignore::WalkBuilder;
 use lens_domain::{
-    FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, calculate_tsed, cluster_similar_pairs,
+    CandidateStrategy, FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, calculate_tsed,
+    cluster_similar_pairs, lsh_candidate_pairs,
 };
 use lens_rust::{RustParser, extract_functions_excluding_tests};
+use rayon::prelude::*;
 use serde::Serialize;
+use tracing::debug;
 
 use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
 
@@ -31,6 +35,8 @@ pub const DEFAULT_THRESHOLD: f64 = 0.85;
 /// `--min-lines` default in `similarity-ts`: tiny functions (one-liners,
 /// trivial getters) form too many spurious matches.
 pub const DEFAULT_MIN_LINES: usize = 5;
+
+const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
 
 /// Analyzer entry point. Holds the threshold and TSED options so per-run
 /// configuration can be threaded through `analyze` without changing the
@@ -98,6 +104,7 @@ impl SimilarityAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+        let started = Instant::now();
         let corpus = self.collect_corpus(path)?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus);
@@ -107,6 +114,14 @@ impl SimilarityAnalyzer {
             self.min_lines,
             function_count,
             &clusters,
+        );
+        debug!(
+            target: PROFILE_TARGET,
+            path = %path.display(),
+            function_count,
+            cluster_count = clusters.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "analyze similarity finished"
         );
         match format {
             OutputFormat::Json => {
@@ -129,7 +144,9 @@ impl SimilarityAnalyzer {
     }
 
     fn collect_directory(&self, root: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+        let started = Instant::now();
         let mut out = Vec::new();
+        let mut file_count = 0usize;
         for entry in WalkBuilder::new(root).build() {
             let entry = entry.map_err(|e| AnalyzerError::Io {
                 path: root.to_path_buf(),
@@ -151,8 +168,17 @@ impl SimilarityAnalyzer {
                 .display()
                 .to_string()
                 .replace('\\', "/");
+            file_count += 1;
             out.extend(self.collect_file(p, Some(rel))?);
         }
+        debug!(
+            target: PROFILE_TARGET,
+            root = %root.display(),
+            file_count,
+            function_count = out.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity corpus directory collected"
+        );
         Ok(out)
     }
 
@@ -161,17 +187,28 @@ impl SimilarityAnalyzer {
         path: &Path,
         rel_override: Option<String>,
     ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+        let started = Instant::now();
         let (lang, source) = read_source(path)?;
         let funcs = extract_functions(lang, &source, self.exclude_tests)?;
         let rel = rel_override.unwrap_or_else(|| path.display().to_string());
-        Ok(funcs
+        let out: Vec<_> = funcs
             .into_iter()
             .map(|def| OwnedFunction {
                 file: path.to_path_buf(),
                 rel_path: rel.clone(),
                 def,
             })
-            .collect())
+            .collect();
+        debug!(
+            target: PROFILE_TARGET,
+            path = %path.display(),
+            language = ?lang,
+            bytes = source.len(),
+            function_count = out.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity source parsed"
+        );
+        Ok(out)
     }
 
     /// Pairwise TSED over the corpus, then complete-link clustering. Inlined
@@ -180,61 +217,216 @@ impl SimilarityAnalyzer {
     /// `--diff-only` filter sees the file/line metadata that domain doesn't
     /// know about.
     fn find_clusters<'a>(&self, corpus: &'a [OwnedFunction]) -> Vec<ClusterView<'a>> {
+        let started = Instant::now();
         let changed_by_file = if self.diff_only {
-            collect_changed_ranges(corpus)
+            let diff_started = Instant::now();
+            let changed = collect_changed_ranges(corpus);
+            debug!(
+                target: PROFILE_TARGET,
+                file_count = changed.len(),
+                elapsed_ms = diff_started.elapsed().as_secs_f64() * 1000.0,
+                "similarity changed ranges collected"
+            );
+            changed
         } else {
             HashMap::new()
         };
-        let pair_indices: Vec<(usize, usize, f64)> = candidate_pairs(corpus, self.min_lines)
-            .filter_map(|(i, j)| self.score_pair(corpus, i, j, &changed_by_file))
-            .collect();
-        cluster_similar_pairs(&pair_indices, self.threshold)
+        let candidate_started = Instant::now();
+        let candidates = candidate_pairs(corpus, self.min_lines);
+        debug!(
+            target: PROFILE_TARGET,
+            function_count = corpus.len(),
+            eligible_function_count = candidates.eligible_function_count,
+            min_lines = self.min_lines,
+            strategy = candidates.strategy.as_str(),
+            candidate_count = candidates.len(),
+            elapsed_ms = candidate_started.elapsed().as_secs_f64() * 1000.0,
+            "similarity candidates enumerated"
+        );
+
+        let score_started = Instant::now();
+        let tree_sizes: Vec<usize> = corpus.iter().map(|f| f.def.tree.subtree_size()).collect();
+        let score_stats = candidates
+            .pairs
+            .par_iter()
+            .fold(ScoreStats::default, |mut stats, &(i, j)| {
+                let Some(a) = corpus.get(i) else {
+                    return stats;
+                };
+                let Some(b) = corpus.get(j) else {
+                    return stats;
+                };
+                if self.size_upper_bound_below_threshold(&tree_sizes, i, j) {
+                    stats.size_filtered_count += 1;
+                    return stats;
+                }
+                let similarity = calculate_tsed(&a.def.tree, &b.def.tree, &self.opts);
+                if similarity < self.threshold {
+                    stats.below_threshold_count += 1;
+                    return stats;
+                }
+                if self.diff_only && !pair_touches_changes(a, b, &changed_by_file) {
+                    stats.diff_filtered_count += 1;
+                    return stats;
+                }
+                stats.pairs.push((i, j, similarity));
+                stats
+            })
+            .reduce(ScoreStats::default, |mut a, mut b| {
+                a.size_filtered_count += b.size_filtered_count;
+                a.below_threshold_count += b.below_threshold_count;
+                a.diff_filtered_count += b.diff_filtered_count;
+                a.pairs.append(&mut b.pairs);
+                a
+            })
+            .sorted();
+        debug!(
+            target: PROFILE_TARGET,
+            candidate_count = score_stats.candidate_count(),
+            scored_pair_count = score_stats.scored_pair_count(),
+            matched_pair_count = score_stats.pairs.len(),
+            size_filtered_count = score_stats.size_filtered_count,
+            below_threshold_count = score_stats.below_threshold_count,
+            diff_filtered_count = score_stats.diff_filtered_count,
+            elapsed_ms = score_started.elapsed().as_secs_f64() * 1000.0,
+            "similarity TSED scoring finished"
+        );
+
+        let cluster_started = Instant::now();
+        let clusters: Vec<_> = cluster_similar_pairs(&score_stats.pairs, self.threshold)
             .into_iter()
             .map(|c| ClusterView::from_domain(corpus, c))
-            .collect()
+            .collect();
+        debug!(
+            target: PROFILE_TARGET,
+            matched_pair_count = score_stats.pairs.len(),
+            cluster_count = clusters.len(),
+            cluster_ms = cluster_started.elapsed().as_secs_f64() * 1000.0,
+            total_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity clusters found"
+        );
+        clusters
     }
 
-    /// Score one candidate pair, returning `(i, j, similarity)` when it
-    /// crosses the threshold and survives the `--diff-only` filter.
-    fn score_pair(
-        &self,
-        corpus: &[OwnedFunction],
-        i: usize,
-        j: usize,
-        changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
-    ) -> Option<(usize, usize, f64)> {
-        let a = corpus.get(i)?;
-        let b = corpus.get(j)?;
-        let similarity = calculate_tsed(&a.def.tree, &b.def.tree, &self.opts);
-        if similarity < self.threshold {
-            return None;
+    fn size_upper_bound_below_threshold(&self, tree_sizes: &[usize], i: usize, j: usize) -> bool {
+        if !self.opts.size_penalty {
+            return false;
         }
-        if self.diff_only && !pair_touches_changes(a, b, changed_by_file) {
-            return None;
+        let Some(size_a) = tree_sizes.get(i).copied() else {
+            return false;
+        };
+        let Some(size_b) = tree_sizes.get(j).copied() else {
+            return false;
+        };
+        let max_size = size_a.max(size_b);
+        if max_size == 0 {
+            return false;
         }
-        Some((i, j, similarity))
+        let min_size = size_a.min(size_b) as f64;
+        let upper_bound = (min_size / max_size as f64).sqrt();
+        upper_bound < self.threshold
     }
 }
 
-/// Yield every `(i, j)` index pair from `corpus` (i < j) where both
-/// functions meet the `min_lines` filter. The cartesian product is
-/// generated up front so `find_clusters` reads as a flat `filter_map`.
-fn candidate_pairs(
-    corpus: &[OwnedFunction],
-    min_lines: usize,
-) -> impl Iterator<Item = (usize, usize)> + '_ {
-    corpus
+#[derive(Debug, Default)]
+struct ScoreStats {
+    pairs: Vec<(usize, usize, f64)>,
+    size_filtered_count: usize,
+    below_threshold_count: usize,
+    diff_filtered_count: usize,
+}
+
+impl ScoreStats {
+    fn sorted(mut self) -> Self {
+        self.pairs.sort_by_key(|(i, j, _)| (*i, *j));
+        self
+    }
+
+    fn scored_pair_count(&self) -> usize {
+        self.pairs.len() + self.below_threshold_count + self.diff_filtered_count
+    }
+
+    fn candidate_count(&self) -> usize {
+        self.scored_pair_count() + self.size_filtered_count
+    }
+}
+
+#[derive(Debug)]
+struct CandidatePairs {
+    pairs: Vec<(usize, usize)>,
+    eligible_function_count: usize,
+    strategy: CandidatePairStrategy,
+}
+
+impl CandidatePairs {
+    fn len(&self) -> usize {
+        self.pairs.len()
+    }
+}
+
+#[derive(Debug)]
+enum CandidatePairStrategy {
+    Cartesian,
+    Lsh,
+}
+
+impl CandidatePairStrategy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cartesian => "cartesian",
+            Self::Lsh => "lsh",
+        }
+    }
+}
+
+/// Return every candidate `(i, j)` index pair from `corpus` (i < j) where
+/// both functions meet the `min_lines` filter. Large corpora go through the
+/// same LSH pre-filter used by `lens-domain`; small corpora keep the exact
+/// cartesian path because LSH setup costs more than it saves there.
+fn candidate_pairs(corpus: &[OwnedFunction], min_lines: usize) -> CandidatePairs {
+    let eligible_indices: Vec<usize> = corpus
         .iter()
         .enumerate()
         .filter(move |(_, a)| a.def.line_count() >= min_lines)
-        .flat_map(move |(i, _)| {
-            corpus
-                .iter()
-                .enumerate()
-                .skip(i + 1)
-                .filter(move |(_, b)| b.def.line_count() >= min_lines)
-                .map(move |(j, _)| (i, j))
-        })
+        .map(|(i, _)| i)
+        .collect();
+    let mut strategy = CandidateStrategy::default();
+    // The domain default favours recall for small hook inputs. Directory
+    // analysis sees much larger corpora, so use a tighter banding to avoid
+    // spending minutes verifying weak LSH candidates with TSED.
+    strategy.lsh.num_bands = 14;
+    let use_lsh = strategy
+        .lsh_min_functions
+        .is_some_and(|min_n| eligible_indices.len() >= min_n);
+    let pairs = if use_lsh {
+        let funcs: Vec<FunctionDef> = eligible_indices
+            .iter()
+            .filter_map(|&i| corpus.get(i).map(|f| f.def.clone()))
+            .collect();
+        lsh_candidate_pairs(&funcs, &strategy.lsh)
+            .into_iter()
+            .filter_map(|(i, j)| {
+                let a = eligible_indices.get(i).copied()?;
+                let b = eligible_indices.get(j).copied()?;
+                Some((a, b))
+            })
+            .collect()
+    } else {
+        eligible_indices
+            .iter()
+            .enumerate()
+            .flat_map(|(pos, &i)| eligible_indices[pos + 1..].iter().map(move |&j| (i, j)))
+            .collect()
+    };
+    CandidatePairs {
+        pairs,
+        eligible_function_count: eligible_indices.len(),
+        strategy: if use_lsh {
+            CandidatePairStrategy::Lsh
+        } else {
+            CandidatePairStrategy::Cartesian
+        },
+    }
 }
 
 fn collect_changed_ranges(corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {

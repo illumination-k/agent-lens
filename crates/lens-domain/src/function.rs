@@ -12,10 +12,15 @@
 //! other" signal explicit.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use rayon::prelude::*;
 
 use crate::lsh::{LshOptions, lsh_candidate_pairs};
 use crate::tree::TreeNode;
 use crate::tsed::{TSEDOptions, calculate_tsed};
+
+const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
 
 /// A single function extracted from a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +181,7 @@ pub fn find_similar_pair_indices_with_strategy(
     opts: &TSEDOptions,
     strategy: &CandidateStrategy,
 ) -> Vec<(usize, usize, f64)> {
+    let started = Instant::now();
     let use_lsh = strategy
         .lsh_min_functions
         .is_some_and(|min_n| functions.len() >= min_n);
@@ -184,13 +190,30 @@ pub fn find_similar_pair_indices_with_strategy(
     } else {
         enumerate_candidate_pairs(functions.len()).collect()
     };
-    candidates
-        .into_iter()
+    let candidate_count = candidates.len();
+    let candidate_elapsed = started.elapsed();
+    let score_started = Instant::now();
+    let mut pairs: Vec<_> = candidates
+        .into_par_iter()
         .filter_map(|(i, j)| {
             let similarity = calculate_tsed(&functions[i].tree, &functions[j].tree, opts);
             (similarity >= threshold).then_some((i, j, similarity))
         })
-        .collect()
+        .collect();
+    pairs.sort_by_key(|(i, j, _)| (*i, *j));
+    tracing::debug!(
+        target: PROFILE_TARGET,
+        functions = functions.len(),
+        threshold,
+        strategy = if use_lsh { "lsh" } else { "cartesian" },
+        candidate_count,
+        matched_pair_count = pairs.len(),
+        candidate_ms = candidate_elapsed.as_secs_f64() * 1000.0,
+        score_ms = score_started.elapsed().as_secs_f64() * 1000.0,
+        total_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "similarity pair scoring finished"
+    );
+    pairs
 }
 
 /// Group `(index_a, index_b, similarity)` triples into complete-link clusters
@@ -206,7 +229,15 @@ pub fn find_similar_pair_indices_with_strategy(
 /// still come back as 2-clusters; items not present in any pair are not
 /// returned. Clusters are sorted by `max_similarity` desc, then by size desc.
 pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> Vec<SimilarCluster> {
+    let started = Instant::now();
     if pairs.is_empty() {
+        tracing::debug!(
+            target: PROFILE_TARGET,
+            pair_count = 0usize,
+            cluster_count = 0usize,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity clustering skipped"
+        );
         return Vec::new();
     }
 
@@ -282,6 +313,14 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(b.members.len().cmp(&a.members.len()))
     });
+    tracing::debug!(
+        target: PROFILE_TARGET,
+        pair_count = pairs.len(),
+        active_count = active.len(),
+        cluster_count = out.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "similarity clustering finished"
+    );
     out
 }
 
