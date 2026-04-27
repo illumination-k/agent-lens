@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use crate::hooks::setup_common;
+
 const SETTINGS_RELATIVE: &str = ".claude/settings.json";
 
 /// Tool matcher used for the block this command writes. Mirrors the
@@ -93,8 +95,7 @@ pub fn resolve_path(scope: SettingsScope, project_root: &Path) -> Result<PathBuf
     match scope {
         SettingsScope::Project => Ok(project_root.join(SETTINGS_RELATIVE)),
         SettingsScope::User => {
-            let home = std::env::var_os("HOME").ok_or(SetupError::HomeNotFound)?;
-            Ok(PathBuf::from(home).join(SETTINGS_RELATIVE))
+            setup_common::home_scoped_path(SETTINGS_RELATIVE).ok_or(SetupError::HomeNotFound)
         }
     }
 }
@@ -183,7 +184,11 @@ fn merge(path: &Path, root: &mut Value) -> Result<Vec<String>, SetupError> {
     let installed = collect_installed_commands(post_tool_use, path)?;
     let missing: Vec<String> = POST_TOOL_USE_COMMANDS
         .iter()
-        .filter(|cmd| !installed.iter().any(|seen| has_command_prefix(seen, cmd)))
+        .filter(|cmd| {
+            !installed
+                .iter()
+                .any(|seen| setup_common::has_command_prefix(seen, cmd))
+        })
         .map(|s| (*s).to_string())
         .collect();
 
@@ -228,18 +233,6 @@ fn collect_installed_commands(
         }
     }
     Ok(out)
-}
-
-/// True when `existing` is the same handler as `wanted`, modulo trailing
-/// arguments. e.g. `agent-lens hook post-tool-use similarity --threshold 0.9`
-/// counts as the `similarity` handler already being installed.
-fn has_command_prefix(existing: &str, wanted: &str) -> bool {
-    if existing == wanted {
-        return true;
-    }
-    existing
-        .strip_prefix(wanted)
-        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
 #[cfg(test)]
@@ -536,23 +529,5 @@ mod tests {
             matches!(err, SetupError::Io { .. }),
             "expected Io error for directory-as-file, got {err:?}",
         );
-    }
-
-    #[test]
-    fn has_command_prefix_only_matches_at_argument_boundary() {
-        assert!(has_command_prefix(
-            "agent-lens hook post-tool-use similarity",
-            "agent-lens hook post-tool-use similarity",
-        ));
-        assert!(has_command_prefix(
-            "agent-lens hook post-tool-use similarity --threshold 0.9",
-            "agent-lens hook post-tool-use similarity",
-        ));
-        // Different handler whose name happens to start with `wrapper`
-        // (hypothetical) must not be mistaken for the `wrapper` install.
-        assert!(!has_command_prefix(
-            "agent-lens hook post-tool-use wrapperx",
-            "agent-lens hook post-tool-use wrapper",
-        ));
     }
 }

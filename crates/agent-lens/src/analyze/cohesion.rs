@@ -13,7 +13,10 @@ use std::path::Path;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
-use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
+use super::{
+    AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, format_optional_f64,
+    read_source,
+};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -181,13 +184,6 @@ fn render_unit(out: &mut String, unit: &UnitView<'_>) {
     );
     for component in &unit.components {
         let _ = writeln!(out, "- {{{}}}", component.join(", "));
-    }
-}
-
-fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
-    match v {
-        Some(x) => format!("{x:.precision$}"),
-        None => "n/a".to_owned(),
     }
 }
 

@@ -6,8 +6,11 @@
 //! formatting) so each agent's hook module is just a thin trait
 //! implementation that wires up the engine-specific input/output shapes.
 
+pub mod runner;
 pub mod similarity;
 pub mod wrapper;
+
+pub use runner::{HookEnvelope, SimilarityHook, WrapperHook};
 
 use std::path::PathBuf;
 
@@ -19,7 +22,7 @@ use crate::analyze::SourceLang;
 /// (which yields zero or one entry) and the Codex `apply_patch` path
 /// (which yields one entry per touched file).
 #[derive(Debug)]
-pub(crate) struct EditedSource {
+pub struct EditedSource {
     /// Path verbatim as it appeared in the agent's input — kept so reports
     /// quote it back without resolving it to an absolute path.
     pub rel_path: String,
@@ -32,7 +35,7 @@ pub(crate) struct EditedSource {
 /// Adapters convert this into [`HookError::Io`] via the `From` impl below
 /// so callers only ever see one canonical error type.
 #[derive(Debug)]
-pub(crate) struct ReadEditedSourceError {
+pub struct ReadEditedSourceError {
     pub path: PathBuf,
     pub source: std::io::Error,
 }

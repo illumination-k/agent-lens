@@ -22,68 +22,15 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lens_domain::{
     ContextSpanReport, ModuleContextSpan, ModulePath, compute_context_spans, compute_report,
 };
-use lens_rust::{
-    CouplingError as RustCouplingError, CrateModule, build_module_tree, extract_edges,
-};
+use lens_rust::{CrateModule, build_module_tree, extract_edges};
 use serde::Serialize;
 
-use super::{OutputFormat, SourceLang};
-
-/// Errors raised while running the context-span analyzer.
-///
-/// Mirrors [`super::coupling::CouplingAnalyzerError`] because both
-/// analyzers walk a Rust crate root in the same way; the variants are
-/// duplicated rather than shared so each analyzer keeps a self-contained
-/// error surface that doesn't leak across CLI subcommands.
-#[derive(Debug, thiserror::Error)]
-pub enum ContextSpanAnalyzerError {
-    #[error("failed to read {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to parse {path:?}: {source}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error(
-        "no usable Rust crate root found at {path:?}; pass a .rs file or a directory containing src/lib.rs or src/main.rs"
-    )]
-    UnsupportedRoot { path: PathBuf },
-    #[error(
-        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
-    )]
-    MissingMod {
-        parent: String,
-        name: String,
-        near: PathBuf,
-    },
-    #[error("failed to serialize report: {0}")]
-    Serialize(#[from] serde_json::Error),
-}
-
-impl From<RustCouplingError> for ContextSpanAnalyzerError {
-    fn from(value: RustCouplingError) -> Self {
-        match value {
-            RustCouplingError::Io { path, source } => Self::Io { path, source },
-            RustCouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-            RustCouplingError::MissingMod { parent, name, near } => {
-                Self::MissingMod { parent, name, near }
-            }
-        }
-    }
-}
+use super::{ContextSpanAnalyzerError, OutputFormat, resolve_crate_root};
 
 /// Stateless analyzer entry point. Kept as a struct so per-run
 /// configuration (e.g. a `--top` cap) can be added later without
@@ -119,32 +66,6 @@ impl ContextSpanAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&view)),
         }
     }
-}
-
-fn resolve_crate_root(path: &Path) -> Result<PathBuf, ContextSpanAnalyzerError> {
-    let meta = std::fs::metadata(path).map_err(|source| ContextSpanAnalyzerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if meta.is_file() {
-        if SourceLang::from_path(path) == Some(SourceLang::Rust) {
-            return Ok(path.to_path_buf());
-        }
-        return Err(ContextSpanAnalyzerError::UnsupportedRoot {
-            path: path.to_path_buf(),
-        });
-    }
-    if meta.is_dir() {
-        for candidate in ["src/lib.rs", "src/main.rs"] {
-            let probe = path.join(candidate);
-            if probe.is_file() {
-                return Ok(probe);
-            }
-        }
-    }
-    Err(ContextSpanAnalyzerError::UnsupportedRoot {
-        path: path.to_path_buf(),
-    })
 }
 
 #[derive(Debug, Serialize)]
@@ -278,6 +199,7 @@ fn reachable_preview(reachable: &[&str]) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
