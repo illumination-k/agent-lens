@@ -1,5 +1,10 @@
 # agent-lens
 
+[![CI Rust](https://github.com/illumination-k/agent-lens/actions/workflows/ci_rust.yml/badge.svg)](https://github.com/illumination-k/agent-lens/actions/workflows/ci_rust.yml)
+[![Lint Base](https://github.com/illumination-k/agent-lens/actions/workflows/lint_base.yml/badge.svg)](https://github.com/illumination-k/agent-lens/actions/workflows/lint_base.yml)
+[![Mutation Tests](https://github.com/illumination-k/agent-lens/actions/workflows/mutants.yml/badge.svg)](https://github.com/illumination-k/agent-lens/actions/workflows/mutants.yml)
+[![codecov](https://codecov.io/gh/illumination-k/agent-lens/branch/main/graph/badge.svg)](https://codecov.io/gh/illumination-k/agent-lens)
+
 > A sharper view of your codebase, tuned for the agent that's about to edit it.
 
 `agent-lens` is a single-binary Rust CLI that bundles two things coding agents
