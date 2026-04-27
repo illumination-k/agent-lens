@@ -530,6 +530,7 @@ fn single_segment_path(ep: &ExprPath) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn unit(src: &str) -> CohesionUnit {
         let mut units = extract_cohesion_units(src).unwrap();
@@ -819,12 +820,15 @@ fn helper() -> i32 { 1 }
         assert_eq!(outer.calls, vec!["helper"]);
     }
 
-    #[test]
-    fn module_local_let_shadows_module_field() {
-        // The `let counter = ...` rebinds the name, so the reference
-        // is NOT to the module-level `COUNTER`. Without shadow-tracking
-        // the two functions would spuriously share and collapse.
-        let src = r#"
+    // Each case asserts the lcom4 value of the file's module-level
+    // unit. The rationale comment above each case explains *why* the
+    // expected value is what it is.
+    #[rstest]
+    // The `let COUNTER = 99;` rebinds the name, so the reference is
+    // NOT to the module-level `COUNTER`. Without shadow-tracking the
+    // two functions would spuriously share and collapse.
+    #[case::module_local_let_shadows_module_field(
+        r#"
 const COUNTER: i32 = 0;
 
 fn reads_module() -> i32 { COUNTER }
@@ -832,36 +836,64 @@ fn shadowed() -> i32 {
     let COUNTER = 99;
     COUNTER
 }
-"#;
-        let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
-    }
-
-    #[test]
-    fn module_param_shadows_module_field() {
-        // A parameter with the same name as a module field shadows it
-        // for that function, so the reference is local.
-        let src = r#"
+"#,
+        2
+    )]
+    // A parameter with the same name as a module field shadows it for
+    // that function, so the reference is local.
+    #[case::module_param_shadows_module_field(
+        r#"
 const TAG: i32 = 0;
 
 fn reader() -> i32 { TAG }
 fn shadowed(TAG: i32) -> i32 { TAG }
-"#;
-        let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
-    }
-
-    #[test]
-    fn module_external_calls_do_not_create_edges() {
-        // `println!` is a macro and `usize::MAX` is a path expression
-        // with multiple segments. Two functions that both use them
-        // must not collapse on that basis.
-        let src = r#"
+"#,
+        2
+    )]
+    // `usize::MAX` / `usize::MIN` are multi-segment path expressions,
+    // not module-level field references. Two functions that both use
+    // them must not collapse on that basis.
+    #[case::module_external_calls_do_not_create_edges(
+        r#"
 fn a() { let _ = usize::MAX; }
 fn b() { let _ = usize::MIN; }
-"#;
+"#,
+        2
+    )]
+    // A closure parameter named after a module field shadows it inside
+    // the closure body. With over-shadowing (closure params added to
+    // outer locals), the reference inside the closure is not counted
+    // as a module-level field reference.
+    #[case::module_closure_param_shadows_field(
+        r#"
+const X: i32 = 1;
+
+fn reader() -> i32 { X }
+fn shadowed() -> i32 {
+    let f = |X: i32| X + 1;
+    f(2)
+}
+"#,
+        2
+    )]
+    // A closure that captures a module-level const without shadowing
+    // it should still count the const as a reference of the enclosing
+    // function — outer's behaviour depends on it.
+    #[case::module_closure_captures_field(
+        r#"
+const X: i32 = 1;
+
+fn alpha() -> i32 {
+    let f = |y: i32| X + y;
+    f(2)
+}
+fn beta() -> i32 { X }
+"#,
+        1
+    )]
+    fn module_unit_lcom4(#[case] src: &str, #[case] expected: usize) {
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.lcom4(), expected);
     }
 
     #[test]
@@ -944,43 +976,6 @@ mod inner {
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "inner");
         assert_eq!(module_units[0].lcom4(), 1);
-    }
-
-    #[test]
-    fn module_closure_param_shadows_field() {
-        // A closure parameter named after a module field shadows it
-        // inside the closure body. With over-shadowing (closure params
-        // added to outer locals), the reference inside the closure is
-        // not counted as a module-level field reference.
-        let src = r#"
-const X: i32 = 1;
-
-fn reader() -> i32 { X }
-fn shadowed() -> i32 {
-    let f = |X: i32| X + 1;
-    f(2)
-}
-"#;
-        let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
-    }
-
-    #[test]
-    fn module_closure_captures_field() {
-        // A closure that captures a module-level const without
-        // shadowing it should still count the const as a reference of
-        // the enclosing function — outer's behaviour depends on it.
-        let src = r#"
-const X: i32 = 1;
-
-fn alpha() -> i32 {
-    let f = |y: i32| X + y;
-    f(2)
-}
-fn beta() -> i32 { X }
-"#;
-        let u = module_unit(src);
-        assert_eq!(u.lcom4(), 1);
     }
 
     #[test]
