@@ -9,6 +9,7 @@
 //! rather than for humans, in line with the project's "agent-friendly lint"
 //! ethos.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -257,9 +258,31 @@ impl SimilarityAnalyzer {
             "similarity candidates enumerated"
         );
 
+        let (pairs_to_score, diff_prefiltered_count): (Cow<'_, [(usize, usize)]>, usize) =
+            if self.diff_only {
+                let mut filtered = 0usize;
+                let pairs: Vec<_> = candidates
+                    .pairs
+                    .iter()
+                    .copied()
+                    .filter(|&(i, j)| {
+                        let keep = corpus
+                            .get(i)
+                            .zip(corpus.get(j))
+                            .is_some_and(|(a, b)| pair_touches_changes(a, b, &changed_by_file));
+                        if !keep {
+                            filtered += 1;
+                        }
+                        keep
+                    })
+                    .collect();
+                (Cow::Owned(pairs), filtered)
+            } else {
+                (Cow::Borrowed(candidates.pairs.as_slice()), 0)
+            };
+
         let score_started = Instant::now();
-        let score_stats = candidates
-            .pairs
+        let mut score_stats = pairs_to_score
             .par_iter()
             .fold(ScoreStats::default, |mut stats, &(i, j)| {
                 let Some(a) = corpus.get(i) else {
@@ -296,10 +319,6 @@ impl SimilarityAnalyzer {
                     stats.below_threshold_count += 1;
                     return stats;
                 }
-                if self.diff_only && !pair_touches_changes(a, b, &changed_by_file) {
-                    stats.diff_filtered_count += 1;
-                    return stats;
-                }
                 stats.pairs.push((i, j, similarity));
                 stats
             })
@@ -311,6 +330,7 @@ impl SimilarityAnalyzer {
                 a
             })
             .sorted();
+        score_stats.diff_filtered_count += diff_prefiltered_count;
         debug!(
             target: PROFILE_TARGET,
             candidate_count = candidates.total_len(),
@@ -357,7 +377,7 @@ impl ScoreStats {
     }
 
     fn scored_pair_count(&self) -> usize {
-        self.pairs.len() + self.below_threshold_count + self.diff_filtered_count
+        self.pairs.len() + self.below_threshold_count
     }
 }
 
