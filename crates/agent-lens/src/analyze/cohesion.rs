@@ -411,11 +411,10 @@ export function gb(): number { return b; }
 
     #[test]
     fn empty_report_for_files_without_impls() {
-        // `lens-rust` only emits `impl`-block units, so a file with
-        // no `impl` produces an empty report regardless of free
-        // functions present.
+        // A file with no `impl` block, no class, and no top-level
+        // function produces an empty cohesion report.
         let dir = tempfile::tempdir().unwrap();
-        let file = write_file(dir.path(), "lib.rs", "fn solo() {}\n");
+        let file = write_file(dir.path(), "lib.rs", "const X: i32 = 1;\n");
         let md = CohesionAnalyzer::new()
             .analyze(&file, OutputFormat::Md)
             .unwrap();
