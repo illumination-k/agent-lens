@@ -19,6 +19,8 @@ use syn::{
     ItemImpl, Member,
 };
 
+use crate::common::type_path_last_ident;
+
 /// Failures produced while extracting cohesion units.
 #[derive(Debug, thiserror::Error)]
 pub enum CohesionError {
@@ -130,18 +132,6 @@ fn method_cohesion(
 
 fn has_self_receiver(method: &ImplItemFn) -> bool {
     matches!(method.sig.inputs.first(), Some(FnArg::Receiver(_)))
-}
-
-fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
-    if let syn::Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-    } else {
-        None
-    }
 }
 
 #[derive(Default)]

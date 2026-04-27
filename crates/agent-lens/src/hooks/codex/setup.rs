@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
+use crate::hooks::setup_common;
+
 const CONFIG_RELATIVE: &str = ".codex/config.toml";
 
 /// Regex Codex matches the just-finished tool name against. `apply_patch`
@@ -110,8 +112,7 @@ pub fn resolve_path(scope: ConfigScope, project_root: &Path) -> Result<PathBuf, 
     match scope {
         ConfigScope::Project => Ok(project_root.join(CONFIG_RELATIVE)),
         ConfigScope::User => {
-            let home = std::env::var_os("HOME").ok_or(SetupError::HomeNotFound)?;
-            Ok(PathBuf::from(home).join(CONFIG_RELATIVE))
+            setup_common::home_scoped_path(CONFIG_RELATIVE).ok_or(SetupError::HomeNotFound)
         }
     }
 }
@@ -198,7 +199,11 @@ fn merge(path: &Path, doc: &mut DocumentMut) -> Result<Vec<String>, SetupError> 
     let missing: Vec<&str> = POST_TOOL_USE_COMMANDS
         .iter()
         .copied()
-        .filter(|cmd| !installed.iter().any(|seen| has_command_prefix(seen, cmd)))
+        .filter(|cmd| {
+            !installed
+                .iter()
+                .any(|seen| setup_common::has_command_prefix(seen, cmd))
+        })
         .collect();
 
     if !missing.is_empty() {
@@ -247,18 +252,6 @@ fn collect_installed_commands(
         }
     }
     Ok(out)
-}
-
-/// True when `existing` is the same handler as `wanted`, modulo trailing
-/// arguments. e.g. `agent-lens codex-hook post-tool-use similarity --threshold 0.9`
-/// counts as the `similarity` handler already being installed.
-fn has_command_prefix(existing: &str, wanted: &str) -> bool {
-    if existing == wanted {
-        return true;
-    }
-    existing
-        .strip_prefix(wanted)
-        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
 #[cfg(test)]
@@ -494,21 +487,5 @@ type = \"prompt\"
         let root = Path::new("/tmp/proj");
         let p = resolve_path(ConfigScope::Project, root).unwrap();
         assert_eq!(p, root.join(".codex/config.toml"));
-    }
-
-    #[test]
-    fn has_command_prefix_only_matches_at_argument_boundary() {
-        assert!(has_command_prefix(
-            "agent-lens codex-hook post-tool-use similarity",
-            "agent-lens codex-hook post-tool-use similarity",
-        ));
-        assert!(has_command_prefix(
-            "agent-lens codex-hook post-tool-use similarity --threshold 0.9",
-            "agent-lens codex-hook post-tool-use similarity",
-        ));
-        assert!(!has_command_prefix(
-            "agent-lens codex-hook post-tool-use wrapperx",
-            "agent-lens codex-hook post-tool-use wrapper",
-        ));
     }
 }

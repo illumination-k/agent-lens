@@ -204,7 +204,10 @@ fn visit_variable_declarator<V: FunctionVisitor>(
     }
 }
 
-fn method_key_name(key: &PropertyKey) -> Option<String> {
+/// Resolve a `PropertyKey` into the user-visible method name. Shared
+/// between [`walk_class`], `cohesion`, and `wrapper` so the three
+/// agree on how to spell `["computed-string"]`, `#private`, etc.
+pub(crate) fn method_key_name(key: &PropertyKey) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
         PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name)),

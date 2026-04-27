@@ -16,7 +16,7 @@
 //! filters them: pytest-flavoured functions and `unittest.TestCase`
 //! methods are forwarding by design and would only add noise.
 
-use lens_domain::WrapperFinding;
+use lens_domain::{WrapperFinding, args_pass_through_by, qualify};
 use ruff_python_ast::{
     Expr, ExprAttribute, ExprCall, Parameters, Stmt, StmtClassDef, StmtFunctionDef, StmtReturn,
 };
@@ -148,13 +148,6 @@ fn analyze(
         callee,
         adapters,
     })
-}
-
-fn qualify(owner: Option<&str>, method: &str) -> String {
-    match owner {
-        Some(o) => format!("{o}::{method}"),
-        None => method.to_owned(),
-    }
 }
 
 /// Return the single tail expression of a function body: either the
@@ -320,23 +313,7 @@ fn collect_param_idents(params: &Parameters) -> Option<Vec<String>> {
 /// True iff every call argument is a parameter passed through, every
 /// parameter is used exactly once, and the arity matches.
 fn args_pass_through(args: &[Expr], params: &[String]) -> bool {
-    if args.len() != params.len() {
-        return false;
-    }
-    let mut seen = vec![false; params.len()];
-    for arg in args {
-        let Some(name) = passthrough_ident(arg) else {
-            return false;
-        };
-        let Some(pos) = params.iter().position(|p| p == &name) else {
-            return false;
-        };
-        if seen[pos] {
-            return false;
-        }
-        seen[pos] = true;
-    }
-    seen.iter().all(|hit| *hit)
+    args_pass_through_by(args, params, passthrough_ident)
 }
 
 fn passthrough_ident(expr: &Expr) -> Option<String> {

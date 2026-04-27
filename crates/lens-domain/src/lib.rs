@@ -43,6 +43,7 @@ pub mod context_span;
 pub mod coupling;
 pub mod function;
 pub mod hotspot;
+pub mod naming;
 pub mod tree;
 pub mod tsed;
 pub mod wrapper;
@@ -59,6 +60,7 @@ pub use coupling::{
 };
 pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
+pub use naming::qualify;
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed};
-pub use wrapper::WrapperFinding;
+pub use wrapper::{WrapperFinding, args_pass_through_by};

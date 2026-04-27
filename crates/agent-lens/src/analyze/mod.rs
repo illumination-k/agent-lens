@@ -19,9 +19,14 @@ use std::process::Command;
 
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
-pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
-pub use coupling::{CouplingAnalyzer, CouplingAnalyzerError};
+pub use context_span::ContextSpanAnalyzer;
+pub use coupling::CouplingAnalyzer;
 pub use hotspot::{HotspotAnalyzer, HotspotError};
+
+/// Backward-compatible alias for the unified [`CrateAnalyzerError`].
+pub type CouplingAnalyzerError = CrateAnalyzerError;
+/// Backward-compatible alias for the unified [`CrateAnalyzerError`].
+pub type ContextSpanAnalyzerError = CrateAnalyzerError;
 pub use similarity::{
     DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
     DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer,
@@ -74,10 +79,9 @@ impl SourceLang {
 
 /// Errors common to single-file analyzers (cohesion, complexity).
 ///
-/// Coupling carries extra variants (`UnsupportedRoot`, `MissingMod`) so it
-/// keeps its own error type. The shared variants here keep the simple
-/// analyzers from each repeating the same Io / extension / parse /
-/// serialize boilerplate.
+/// Coupling and context-span carry extra variants (`UnsupportedRoot`,
+/// `MissingMod`) and use the dedicated [`CrateAnalyzerError`] below
+/// instead.
 #[derive(Debug, thiserror::Error)]
 pub enum AnalyzerError {
     #[error("failed to read {path:?}: {source}")]
@@ -92,6 +96,102 @@ pub enum AnalyzerError {
     Parse(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("failed to serialize report: {0}")]
     Serialize(#[from] serde_json::Error),
+}
+
+/// Errors raised by analyzers that walk a Rust crate from a `.rs` root
+/// (coupling, context-span, …).
+///
+/// Both analyzers reach into the same `lens_rust` extractor and surface
+/// the same handful of failure modes; they used to duplicate this enum.
+#[derive(Debug, thiserror::Error)]
+pub enum CrateAnalyzerError {
+    #[error("failed to read {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse {path:?}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// The provided path exists but isn't a `.rs` file or a directory
+    /// containing a recognisable crate root.
+    #[error(
+        "no usable Rust crate root found at {path:?}; pass a .rs file or a directory containing src/lib.rs or src/main.rs"
+    )]
+    UnsupportedRoot { path: PathBuf },
+    /// `mod foo;` was declared in a parent file but neither `foo.rs` nor
+    /// `foo/mod.rs` could be found.
+    #[error(
+        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
+    )]
+    MissingMod {
+        parent: String,
+        name: String,
+        near: PathBuf,
+    },
+    #[error("failed to serialize report: {0}")]
+    Serialize(#[from] serde_json::Error),
+}
+
+impl From<lens_rust::CouplingError> for CrateAnalyzerError {
+    fn from(value: lens_rust::CouplingError) -> Self {
+        match value {
+            lens_rust::CouplingError::Io { path, source } => Self::Io { path, source },
+            lens_rust::CouplingError::Parse { path, source } => Self::Parse {
+                path,
+                source: Box::new(source),
+            },
+            lens_rust::CouplingError::MissingMod { parent, name, near } => {
+                Self::MissingMod { parent, name, near }
+            }
+        }
+    }
+}
+
+/// Resolve `path` to a Rust crate root.
+///
+/// Accepts:
+/// 1. A `.rs` file → returned as-is.
+/// 2. A directory containing `src/lib.rs` → that file.
+/// 3. A directory containing `src/main.rs` → that file.
+///
+/// Anything else surfaces [`CrateAnalyzerError::UnsupportedRoot`].
+pub fn resolve_crate_root(path: &Path) -> Result<PathBuf, CrateAnalyzerError> {
+    let meta = std::fs::metadata(path).map_err(|source| CrateAnalyzerError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if meta.is_file() && SourceLang::from_path(path) == Some(SourceLang::Rust) {
+        return Ok(path.to_path_buf());
+    }
+    if meta.is_dir()
+        && let Some(probe) = first_existing_file(path, &["src/lib.rs", "src/main.rs"])
+    {
+        return Ok(probe);
+    }
+    Err(CrateAnalyzerError::UnsupportedRoot {
+        path: path.to_path_buf(),
+    })
+}
+
+fn first_existing_file(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .map(|c| root.join(c))
+        .find(|p| p.is_file())
+}
+
+/// Format an `Option<f64>` for markdown reports: `Some(x)` becomes
+/// `"{x:.precision$}"`, `None` becomes the literal `"n/a"`.
+pub(crate) fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
+    match v {
+        Some(x) => format!("{x:.precision$}"),
+        None => "n/a".to_owned(),
+    }
 }
 
 /// Detect the source language from `path` and read it into memory.

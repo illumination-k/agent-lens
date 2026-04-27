@@ -361,28 +361,38 @@ fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
 
 impl AnalyzeCommand {
     /// Pick the right analyzer for this CLI variant and produce its
-    /// report. Kept on the enum so `run_analyze` is a one-liner and
-    /// adding a new analyzer is a localised arm here.
+    /// report. Each arm constructs the analyzer inline; per-handler
+    /// helper functions used to live here but were 100% similar to
+    /// each other and added cyclomatic surface without insight.
     fn run(self) -> Result<String, Box<dyn std::error::Error>> {
         Ok(match self {
             Self::Cohesion {
                 path,
                 format,
                 diff_only,
-            } => Self::run_cohesion(path, format, diff_only)?,
+            } => CohesionAnalyzer::new()
+                .with_diff_only(diff_only)
+                .analyze(&path, format)?,
             Self::Complexity {
                 path,
                 format,
                 diff_only,
-            } => Self::run_complexity(path, format, diff_only)?,
-            Self::Coupling { path, format } => Self::run_coupling(path, format)?,
-            Self::ContextSpan { path, format } => Self::run_context_span(path, format)?,
+            } => ComplexityAnalyzer::new()
+                .with_diff_only(diff_only)
+                .analyze(&path, format)?,
+            Self::Coupling { path, format } => CouplingAnalyzer::new().analyze(&path, format)?,
+            Self::ContextSpan { path, format } => {
+                ContextSpanAnalyzer::new().analyze(&path, format)?
+            }
             Self::Hotspot {
                 path,
                 format,
                 since,
                 top,
-            } => Self::run_hotspot(path, format, since, top)?,
+            } => HotspotAnalyzer::new()
+                .with_top(top)
+                .with_since_opt(since)
+                .analyze(&path, format)?,
             Self::Similarity {
                 path,
                 format,
@@ -390,88 +400,20 @@ impl AnalyzeCommand {
                 exclude_tests,
                 threshold,
                 min_lines,
-            } => {
-                Self::run_similarity(path, format, diff_only, exclude_tests, threshold, min_lines)?
-            }
+            } => SimilarityAnalyzer::new()
+                .with_threshold(threshold)
+                .with_diff_only(diff_only)
+                .with_exclude_tests(exclude_tests)
+                .with_min_lines(min_lines)
+                .analyze(&path, format)?,
             Self::Wrapper {
                 path,
                 format,
                 diff_only,
-            } => Self::run_wrapper(path, format, diff_only)?,
+            } => WrapperAnalyzer::new()
+                .with_diff_only(diff_only)
+                .analyze(&path, format)?,
         })
-    }
-
-    fn run_cohesion(
-        path: PathBuf,
-        format: OutputFormat,
-        diff_only: bool,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(CohesionAnalyzer::new()
-            .with_diff_only(diff_only)
-            .analyze(&path, format)?)
-    }
-
-    fn run_complexity(
-        path: PathBuf,
-        format: OutputFormat,
-        diff_only: bool,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(ComplexityAnalyzer::new()
-            .with_diff_only(diff_only)
-            .analyze(&path, format)?)
-    }
-
-    fn run_coupling(
-        path: PathBuf,
-        format: OutputFormat,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(CouplingAnalyzer::new().analyze(&path, format)?)
-    }
-
-    fn run_context_span(
-        path: PathBuf,
-        format: OutputFormat,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(ContextSpanAnalyzer::new().analyze(&path, format)?)
-    }
-
-    fn run_hotspot(
-        path: PathBuf,
-        format: OutputFormat,
-        since: Option<String>,
-        top: Option<usize>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let analyzer = match since {
-            Some(s) => HotspotAnalyzer::new().with_top(top).with_since(s),
-            None => HotspotAnalyzer::new().with_top(top),
-        };
-        Ok(analyzer.analyze(&path, format)?)
-    }
-
-    fn run_similarity(
-        path: PathBuf,
-        format: OutputFormat,
-        diff_only: bool,
-        exclude_tests: bool,
-        threshold: f64,
-        min_lines: usize,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(SimilarityAnalyzer::new()
-            .with_threshold(threshold)
-            .with_diff_only(diff_only)
-            .with_exclude_tests(exclude_tests)
-            .with_min_lines(min_lines)
-            .analyze(&path, format)?)
-    }
-
-    fn run_wrapper(
-        path: PathBuf,
-        format: OutputFormat,
-        diff_only: bool,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(WrapperAnalyzer::new()
-            .with_diff_only(diff_only)
-            .analyze(&path, format)?)
     }
 }
 

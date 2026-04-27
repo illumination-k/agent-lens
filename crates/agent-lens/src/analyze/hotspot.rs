@@ -74,6 +74,16 @@ impl HotspotAnalyzer {
         self
     }
 
+    /// Like [`Self::with_since`] but accepts an `Option`, leaving the
+    /// window unchanged when `None` is passed. Lets callers thread a
+    /// `--since` CLI flag through without an extra `if let`.
+    pub fn with_since_opt(mut self, since: Option<String>) -> Self {
+        if let Some(s) = since {
+            self.since = Some(s);
+        }
+        self
+    }
+
     /// Cap the markdown report's table to the top-N entries. JSON
     /// output always carries the full list. `None` keeps every row.
     pub fn with_top(mut self, top: Option<usize>) -> Self {

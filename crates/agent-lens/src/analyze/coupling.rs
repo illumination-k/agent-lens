@@ -22,66 +22,16 @@
 //!   unusual.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lens_domain::{
     CouplingEdge, CouplingReport, DependencyCycle, ModuleMetrics, ModulePath, PairCoupling,
     compute_report,
 };
-use lens_rust::{CouplingError as RustCouplingError, build_module_tree, extract_edges};
+use lens_rust::{build_module_tree, extract_edges};
 use serde::Serialize;
 
-use super::{OutputFormat, SourceLang};
-
-/// Errors raised while running the coupling analyzer.
-#[derive(Debug, thiserror::Error)]
-pub enum CouplingAnalyzerError {
-    #[error("failed to read {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to parse {path:?}: {source}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    /// The provided path exists but isn't a `.rs` file or a directory
-    /// containing a recognisable crate root.
-    #[error(
-        "no usable Rust crate root found at {path:?}; pass a .rs file or a directory containing src/lib.rs or src/main.rs"
-    )]
-    UnsupportedRoot { path: PathBuf },
-    /// `mod foo;` was declared in a parent file but neither `foo.rs` nor
-    /// `foo/mod.rs` could be found.
-    #[error(
-        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
-    )]
-    MissingMod {
-        parent: String,
-        name: String,
-        near: PathBuf,
-    },
-    #[error("failed to serialize report: {0}")]
-    Serialize(#[from] serde_json::Error),
-}
-
-impl From<RustCouplingError> for CouplingAnalyzerError {
-    fn from(value: RustCouplingError) -> Self {
-        match value {
-            RustCouplingError::Io { path, source } => Self::Io { path, source },
-            RustCouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-            RustCouplingError::MissingMod { parent, name, near } => {
-                Self::MissingMod { parent, name, near }
-            }
-        }
-    }
-}
+use super::{CouplingAnalyzerError, OutputFormat, format_optional_f64, resolve_crate_root};
 
 /// Stateless analyzer entry point. Kept as a struct so per-run
 /// configuration (filters, thresholds) can be added later without
@@ -114,41 +64,6 @@ impl CouplingAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&view)),
         }
     }
-}
-
-/// Map a user-provided path to a single `.rs` crate root.
-///
-/// Supports three forms:
-/// 1. Direct `.rs` file → use as-is.
-/// 2. Directory containing `src/lib.rs` → use that.
-/// 3. Directory containing `src/main.rs` → use that.
-///
-/// Anything else surfaces [`CouplingAnalyzerError::UnsupportedRoot`] or
-/// an [`CouplingAnalyzerError::Io`] when the path doesn't exist at all.
-fn resolve_crate_root(path: &Path) -> Result<PathBuf, CouplingAnalyzerError> {
-    let meta = std::fs::metadata(path).map_err(|source| CouplingAnalyzerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if meta.is_file() {
-        if SourceLang::from_path(path) == Some(SourceLang::Rust) {
-            return Ok(path.to_path_buf());
-        }
-        return Err(CouplingAnalyzerError::UnsupportedRoot {
-            path: path.to_path_buf(),
-        });
-    }
-    if meta.is_dir() {
-        for candidate in ["src/lib.rs", "src/main.rs"] {
-            let probe = path.join(candidate);
-            if probe.is_file() {
-                return Ok(probe);
-            }
-        }
-    }
-    Err(CouplingAnalyzerError::UnsupportedRoot {
-        path: path.to_path_buf(),
-    })
 }
 
 #[derive(Debug, Serialize)]
@@ -318,17 +233,11 @@ fn render_pairs(out: &mut String, pairs: &[PairView<'_>]) {
     }
 }
 
-fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
-    match v {
-        Some(x) => format!("{x:.precision$}"),
-        None => "n/a".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
@@ -639,18 +548,6 @@ mod tests {
             near: PathBuf::from("/tmp"),
         };
         assert!(err.source().is_none());
-    }
-
-    #[test]
-    fn coupling_format_optional_f64_renders_some_with_precision() {
-        assert_eq!(format_optional_f64(Some(0.5), 2), "0.50");
-        assert_eq!(format_optional_f64(Some(1.0), 0), "1");
-    }
-
-    #[test]
-    fn coupling_format_optional_f64_renders_none_as_n_a() {
-        assert_eq!(format_optional_f64(None, 0), "n/a");
-        assert_eq!(format_optional_f64(None, 4), "n/a");
     }
 
     #[test]
