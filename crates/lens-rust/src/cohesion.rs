@@ -7,18 +7,34 @@
 //! no fields to share, so including them would inflate LCOM4 with isolated
 //! components that don't reflect a real cohesion problem.
 //!
+//! In addition to `impl`-block units we emit a **module-level** unit per
+//! scope (the file body, plus each inline `mod foo { ... }` block): top-level
+//! free `fn` items act as the methods, top-level `static` / `const` items
+//! act as the shared fields, and direct sibling calls / shared field access
+//! form edges. Locally-bound names inside a function (parameters, `let`
+//! bindings, closure params, `for` / `match` / `if let` / `while let`
+//! patterns) shadow module names, so a `let counter = 0;` inside a function
+//! is not counted as a reference to the module-level `static COUNTER`.
+//! `#[test]`-tagged free functions and `#[cfg(test)]`-gated modules are
+//! filtered to keep test scaffolding out of production cohesion reports.
+//!
 //! Calls are matched verbatim against the names of *sibling* methods on the
-//! same impl block. Calls to anything else are dropped on the floor — the
-//! cohesion graph only ever sees in-unit edges.
+//! same impl block (or sibling free functions in the same module). Calls to
+//! anything else are dropped on the floor — the cohesion graph only ever
+//! sees in-unit edges.
+
+use std::collections::HashSet;
 
 use lens_domain::{CohesionUnit, CohesionUnitKind, MethodCohesion};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
-    Expr, ExprCall, ExprField, ExprMethodCall, ExprPath, FnArg, ImplItem, ImplItemFn, Item,
-    ItemImpl, Member,
+    Arm, Expr, ExprCall, ExprClosure, ExprField, ExprForLoop, ExprIf, ExprLet, ExprMethodCall,
+    ExprPath, ExprWhile, FnArg, ImplItem, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod,
+    ItemStatic, Local, Member, Pat,
 };
 
+use crate::attrs::{has_cfg_test, is_test_function};
 use crate::common::type_path_last_ident;
 
 /// Failures produced while extracting cohesion units.
@@ -28,17 +44,37 @@ pub enum CohesionError {
     Syn(#[from] syn::Error),
 }
 
-/// Extract one [`CohesionUnit`] per `impl` block in `source`.
+/// Placeholder name used for the program-level (file-root) module unit.
+/// Inline `mod foo { ... }` blocks use `foo` as the unit name instead, so
+/// this constant only ever stands in for the file's outermost scope.
+const MODULE_UNIT_NAME: &str = "<module>";
+
+/// Extract one [`CohesionUnit`] per `impl` block in `source` plus one
+/// module-level unit per scope (the file body, and each inline
+/// `mod foo { ... }` block) that has at least one production free
+/// function.
 ///
 /// Empty `impl` blocks (no instance methods) are skipped; they have no
-/// cohesion to measure and would only add noise to a report.
+/// cohesion to measure and would only add noise to a report. Likewise
+/// empty modules and `#[cfg(test)]` modules are skipped.
 pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, CohesionError> {
     let file = syn::parse_file(source)?;
     let mut out = Vec::new();
-    for item in &file.items {
-        collect_item(item, &mut out);
-    }
+    collect_scope(&file.items, MODULE_UNIT_NAME, &mut out);
     Ok(out)
+}
+
+/// Process one lexical scope: emit `impl` units (recursively descending
+/// into inline modules), recurse into nested modules as their own
+/// scopes, and finally emit a module-level unit summarising this
+/// scope's free functions / fields.
+fn collect_scope(items: &[Item], scope_name: &str, out: &mut Vec<CohesionUnit>) {
+    for item in items {
+        collect_item(item, out);
+    }
+    if let Some(unit) = build_module_unit(items, scope_name) {
+        out.push(unit);
+    }
 }
 
 fn collect_item(item: &Item, out: &mut Vec<CohesionUnit>) {
@@ -49,10 +85,14 @@ fn collect_item(item: &Item, out: &mut Vec<CohesionUnit>) {
             }
         }
         Item::Mod(item_mod) => {
+            // `#[cfg(test)]` modules are test scaffolding; their cohesion
+            // is dictated by the test harness, not by a real production
+            // responsibility split.
+            if has_cfg_test(&item_mod.attrs) {
+                return;
+            }
             if let Some((_, items)) = &item_mod.content {
-                for nested in items {
-                    collect_item(nested, out);
-                }
+                collect_scope(items, &item_mod.ident.to_string(), out);
             }
         }
         _ => {}
@@ -185,14 +225,325 @@ fn is_self_expr(expr: &Expr) -> bool {
     )
 }
 
+// ---------- Module-level extraction ----------
+
+/// Build the module unit for a single scope, if any. Returns `None`
+/// when the scope has no production free function — pure-impl files,
+/// pure-`use` files, and `#[test]`-only scopes don't get a unit.
+fn build_module_unit(items: &[Item], scope_name: &str) -> Option<CohesionUnit> {
+    let functions: Vec<&ItemFn> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) if !is_test_function(&f.attrs) => Some(f),
+            _ => None,
+        })
+        .collect();
+    if functions.is_empty() {
+        return None;
+    }
+
+    let module_fields = collect_module_fields(items);
+    let sibling_names: HashSet<String> =
+        functions.iter().map(|f| f.sig.ident.to_string()).collect();
+
+    let cohesions: Vec<MethodCohesion> = functions
+        .iter()
+        .map(|f| module_function_cohesion(f, &module_fields, &sibling_names))
+        .collect();
+
+    let (start_line, end_line) = scope_line_range(items);
+    Some(CohesionUnit::build(
+        CohesionUnitKind::Module,
+        scope_name,
+        start_line,
+        end_line,
+        cohesions,
+    ))
+}
+
+fn scope_line_range(items: &[Item]) -> (usize, usize) {
+    let Some(first) = items.first() else {
+        return (1, 1);
+    };
+    let last = items.last().unwrap_or(first);
+    (first.span().start().line, last.span().end().line)
+}
+
+/// Names of every top-level binding that participates in cohesion as a
+/// "field": `static` and `const` items. `use` imports, type aliases,
+/// and nested `fn` / `mod` / `impl` declarations are excluded — they
+/// are not shared mutable / read state, they're sibling units of their
+/// own (or scoped names).
+fn collect_module_fields(items: &[Item]) -> HashSet<String> {
+    let mut fields = HashSet::new();
+    for item in items {
+        match item {
+            Item::Static(s) => {
+                fields.insert(s.ident.to_string());
+            }
+            Item::Const(c) => {
+                fields.insert(c.ident.to_string());
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
+fn module_function_cohesion(
+    func: &ItemFn,
+    module_fields: &HashSet<String>,
+    siblings: &HashSet<String>,
+) -> MethodCohesion {
+    let locals = collect_local_names(func);
+    let mut visitor = ModuleRefVisitor {
+        module_fields,
+        siblings,
+        locals: &locals,
+        fields: Vec::new(),
+        calls: Vec::new(),
+    };
+    visitor.visit_block(&func.block);
+
+    let mut fields = visitor.fields;
+    fields.sort();
+    fields.dedup();
+    let mut calls = visitor.calls;
+    calls.sort();
+    calls.dedup();
+
+    MethodCohesion::new(
+        func.sig.ident.to_string(),
+        func.sig.span().start().line,
+        func.block.span().end().line,
+        fields,
+        calls,
+    )
+}
+
+/// Function-local bindings that may shadow module-level names:
+/// parameters, `let` bindings, closure parameters, `for` / `match` /
+/// `if let` / `while let` patterns, and nested `fn` / `const` / `static`
+/// items. We *do* descend into closures (they share the enclosing
+/// scope and capture from it) but we do *not* descend into nested
+/// `fn` / `impl` / `mod` items — those have their own scopes.
+fn collect_local_names(func: &ItemFn) -> HashSet<String> {
+    let mut locals = HashSet::new();
+    for arg in &func.sig.inputs {
+        if let FnArg::Typed(pat) = arg {
+            collect_pat_names(&pat.pat, &mut locals);
+        }
+    }
+    let mut walker = LocalWalker {
+        locals: &mut locals,
+    };
+    walker.visit_block(&func.block);
+    locals
+}
+
+/// Recursively pull every plain `Pat::Ident` out of a pattern (`x`,
+/// `(a, b)`, `Foo { x, y }`, `Some(x)`, `&x`, etc.). Reference / mut
+/// modifiers are unwrapped; literals, ranges and wildcards introduce
+/// no bindings.
+fn collect_pat_names(pat: &Pat, out: &mut HashSet<String>) {
+    match pat {
+        Pat::Ident(p) => {
+            out.insert(p.ident.to_string());
+            if let Some((_, sub)) = &p.subpat {
+                collect_pat_names(sub, out);
+            }
+        }
+        Pat::Tuple(t) => {
+            for elem in &t.elems {
+                collect_pat_names(elem, out);
+            }
+        }
+        Pat::TupleStruct(t) => {
+            for elem in &t.elems {
+                collect_pat_names(elem, out);
+            }
+        }
+        Pat::Struct(s) => {
+            for field in &s.fields {
+                collect_pat_names(&field.pat, out);
+            }
+        }
+        Pat::Slice(s) => {
+            for elem in &s.elems {
+                collect_pat_names(elem, out);
+            }
+        }
+        Pat::Or(o) => {
+            for case in &o.cases {
+                collect_pat_names(case, out);
+            }
+        }
+        Pat::Reference(r) => collect_pat_names(&r.pat, out),
+        Pat::Paren(p) => collect_pat_names(&p.pat, out),
+        Pat::Type(t) => collect_pat_names(&t.pat, out),
+        _ => {}
+    }
+}
+
+struct LocalWalker<'a> {
+    locals: &'a mut HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for LocalWalker<'_> {
+    fn visit_local(&mut self, local: &'ast Local) {
+        collect_pat_names(&local.pat, self.locals);
+        if let Some(init) = &local.init {
+            self.visit_expr(&init.expr);
+            if let Some((_, diverge)) = &init.diverge {
+                self.visit_expr(diverge);
+            }
+        }
+    }
+
+    fn visit_expr_for_loop(&mut self, e: &'ast ExprForLoop) {
+        collect_pat_names(&e.pat, self.locals);
+        self.visit_expr(&e.expr);
+        self.visit_block(&e.body);
+    }
+
+    fn visit_expr_let(&mut self, e: &'ast ExprLet) {
+        collect_pat_names(&e.pat, self.locals);
+        self.visit_expr(&e.expr);
+    }
+
+    fn visit_expr_if(&mut self, e: &'ast ExprIf) {
+        // `if let Pat = expr { ... } else { ... }` — the let-pattern
+        // binds in the consequent block, which `visit_expr_let`
+        // already covers via the default walker. Just delegate.
+        syn::visit::visit_expr_if(self, e);
+    }
+
+    fn visit_expr_while(&mut self, e: &'ast ExprWhile) {
+        syn::visit::visit_expr_while(self, e);
+    }
+
+    fn visit_arm(&mut self, arm: &'ast Arm) {
+        collect_pat_names(&arm.pat, self.locals);
+        if let Some((_, guard)) = &arm.guard {
+            self.visit_expr(guard);
+        }
+        self.visit_expr(&arm.body);
+    }
+
+    fn visit_expr_closure(&mut self, c: &'ast ExprClosure) {
+        for p in &c.inputs {
+            collect_pat_names(p, self.locals);
+        }
+        self.visit_expr(&c.body);
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+        // Nested fn declares its name in the enclosing scope; descend
+        // no further — the body is its own scope.
+        self.locals.insert(item.sig.ident.to_string());
+    }
+
+    fn visit_item_const(&mut self, item: &'ast ItemConst) {
+        self.locals.insert(item.ident.to_string());
+    }
+
+    fn visit_item_static(&mut self, item: &'ast ItemStatic) {
+        self.locals.insert(item.ident.to_string());
+    }
+
+    fn visit_item_impl(&mut self, _: &'ast ItemImpl) {
+        // Nested impl bodies are their own scopes; don't descend.
+    }
+
+    fn visit_item_mod(&mut self, _: &'ast ItemMod) {
+        // Likewise for nested modules.
+    }
+}
+
+/// Visitor that records (a) free identifier references that resolve to
+/// a module-level field and (b) calls to sibling free functions, in
+/// both cases skipping names shadowed by a function-local binding.
+/// Mirrors [`SelfRefVisitor`] but tracks free names instead of `self.x`.
+struct ModuleRefVisitor<'a> {
+    module_fields: &'a HashSet<String>,
+    siblings: &'a HashSet<String>,
+    locals: &'a HashSet<String>,
+    fields: Vec<String>,
+    calls: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for ModuleRefVisitor<'_> {
+    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        // Sibling call: callee is a single-segment unqualified path.
+        // Record and skip recursing into the callee itself so the
+        // path doesn't *also* fire as a field reference.
+        if let Expr::Path(ep) = &*call.func
+            && let Some(name) = single_segment_path(ep)
+            && !self.locals.contains(&name)
+            && self.siblings.contains(&name)
+        {
+            self.calls.push(name);
+        } else {
+            self.visit_expr(&call.func);
+        }
+        for arg in &call.args {
+            self.visit_expr(arg);
+        }
+    }
+
+    fn visit_expr_path(&mut self, ep: &'ast ExprPath) {
+        if let Some(name) = single_segment_path(ep)
+            && !self.locals.contains(&name)
+            && self.module_fields.contains(&name)
+        {
+            self.fields.push(name);
+        }
+    }
+
+    // Skip nested items: their scopes are independent.
+    fn visit_item_fn(&mut self, _: &'ast ItemFn) {}
+    fn visit_item_mod(&mut self, _: &'ast ItemMod) {}
+    fn visit_item_impl(&mut self, _: &'ast ItemImpl) {}
+
+    // Don't double-walk macro contents (and we couldn't do anything
+    // useful with them anyway — macros are tokens, not expressions).
+    fn visit_macro(&mut self, _: &'ast syn::Macro) {}
+}
+
+/// Return the single-segment, unqualified, no-leading-colon name from
+/// an `ExprPath`, or `None` if the path is qualified, has multiple
+/// segments, or has generic arguments.
+fn single_segment_path(ep: &ExprPath) -> Option<String> {
+    if ep.qself.is_some() || ep.path.leading_colon.is_some() {
+        return None;
+    }
+    if ep.path.segments.len() != 1 {
+        return None;
+    }
+    let seg = &ep.path.segments[0];
+    if !seg.arguments.is_none() {
+        return None;
+    }
+    Some(seg.ident.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn unit(src: &str) -> CohesionUnit {
         let mut units = extract_cohesion_units(src).unwrap();
+        units.retain(|u| !matches!(u.kind, CohesionUnitKind::Module));
         assert_eq!(units.len(), 1, "expected exactly one impl block");
         units.remove(0)
+    }
+
+    fn module_unit(src: &str) -> CohesionUnit {
+        extract_cohesion_units(src)
+            .unwrap()
+            .into_iter()
+            .find(|u| matches!(u.kind, CohesionUnitKind::Module))
+            .expect("expected a module-level cohesion unit")
     }
 
     #[test]
@@ -414,5 +765,248 @@ impl Foo {
         // The two methods do not share any self field, so they form
         // separate components.
         assert_eq!(u.lcom4(), 2);
+    }
+
+    // ---------- Module-level cohesion ----------
+
+    #[test]
+    fn module_unit_collapses_when_all_functions_share_a_static() {
+        let src = r#"
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn bump() {
+    COUNTER.fetch_add(1, Ordering::Relaxed);
+}
+
+fn get() -> usize {
+    COUNTER.load(Ordering::Relaxed)
+}
+"#;
+        let u = module_unit(src);
+        assert!(matches!(u.kind, CohesionUnitKind::Module));
+        assert_eq!(u.type_name, "<module>");
+        assert_eq!(u.methods.len(), 2);
+        assert_eq!(u.lcom4(), 1);
+    }
+
+    #[test]
+    fn module_split_responsibilities_show_multiple_components() {
+        let src = r#"
+const MAX_COUNT: usize = 100;
+const MAX_LOG: usize = 1000;
+
+fn check_count(n: usize) -> bool { n < MAX_COUNT }
+fn at_count(n: usize) -> bool { n == MAX_COUNT }
+fn check_log(n: usize) -> bool { n < MAX_LOG }
+fn at_log(n: usize) -> bool { n == MAX_LOG }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
+    }
+
+    #[test]
+    fn module_sibling_call_forms_an_edge() {
+        let src = r#"
+fn outer() -> i32 { helper() }
+fn helper() -> i32 { 1 }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 1);
+        let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
+        assert_eq!(outer.calls, vec!["helper"]);
+    }
+
+    #[test]
+    fn module_local_let_shadows_module_field() {
+        // The `let counter = ...` rebinds the name, so the reference
+        // is NOT to the module-level `COUNTER`. Without shadow-tracking
+        // the two functions would spuriously share and collapse.
+        let src = r#"
+const COUNTER: i32 = 0;
+
+fn reads_module() -> i32 { COUNTER }
+fn shadowed() -> i32 {
+    let COUNTER = 99;
+    COUNTER
+}
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+    }
+
+    #[test]
+    fn module_param_shadows_module_field() {
+        // A parameter with the same name as a module field shadows it
+        // for that function, so the reference is local.
+        let src = r#"
+const TAG: i32 = 0;
+
+fn reader() -> i32 { TAG }
+fn shadowed(TAG: i32) -> i32 { TAG }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+    }
+
+    #[test]
+    fn module_external_calls_do_not_create_edges() {
+        // `println!` is a macro and `usize::MAX` is a path expression
+        // with multiple segments. Two functions that both use them
+        // must not collapse on that basis.
+        let src = r#"
+fn a() { let _ = usize::MAX; }
+fn b() { let _ = usize::MIN; }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+    }
+
+    #[test]
+    fn module_test_functions_are_excluded() {
+        // `#[test]` functions are scaffolding; their cohesion is
+        // dictated by the test harness, not by a real production
+        // responsibility split.
+        let src = r#"
+const COUNTER: i32 = 0;
+
+fn production() -> i32 { COUNTER }
+
+#[test]
+fn smoke() {
+    assert_eq!(production(), 0);
+}
+"#;
+        let u = module_unit(src);
+        let names: Vec<&str> = u.methods.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["production"]);
+    }
+
+    #[test]
+    fn module_cfg_test_module_is_skipped() {
+        // The `#[cfg(test)]` mod's cohesion would be entirely about
+        // tests; drop the whole subtree.
+        let src = r#"
+fn production() -> i32 { 0 }
+
+#[cfg(test)]
+mod tests {
+    const FIXTURE: i32 = 1;
+    fn helper() -> i32 { FIXTURE }
+    fn user() -> i32 { helper() + FIXTURE }
+}
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        // Only the file-root module unit (single function -> still
+        // emitted) should appear, no `tests` module unit.
+        let module_units: Vec<&CohesionUnit> = units
+            .iter()
+            .filter(|u| matches!(u.kind, CohesionUnitKind::Module))
+            .collect();
+        assert_eq!(module_units.len(), 1);
+        assert_eq!(module_units[0].type_name, "<module>");
+    }
+
+    #[test]
+    fn module_unit_is_skipped_when_no_top_level_functions() {
+        // Pure-`impl` files have no module unit.
+        let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn inc(&mut self) { self.n += 1; }
+    fn get(&self) -> i32 { self.n }
+}
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        assert_eq!(units.len(), 1);
+        assert!(matches!(units[0].kind, CohesionUnitKind::Inherent));
+    }
+
+    #[test]
+    fn nested_mod_gets_its_own_module_unit() {
+        // An inline `mod foo { ... }` block is its own scope; sibling
+        // functions inside it must collapse via the inner module's
+        // own unit, named after the module.
+        let src = r#"
+mod inner {
+    static COUNTER: i32 = 0;
+    pub fn bump() { let _ = COUNTER; }
+    pub fn get() -> i32 { COUNTER }
+}
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        let module_units: Vec<&CohesionUnit> = units
+            .iter()
+            .filter(|u| matches!(u.kind, CohesionUnitKind::Module))
+            .collect();
+        assert_eq!(module_units.len(), 1);
+        assert_eq!(module_units[0].type_name, "inner");
+        assert_eq!(module_units[0].lcom4(), 1);
+    }
+
+    #[test]
+    fn module_closure_param_shadows_field() {
+        // A closure parameter named after a module field shadows it
+        // inside the closure body. With over-shadowing (closure params
+        // added to outer locals), the reference inside the closure is
+        // not counted as a module-level field reference.
+        let src = r#"
+const X: i32 = 1;
+
+fn reader() -> i32 { X }
+fn shadowed() -> i32 {
+    let f = |X: i32| X + 1;
+    f(2)
+}
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 2);
+    }
+
+    #[test]
+    fn module_closure_captures_field() {
+        // A closure that captures a module-level const without
+        // shadowing it should still count the const as a reference of
+        // the enclosing function — outer's behaviour depends on it.
+        let src = r#"
+const X: i32 = 1;
+
+fn alpha() -> i32 {
+    let f = |y: i32| X + y;
+    f(2)
+}
+fn beta() -> i32 { X }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 1);
+    }
+
+    #[test]
+    fn module_nested_fn_is_not_a_separate_unit_or_field_reference() {
+        // The nested `inner` is a local binding inside `outer`; it
+        // must NOT register as a sibling and must NOT be picked up as
+        // its own sibling fn. Without this guard, `outer` would record
+        // a reference to `helper` via its nested call, polluting the
+        // graph.
+        let src = r#"
+fn outer() -> i32 {
+    fn inner() -> i32 { helper() }
+    inner()
+}
+
+fn helper() -> i32 { 1 }
+"#;
+        let u = module_unit(src);
+        let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
+        // outer's body contains `fn inner` (skipped) and `inner()` —
+        // `inner` is a local, `helper` is referenced only inside
+        // `inner`'s body which we don't descend into.
+        assert!(
+            outer.calls.is_empty(),
+            "outer.calls should be empty, got {:?}",
+            outer.calls,
+        );
     }
 }

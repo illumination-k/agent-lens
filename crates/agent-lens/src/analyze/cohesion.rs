@@ -130,8 +130,9 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, Bo
         SourceLang::Rust => {
             lens_rust::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
         }
-        SourceLang::TypeScript(dialect) => lens_ts::extract_cohesion_units(source, dialect)
-            .map_err(|e| Box::new(e) as BoxedError),
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::extract_cohesion_units(source, dialect).map_err(|e| Box::new(e) as BoxedError)
+        }
         SourceLang::Python => {
             lens_py::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
         }
@@ -207,6 +208,7 @@ impl<'a> From<&'a CohesionUnit> for UnitView<'a> {
         let (kind, trait_name) = match &unit.kind {
             CohesionUnitKind::Inherent => ("inherent", None),
             CohesionUnitKind::Trait { trait_name } => ("trait", Some(trait_name.as_str())),
+            CohesionUnitKind::Module => ("module", None),
         };
         let components: Vec<Vec<&str>> = unit
             .components
@@ -260,7 +262,7 @@ fn format_markdown(report: &Report<'_>) -> String {
         report.root, report.file_count, report.unit_count,
     );
     if report.unit_count == 0 {
-        out.push_str("\n_No `impl` blocks with instance methods._\n");
+        out.push_str("\n_No cohesion units (no `impl` block / class / module-level functions)._\n");
         return out;
     }
     for file in &report.files {
@@ -273,9 +275,10 @@ fn format_markdown(report: &Report<'_>) -> String {
 }
 
 fn render_unit(out: &mut String, unit: &UnitView<'_>) {
-    let header = match unit.trait_name {
-        Some(t) => format!("impl {t} for {}", unit.type_name),
-        None => format!("impl {}", unit.type_name),
+    let header = match (unit.kind, unit.trait_name) {
+        ("module", _) => format!("module {}", unit.type_name),
+        (_, Some(t)) => format!("impl {t} for {}", unit.type_name),
+        _ => format!("impl {}", unit.type_name),
     };
     let lcom96 = format_optional_f64(unit.lcom96, 2);
     // writeln! into a String cannot fail; the result is swallowed
@@ -420,6 +423,83 @@ class Counter:
     }
 
     #[test]
+    fn python_module_unit_is_emitted_alongside_classes() {
+        // A file with both a class and module-level functions should
+        // produce two units: the class and the module. Without
+        // module-level cohesion the agent would only see the class
+        // and miss e.g. split-personality file scope.
+        let dir = tempfile::tempdir().unwrap();
+        let src = "
+counter = 0
+
+def bump():
+    global counter
+    counter += 1
+
+def get():
+    return counter
+
+class Other:
+    def m(self):
+        return self.x
+";
+        let file = write_file(dir.path(), "lib.py", src);
+        let json = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["file_count"], 1);
+        assert_eq!(parsed["unit_count"], 2);
+        let kinds: Vec<String> = parsed["files"][0]["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["kind"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(kinds.contains(&"inherent".to_owned()));
+        assert!(kinds.contains(&"module".to_owned()));
+    }
+
+    #[test]
+    fn typescript_module_unit_is_emitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+let counter = 0;
+
+export function bump(): void { counter += 1; }
+export function get(): number { return counter; }
+"#;
+        let file = write_file(dir.path(), "lib.ts", src);
+        let json = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["unit_count"], 1);
+        assert_eq!(parsed["files"][0]["units"][0]["kind"], "module");
+        assert_eq!(parsed["files"][0]["units"][0]["lcom4"], 1);
+    }
+
+    #[test]
+    fn markdown_renders_module_units_with_module_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+let a = 0;
+let b = 0;
+
+export function ga(): number { return a; }
+export function gb(): number { return b; }
+"#;
+        let file = write_file(dir.path(), "lib.ts", src);
+        let md = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        // Module units render with `module <name>` (rather than
+        // `impl <name>`) so the agent can tell the granularity apart.
+        assert!(md.contains("module <module>"), "got: {md}");
+        assert!(md.contains("LCOM4 = 2"));
+    }
+
+    #[test]
     fn missing_file_surfaces_io_error() {
         let err = CohesionAnalyzer::new()
             .analyze(
@@ -442,12 +522,14 @@ class Counter:
 
     #[test]
     fn empty_report_for_files_without_impls() {
+        // A file with no `impl` block, no class, and no top-level
+        // function produces an empty cohesion report.
         let dir = tempfile::tempdir().unwrap();
-        let file = write_file(dir.path(), "lib.rs", "fn solo() {}\n");
+        let file = write_file(dir.path(), "lib.rs", "const X: i32 = 1;\n");
         let md = CohesionAnalyzer::new()
             .analyze(&file, OutputFormat::Md)
             .unwrap();
-        assert!(md.contains("No `impl` blocks"));
+        assert!(md.contains("No cohesion units"));
     }
 
     #[test]
@@ -570,8 +652,9 @@ impl B { fn gy(&self) -> i32 { self.y } }
 
     #[test]
     fn directory_mode_drops_files_without_units() {
-        // Two files: one with an `impl`, one with only free functions.
-        // The latter should be dropped to keep the report signal-dense.
+        // Two files: one with an `impl`, one with only a `const` and no
+        // functions of any kind. The latter should be dropped to keep
+        // the report signal-dense.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -581,7 +664,7 @@ struct A { x: i32 }
 impl A { fn gx(&self) -> i32 { self.x } }
 "#,
         );
-        write_file(dir.path(), "no_impl.rs", "fn solo() {}\n");
+        write_file(dir.path(), "no_units.rs", "const X: i32 = 1;\n");
 
         let json = CohesionAnalyzer::new()
             .analyze(dir.path(), OutputFormat::Json)

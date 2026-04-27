@@ -27,10 +27,17 @@ use crate::function::FunctionDef;
 /// `impl Trait for Foo { ... }`. The distinction is preserved because cohesion
 /// of trait impls is usually less interesting (the method set is dictated by
 /// the trait) but callers may still want to surface it.
+///
+/// `Module` covers a file- or namespace-level scope: top-level functions act
+/// as the methods, top-level variables act as the shared fields, and direct
+/// calls between siblings count as edges. Used by language adapters that
+/// expose free functions (Python, TypeScript) so cohesion isn't blind to
+/// the module-as-class pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CohesionUnitKind {
     Inherent,
     Trait { trait_name: String },
+    Module,
 }
 
 /// One method's cohesion-relevant footprint.
