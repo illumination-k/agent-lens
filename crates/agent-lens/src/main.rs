@@ -23,8 +23,13 @@ use agent_lens::analyze::{
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
+use agent_lens::hooks::codex::pre_tool_use::{
+    CohesionHook as CodexPreCohesionHook, ComplexityHook as CodexPreComplexityHook,
+};
+use agent_lens::hooks::codex::session_start::SummaryHook as CodexSessionStartSummaryHook;
 use agent_lens::hooks::codex::setup::{self as codex_setup, SetupSummary as CodexSetupSummary};
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
+use agent_lens::hooks::pre_tool_use::{CohesionHook, ComplexityHook};
 use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tracing::{error, info};
@@ -57,6 +62,9 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum HookCommand {
+    /// Handle a `PreToolUse` event.
+    #[command(subcommand)]
+    PreToolUse(PreToolUseCommand),
     /// Handle a `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(PostToolUseCommand),
@@ -98,6 +106,27 @@ impl From<SetupScope> for SettingsScope {
 }
 
 #[derive(Debug, Subcommand)]
+enum PreToolUseCommand {
+    /// Report functions whose pre-edit complexity (cyclomatic /
+    /// cognitive / nesting) crosses a non-trivial threshold in the
+    /// file the agent is about to edit.
+    ///
+    /// The parser is chosen from the file extension (`.rs` / `.ts` /
+    /// `.py`). Files with an unsupported extension are ignored
+    /// silently. `Write` against a brand-new path is a silent no-op
+    /// (no current state to read).
+    Complexity,
+    /// Report `impl` blocks whose pre-edit LCOM4 cohesion is above 1
+    /// (split-personality types) in the file the agent is about to
+    /// edit.
+    ///
+    /// The parser is chosen from the file extension (`.rs` / `.ts` /
+    /// `.py`). Files with an unsupported extension are ignored
+    /// silently.
+    Cohesion,
+}
+
+#[derive(Debug, Subcommand)]
 enum PostToolUseCommand {
     /// Report similar function pairs in the file that was just edited.
     ///
@@ -114,6 +143,12 @@ enum PostToolUseCommand {
 
 #[derive(Debug, Subcommand)]
 enum CodexHookCommand {
+    /// Handle a Codex `SessionStart` event.
+    #[command(subcommand)]
+    SessionStart(CodexSessionStartCommand),
+    /// Handle a Codex `PreToolUse` event.
+    #[command(subcommand)]
+    PreToolUse(CodexPreToolUseCommand),
     /// Handle a Codex `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(CodexPostToolUseCommand),
@@ -170,6 +205,35 @@ enum CodexPostToolUseCommand {
     /// Runs against every file Codex's `apply_patch` just touched.
     /// Files with an unsupported extension are ignored silently.
     Wrapper,
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexPreToolUseCommand {
+    /// Report functions whose pre-patch complexity crosses a
+    /// non-trivial threshold across every file Codex's `apply_patch`
+    /// is about to update.
+    ///
+    /// `*** Add File:` entries are skipped (no current state on disk);
+    /// only `*** Update File:` paths are inspected.
+    Complexity,
+    /// Report `impl` blocks whose pre-patch LCOM4 cohesion is above 1
+    /// across every file Codex's `apply_patch` is about to update.
+    ///
+    /// `*** Add File:` entries are skipped (no current state on disk);
+    /// only `*** Update File:` paths are inspected.
+    Cohesion,
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexSessionStartCommand {
+    /// Inject a one-shot summary of the project's hotspots and
+    /// coupling thumbnail into the new Codex session.
+    ///
+    /// Runs once per session against `cwd`. Pieces that don't apply
+    /// (cwd outside a git working tree, or not anchored at a Rust
+    /// crate) are silently omitted; if neither applies, the hook
+    /// returns a no-op and Codex starts unchanged.
+    Summary,
 }
 
 #[derive(Debug, Subcommand)]
@@ -347,8 +411,11 @@ fn init_tracing() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Command::Hook(HookCommand::PreToolUse(sub)) => run_pre_tool_use(sub),
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
         Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args),
+        Command::CodexHook(CodexHookCommand::SessionStart(sub)) => run_codex_session_start(sub),
+        Command::CodexHook(CodexHookCommand::PreToolUse(sub)) => run_codex_pre_tool_use(sub),
         Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
         Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
         Command::Analyze(sub) => run_analyze(sub),
@@ -425,6 +492,17 @@ fn write_stdout_line(report: &str) -> Result<(), Box<dyn std::error::Error>> {
         stdout.write_all(b"\n")?;
     }
     Ok(())
+}
+
+fn run_pre_tool_use(cmd: PreToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let ClaudeCodeHookInput::PreToolUse(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
+        return Err("expected a PreToolUse hook payload on stdin".into());
+    };
+    let output = match cmd {
+        PreToolUseCommand::Complexity => ComplexityHook::new().handle(input)?,
+        PreToolUseCommand::Cohesion => CohesionHook::new().handle(input)?,
+    };
+    write_stdout_json(&output)
 }
 
 fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
@@ -521,6 +599,17 @@ struct SetupApplyContext<'a> {
     unchanged_message: &'static str,
 }
 
+fn run_codex_pre_tool_use(cmd: CodexPreToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let CodexHookInput::PreToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
+        return Err("expected a Codex PreToolUse hook payload on stdin".into());
+    };
+    let output = match cmd {
+        CodexPreToolUseCommand::Complexity => CodexPreComplexityHook::new().handle(input)?,
+        CodexPreToolUseCommand::Cohesion => CodexPreCohesionHook::new().handle(input)?,
+    };
+    write_stdout_json(&output)
+}
+
 fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
     let CodexHookInput::PostToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
         return Err("expected a Codex PostToolUse hook payload on stdin".into());
@@ -528,6 +617,18 @@ fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn s
     let output = match cmd {
         CodexPostToolUseCommand::Similarity => CodexSimilarityHook::new().handle(input)?,
         CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
+    };
+    write_stdout_json(&output)
+}
+
+fn run_codex_session_start(
+    cmd: CodexSessionStartCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let CodexHookInput::SessionStart(input) = read_stdin_json::<CodexHookInput>()? else {
+        return Err("expected a Codex SessionStart hook payload on stdin".into());
+    };
+    let output = match cmd {
+        CodexSessionStartCommand::Summary => CodexSessionStartSummaryHook::new().handle(input)?,
     };
     write_stdout_json(&output)
 }
@@ -576,6 +677,26 @@ mod tests {
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_hook_pre_tool_use_complexity() {
+        let cli = Cli::try_parse_from(["agent-lens", "hook", "pre-tool-use", "complexity"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Complexity)),
+        ));
+    }
+
+    #[test]
+    fn parses_hook_pre_tool_use_cohesion() {
+        let cli = Cli::try_parse_from(["agent-lens", "hook", "pre-tool-use", "cohesion"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Cohesion)),
+        ));
     }
 
     #[test]
@@ -634,6 +755,42 @@ mod tests {
             cli.command,
             Command::CodexHook(CodexHookCommand::PostToolUse(
                 CodexPostToolUseCommand::Similarity,
+            )),
+        ));
+    }
+
+    #[test]
+    fn parses_codex_hook_pre_tool_use_complexity() {
+        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "pre-tool-use", "complexity"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::CodexHook(CodexHookCommand::PreToolUse(
+                CodexPreToolUseCommand::Complexity,
+            )),
+        ));
+    }
+
+    #[test]
+    fn parses_codex_hook_pre_tool_use_cohesion() {
+        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "pre-tool-use", "cohesion"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::CodexHook(CodexHookCommand::PreToolUse(
+                CodexPreToolUseCommand::Cohesion
+            )),
+        ));
+    }
+
+    #[test]
+    fn parses_codex_hook_session_start_summary() {
+        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "session-start", "summary"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::CodexHook(CodexHookCommand::SessionStart(
+                CodexSessionStartCommand::Summary,
             )),
         ));
     }

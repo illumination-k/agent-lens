@@ -8,5 +8,6 @@
 pub mod codex;
 pub(crate) mod core;
 pub mod post_tool_use;
+pub mod pre_tool_use;
 pub mod setup;
 pub(crate) mod setup_common;
