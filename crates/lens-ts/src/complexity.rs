@@ -646,39 +646,93 @@ function nested(n: number): void {
         assert_eq!(nested.cognitive, 3);
     }
 
-    #[test]
-    fn class_methods_get_qualified_names() {
-        let units = extract(
-            r#"
+    #[rstest]
+    #[case::class_method(
+        r#"
 class Foo {
     bar(): void {}
 }
 "#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::bar");
-    }
-
-    #[test]
-    fn arrow_function_binding_records_name() {
-        let units = extract("const add = (a: number, b: number): number => a + b;");
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "add");
-    }
-
-    #[test]
-    fn nested_namespace_functions_are_picked_up() {
-        let units = extract(
-            r#"
+        "Foo::bar",
+        None
+    )]
+    #[case::arrow_binding("const add = (a: number, b: number): number => a + b;", "add", None)]
+    #[case::nested_namespace_function(
+        r#"
 namespace inner {
     export function hidden(n: number): number { return n > 0 ? 1 : 0; }
 }
 "#,
-        );
+        "hidden",
+        Some(2)
+    )]
+    #[case::export_default_function(
+        "export default function defaulted(): void {}",
+        "defaulted",
+        None
+    )]
+    #[case::export_default_class_method(
+        r#"
+export default class Foo {
+    bar(): void {}
+}
+"#,
+        "Foo::bar",
+        None
+    )]
+    #[case::exported_class_method(
+        r#"
+export class Foo {
+    bar(): void {}
+}
+"#,
+        "Foo::bar",
+        None
+    )]
+    #[case::exported_variable(
+        "export const adder = (a: number, b: number): number => a + b;",
+        "adder",
+        None
+    )]
+    #[case::function_expression_const("const fe = function () { return 1; };", "fe", None)]
+    #[case::private_class_method(
+        r#"
+class Foo {
+    #secret(): void {}
+}
+"#,
+        "Foo::#secret",
+        None
+    )]
+    #[case::string_literal_class_method(
+        r#"
+class Foo {
+    "weird name"(): void {}
+}
+"#,
+        "Foo::weird name",
+        None
+    )]
+    #[case::namespace_module_declaration(
+        r#"
+namespace outer {
+    export function inner(): void {}
+}
+"#,
+        "inner",
+        None
+    )]
+    fn extracted_function_matches(
+        #[case] src: &str,
+        #[case] expected_name: &str,
+        #[case] expected_cyclomatic: Option<u32>,
+    ) {
+        let units = extract(src);
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "hidden");
-        // base 1 + ?: = 2
-        assert_eq!(units[0].cyclomatic, 2);
+        assert_eq!(units[0].name, expected_name);
+        if let Some(expected) = expected_cyclomatic {
+            assert_eq!(units[0].cyclomatic, expected);
+        }
     }
 
     #[test]
@@ -770,91 +824,5 @@ function f(): void {
             "expected total_operands >= 6, got {}",
             f.halstead.total_operands,
         );
-    }
-
-    #[test]
-    fn export_default_function_is_extracted() {
-        let units = extract("export default function defaulted(): void {}");
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "defaulted");
-    }
-
-    #[test]
-    fn export_default_class_methods_are_extracted() {
-        let units = extract(
-            r#"
-export default class Foo {
-    bar(): void {}
-}
-"#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::bar");
-    }
-
-    #[test]
-    fn exported_class_methods_are_extracted() {
-        let units = extract(
-            r#"
-export class Foo {
-    bar(): void {}
-}
-"#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::bar");
-    }
-
-    #[test]
-    fn exported_variable_declaration_is_extracted() {
-        let units = extract("export const adder = (a: number, b: number): number => a + b;");
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "adder");
-    }
-
-    #[test]
-    fn function_expression_assigned_to_const_is_extracted() {
-        let units = extract("const fe = function () { return 1; };");
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "fe");
-    }
-
-    #[test]
-    fn private_class_methods_are_extracted_with_hash_prefix() {
-        let units = extract(
-            r#"
-class Foo {
-    #secret(): void {}
-}
-"#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::#secret");
-    }
-
-    #[test]
-    fn class_methods_with_string_literal_keys_are_extracted() {
-        let units = extract(
-            r#"
-class Foo {
-    "weird name"(): void {}
-}
-"#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::weird name");
-    }
-
-    #[test]
-    fn ts_namespace_module_declaration_is_walked() {
-        let units = extract(
-            r#"
-namespace outer {
-    export function inner(): void {}
-}
-"#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "inner");
     }
 }

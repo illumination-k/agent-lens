@@ -538,46 +538,47 @@ fn nested(n: i32) {
         assert_eq!(nested.cognitive, 3);
     }
 
-    #[test]
-    fn impl_methods_get_qualified_names() {
-        let units = extract(
-            r#"
+    #[rstest]
+    #[case::impl_method(
+        r#"
 struct Foo;
 impl Foo {
     fn bar(&self) {}
 }
 "#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::bar");
-    }
-
-    #[test]
-    fn trait_default_methods_are_extracted_with_required_skipped() {
-        let units = extract(
-            r#"
+        "Foo::bar",
+        None
+    )]
+    #[case::trait_default_method(
+        r#"
 trait T {
     fn required(&self);
     fn with_default(&self) { let _ = 1; }
 }
 "#,
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "T::with_default");
-    }
-
-    #[test]
-    fn nested_module_functions_are_picked_up() {
-        let units = extract(
-            r#"
+        "T::with_default",
+        None
+    )]
+    #[case::nested_module_function(
+        r#"
 mod inner {
     fn hidden(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }
 }
 "#,
-        );
+        "hidden",
+        Some(2)
+    )]
+    fn extracted_function_matches(
+        #[case] src: &str,
+        #[case] expected_name: &str,
+        #[case] expected_cyclomatic: Option<u32>,
+    ) {
+        let units = extract(src);
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "hidden");
-        assert_eq!(units[0].cyclomatic, 2);
+        assert_eq!(units[0].name, expected_name);
+        if let Some(expected) = expected_cyclomatic {
+            assert_eq!(units[0].cyclomatic, expected);
+        }
     }
 
     #[test]

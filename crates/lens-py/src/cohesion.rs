@@ -722,6 +722,7 @@ impl<'a, 'ast> Visitor<'ast> for ModuleRefVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn unit(src: &str) -> CohesionUnit {
         let mut units = extract_cohesion_units(src).unwrap();
@@ -923,47 +924,52 @@ class Foo:
         assert_eq!(u.lcom4(), 2);
     }
 
-    #[test]
-    fn test_classes_are_skipped() {
-        // Test classes' cohesion is dictated by the framework's
-        // lifecycle hooks, not by a real production responsibility split.
-        let src = "
+    #[rstest]
+    #[case::test_class(
+        "
 class TestThing:
     def helper(self):
         return self.tag
     def use(self):
         return self.helper()
-";
-        let units = extract_cohesion_units(src).unwrap();
-        assert!(units.is_empty());
-    }
-
-    #[test]
-    fn unittest_testcase_subclasses_are_skipped() {
-        let src = "
+"
+    )]
+    #[case::unittest_testcase_subclass(
+        "
 import unittest
 class Foo(unittest.TestCase):
     def test_a(self):
         return self.tag
     def use(self):
         return self.tag
-";
-        let units = extract_cohesion_units(src).unwrap();
-        assert!(units.is_empty());
-    }
-
-    #[test]
-    fn protocol_classes_are_skipped() {
-        // PEP 544 Protocol classes describe a structural contract;
-        // their cohesion is meaningless and every body is a `...` stub
-        // that would be filtered anyway. Drop the whole class.
-        let src = "
+"
+    )]
+    #[case::protocol_class(
+        "
 from typing import Protocol
 
 class Service(Protocol):
     def handle(self, x): ...
     def close(self): ...
-";
+"
+    )]
+    #[case::class_with_only_dunder_init(
+        "
+class Foo:
+    def __init__(self, n):
+        self.n = n
+"
+    )]
+    #[case::pure_test_module(
+        "
+def test_a():
+    assert True
+
+def test_b():
+    assert True
+"
+    )]
+    fn extracts_no_units(#[case] src: &str) {
         let units = extract_cohesion_units(src).unwrap();
         assert!(units.is_empty());
     }
@@ -990,17 +996,6 @@ class Service:
         let names: Vec<&str> = u.methods.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, ["concrete", "also_concrete"]);
         assert_eq!(u.lcom4(), 1);
-    }
-
-    #[test]
-    fn class_with_only_dunder_init_is_skipped() {
-        let src = "
-class Foo:
-    def __init__(self, n):
-        self.n = n
-";
-        let units = extract_cohesion_units(src).unwrap();
-        assert!(units.is_empty());
     }
 
     #[test]
@@ -1206,22 +1201,6 @@ def b():
 ";
         let u = module_unit(src);
         assert_eq!(u.lcom4(), 2);
-    }
-
-    #[test]
-    fn module_unit_is_skipped_for_pure_test_modules() {
-        // A file that only contains test functions has no production
-        // top-level function — extract_cohesion_units must not emit a
-        // module unit (and must not panic).
-        let src = "
-def test_a():
-    assert True
-
-def test_b():
-    assert True
-";
-        let units = extract_cohesion_units(src).unwrap();
-        assert!(units.is_empty());
     }
 
     #[test]

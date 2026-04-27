@@ -757,6 +757,7 @@ impl<'a, 'ast> Visit<'ast> for ModuleRefVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn unit(src: &str) -> CohesionUnit {
         let mut units = extract_cohesion_units(src, Dialect::Ts).unwrap();
@@ -958,14 +959,28 @@ export default class Foo {
         assert_eq!(units[0].type_name, "Foo");
     }
 
-    #[test]
-    fn classes_with_only_static_methods_are_skipped() {
-        let src = r#"
+    #[rstest]
+    #[case::only_static_methods(
+        r#"
 class Foo {
     static a(): void {}
     static b(): void {}
 }
-"#;
+"#
+    )]
+    #[case::anonymous_class(
+        r#"
+const F = class { get(): number { return 1; } };
+"#
+    )]
+    #[case::pure_type_or_import_file(
+        r#"
+import { foo } from "bar";
+type T = number;
+interface I { x: number; }
+"#
+    )]
+    fn extracts_no_units(#[case] src: &str) {
         let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert!(units.is_empty());
     }
@@ -985,17 +1000,6 @@ class Foo {
         assert!(external.fields.is_empty());
         assert_eq!(local.fields, vec!["tag"]);
         assert_eq!(u.lcom4(), 2);
-    }
-
-    #[test]
-    fn anonymous_class_is_skipped() {
-        // We cannot name the unit, so we drop it rather than emit a
-        // generic placeholder.
-        let src = r#"
-const F = class { get(): number { return 1; } };
-"#;
-        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
-        assert!(units.is_empty());
     }
 
     #[test]
@@ -1160,19 +1164,6 @@ namespace inner {
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "inner");
         assert_eq!(module_units[0].lcom4(), 1);
-    }
-
-    #[test]
-    fn module_unit_skips_pure_type_or_import_files() {
-        // A file with only type aliases / interfaces / imports has no
-        // top-level function, so no module unit is emitted.
-        let src = r#"
-import { foo } from "bar";
-type T = number;
-interface I { x: number; }
-"#;
-        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
-        assert!(units.is_empty());
     }
 
     #[test]

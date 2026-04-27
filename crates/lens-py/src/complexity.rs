@@ -709,40 +709,29 @@ def nested(n):
         assert_eq!(nested.cognitive, 3);
     }
 
-    #[test]
-    fn class_methods_get_qualified_names() {
-        // Real body: a `pass`-only method now reads as a stub and is
-        // dropped before complexity is measured.
-        let units = extract(
-            "
+    #[rstest]
+    #[case::class_method(
+        "
 class Foo:
     def bar(self):
         return 1
 ",
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::bar");
-    }
-
-    #[test]
-    fn async_function_is_extracted() {
-        let units = extract("async def fetch(url):\n    return await get(url)\n");
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "fetch");
-    }
-
-    #[test]
-    fn nested_functions_are_not_separate_units() {
-        let units = extract(
-            "
+        &["Foo::bar"]
+    )]
+    #[case::async_function("async def fetch(url):\n    return await get(url)\n", &["fetch"])]
+    #[case::nested_function_is_not_separate_unit(
+        "
 def outer():
     def inner():
         return 1
     return inner
 ",
-        );
+        &["outer"]
+    )]
+    fn extracted_names_match(#[case] src: &str, #[case] expected: &[&str]) {
+        let units = extract(src);
         let names: Vec<_> = units.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["outer"]);
+        assert_eq!(names, expected);
     }
 
     #[test]
