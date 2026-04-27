@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use ignore::WalkBuilder;
 
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
@@ -58,6 +59,12 @@ pub enum SourceLang {
     Rust,
     TypeScript(lens_ts::Dialect),
     Python,
+}
+
+#[derive(Debug)]
+pub(crate) struct SourceFile {
+    pub path: PathBuf,
+    pub display_path: String,
 }
 
 impl SourceLang {
@@ -172,6 +179,52 @@ impl CompiledPathFilter {
         }
         !self.has_excludes || !self.exclude.is_match(rel)
     }
+}
+
+pub(crate) fn collect_source_files(
+    path: &Path,
+    filter: &CompiledPathFilter,
+) -> Result<Vec<SourceFile>, AnalyzerError> {
+    if path.is_dir() {
+        collect_directory_source_files(path, filter)
+    } else if filter.includes_path(path) {
+        Ok(vec![SourceFile {
+            path: path.to_path_buf(),
+            display_path: path.display().to_string(),
+        }])
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn collect_directory_source_files(
+    root: &Path,
+    filter: &CompiledPathFilter,
+) -> Result<Vec<SourceFile>, AnalyzerError> {
+    let mut out = Vec::new();
+    for entry in WalkBuilder::new(root).build() {
+        let entry = entry.map_err(|e| AnalyzerError::Io {
+            path: root.to_path_buf(),
+            source: std::io::Error::other(e),
+        })?;
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let p = entry.path();
+        if !filter.includes_path(p) || SourceLang::from_path(p).is_none() {
+            continue;
+        }
+        out.push(SourceFile {
+            path: p.to_path_buf(),
+            display_path: relative_display_path(p, root),
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+pub(crate) fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
+    ranges.iter().any(|r| r.overlaps(start, end))
 }
 
 fn add_exclude_pattern(builder: &mut GlobSetBuilder, pattern: &str) -> Result<(), PathFilterError> {

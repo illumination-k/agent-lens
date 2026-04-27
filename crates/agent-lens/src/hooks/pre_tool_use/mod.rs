@@ -12,12 +12,14 @@
 //! than failing the tool call. `Edit` / `MultiEdit` always target
 //! existing files, so a missing file there is still a hard error.
 
+#[cfg(test)]
 use std::path::Path;
 
 use agent_hooks::claude_code::{CommonHookOutput, PreToolUseInput, PreToolUseOutput};
 
-use crate::analyze::SourceLang;
-use crate::hooks::core::{EditedSource, HookEnvelope, ReadEditedSourceError};
+use crate::hooks::core::{
+    EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError, read_edited_source,
+};
 
 /// Claude Code's PreToolUse adapter for the engine-agnostic hook
 /// runner.
@@ -80,34 +82,16 @@ pub(crate) fn prepare_edited_sources(
     let Some(rel_path) = extract_file_path(&input.tool_input) else {
         return Ok(Vec::new());
     };
-    let rel = Path::new(&rel_path);
-    let Some(lang) = SourceLang::from_path(rel) else {
-        return Ok(Vec::new());
-    };
-    let abs_path = if rel.is_absolute() {
-        rel.to_path_buf()
+    let missing_policy = if TOLERATE_MISSING_FILE_TOOLS.contains(&input.tool_name.as_str()) {
+        MissingFilePolicy::Skip
     } else {
-        input.context.cwd.join(rel)
+        MissingFilePolicy::Error
     };
-    let source = match std::fs::read_to_string(&abs_path) {
-        Ok(s) => s,
-        Err(source) => {
-            if source.kind() == std::io::ErrorKind::NotFound
-                && TOLERATE_MISSING_FILE_TOOLS.contains(&input.tool_name.as_str())
-            {
-                return Ok(Vec::new());
-            }
-            return Err(ReadEditedSourceError {
-                path: abs_path,
-                source,
-            });
-        }
-    };
-    Ok(vec![EditedSource {
-        rel_path,
-        lang,
-        source,
-    }])
+    Ok(
+        read_edited_source(&input.context.cwd, rel_path, missing_policy)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {

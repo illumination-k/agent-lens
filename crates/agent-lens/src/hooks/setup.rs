@@ -18,38 +18,32 @@ const SETTINGS_RELATIVE: &str = ".claude/settings.json";
 
 /// Tool matcher used for the PostToolUse block. Mirrors the
 /// `EDITING_TOOL_NAMES` constant the handlers themselves filter on.
-pub const POST_TOOL_USE_MATCHER: &str = "Edit|Write|MultiEdit";
+pub const POST_TOOL_USE_MATCHER: &str = setup_common::CLAUDE_EDITING_TOOL_MATCHER;
 
 /// Commands the setup writes into `hooks.PostToolUse`. One entry per
 /// installed handler; matching against the leading prefix of an existing
 /// `command` string makes the merge tolerant of user-added flags.
-pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
-    "agent-lens hook post-tool-use similarity",
-    "agent-lens hook post-tool-use wrapper",
-];
+pub const POST_TOOL_USE_COMMANDS: &[&str] = setup_common::CLAUDE_POST_TOOL_USE_COMMANDS;
 
 /// Tool matcher used for the PreToolUse block. Mirrors the
 /// `EDITING_TOOL_NAMES` constant the handlers themselves filter on; the
 /// value happens to match [`POST_TOOL_USE_MATCHER`] today because the
 /// pre/post handlers act on the same set of editing tools.
-pub const PRE_TOOL_USE_MATCHER: &str = "Edit|Write|MultiEdit";
+pub const PRE_TOOL_USE_MATCHER: &str = setup_common::CLAUDE_EDITING_TOOL_MATCHER;
 
 /// Commands the setup writes into `hooks.PreToolUse`. One entry per
 /// installed handler; matching against the leading prefix of an existing
 /// `command` string makes the merge tolerant of user-added flags.
-pub const PRE_TOOL_USE_COMMANDS: &[&str] = &[
-    "agent-lens hook pre-tool-use complexity",
-    "agent-lens hook pre-tool-use cohesion",
-];
+pub const PRE_TOOL_USE_COMMANDS: &[&str] = setup_common::CLAUDE_PRE_TOOL_USE_COMMANDS;
 
 /// Source matcher for the SessionStart block. Claude Code dispatches on
 /// the `source` field (`startup` / `resume` / `clear` / `compact`); a
 /// summary on every clear/compact would be noisy, so by default we only
 /// fire on a fresh start or a resumed session.
-pub const SESSION_START_MATCHER: &str = "startup|resume";
+pub const SESSION_START_MATCHER: &str = setup_common::CLAUDE_SESSION_START_MATCHER;
 
 /// Commands the setup writes into `hooks.SessionStart`.
-pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens hook session-start summary"];
+pub const SESSION_START_COMMANDS: &[&str] = setup_common::CLAUDE_SESSION_START_COMMANDS;
 
 /// Per-event metadata used by [`merge`]. Field labels are baked in as
 /// `&'static str` so they can flow into [`SetupError::UnexpectedShape`]
@@ -71,7 +65,7 @@ struct EventBlock {
 
 const EVENTS: &[EventBlock] = &[
     EventBlock {
-        event: "SessionStart",
+        event: setup_common::SESSION_START_EVENT,
         array_field: "hooks.SessionStart",
         entry_field: "hooks.SessionStart[]",
         inner_array_field: "hooks.SessionStart[].hooks",
@@ -79,7 +73,7 @@ const EVENTS: &[EventBlock] = &[
         commands: SESSION_START_COMMANDS,
     },
     EventBlock {
-        event: "PreToolUse",
+        event: setup_common::PRE_TOOL_USE_EVENT,
         array_field: "hooks.PreToolUse",
         entry_field: "hooks.PreToolUse[]",
         inner_array_field: "hooks.PreToolUse[].hooks",
@@ -87,7 +81,7 @@ const EVENTS: &[EventBlock] = &[
         commands: PRE_TOOL_USE_COMMANDS,
     },
     EventBlock {
-        event: "PostToolUse",
+        event: setup_common::POST_TOOL_USE_EVENT,
         array_field: "hooks.PostToolUse",
         entry_field: "hooks.PostToolUse[]",
         inner_array_field: "hooks.PostToolUse[].hooks",

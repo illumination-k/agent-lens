@@ -6,12 +6,14 @@
 //! `*** Add File:` markers, and reads each touched file off disk so the
 //! engine-agnostic [`crate::hooks::core`] runners can analyse them.
 
+#[cfg(test)]
 use std::path::Path;
 
 use agent_hooks::codex::{PostToolUseHookSpecificOutput, PostToolUseInput, PostToolUseOutput};
 
-use crate::analyze::SourceLang;
-use crate::hooks::core::{EditedSource, HookEnvelope, ReadEditedSourceError};
+use crate::hooks::core::{
+    EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError, read_edited_source,
+};
 
 /// Tool name Codex uses for the patch-style edit tool.
 pub(crate) const APPLY_PATCH_TOOL: &str = "apply_patch";
@@ -68,25 +70,11 @@ pub(crate) fn prepare_edited_sources(
     let rel_paths = parse_patched_paths(&command);
     let mut out = Vec::with_capacity(rel_paths.len());
     for rel_path in rel_paths {
-        let rel = Path::new(&rel_path);
-        let Some(lang) = SourceLang::from_path(rel) else {
-            continue;
-        };
-        let abs_path = if rel.is_absolute() {
-            rel.to_path_buf()
-        } else {
-            input.context.cwd.join(rel)
-        };
-        let source =
-            std::fs::read_to_string(&abs_path).map_err(|source| ReadEditedSourceError {
-                path: abs_path,
-                source,
-            })?;
-        out.push(EditedSource {
-            rel_path,
-            lang,
-            source,
-        });
+        if let Some(source) =
+            read_edited_source(&input.context.cwd, rel_path, MissingFilePolicy::Error)?
+        {
+            out.push(source);
+        }
     }
     Ok(out)
 }

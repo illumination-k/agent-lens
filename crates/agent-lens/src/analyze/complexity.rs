@@ -13,13 +13,12 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ignore::WalkBuilder;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
 use super::{
-    AnalyzePathFilter, AnalyzerError, CompiledPathFilter, LineRange, OutputFormat, SourceLang,
-    changed_line_ranges, format_optional_f64, read_source,
+    AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, SourceLang, changed_line_ranges,
+    collect_source_files, format_optional_f64, overlaps_any, read_source,
 };
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
@@ -79,46 +78,9 @@ impl ComplexityAnalyzer {
     /// output stays signal-dense.
     fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
         let filter = self.path_filter.compile(path)?;
-        if path.is_dir() {
-            self.collect_directory(path, &filter)
-        } else if filter.includes_path(path) {
-            Ok(self.analyze_file(path, None)?.into_iter().collect())
-        } else {
-            Ok(Vec::new())
-        }
-    }
-
-    fn collect_directory(
-        &self,
-        root: &Path,
-        filter: &CompiledPathFilter,
-    ) -> Result<Vec<FileReport>, AnalyzerError> {
         let mut out = Vec::new();
-        for entry in WalkBuilder::new(root).build() {
-            let entry = entry.map_err(|e| AnalyzerError::Io {
-                path: root.to_path_buf(),
-                source: std::io::Error::other(e),
-            })?;
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let p = entry.path();
-            if !filter.includes_path(p) {
-                continue;
-            }
-            if SourceLang::from_path(p).is_none() {
-                continue;
-            }
-            // Display paths relative to the walk root so per-file entries
-            // stay readable when the analyzer is pointed at a deep
-            // directory.
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            if let Some(report) = self.analyze_file(p, Some(rel))? {
+        for source_file in collect_source_files(path, &filter)? {
+            if let Some(report) = self.analyze_file(&source_file)? {
                 out.push(report);
             }
         }
@@ -128,30 +90,21 @@ impl ComplexityAnalyzer {
     /// Analyze a single file. Returns `None` when the file has no
     /// functions (after filtering), so empty entries don't pollute the
     /// directory-mode report.
-    fn analyze_file(
-        &self,
-        path: &Path,
-        rel_override: Option<String>,
-    ) -> Result<Option<FileReport>, AnalyzerError> {
-        let (lang, source) = read_source(path)?;
+    fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
+        let (lang, source) = read_source(&file.path)?;
         let mut functions = extract_units(lang, &source).map_err(AnalyzerError::Parse)?;
         if self.diff_only {
-            let changed = changed_line_ranges(path);
+            let changed = changed_line_ranges(&file.path);
             functions.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
         }
         if functions.is_empty() {
             return Ok(None);
         }
-        let display_path = rel_override.unwrap_or_else(|| path.display().to_string());
         Ok(Some(FileReport {
-            file: display_path,
+            file: file.display_path.clone(),
             functions,
         }))
     }
-}
-
-fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
-    ranges.iter().any(|r| r.overlaps(start, end))
 }
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
