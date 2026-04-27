@@ -59,6 +59,7 @@ pub enum SourceLang {
     Rust,
     TypeScript(lens_ts::Dialect),
     Python,
+    Go,
 }
 
 #[derive(Debug)]
@@ -74,6 +75,9 @@ impl SourceLang {
         }
         if ext == "py" {
             return Some(Self::Python);
+        }
+        if ext == "go" {
+            return Some(Self::Go);
         }
         lens_ts::Dialect::from_extension(ext).map(Self::TypeScript)
     }
@@ -576,6 +580,7 @@ mod tests {
     fn source_lang_from_extension_keeps_other_languages() {
         assert_eq!(SourceLang::from_extension("rs"), Some(SourceLang::Rust));
         assert_eq!(SourceLang::from_extension("py"), Some(SourceLang::Python));
+        assert_eq!(SourceLang::from_extension("go"), Some(SourceLang::Go));
         assert_eq!(SourceLang::from_extension("md"), None);
     }
 

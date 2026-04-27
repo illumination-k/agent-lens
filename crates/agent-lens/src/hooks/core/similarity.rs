@@ -138,6 +138,12 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>,
                 .extract_functions(source)
                 .map_err(|e| HookError::Parse(Box::new(e)))
         }
+        SourceLang::Go => {
+            let mut parser = lens_golang::GoParser::new();
+            parser
+                .extract_functions(source)
+                .map_err(|e| HookError::Parse(Box::new(e)))
+        }
     }
 }
 

@@ -259,6 +259,10 @@ fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
         }
+        // Hotspot scoring needs per-function complexity; Go isn't
+        // wired up to a complexity extractor yet. Returning an empty
+        // unit list keeps the walker on mixed-language repos.
+        SourceLang::Go => Ok(Vec::new()),
     };
     match result {
         Ok(u) => Some(u),

@@ -452,6 +452,7 @@ fn extract_functions(
         SourceLang::Rust => extract_rust(source, exclude_tests),
         SourceLang::TypeScript(dialect) => extract_typescript(source, dialect, exclude_tests),
         SourceLang::Python => extract_python(source, exclude_tests),
+        SourceLang::Go => extract_go(source, exclude_tests),
     }
     .map_err(AnalyzerError::Parse)
 }
@@ -487,6 +488,16 @@ fn extract_python(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>,
         lens_py::extract_functions_excluding_tests(source).map_err(box_err)
     } else {
         lens_py::PythonParser::new()
+            .extract_functions(source)
+            .map_err(box_err)
+    }
+}
+
+fn extract_go(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
+    if exclude_tests {
+        lens_golang::extract_functions_excluding_tests(source).map_err(box_err)
+    } else {
+        lens_golang::GoParser::new()
             .extract_functions(source)
             .map_err(box_err)
     }
@@ -942,6 +953,105 @@ def test_beta():
     assert a + b + c == 6
 "#;
         let file = write_file(dir.path(), "lib.py", src);
+
+        let with_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
+
+        let without_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_exclude_tests(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
+        assert_eq!(parsed["cluster_count"], 0);
+        assert_eq!(parsed["function_count"], 1);
+    }
+
+    #[test]
+    fn report_renders_paired_go_functions() {
+        // Two structurally identical Go functions — guaranteed to score
+        // above the 0.5 threshold and exercise the lens-golang dispatch
+        // added alongside the Rust / TS / Python arms.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+package p
+
+func alpha(xs []int) int {
+    total := 0
+    for _, x := range xs {
+        total += x
+    }
+    return total
+}
+
+func beta(ys []int) int {
+    sum := 0
+    for _, y := range ys {
+        sum += y
+    }
+    return sum
+}
+"#;
+        let file = write_file(dir.path(), "lib.go", src);
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 2);
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
+        let names: Vec<&str> = parsed["clusters"][0]["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+    }
+
+    #[test]
+    fn exclude_tests_drops_go_test_functions_from_report() {
+        // `go test`-style `Test*` functions form a parallel pair next
+        // to a single production function; `--exclude-tests` should
+        // drop them via `lens_golang::extract_functions_excluding_tests`.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+package p
+
+import "testing"
+
+func production(xs []int) int {
+    total := 0
+    for _, x := range xs {
+        total += x
+    }
+    return total
+}
+
+func TestAlpha(t *testing.T) {
+    a := 1
+    b := 2
+    c := 3
+    if a+b+c != 6 {
+        t.Fatal("bad")
+    }
+}
+
+func TestBeta(t *testing.T) {
+    a := 1
+    b := 2
+    c := 3
+    if a+b+c != 6 {
+        t.Fatal("bad")
+    }
+}
+"#;
+        let file = write_file(dir.path(), "lib.go", src);
 
         let with_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)
