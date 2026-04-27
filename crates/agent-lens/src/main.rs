@@ -30,6 +30,7 @@ use agent_lens::hooks::codex::session_start::SummaryHook as CodexSessionStartSum
 use agent_lens::hooks::codex::setup::{self as codex_setup, SetupSummary as CodexSetupSummary};
 use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use agent_lens::hooks::pre_tool_use::{CohesionHook, ComplexityHook};
+use agent_lens::hooks::session_start::SummaryHook as SessionStartSummaryHook;
 use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tracing::{error, info};
@@ -62,19 +63,22 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum HookCommand {
+    /// Handle a `SessionStart` event.
+    #[command(subcommand)]
+    SessionStart(SessionStartCommand),
     /// Handle a `PreToolUse` event.
     #[command(subcommand)]
     PreToolUse(PreToolUseCommand),
     /// Handle a `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(PostToolUseCommand),
-    /// Wire `agent-lens`'s PostToolUse handlers into a Claude Code
+    /// Wire `agent-lens`'s hook handlers into a Claude Code
     /// `settings.json`.
     ///
     /// The merge is conservative: existing entries are preserved, and a
-    /// new `PostToolUse` block is appended only with the commands that
-    /// aren't already wired up. Re-running the command is a no-op once
-    /// every handler is installed.
+    /// new block is appended only with the commands that aren't already
+    /// wired up. Re-running the command is a no-op once every handler
+    /// is installed.
     Setup(SetupArgs),
 }
 
@@ -103,6 +107,18 @@ impl From<SetupScope> for SettingsScope {
             SetupScope::User => Self::User,
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionStartCommand {
+    /// Inject a one-shot summary of the project's hotspots and
+    /// coupling thumbnail into the new Claude Code session.
+    ///
+    /// Runs once per session against `cwd`. Pieces that don't apply
+    /// (cwd outside a git working tree, or not anchored at a Rust
+    /// crate) are silently omitted; if neither applies, the hook
+    /// returns a no-op and Claude Code starts unchanged.
+    Summary,
 }
 
 #[derive(Debug, Subcommand)]
@@ -411,6 +427,7 @@ fn init_tracing() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Command::Hook(HookCommand::SessionStart(sub)) => run_session_start(sub),
         Command::Hook(HookCommand::PreToolUse(sub)) => run_pre_tool_use(sub),
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
         Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args),
@@ -492,6 +509,16 @@ fn write_stdout_line(report: &str) -> Result<(), Box<dyn std::error::Error>> {
         stdout.write_all(b"\n")?;
     }
     Ok(())
+}
+
+fn run_session_start(cmd: SessionStartCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let ClaudeCodeHookInput::SessionStart(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
+        return Err("expected a SessionStart hook payload on stdin".into());
+    };
+    let output = match cmd {
+        SessionStartCommand::Summary => SessionStartSummaryHook::new().handle(input)?,
+    };
+    write_stdout_json(&output)
 }
 
 fn run_pre_tool_use(cmd: PreToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
@@ -677,6 +704,16 @@ mod tests {
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_hook_session_start_summary() {
+        let cli = Cli::try_parse_from(["agent-lens", "hook", "session-start", "summary"])
+            .expect("clean parse");
+        assert!(matches!(
+            cli.command,
+            Command::Hook(HookCommand::SessionStart(SessionStartCommand::Summary)),
+        ));
     }
 
     #[test]

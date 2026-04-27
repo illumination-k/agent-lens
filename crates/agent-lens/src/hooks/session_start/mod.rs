@@ -1,30 +1,24 @@
-//! Codex `SessionStart` hook handler.
+//! Claude Code `SessionStart` hook handler.
 //!
 //! Runs once per session and injects a one-shot context summary into
-//! Codex via `additionalContext`: the highest churn × complexity files
-//! (hotspot) and a thumbnail of the crate's coupling graph (top
+//! Claude Code via `additionalContext`: the highest churn × complexity
+//! files (hotspot) and a thumbnail of the crate's coupling graph (top
 //! Fan-In/Fan-Out modules, dependency cycles, most coupled pairs).
 //!
-//! The point is an "onboarding sketch" — what the agent should know
-//! about this codebase before it starts touching files. Both halves
-//! are best-effort: a session that starts outside a git working tree
-//! gets a report without the hotspot section, and a session that isn't
-//! anchored at a Rust crate gets one without the coupling section. If
-//! neither half produces signal, the hook stays silent and falls
-//! through to a default no-op response.
-//!
-//! The body itself is rendered by [`crate::hooks::core::render_summary`]
-//! and shared with the parallel Claude Code SessionStart handler; this
-//! module is just the Codex-shaped wrapper around it.
+//! Mirrors the Codex SessionStart handler — both share the same body
+//! renderer ([`crate::hooks::core::render_summary`]) and only differ in
+//! how the resulting string is wrapped into a hook response.
 
 use agent_hooks::Hook;
-use agent_hooks::codex::{SessionStartHookSpecificOutput, SessionStartInput, SessionStartOutput};
+use agent_hooks::claude_code::{
+    SessionStartHookSpecificOutput, SessionStartInput, SessionStartOutput,
+};
 
 use crate::hooks::core::{SessionSummaryError, render_summary};
 
 const HOOK_EVENT_NAME: &str = "SessionStart";
 
-/// Codex SessionStart handler that emits a hotspot + coupling summary.
+/// Claude Code SessionStart handler that emits a hotspot + coupling summary.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SummaryHook;
 
@@ -56,7 +50,7 @@ impl Hook for SummaryHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_hooks::codex::{HookContext, SessionStartSource};
+    use agent_hooks::claude_code::{HookContext, SessionStartSource};
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -64,9 +58,9 @@ mod tests {
     fn ctx(cwd: PathBuf) -> HookContext {
         HookContext {
             session_id: "sess".into(),
-            transcript_path: None,
+            transcript_path: PathBuf::from("/tmp/t.jsonl"),
             cwd,
-            model: "gpt-5".into(),
+            permission_mode: None,
         }
     }
 
@@ -105,8 +99,6 @@ mod tests {
         assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 
-    /// Produce a minimal repo with a `src/` crate and two commits so
-    /// hotspot has churn to rank by.
     fn init_repo_with_crate(dir: &Path) {
         run_git(dir, &["init", "-q", "-b", "main"]);
         run_git(dir, &["config", "user.email", "test@example.com"]);
@@ -130,7 +122,6 @@ pub fn nest(n: i32) -> i32 {
         );
         run_git(dir, &["add", "."]);
         run_git(dir, &["commit", "-q", "-m", "initial"]);
-        // Touch b.rs again so its churn dominates a.rs.
         write_file(
             dir,
             "src/b.rs",
@@ -172,26 +163,15 @@ pub fn nest(n: i32) -> i32 {
             .expect("expected additionalContext");
 
         assert!(body.starts_with("# agent-lens session-start"), "got {body}");
-        assert!(
-            body.contains("## Hotspots"),
-            "should include hotspot: {body}"
-        );
-        assert!(
-            body.contains("src/b.rs"),
-            "should mention churn target: {body}"
-        );
-        assert!(
-            body.contains("## Coupling"),
-            "should include coupling: {body}"
-        );
-        assert!(body.contains("crate::a"), "should mention modules: {body}");
-        assert!(body.contains("crate::b"), "should mention modules: {body}");
+        assert!(body.contains("## Hotspots"), "want hotspot: {body}");
+        assert!(body.contains("src/b.rs"), "want churn target: {body}");
+        assert!(body.contains("## Coupling"), "want coupling: {body}");
+        assert!(body.contains("crate::a"), "want modules: {body}");
+        assert!(body.contains("crate::b"), "want modules: {body}");
     }
 
     #[test]
     fn coupling_only_when_no_git_repo() {
-        // A bare crate that isn't checked into git: hotspot section
-        // is skipped, coupling stays.
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "src/lib.rs", "pub mod a;\n");
         write_file(dir.path(), "src/a.rs", "pub fn solo() {}\n");
@@ -209,8 +189,6 @@ pub fn nest(n: i32) -> i32 {
 
     #[test]
     fn hotspot_only_when_no_crate_root() {
-        // A git repo with .rs files but no recognisable crate root
-        // (no src/lib.rs or src/main.rs at the top level).
         let dir = tempfile::tempdir().unwrap();
         run_git(dir.path(), &["init", "-q", "-b", "main"]);
         run_git(dir.path(), &["config", "user.email", "test@example.com"]);

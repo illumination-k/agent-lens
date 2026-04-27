@@ -11,6 +11,7 @@
 mod context;
 mod post_tool_use;
 mod pre_tool_use;
+mod session_start;
 mod stop;
 mod subagent_stop;
 mod user_prompt_submit;
@@ -20,6 +21,9 @@ pub use post_tool_use::{PostToolUseInput, PostToolUseOutput};
 pub use pre_tool_use::{
     PermissionDecision, PreToolUseDecision, PreToolUseHookSpecificOutput, PreToolUseInput,
     PreToolUseOutput,
+};
+pub use session_start::{
+    SessionStartHookSpecificOutput, SessionStartInput, SessionStartOutput, SessionStartSource,
 };
 pub use stop::{StopInput, StopOutput};
 pub use subagent_stop::{SubagentStopInput, SubagentStopOutput};
@@ -36,6 +40,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "hook_event_name")]
 pub enum ClaudeCodeHookInput {
+    SessionStart(SessionStartInput),
     PreToolUse(PreToolUseInput),
     PostToolUse(PostToolUseInput),
     UserPromptSubmit(UserPromptSubmitInput),
@@ -54,6 +59,16 @@ mod dispatch_tests {
             "transcript_path": "/tmp/t.jsonl",
             "cwd": "/repo",
         })
+    }
+
+    #[test]
+    fn dispatches_session_start_variant() {
+        let mut payload = ctx();
+        let obj = payload.as_object_mut().unwrap();
+        obj.insert("hook_event_name".into(), json!("SessionStart"));
+        obj.insert("source".into(), json!("startup"));
+        let parsed: ClaudeCodeHookInput = serde_json::from_value(payload).unwrap();
+        assert!(matches!(parsed, ClaudeCodeHookInput::SessionStart(_)));
     }
 
     #[test]
