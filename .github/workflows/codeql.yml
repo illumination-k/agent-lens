@@ -3,7 +3,21 @@ name: CodeQL Analysis
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "mise.rust.toml"
+      - "mise.base.toml"
+      - ".github/workflows/codeql.yml"
   pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "mise.rust.toml"
+      - "mise.base.toml"
+      - ".github/workflows/codeql.yml"
   schedule:
     - cron: "0 6 * * 1"
 

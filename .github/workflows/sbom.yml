@@ -3,6 +3,10 @@ name: SBOM Generation
 on:
   push:
     branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/sbom.yml"
 
 jobs:
   sbom:
