@@ -50,12 +50,42 @@ pub fn compute_edit_distance(a: &TreeNode, b: &TreeNode, opts: &APTEDOptions) ->
     ctx.tree_distance(a, b)
 }
 
+/// Precomputed subtree sizes keyed by node address.
+///
+/// The keys are only valid while the tree used to build the map is alive and
+/// unmoved. This is intended for callers comparing the same set of trees many
+/// times, where recomputing subtree sizes inside every APTED run dominates
+/// otherwise cheap pair checks.
+pub type SubtreeSizes = HashMap<usize, usize>;
+
+/// Collect subtree sizes for every node in `tree`.
+pub fn collect_subtree_sizes(tree: &TreeNode) -> SubtreeSizes {
+    let mut sizes = HashMap::new();
+    collect_subtree_sizes_into(tree, &mut sizes);
+    sizes
+}
+
+/// Compute edit distance using precomputed subtree size tables.
+pub fn compute_edit_distance_with_subtree_sizes(
+    a: &TreeNode,
+    b: &TreeNode,
+    opts: &APTEDOptions,
+    left_sizes: &SubtreeSizes,
+    right_sizes: &SubtreeSizes,
+) -> f64 {
+    let mut ctx = AptedContext::with_subtree_sizes(opts, left_sizes, right_sizes);
+    ctx.tree_distance(a, b)
+}
+
 type MemoKey = (usize, usize);
 
 struct AptedContext<'a> {
     opts: &'a APTEDOptions,
     memo: HashMap<MemoKey, f64>,
-    subtree_sizes: HashMap<usize, usize>,
+    left_sizes: Option<&'a SubtreeSizes>,
+    right_sizes: Option<&'a SubtreeSizes>,
+    computed_left_sizes: HashMap<usize, usize>,
+    computed_right_sizes: HashMap<usize, usize>,
 }
 
 impl<'a> AptedContext<'a> {
@@ -63,7 +93,25 @@ impl<'a> AptedContext<'a> {
         Self {
             opts,
             memo: HashMap::new(),
-            subtree_sizes: HashMap::new(),
+            left_sizes: None,
+            right_sizes: None,
+            computed_left_sizes: HashMap::new(),
+            computed_right_sizes: HashMap::new(),
+        }
+    }
+
+    fn with_subtree_sizes(
+        opts: &'a APTEDOptions,
+        left_sizes: &'a SubtreeSizes,
+        right_sizes: &'a SubtreeSizes,
+    ) -> Self {
+        Self {
+            opts,
+            memo: HashMap::new(),
+            left_sizes: Some(left_sizes),
+            right_sizes: Some(right_sizes),
+            computed_left_sizes: HashMap::new(),
+            computed_right_sizes: HashMap::new(),
         }
     }
 
@@ -89,18 +137,21 @@ impl<'a> AptedContext<'a> {
         if n == 0 {
             return bc
                 .iter()
-                .map(|node| self.subtree_size(node) as f64 * self.opts.insert_cost)
+                .map(|node| self.right_subtree_size(node) as f64 * self.opts.insert_cost)
                 .sum();
         }
         if m == 0 {
             return ac
                 .iter()
-                .map(|node| self.subtree_size(node) as f64 * self.opts.delete_cost)
+                .map(|node| self.left_subtree_size(node) as f64 * self.opts.delete_cost)
                 .sum();
         }
 
-        let ac_sizes: Vec<usize> = ac.iter().map(|node| self.subtree_size(node)).collect();
-        let bc_sizes: Vec<usize> = bc.iter().map(|node| self.subtree_size(node)).collect();
+        let ac_sizes: Vec<usize> = ac.iter().map(|node| self.left_subtree_size(node)).collect();
+        let bc_sizes: Vec<usize> = bc
+            .iter()
+            .map(|node| self.right_subtree_size(node))
+            .collect();
         let mut prev = vec![0.0_f64; m + 1];
         let mut cur = vec![0.0_f64; m + 1];
 
@@ -124,20 +175,50 @@ impl<'a> AptedContext<'a> {
         prev[m]
     }
 
-    fn subtree_size(&mut self, node: &TreeNode) -> usize {
+    fn left_subtree_size(&mut self, node: &TreeNode) -> usize {
         let key = node_key(node);
-        if let Some(&size) = self.subtree_sizes.get(&key) {
+        if let Some(sizes) = self.left_sizes
+            && let Some(&size) = sizes.get(&key)
+        {
+            return size;
+        }
+        Self::subtree_size_from_cache(node, &mut self.computed_left_sizes)
+    }
+
+    fn right_subtree_size(&mut self, node: &TreeNode) -> usize {
+        let key = node_key(node);
+        if let Some(sizes) = self.right_sizes
+            && let Some(&size) = sizes.get(&key)
+        {
+            return size;
+        }
+        Self::subtree_size_from_cache(node, &mut self.computed_right_sizes)
+    }
+
+    fn subtree_size_from_cache(node: &TreeNode, cache: &mut HashMap<usize, usize>) -> usize {
+        let key = node_key(node);
+        if let Some(&size) = cache.get(&key) {
             return size;
         }
 
         let size = 1 + node
             .children
             .iter()
-            .map(|child| self.subtree_size(child))
+            .map(|child| Self::subtree_size_from_cache(child, cache))
             .sum::<usize>();
-        self.subtree_sizes.insert(key, size);
+        cache.insert(key, size);
         size
     }
+}
+
+fn collect_subtree_sizes_into(node: &TreeNode, sizes: &mut SubtreeSizes) -> usize {
+    let size = 1 + node
+        .children
+        .iter()
+        .map(|child| collect_subtree_sizes_into(child, sizes))
+        .sum::<usize>();
+    sizes.insert(node_key(node), size);
+    size
 }
 
 fn nodes_match(a: &TreeNode, b: &TreeNode, opts: &APTEDOptions) -> bool {

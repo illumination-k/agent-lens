@@ -10,6 +10,7 @@ repository = "https://github.com/illumination-k/agent-lens"
 
 [workspace.dependencies]
 criterion = "0.7"
+proptest = "1"
 rayon = "1"
 rstest = "0.26"
 thiserror = "2"

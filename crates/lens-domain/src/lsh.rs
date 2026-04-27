@@ -212,6 +212,8 @@ fn minhash_signature(features: &HashSet<u64>, family: &HashFamily) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
 
     fn def(label_kinds: &[&str]) -> FunctionDef {
         let children = label_kinds
@@ -339,5 +341,105 @@ mod tests {
             ..Default::default()
         };
         assert!(lsh_candidate_pairs(&funcs, &opts).is_empty());
+    }
+
+    fn generated_def(name: impl Into<String>, label_kinds: &[u8]) -> FunctionDef {
+        let children = label_kinds
+            .iter()
+            .map(|kind| TreeNode::leaf(format!("K{kind}")))
+            .collect::<Vec<_>>();
+        FunctionDef {
+            name: name.into(),
+            start_line: 1,
+            end_line: label_kinds.len().max(1),
+            tree: TreeNode::with_children("Block", "", children),
+        }
+    }
+
+    fn analyzer_lsh_options() -> LshOptions {
+        LshOptions {
+            num_bands: 24,
+            ..Default::default()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn identical_generated_functions_are_always_candidates(
+            labels in vec(0_u8..16, 0..48),
+            prefix in vec(vec(0_u8..16, 0..24), 0..8),
+            suffix in vec(vec(0_u8..16, 0..24), 0..8),
+        ) {
+            let clone_a = prefix.len();
+            let clone_b = prefix.len() + 1;
+            let funcs = prefix
+                .iter()
+                .enumerate()
+                .map(|(idx, labels)| generated_def(format!("prefix_{idx}"), labels))
+                .chain([
+                    generated_def("clone_a", &labels),
+                    generated_def("clone_b", &labels),
+                ])
+                .chain(
+                    suffix
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, labels)| generated_def(format!("suffix_{idx}"), labels)),
+                )
+                .collect::<Vec<_>>();
+
+            for opts in [LshOptions::default(), analyzer_lsh_options()] {
+                let pairs = lsh_candidate_pairs(&funcs, &opts);
+                prop_assert!(
+                    pairs.contains(&(clone_a, clone_b)),
+                    "identical pair missing with opts {opts:?}; labels={labels:?}, pairs={pairs:?}",
+                );
+            }
+        }
+
+        #[test]
+        fn one_label_mutation_in_long_generated_functions_stays_candidate(
+            mut labels in vec(0_u8..16, 24..64),
+            mutation_index in 0_usize..64,
+            replacement in 0_u8..16,
+        ) {
+            let idx = mutation_index % labels.len();
+            let original = labels.clone();
+            labels[idx] = if replacement == original[idx] {
+                replacement.wrapping_add(1) % 16
+            } else {
+                replacement
+            };
+            let funcs = vec![
+                generated_def("original", &original),
+                generated_def("mutated", &labels),
+            ];
+
+            for opts in [LshOptions::default(), analyzer_lsh_options()] {
+                let pairs = lsh_candidate_pairs(&funcs, &opts);
+                prop_assert!(
+                    pairs.contains(&(0, 1)),
+                    "near-clone pair missing with opts {opts:?}; original={original:?}, mutated={labels:?}",
+                );
+            }
+        }
+
+        #[test]
+        fn generated_candidate_output_is_sorted_unique_and_in_bounds(
+            corpus in vec(vec(0_u8..12, 0..32), 0..24),
+        ) {
+            let funcs = corpus
+                .iter()
+                .enumerate()
+                .map(|(idx, labels)| generated_def(format!("f_{idx}"), labels))
+                .collect::<Vec<_>>();
+            let pairs = lsh_candidate_pairs(&funcs, &analyzer_lsh_options());
+
+            prop_assert!(pairs.windows(2).all(|w| w[0] < w[1]), "pairs not sorted/unique: {pairs:?}");
+            for (i, j) in pairs {
+                prop_assert!(i < j, "expected i < j, got ({i}, {j})");
+                prop_assert!(j < funcs.len(), "candidate index out of bounds: ({i}, {j}) for len {}", funcs.len());
+            }
+        }
     }
 }

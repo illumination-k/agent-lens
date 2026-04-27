@@ -5,7 +5,9 @@
 //! short functions don't get falsely-high scores just because they happen to
 //! share a small handful of tokens.
 
-use crate::apted::{APTEDOptions, compute_edit_distance};
+use crate::apted::{
+    APTEDOptions, SubtreeSizes, compute_edit_distance, compute_edit_distance_with_subtree_sizes,
+};
 use crate::tree::TreeNode;
 
 /// Tuning knobs for [`calculate_tsed`].
@@ -56,12 +58,41 @@ impl Default for TSEDOptions {
 pub fn calculate_tsed(a: &TreeNode, b: &TreeNode, opts: &TSEDOptions) -> f64 {
     let size_a = a.subtree_size();
     let size_b = b.subtree_size();
+    calculate_tsed_with_distance(a, b, size_a, size_b, opts, |a, b| {
+        compute_edit_distance(a, b, &opts.apted)
+    })
+}
+
+/// [`calculate_tsed`] variant for callers that compare a stable corpus many
+/// times and can precompute subtree sizes once per tree.
+pub fn calculate_tsed_with_subtree_sizes(
+    a: &TreeNode,
+    b: &TreeNode,
+    size_a: usize,
+    size_b: usize,
+    sizes_a: &SubtreeSizes,
+    sizes_b: &SubtreeSizes,
+    opts: &TSEDOptions,
+) -> f64 {
+    calculate_tsed_with_distance(a, b, size_a, size_b, opts, |a, b| {
+        compute_edit_distance_with_subtree_sizes(a, b, &opts.apted, sizes_a, sizes_b)
+    })
+}
+
+fn calculate_tsed_with_distance(
+    a: &TreeNode,
+    b: &TreeNode,
+    size_a: usize,
+    size_b: usize,
+    opts: &TSEDOptions,
+    distance: impl FnOnce(&TreeNode, &TreeNode) -> f64,
+) -> f64 {
     let max_size = size_a.max(size_b);
     if max_size == 0 {
         return 1.0;
     }
 
-    let distance = compute_edit_distance(a, b, &opts.apted);
+    let distance = distance(a, b);
     let base = 1.0 - distance / max_size as f64;
 
     let similarity = if opts.size_penalty {
