@@ -28,6 +28,20 @@ pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
     "agent-lens hook post-tool-use wrapper",
 ];
 
+/// Tool matcher used for the PreToolUse block. Mirrors the
+/// `EDITING_TOOL_NAMES` constant the handlers themselves filter on; the
+/// value happens to match [`POST_TOOL_USE_MATCHER`] today because the
+/// pre/post handlers act on the same set of editing tools.
+pub const PRE_TOOL_USE_MATCHER: &str = "Edit|Write|MultiEdit";
+
+/// Commands the setup writes into `hooks.PreToolUse`. One entry per
+/// installed handler; matching against the leading prefix of an existing
+/// `command` string makes the merge tolerant of user-added flags.
+pub const PRE_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens hook pre-tool-use complexity",
+    "agent-lens hook pre-tool-use cohesion",
+];
+
 /// Source matcher for the SessionStart block. Claude Code dispatches on
 /// the `source` field (`startup` / `resume` / `clear` / `compact`); a
 /// summary on every clear/compact would be noisy, so by default we only
@@ -63,6 +77,14 @@ const EVENTS: &[EventBlock] = &[
         inner_array_field: "hooks.SessionStart[].hooks",
         matcher: SESSION_START_MATCHER,
         commands: SESSION_START_COMMANDS,
+    },
+    EventBlock {
+        event: "PreToolUse",
+        array_field: "hooks.PreToolUse",
+        entry_field: "hooks.PreToolUse[]",
+        inner_array_field: "hooks.PreToolUse[].hooks",
+        matcher: PRE_TOOL_USE_MATCHER,
+        commands: PRE_TOOL_USE_COMMANDS,
     },
     EventBlock {
         event: "PostToolUse",
@@ -308,7 +330,9 @@ mod tests {
         assert!(plan.changed());
         assert_eq!(
             plan.added_commands.len(),
-            POST_TOOL_USE_COMMANDS.len() + SESSION_START_COMMANDS.len(),
+            SESSION_START_COMMANDS.len()
+                + PRE_TOOL_USE_COMMANDS.len()
+                + POST_TOOL_USE_COMMANDS.len(),
         );
         assert_eq!(
             plan.after,
@@ -318,6 +342,13 @@ mod tests {
                         "matcher": SESSION_START_MATCHER,
                         "hooks": [
                             {"type": "command", "command": "agent-lens hook session-start summary"},
+                        ],
+                    }],
+                    "PreToolUse": [{
+                        "matcher": PRE_TOOL_USE_MATCHER,
+                        "hooks": [
+                            {"type": "command", "command": "agent-lens hook pre-tool-use complexity"},
+                            {"type": "command", "command": "agent-lens hook pre-tool-use cohesion"},
                         ],
                     }],
                     "PostToolUse": [{
@@ -333,10 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_installs_session_start_alongside_existing_post_tool_use() {
+    fn plan_installs_missing_blocks_alongside_existing_post_tool_use() {
         // When a user has only the older PostToolUse block, re-running
-        // setup should add the new SessionStart block without disturbing
-        // the existing one.
+        // setup should add the SessionStart and PreToolUse blocks
+        // without disturbing the existing one.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
         let existing = json!({
@@ -355,12 +386,21 @@ mod tests {
         let plan = plan(path).unwrap();
         assert_eq!(
             plan.added_commands,
-            vec!["agent-lens hook session-start summary".to_string()],
+            vec![
+                "agent-lens hook session-start summary".to_string(),
+                "agent-lens hook pre-tool-use complexity".to_string(),
+                "agent-lens hook pre-tool-use cohesion".to_string(),
+            ],
         );
         assert!(plan.changed());
         let session_start = plan.after["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(session_start.len(), 1);
         assert_eq!(session_start[0]["matcher"], SESSION_START_MATCHER);
+        let pre_tool_use = plan.after["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use[0]["matcher"], PRE_TOOL_USE_MATCHER);
+        let pre_hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
+        assert_eq!(pre_hooks.len(), PRE_TOOL_USE_COMMANDS.len());
     }
 
     #[test]
@@ -413,10 +453,14 @@ mod tests {
 
         let after = read(&path);
         assert_eq!(after["theme"], "dark");
+        let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(
-            after["hooks"]["PreToolUse"],
-            existing["hooks"]["PreToolUse"]
+            pre.len(),
+            2,
+            "existing PreToolUse entry should still be present"
         );
+        assert_eq!(pre[0], existing["hooks"]["PreToolUse"][0]);
+        assert_eq!(pre[1]["matcher"], PRE_TOOL_USE_MATCHER);
         let post = after["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(
             post.len(),
@@ -429,6 +473,9 @@ mod tests {
 
     #[test]
     fn skips_command_already_installed_under_other_matcher() {
+        // Pre-installs every handler the setup writes — under a
+        // non-canonical matcher in each block — so the only queued
+        // command is the post-tool-use wrapper.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
         let existing = json!({
@@ -439,6 +486,13 @@ mod tests {
                         "type": "command",
                         "command": "agent-lens hook session-start summary",
                     }],
+                }],
+                "PreToolUse": [{
+                    "matcher": "Write",
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook pre-tool-use complexity"},
+                        {"type": "command", "command": "agent-lens hook pre-tool-use cohesion"},
+                    ],
                 }],
                 "PostToolUse": [{
                     "matcher": "Write",
@@ -469,6 +523,13 @@ mod tests {
                     "matcher": SESSION_START_MATCHER,
                     "hooks": [
                         {"type": "command", "command": "agent-lens hook session-start summary --quiet"},
+                    ],
+                }],
+                "PreToolUse": [{
+                    "matcher": "Edit|Write",
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook pre-tool-use complexity --foo"},
+                        {"type": "command", "command": "agent-lens hook pre-tool-use cohesion"},
                     ],
                 }],
                 "PostToolUse": [{

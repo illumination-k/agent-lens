@@ -41,6 +41,72 @@ pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
     "agent-lens codex-hook post-tool-use wrapper",
 ];
 
+/// Regex Codex matches the about-to-run tool name against. The pre-edit
+/// handlers reason about the same `apply_patch` payload as the post-edit
+/// handlers, so the matcher matches [`POST_TOOL_USE_MATCHER`] today.
+pub const PRE_TOOL_USE_MATCHER: &str = "^apply_patch$";
+
+/// Commands the setup writes into `[[hooks.PreToolUse.hooks]]`.
+pub const PRE_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens codex-hook pre-tool-use complexity",
+    "agent-lens codex-hook pre-tool-use cohesion",
+];
+
+/// Regex Codex matches the SessionStart `source` field against
+/// (`startup` / `resume` / `clear`). A summary on every clear would be
+/// noisy, so by default we only fire on a fresh start or a resumed
+/// session.
+pub const SESSION_START_MATCHER: &str = "^(startup|resume)$";
+
+/// Commands the setup writes into `[[hooks.SessionStart.hooks]]`.
+pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens codex-hook session-start summary"];
+
+/// Per-event metadata for the merge loop. The shape mirrors the Claude
+/// Code setup's [`crate::hooks::setup`] so the two stay in sync as new
+/// handlers land.
+struct EventBlock {
+    /// Key under `hooks.` in `config.toml` (e.g. `"PostToolUse"`).
+    event: &'static str,
+    /// Field path used in error messages for the outer array-of-tables.
+    array_field: &'static str,
+    /// Field path used in error messages for an entry's `hooks` array.
+    inner_array_field: &'static str,
+    /// Field path used in error messages for a handler's `command`
+    /// field.
+    command_field: &'static str,
+    /// Matcher string written for this event's block.
+    matcher: &'static str,
+    /// Commands the setup may install under this event.
+    commands: &'static [&'static str],
+}
+
+const EVENTS: &[EventBlock] = &[
+    EventBlock {
+        event: "SessionStart",
+        array_field: "hooks.SessionStart",
+        inner_array_field: "hooks.SessionStart[].hooks",
+        command_field: "hooks.SessionStart[].hooks[].command",
+        matcher: SESSION_START_MATCHER,
+        commands: SESSION_START_COMMANDS,
+    },
+    EventBlock {
+        event: "PreToolUse",
+        array_field: "hooks.PreToolUse",
+        inner_array_field: "hooks.PreToolUse[].hooks",
+        command_field: "hooks.PreToolUse[].hooks[].command",
+        matcher: PRE_TOOL_USE_MATCHER,
+        commands: PRE_TOOL_USE_COMMANDS,
+    },
+    EventBlock {
+        event: "PostToolUse",
+        array_field: "hooks.PostToolUse",
+        inner_array_field: "hooks.PostToolUse[].hooks",
+        command_field: "hooks.PostToolUse[].hooks[].command",
+        matcher: POST_TOOL_USE_MATCHER,
+        commands: POST_TOOL_USE_COMMANDS,
+    },
+];
+
 /// Where to install the hook entries.
 #[derive(Debug, Clone, Copy)]
 pub enum ConfigScope {
@@ -184,58 +250,64 @@ fn merge(path: &Path, doc: &mut DocumentMut) -> Result<Vec<String>, SetupError> 
             field: "hooks",
         })?;
 
-    let post_tool_use_item = hooks
-        .entry("PostToolUse")
-        .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
-    let post_tool_use =
-        post_tool_use_item
-            .as_array_of_tables_mut()
-            .ok_or_else(|| SetupError::UnexpectedShape {
-                path: path.to_path_buf(),
-                field: "hooks.PostToolUse",
-            })?;
+    let mut added: Vec<String> = Vec::new();
+    for block in EVENTS {
+        let entries_item = hooks
+            .entry(block.event)
+            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+        let entries =
+            entries_item
+                .as_array_of_tables_mut()
+                .ok_or_else(|| SetupError::UnexpectedShape {
+                    path: path.to_path_buf(),
+                    field: block.array_field,
+                })?;
 
-    let installed = collect_installed_commands(post_tool_use, path)?;
-    let missing: Vec<&str> = POST_TOOL_USE_COMMANDS
-        .iter()
-        .copied()
-        .filter(|cmd| {
-            !installed
-                .iter()
-                .any(|seen| setup_common::has_command_prefix(seen, cmd))
-        })
-        .collect();
+        let installed = collect_installed_commands(entries, path, block)?;
+        let missing: Vec<&str> = block
+            .commands
+            .iter()
+            .copied()
+            .filter(|cmd| {
+                !installed
+                    .iter()
+                    .any(|seen| setup_common::has_command_prefix(seen, cmd))
+            })
+            .collect();
 
-    if !missing.is_empty() {
-        let mut group = Table::new();
-        group.insert("matcher", value(POST_TOOL_USE_MATCHER));
-        let mut handlers = ArrayOfTables::new();
-        for cmd in &missing {
-            let mut handler = Table::new();
-            handler.insert("type", value("command"));
-            handler.insert("command", value(*cmd));
-            handlers.push(handler);
+        if !missing.is_empty() {
+            let mut group = Table::new();
+            group.insert("matcher", value(block.matcher));
+            let mut handlers = ArrayOfTables::new();
+            for cmd in &missing {
+                let mut handler = Table::new();
+                handler.insert("type", value("command"));
+                handler.insert("command", value(*cmd));
+                handlers.push(handler);
+            }
+            group.insert("hooks", Item::ArrayOfTables(handlers));
+            entries.push(group);
+            added.extend(missing.iter().map(|s| (*s).to_string()));
         }
-        group.insert("hooks", Item::ArrayOfTables(handlers));
-        post_tool_use.push(group);
     }
 
-    Ok(missing.iter().map(|s| (*s).to_string()).collect())
+    Ok(added)
 }
 
 fn collect_installed_commands(
-    post_tool_use: &ArrayOfTables,
+    entries: &ArrayOfTables,
     path: &Path,
+    block: &EventBlock,
 ) -> Result<Vec<String>, SetupError> {
     let mut out = Vec::new();
-    for group in post_tool_use.iter() {
+    for group in entries.iter() {
         let Some(handlers_item) = group.get("hooks") else {
             continue;
         };
         let Some(handlers) = handlers_item.as_array_of_tables() else {
             return Err(SetupError::UnexpectedShape {
                 path: path.to_path_buf(),
-                field: "hooks.PostToolUse[].hooks",
+                field: block.inner_array_field,
             });
         };
         for handler in handlers.iter() {
@@ -245,7 +317,7 @@ fn collect_installed_commands(
             let Some(cmd) = cmd_item.as_str() else {
                 return Err(SetupError::UnexpectedShape {
                     path: path.to_path_buf(),
-                    field: "hooks.PostToolUse[].hooks[].command",
+                    field: block.command_field,
                 });
             };
             out.push(cmd.to_string());
@@ -271,22 +343,38 @@ mod tests {
         let plan = plan(path.clone()).unwrap();
         assert!(plan.before.is_none());
         assert!(plan.changed());
-        assert_eq!(plan.added_commands.len(), POST_TOOL_USE_COMMANDS.len());
+        assert_eq!(
+            plan.added_commands.len(),
+            SESSION_START_COMMANDS.len()
+                + PRE_TOOL_USE_COMMANDS.len()
+                + POST_TOOL_USE_COMMANDS.len(),
+        );
 
         let doc = parse(&plan.after);
-        let groups = doc["hooks"]["PostToolUse"].as_array_of_tables().unwrap();
-        assert_eq!(groups.len(), 1, "all handlers go under one matcher group");
-        assert_eq!(
-            groups.get(0).unwrap()["matcher"].as_str().unwrap(),
-            POST_TOOL_USE_MATCHER,
-        );
-        let handlers = groups.get(0).unwrap()["hooks"]
-            .as_array_of_tables()
-            .unwrap();
-        assert_eq!(handlers.len(), POST_TOOL_USE_COMMANDS.len());
-        for (handler, expected) in handlers.iter().zip(POST_TOOL_USE_COMMANDS.iter()) {
-            assert_eq!(handler["type"].as_str().unwrap(), "command");
-            assert_eq!(handler["command"].as_str().unwrap(), *expected);
+        for (event, matcher, expected_commands) in [
+            (
+                "SessionStart",
+                SESSION_START_MATCHER,
+                SESSION_START_COMMANDS,
+            ),
+            ("PreToolUse", PRE_TOOL_USE_MATCHER, PRE_TOOL_USE_COMMANDS),
+            ("PostToolUse", POST_TOOL_USE_MATCHER, POST_TOOL_USE_COMMANDS),
+        ] {
+            let groups = doc["hooks"][event].as_array_of_tables().unwrap();
+            assert_eq!(
+                groups.len(),
+                1,
+                "all {event} handlers go under one matcher group",
+            );
+            assert_eq!(groups.get(0).unwrap()["matcher"].as_str().unwrap(), matcher);
+            let handlers = groups.get(0).unwrap()["hooks"]
+                .as_array_of_tables()
+                .unwrap();
+            assert_eq!(handlers.len(), expected_commands.len());
+            for (handler, expected) in handlers.iter().zip(expected_commands.iter()) {
+                assert_eq!(handler["type"].as_str().unwrap(), "command");
+                assert_eq!(handler["command"].as_str().unwrap(), *expected);
+            }
         }
     }
 
@@ -366,9 +454,30 @@ command = \"echo done\"
 
     #[test]
     fn skips_command_already_installed_under_other_matcher() {
+        // Pre-installs every handler the setup writes — under a
+        // non-canonical matcher in each block — so the only queued
+        // command is the post-tool-use wrapper.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         let existing = "\
+[[hooks.SessionStart]]
+matcher = \"^startup$\"
+
+[[hooks.SessionStart.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook session-start summary\"
+
+[[hooks.PreToolUse]]
+matcher = \"\"
+
+[[hooks.PreToolUse.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook pre-tool-use complexity\"
+
+[[hooks.PreToolUse.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook pre-tool-use cohesion\"
+
 [[hooks.PostToolUse]]
 matcher = \"\"
 
@@ -391,6 +500,24 @@ command = \"agent-lens codex-hook post-tool-use similarity\"
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         let existing = "\
+[[hooks.SessionStart]]
+matcher = \"^(startup|resume)$\"
+
+[[hooks.SessionStart.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook session-start summary --quiet\"
+
+[[hooks.PreToolUse]]
+matcher = \"^apply_patch$\"
+
+[[hooks.PreToolUse.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook pre-tool-use complexity --foo\"
+
+[[hooks.PreToolUse.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook pre-tool-use cohesion\"
+
 [[hooks.PostToolUse]]
 matcher = \"^apply_patch$\"
 
@@ -429,7 +556,15 @@ type = \"prompt\"
         fs::write(&path, existing).unwrap();
 
         let plan = plan(path).unwrap();
-        assert_eq!(plan.added_commands.len(), POST_TOOL_USE_COMMANDS.len());
+        // SessionStart and PreToolUse are still missing entirely, plus
+        // both PostToolUse commands need installing because the only
+        // existing handler has no `command` field.
+        assert_eq!(
+            plan.added_commands.len(),
+            SESSION_START_COMMANDS.len()
+                + PRE_TOOL_USE_COMMANDS.len()
+                + POST_TOOL_USE_COMMANDS.len(),
+        );
     }
 
     #[test]
