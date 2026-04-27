@@ -255,13 +255,16 @@ enum CodexSessionStartCommand {
 
 #[derive(Debug, Subcommand)]
 enum AnalyzeCommand {
-    /// Report LCOM4 cohesion units (one per `impl` block) for a source file.
+    /// Report LCOM4 cohesion units (one per `impl` block).
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts` / `.py`).
-    /// The JSON format is the default machine-readable output;
-    /// `--format md` emits a compact summary tuned for LLM context.
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep) and groups findings per file. The parser is chosen from
+    /// each file extension (`.rs` / `.ts` / `.py`). The JSON format is the
+    /// default machine-readable output; `--format md` emits a compact
+    /// summary tuned for LLM context.
     Cohesion {
-        /// Path to a source file to analyze.
+        /// Path to a source file or a directory to analyze.
         path: PathBuf,
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
@@ -272,14 +275,17 @@ enum AnalyzeCommand {
         diff_only: bool,
     },
     /// Report per-function complexity metrics (Cyclomatic, Cognitive,
-    /// Max Nesting, Halstead Volume, Maintainability Index) for a source
-    /// file.
+    /// Max Nesting, Halstead Volume, Maintainability Index).
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts` / `.py`).
-    /// The JSON format is the default machine-readable output;
-    /// `--format md` emits a compact summary tuned for LLM context.
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep), groups findings per file, and aggregates the top-level
+    /// summary across the whole corpus. The parser is chosen from each
+    /// file extension (`.rs` / `.ts` / `.py`). The JSON format is the
+    /// default machine-readable output; `--format md` emits a compact
+    /// summary tuned for LLM context.
     Complexity {
-        /// Path to a source file to analyze.
+        /// Path to a source file or a directory to analyze.
         path: PathBuf,
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]

@@ -1,10 +1,11 @@
-//! `analyze complexity` — surface per-function complexity metrics for a
-//! Rust source file.
+//! `analyze complexity` — surface per-function complexity metrics.
 //!
-//! Today the analyzer is single-file, single-language: pass it a `.rs` path
-//! and it reports every free function, inherent / trait method, and trait
-//! default method along with Cyclomatic, Cognitive, Max Nesting, Halstead
-//! Volume, and Maintainability Index. Output is JSON by default; the
+//! Accepts either a single source file or a directory. When the input is a
+//! directory the analyzer walks it recursively (respecting `.gitignore`
+//! via the `ignore` crate, the same one used by ripgrep), parses every
+//! supported file, and groups findings per file. The top-level `summary`
+//! aggregates metrics across the entire corpus; the markdown top-N table
+//! likewise ranks across every file. Output is JSON by default; the
 //! markdown mode emits a compact summary tuned for LLM context windows
 //! rather than for humans, in line with the project's "agent-friendly lint"
 //! ethos.
@@ -12,6 +13,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use ignore::WalkBuilder;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
@@ -42,20 +44,8 @@ impl ComplexityAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let (lang, source) = read_source(path)?;
-        let mut functions = match lang {
-            SourceLang::Rust => lens_rust::extract_complexity_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(&source, dialect)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Python => lens_py::extract_complexity_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-        };
-        if self.diff_only {
-            let changed = changed_line_ranges(path);
-            functions.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
-        }
-        let report = Report::new(path, &functions);
+        let files = self.collect_file_reports(path)?;
+        let report = Report::new(path, &files);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
@@ -63,27 +53,138 @@ impl ComplexityAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
     }
+
+    /// Resolve `path` to a list of per-file reports. Single-file inputs
+    /// produce a one-element vec; directory inputs walk recursively,
+    /// honouring `.gitignore`. Files with no functions are dropped so the
+    /// output stays signal-dense.
+    fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+        if path.is_dir() {
+            self.collect_directory(path)
+        } else {
+            Ok(self.analyze_file(path, None)?.into_iter().collect())
+        }
+    }
+
+    fn collect_directory(&self, root: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+        let mut out = Vec::new();
+        for entry in WalkBuilder::new(root).build() {
+            let entry = entry.map_err(|e| AnalyzerError::Io {
+                path: root.to_path_buf(),
+                source: std::io::Error::other(e),
+            })?;
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let p = entry.path();
+            if SourceLang::from_path(p).is_none() {
+                continue;
+            }
+            // Display paths relative to the walk root so per-file entries
+            // stay readable when the analyzer is pointed at a deep
+            // directory.
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if let Some(report) = self.analyze_file(p, Some(rel))? {
+                out.push(report);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Analyze a single file. Returns `None` when the file has no
+    /// functions (after filtering), so empty entries don't pollute the
+    /// directory-mode report.
+    fn analyze_file(
+        &self,
+        path: &Path,
+        rel_override: Option<String>,
+    ) -> Result<Option<FileReport>, AnalyzerError> {
+        let (lang, source) = read_source(path)?;
+        let mut functions = extract_units(lang, &source).map_err(AnalyzerError::Parse)?;
+        if self.diff_only {
+            let changed = changed_line_ranges(path);
+            functions.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
+        }
+        if functions.is_empty() {
+            return Ok(None);
+        }
+        let display_path = rel_override.unwrap_or_else(|| path.display().to_string());
+        Ok(Some(FileReport {
+            file: display_path,
+            functions,
+        }))
+    }
 }
 
 fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
     ranges.iter().any(|r| r.overlaps(start, end))
 }
 
+type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+
+fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<FunctionComplexity>, BoxedError> {
+    match lang {
+        SourceLang::Rust => {
+            lens_rust::extract_complexity_units(source).map_err(|e| Box::new(e) as BoxedError)
+        }
+        SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(source, dialect)
+            .map_err(|e| Box::new(e) as BoxedError),
+        SourceLang::Python => {
+            lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as BoxedError)
+        }
+    }
+}
+
+/// Per-file slice of the report. Owns the display path so directory mode
+/// can attach a path relative to the walk root without storing the original
+/// `PathBuf`.
+#[derive(Debug)]
+struct FileReport {
+    file: String,
+    functions: Vec<FunctionComplexity>,
+}
+
 #[derive(Debug, Serialize)]
 struct Report<'a> {
-    file: String,
+    /// Input path: a single source file, or the root directory walked.
+    root: String,
+    file_count: usize,
     function_count: usize,
     summary: Summary,
-    functions: Vec<FunctionView<'a>>,
+    files: Vec<FileView<'a>>,
 }
 
 impl<'a> Report<'a> {
-    fn new(path: &Path, functions: &'a [FunctionComplexity]) -> Self {
+    fn new(path: &Path, files: &'a [FileReport]) -> Self {
+        let function_count = files.iter().map(|f| f.functions.len()).sum();
         Self {
-            file: path.display().to_string(),
-            function_count: functions.len(),
-            summary: Summary::from_functions(functions),
-            functions: functions.iter().map(FunctionView::from).collect(),
+            root: path.display().to_string(),
+            file_count: files.len(),
+            function_count,
+            summary: Summary::from_files(files),
+            files: files.iter().map(FileView::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FileView<'a> {
+    file: &'a str,
+    function_count: usize,
+    functions: Vec<FunctionView<'a>>,
+}
+
+impl<'a> From<&'a FileReport> for FileView<'a> {
+    fn from(f: &'a FileReport) -> Self {
+        Self {
+            file: f.file.as_str(),
+            function_count: f.functions.len(),
+            functions: f.functions.iter().map(FunctionView::from).collect(),
         }
     }
 }
@@ -98,15 +199,16 @@ struct Summary {
     cognitive_median: u32,
     max_nesting_max: u32,
     loc_total: usize,
-    /// Lowest MI seen across the file's functions, or `null` when no
-    /// function has a defined MI (empty file or all-undefined Halstead).
+    /// Lowest MI seen across the corpus, or `null` when no function has
+    /// a defined MI (empty input or all-undefined Halstead).
     #[serde(skip_serializing_if = "Option::is_none")]
     maintainability_index_min: Option<f64>,
 }
 
 impl Summary {
-    fn from_functions(functions: &[FunctionComplexity]) -> Self {
-        if functions.is_empty() {
+    fn from_files(files: &[FileReport]) -> Self {
+        let total: usize = files.iter().map(|f| f.functions.len()).sum();
+        if total == 0 {
             return Self {
                 cyclomatic_max: 0,
                 cyclomatic_p95: 0,
@@ -119,14 +221,14 @@ impl Summary {
                 maintainability_index_min: None,
             };
         }
-        let mut cc: Vec<u32> = functions.iter().map(|f| f.cyclomatic).collect();
-        let mut cog: Vec<u32> = functions.iter().map(|f| f.cognitive).collect();
+        let all = || files.iter().flat_map(|f| f.functions.iter());
+        let mut cc: Vec<u32> = all().map(|f| f.cyclomatic).collect();
+        let mut cog: Vec<u32> = all().map(|f| f.cognitive).collect();
         cc.sort_unstable();
         cog.sort_unstable();
-        let nesting_max = functions.iter().map(|f| f.max_nesting).max().unwrap_or(0);
-        let loc_total = functions.iter().map(FunctionComplexity::loc).sum();
-        let mi_min = functions
-            .iter()
+        let nesting_max = all().map(|f| f.max_nesting).max().unwrap_or(0);
+        let loc_total = all().map(FunctionComplexity::loc).sum();
+        let mi_min = all()
             .filter_map(FunctionComplexity::maintainability_index)
             .fold(None::<f64>, |acc, x| Some(acc.map_or(x, |a| a.min(x))));
 
@@ -191,15 +293,15 @@ const TOP_N: usize = 5;
 
 fn format_markdown(report: &Report<'_>) -> String {
     let mut out = format!(
-        "# Complexity report: {} ({} function(s))\n",
-        report.file, report.function_count,
+        "# Complexity report: {} ({} file(s), {} function(s))\n",
+        report.root, report.file_count, report.function_count,
     );
-    if report.functions.is_empty() {
+    if report.function_count == 0 {
         out.push_str("\n_No functions found._\n");
         return out;
     }
     render_summary(&mut out, &report.summary);
-    render_top_functions(&mut out, &report.functions);
+    render_top_functions(&mut out, &report.files);
     out
 }
 
@@ -227,7 +329,15 @@ fn render_summary(out: &mut String, s: &Summary) {
     );
 }
 
-fn render_top_functions(out: &mut String, functions: &[FunctionView<'_>]) {
+/// One row of the top-N table. The view holds borrows into the per-file
+/// reports plus the file the function came from, so directory-mode output
+/// stays unambiguous.
+struct TopRow<'a> {
+    file: &'a str,
+    func: &'a FunctionView<'a>,
+}
+
+fn render_top_functions(out: &mut String, files: &[FileView<'_>]) {
     // Rank by cognitive first, then cyclomatic, then earliest line.
     //
     // Cyclomatic is dominated by `match` arms, so an exhaustive enum
@@ -237,30 +347,42 @@ fn render_top_functions(out: &mut String, functions: &[FunctionView<'_>]) {
     // the agent actually wants when picking what to read or refactor
     // first. Cyclomatic stays as the tiebreaker so ranking is still
     // deterministic when cognitive ties.
-    let mut indexed: Vec<&FunctionView<'_>> = functions.iter().collect();
-    indexed.sort_by(|a, b| {
-        b.cognitive
-            .cmp(&a.cognitive)
-            .then_with(|| b.cyclomatic.cmp(&a.cyclomatic))
-            .then_with(|| a.start_line.cmp(&b.start_line))
+    let mut rows: Vec<TopRow<'_>> = files
+        .iter()
+        .flat_map(|fv| {
+            fv.functions.iter().map(|func| TopRow {
+                file: fv.file,
+                func,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.func
+            .cognitive
+            .cmp(&a.func.cognitive)
+            .then_with(|| b.func.cyclomatic.cmp(&a.func.cyclomatic))
+            .then_with(|| a.func.start_line.cmp(&b.func.start_line))
+            .then_with(|| a.file.cmp(b.file))
     });
 
     let _ = writeln!(
         out,
         "\n## Top {TOP_N} by complexity (cognitive, then cyclomatic)"
     );
-    for fv in indexed.iter().take(TOP_N) {
+    for row in rows.iter().take(TOP_N) {
+        let f = row.func;
         let _ = writeln!(
             out,
-            "- `{}` (L{}-{}): cc={}, cog={}, nest={}, loc={}, mi={}",
-            fv.name,
-            fv.start_line,
-            fv.end_line,
-            fv.cyclomatic,
-            fv.cognitive,
-            fv.max_nesting,
-            fv.loc,
-            format_optional_f64(fv.maintainability_index, 0),
+            "- {}:`{}` (L{}-{}): cc={}, cog={}, nest={}, loc={}, mi={}",
+            row.file,
+            f.name,
+            f.start_line,
+            f.end_line,
+            f.cyclomatic,
+            f.cognitive,
+            f.max_nesting,
+            f.loc,
+            format_optional_f64(f.maintainability_index, 0),
         );
     }
 }
@@ -273,6 +395,9 @@ mod tests {
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         path
@@ -293,11 +418,11 @@ fn branchy(n: i32) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["function_count"], 2);
+        assert_eq!(parsed["file_count"], 1);
         // The branchy function has CC = 3 (1 + if + else if).
         let cc_max = parsed["summary"]["cyclomatic_max"].as_u64().unwrap();
         assert_eq!(cc_max, 3);
-        // simple should land at CC=1, branchy at 3 in the function list.
-        let funcs = parsed["functions"].as_array().unwrap();
+        let funcs = parsed["files"][0]["functions"].as_array().unwrap();
         assert_eq!(funcs.len(), 2);
     }
 
@@ -433,7 +558,87 @@ fn beta() -> i32 { 2 }
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["function_count"], 1);
-        assert_eq!(parsed["functions"][0]["name"], "alpha");
+        assert_eq!(parsed["files"][0]["functions"][0]["name"], "alpha");
+    }
+
+    #[test]
+    fn directory_mode_aggregates_summary_across_files() {
+        // Two files with one function each: the corpus-wide summary
+        // should reflect the higher of the two complexities, and the
+        // top-N markdown should rank across both files.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", "fn a() {}\n");
+        write_file(
+            dir.path(),
+            "nested/b.rs",
+            r#"
+fn b(n: i32) -> i32 {
+    if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
+}
+"#,
+        );
+
+        let json = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["file_count"], 2);
+        assert_eq!(parsed["function_count"], 2);
+        // b: 1 + if + else if = 3
+        assert_eq!(parsed["summary"]["cyclomatic_max"], 3);
+
+        let md = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        // Top-N row carries the file path so cross-file ranking is
+        // unambiguous.
+        assert!(md.contains("nested/b.rs:`b`"));
+    }
+
+    #[test]
+    fn directory_mode_skips_unsupported_extensions_and_gitignored_files() {
+        // `.gitignore` should be honoured (the `ignore` walker is
+        // gitignore-aware out of the box), and unsupported extensions
+        // should be silently skipped.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", "fn a() {}\n");
+        write_file(dir.path(), "ignored.rs", "fn b() {}\n");
+        write_file(dir.path(), "notes.txt", "not a source file");
+        write_file(dir.path(), ".gitignore", "ignored.rs\n");
+
+        // The `ignore` crate honours .gitignore only inside a git repo
+        // by default; bootstrap one so the test exercises the gitignore
+        // path rather than just the extension filter.
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let json = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["file_count"], 1, "got {parsed}");
+        assert_eq!(parsed["files"][0]["file"], "a.rs");
+    }
+
+    #[test]
+    fn directory_mode_drops_files_without_functions() {
+        // Two files: one with a function, one with only a comment. The
+        // comment-only file should be dropped to keep the report
+        // signal-dense.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "with_fn.rs", "fn a() {}\n");
+        write_file(dir.path(), "empty.rs", "// nothing\n");
+
+        let json = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["file_count"], 1);
+        assert_eq!(parsed["files"][0]["file"], "with_fn.rs");
     }
 
     fn run_git(dir: &Path, args: &[&str]) {

@@ -84,7 +84,7 @@ agent-lens analyze coupling crates/agent-lens \
   | jq '.cycles[] | select(length > 1)'
 
 # Impls with LCOM4 >= 2
-agent-lens analyze cohesion <path> | jq '.units[] | select(.lcom4 >= 2)'
+agent-lens analyze cohesion <path> | jq '.files[].units[] | select(.lcom4 >= 2)'
 ```
 
 ## Don't reach for it when
