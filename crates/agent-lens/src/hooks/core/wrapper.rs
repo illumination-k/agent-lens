@@ -48,8 +48,8 @@ fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, H
         SourceLang::Rust => {
             lens_rust::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
-        SourceLang::TypeScript => {
-            lens_ts::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::find_wrappers(source, dialect).map_err(|e| HookError::Parse(Box::new(e)))
         }
         SourceLang::Python => {
             lens_py::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))

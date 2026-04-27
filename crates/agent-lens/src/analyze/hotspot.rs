@@ -232,8 +232,8 @@ fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
         SourceLang::Rust => {
             lens_rust::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
         }
-        SourceLang::TypeScript => {
-            lens_ts::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::extract_complexity_units(source, dialect).map_err(|e| Box::new(e) as _)
         }
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
