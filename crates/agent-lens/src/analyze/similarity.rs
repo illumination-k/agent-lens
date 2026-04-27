@@ -175,37 +175,61 @@ impl SimilarityAnalyzer {
         } else {
             HashMap::new()
         };
-
-        let mut pairs = Vec::new();
-        for (i, a) in corpus.iter().enumerate() {
-            if a.def.line_count() < self.min_lines {
-                continue;
-            }
-            for b in &corpus[i + 1..] {
-                if b.def.line_count() < self.min_lines {
-                    continue;
-                }
-                let similarity = calculate_tsed(&a.def.tree, &b.def.tree, &self.opts);
-                if similarity < self.threshold {
-                    continue;
-                }
-                if self.diff_only && !pair_touches_changes(a, b, &changed_by_file) {
-                    continue;
-                }
-                pairs.push(PairView {
-                    a: FunctionRef::from(a),
-                    b: FunctionRef::from(b),
-                    similarity,
-                });
-            }
-        }
-        pairs.sort_by(|x, y| {
-            y.similarity
-                .partial_cmp(&x.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let mut pairs: Vec<PairView<'a>> = candidate_pairs(corpus, self.min_lines)
+            .filter_map(|(a, b)| self.score_pair(a, b, &changed_by_file))
+            .collect();
+        sort_by_similarity_desc(&mut pairs);
         pairs
     }
+
+    /// Score one candidate pair. Returns `None` when the pair fails the
+    /// threshold or, in `--diff-only` mode, doesn't touch a changed line.
+    fn score_pair<'a>(
+        &self,
+        a: &'a OwnedFunction,
+        b: &'a OwnedFunction,
+        changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
+    ) -> Option<PairView<'a>> {
+        let similarity = calculate_tsed(&a.def.tree, &b.def.tree, &self.opts);
+        if similarity < self.threshold {
+            return None;
+        }
+        if self.diff_only && !pair_touches_changes(a, b, changed_by_file) {
+            return None;
+        }
+        Some(PairView {
+            a: FunctionRef::from(a),
+            b: FunctionRef::from(b),
+            similarity,
+        })
+    }
+}
+
+/// Yield every (a, b) pair from `corpus` (i < j) where both functions
+/// meet the `min_lines` filter. The cartesian product is generated up
+/// front so `find_pairs` reads as a flat `filter_map`.
+fn candidate_pairs(
+    corpus: &[OwnedFunction],
+    min_lines: usize,
+) -> impl Iterator<Item = (&OwnedFunction, &OwnedFunction)> + '_ {
+    corpus
+        .iter()
+        .enumerate()
+        .filter(move |(_, a)| a.def.line_count() >= min_lines)
+        .flat_map(move |(i, a)| {
+            corpus[i + 1..]
+                .iter()
+                .filter(move |b| b.def.line_count() >= min_lines)
+                .map(move |b| (a, b))
+        })
+}
+
+fn sort_by_similarity_desc(pairs: &mut [PairView<'_>]) {
+    pairs.sort_by(|x, y| {
+        y.similarity
+            .partial_cmp(&x.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 fn collect_changed_ranges(corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
@@ -258,42 +282,47 @@ fn extract_functions(
     exclude_tests: bool,
 ) -> Result<Vec<FunctionDef>, AnalyzerError> {
     match lang {
-        SourceLang::Rust => {
-            if exclude_tests {
-                extract_functions_excluding_tests(source)
-                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
-            } else {
-                let mut parser = RustParser::new();
-                parser
-                    .extract_functions(source)
-                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
-            }
-        }
-        SourceLang::TypeScript => {
-            if exclude_tests {
-                lens_ts::extract_functions_excluding_tests(source)
-                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
-            } else {
-                let mut parser = lens_ts::TypeScriptParser::new();
-                <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
-                    &mut parser,
-                    source,
-                )
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))
-            }
-        }
-        SourceLang::Python => {
-            if exclude_tests {
-                lens_py::extract_functions_excluding_tests(source)
-                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
-            } else {
-                let mut parser = lens_py::PythonParser::new();
-                parser
-                    .extract_functions(source)
-                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))
-            }
-        }
+        SourceLang::Rust => extract_rust(source, exclude_tests),
+        SourceLang::TypeScript => extract_typescript(source, exclude_tests),
+        SourceLang::Python => extract_python(source, exclude_tests),
     }
+    .map_err(|e| AnalyzerError::Parse(e))
+}
+
+type ExtractError = Box<dyn std::error::Error + Send + Sync>;
+
+fn extract_rust(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
+    if exclude_tests {
+        extract_functions_excluding_tests(source).map_err(box_err)
+    } else {
+        RustParser::new().extract_functions(source).map_err(box_err)
+    }
+}
+
+fn extract_typescript(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
+    if exclude_tests {
+        lens_ts::extract_functions_excluding_tests(source).map_err(box_err)
+    } else {
+        <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
+            &mut lens_ts::TypeScriptParser::new(),
+            source,
+        )
+        .map_err(box_err)
+    }
+}
+
+fn extract_python(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
+    if exclude_tests {
+        lens_py::extract_functions_excluding_tests(source).map_err(box_err)
+    } else {
+        lens_py::PythonParser::new()
+            .extract_functions(source)
+            .map_err(box_err)
+    }
+}
+
+fn box_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> ExtractError {
+    Box::new(e)
 }
 
 #[derive(Debug, Serialize)]
