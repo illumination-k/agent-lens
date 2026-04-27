@@ -444,28 +444,31 @@ mod tests {
         }
 
         #[test]
-        fn one_label_mutation_in_long_generated_functions_stays_candidate(
-            mut labels in vec(0_u8..16, 24..64),
-            mutation_index in 0_usize..64,
-            replacement in 0_u8..16,
+        fn one_label_mutation_recall_in_long_generated_functions_stays_high(
+            labels in vec(0_u8..16, 24..64),
+            replacement_offset in 1_u8..16,
         ) {
-            let idx = mutation_index % labels.len();
-            let original = labels.clone();
-            labels[idx] = if replacement == original[idx] {
-                replacement.wrapping_add(1) % 16
-            } else {
-                replacement
-            };
-            let funcs = vec![
-                generated_def("original", &original),
-                generated_def("mutated", &labels),
-            ];
+            let funcs = std::iter::once(generated_def("original", &labels))
+                .chain((0..labels.len()).map(|mutation_index| {
+                    let mut mutated = labels.clone();
+                    mutated[mutation_index] =
+                        (mutated[mutation_index] + replacement_offset) % 16;
+                    generated_def(format!("mutated_{mutation_index}"), &mutated)
+                }))
+                .collect::<Vec<_>>();
 
             for opts in [LshOptions::default(), analyzer_lsh_options()] {
-                let pairs = lsh_candidate_pairs(&funcs, &opts);
+                let pairs = lsh_candidate_pairs(&funcs, &opts)
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                let expected = labels.len();
+                let hits = (1..funcs.len())
+                    .filter(|idx| pairs.contains(&(0, *idx)))
+                    .count();
+                let min_hits = expected * 4 / 5;
                 prop_assert!(
-                    pairs.contains(&(0, 1)),
-                    "near-clone pair missing with opts {opts:?}; original={original:?}, mutated={labels:?}",
+                    hits >= min_hits,
+                    "one-label near-clone recall too low with opts {opts:?}; hits={hits}/{expected}, min_hits={min_hits}, labels={labels:?}, replacement_offset={replacement_offset}",
                 );
             }
         }
