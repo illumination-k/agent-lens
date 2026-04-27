@@ -65,7 +65,19 @@ impl Default for LshOptions {
 /// guaranteed to be in the output, but the output also contains weakly-
 /// similar pairs that the downstream TSED filter will drop.
 pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<(usize, usize)> {
-    if functions.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
+    let trees: Vec<&TreeNode> = functions.iter().map(|function| &function.tree).collect();
+    lsh_candidate_pairs_for_trees(&trees, opts)
+}
+
+/// Generate candidate pairs for an already-borrowed tree corpus.
+///
+/// This avoids cloning full [`FunctionDef`] values in callers that already
+/// keep their own index mapping, such as directory-level analyzers.
+pub fn lsh_candidate_pairs_for_trees(
+    trees: &[&TreeNode],
+    opts: &LshOptions,
+) -> Vec<(usize, usize)> {
+    if trees.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
         return Vec::new();
     }
     let rows_per_band = opts.num_hashes / opts.num_bands;
@@ -73,10 +85,10 @@ pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<
         return Vec::new();
     }
     let family = HashFamily::new(opts.num_hashes, opts.seed);
-    let signatures: Vec<Vec<u64>> = functions
+    let signatures: Vec<Vec<u64>> = trees
         .iter()
-        .map(|f| {
-            let features = extract_shingles(&f.tree, opts.shingle_size);
+        .map(|tree| {
+            let features = extract_shingles(tree, opts.shingle_size);
             minhash_signature(&features, &family)
         })
         .collect();
@@ -94,9 +106,15 @@ pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<
         }
     }
 
+    const DEDUP_BUCKET_MIN_SIZE: usize = 64;
+
     let mut candidates: HashSet<(usize, usize)> = HashSet::new();
+    let mut expanded_buckets: HashSet<Vec<usize>> = HashSet::new();
     for indices in buckets.into_values() {
         if indices.len() < 2 {
+            continue;
+        }
+        if indices.len() >= DEDUP_BUCKET_MIN_SIZE && !expanded_buckets.insert(indices.clone()) {
             continue;
         }
         for (pos, &i) in indices.iter().enumerate() {
@@ -212,6 +230,8 @@ fn minhash_signature(features: &HashSet<u64>, family: &HashFamily) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
 
     fn def(label_kinds: &[&str]) -> FunctionDef {
         let children = label_kinds
@@ -277,6 +297,21 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_tree_entrypoint_matches_function_entrypoint() {
+        let funcs = vec![
+            def(&["Let", "Call", "Add", "Return"]),
+            def(&["Let", "Call", "Add", "Return"]),
+            def(&["If", "While", "Match"]),
+        ];
+        let trees: Vec<&TreeNode> = funcs.iter().map(|f| &f.tree).collect();
+        let opts = LshOptions::default();
+        assert_eq!(
+            lsh_candidate_pairs_for_trees(&trees, &opts),
+            lsh_candidate_pairs(&funcs, &opts),
+        );
+    }
+
+    #[test]
     fn output_pairs_are_sorted_and_have_i_lt_j() {
         let funcs = vec![
             def(&["A", "B", "C"]),
@@ -339,5 +374,105 @@ mod tests {
             ..Default::default()
         };
         assert!(lsh_candidate_pairs(&funcs, &opts).is_empty());
+    }
+
+    fn generated_def(name: impl Into<String>, label_kinds: &[u8]) -> FunctionDef {
+        let children = label_kinds
+            .iter()
+            .map(|kind| TreeNode::leaf(format!("K{kind}")))
+            .collect::<Vec<_>>();
+        FunctionDef {
+            name: name.into(),
+            start_line: 1,
+            end_line: label_kinds.len().max(1),
+            tree: TreeNode::with_children("Block", "", children),
+        }
+    }
+
+    fn analyzer_lsh_options() -> LshOptions {
+        LshOptions {
+            num_bands: 24,
+            ..Default::default()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn identical_generated_functions_are_always_candidates(
+            labels in vec(0_u8..16, 0..48),
+            prefix in vec(vec(0_u8..16, 0..24), 0..8),
+            suffix in vec(vec(0_u8..16, 0..24), 0..8),
+        ) {
+            let clone_a = prefix.len();
+            let clone_b = prefix.len() + 1;
+            let funcs = prefix
+                .iter()
+                .enumerate()
+                .map(|(idx, labels)| generated_def(format!("prefix_{idx}"), labels))
+                .chain([
+                    generated_def("clone_a", &labels),
+                    generated_def("clone_b", &labels),
+                ])
+                .chain(
+                    suffix
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, labels)| generated_def(format!("suffix_{idx}"), labels)),
+                )
+                .collect::<Vec<_>>();
+
+            for opts in [LshOptions::default(), analyzer_lsh_options()] {
+                let pairs = lsh_candidate_pairs(&funcs, &opts);
+                prop_assert!(
+                    pairs.contains(&(clone_a, clone_b)),
+                    "identical pair missing with opts {opts:?}; labels={labels:?}, pairs={pairs:?}",
+                );
+            }
+        }
+
+        #[test]
+        fn one_label_mutation_in_long_generated_functions_stays_candidate(
+            mut labels in vec(0_u8..16, 24..64),
+            mutation_index in 0_usize..64,
+            replacement in 0_u8..16,
+        ) {
+            let idx = mutation_index % labels.len();
+            let original = labels.clone();
+            labels[idx] = if replacement == original[idx] {
+                replacement.wrapping_add(1) % 16
+            } else {
+                replacement
+            };
+            let funcs = vec![
+                generated_def("original", &original),
+                generated_def("mutated", &labels),
+            ];
+
+            for opts in [LshOptions::default(), analyzer_lsh_options()] {
+                let pairs = lsh_candidate_pairs(&funcs, &opts);
+                prop_assert!(
+                    pairs.contains(&(0, 1)),
+                    "near-clone pair missing with opts {opts:?}; original={original:?}, mutated={labels:?}",
+                );
+            }
+        }
+
+        #[test]
+        fn generated_candidate_output_is_sorted_unique_and_in_bounds(
+            corpus in vec(vec(0_u8..12, 0..32), 0..24),
+        ) {
+            let funcs = corpus
+                .iter()
+                .enumerate()
+                .map(|(idx, labels)| generated_def(format!("f_{idx}"), labels))
+                .collect::<Vec<_>>();
+            let pairs = lsh_candidate_pairs(&funcs, &analyzer_lsh_options());
+
+            prop_assert!(pairs.windows(2).all(|w| w[0] < w[1]), "pairs not sorted/unique: {pairs:?}");
+            for (i, j) in pairs {
+                prop_assert!(i < j, "expected i < j, got ({i}, {j})");
+                prop_assert!(j < funcs.len(), "candidate index out of bounds: ({i}, {j}) for len {}", funcs.len());
+            }
+        }
     }
 }

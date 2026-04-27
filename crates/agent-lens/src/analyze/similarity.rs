@@ -9,16 +9,23 @@
 //! rather than for humans, in line with the project's "agent-friendly lint"
 //! ethos.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ignore::WalkBuilder;
 use lens_domain::{
-    FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, calculate_tsed, cluster_similar_pairs,
+    CandidateStrategy, FunctionDef, LanguageParser, SimilarCluster, TSEDOptions,
+    calculate_tsed_with_subtree_sizes, cluster_similar_pairs, collect_subtree_sizes,
+    lsh_candidate_pairs_for_trees,
 };
 use lens_rust::{RustParser, extract_functions_excluding_tests};
+use rayon::prelude::*;
 use serde::Serialize;
+use tracing::debug;
 
 use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
 
@@ -31,6 +38,8 @@ pub const DEFAULT_THRESHOLD: f64 = 0.85;
 /// `--min-lines` default in `similarity-ts`: tiny functions (one-liners,
 /// trivial getters) form too many spurious matches.
 pub const DEFAULT_MIN_LINES: usize = 5;
+
+const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
 
 /// Analyzer entry point. Holds the threshold and TSED options so per-run
 /// configuration can be threaded through `analyze` without changing the
@@ -98,6 +107,7 @@ impl SimilarityAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+        let started = Instant::now();
         let corpus = self.collect_corpus(path)?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus);
@@ -107,6 +117,14 @@ impl SimilarityAnalyzer {
             self.min_lines,
             function_count,
             &clusters,
+        );
+        debug!(
+            target: PROFILE_TARGET,
+            path = %path.display(),
+            function_count,
+            cluster_count = clusters.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "analyze similarity finished"
         );
         match format {
             OutputFormat::Json => {
@@ -129,7 +147,8 @@ impl SimilarityAnalyzer {
     }
 
     fn collect_directory(&self, root: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-        let mut out = Vec::new();
+        let started = Instant::now();
+        let mut files = Vec::new();
         for entry in WalkBuilder::new(root).build() {
             let entry = entry.map_err(|e| AnalyzerError::Io {
                 path: root.to_path_buf(),
@@ -142,17 +161,33 @@ impl SimilarityAnalyzer {
             if SourceLang::from_path(p).is_none() {
                 continue;
             }
-            // Display paths relative to the walk root so cross-file pair
-            // reports stay readable when the analyzer is pointed at a
-            // deep directory.
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            out.extend(self.collect_file(p, Some(rel))?);
+            files.push(p.to_path_buf());
         }
+        files.sort();
+
+        let parsed: Vec<Vec<OwnedFunction>> = files
+            .par_iter()
+            .map(|p| {
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap_or(p)
+                    .display()
+                    .to_string()
+                    .replace('\\', "/");
+                self.collect_file(p, Some(rel))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let out: Vec<_> = parsed.into_iter().flatten().collect();
+        let file_count = files.len();
+        debug!(
+            target: PROFILE_TARGET,
+            root = %root.display(),
+            file_count,
+            function_count = out.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity corpus directory collected"
+        );
         Ok(out)
     }
 
@@ -161,17 +196,28 @@ impl SimilarityAnalyzer {
         path: &Path,
         rel_override: Option<String>,
     ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+        let started = Instant::now();
         let (lang, source) = read_source(path)?;
         let funcs = extract_functions(lang, &source, self.exclude_tests)?;
         let rel = rel_override.unwrap_or_else(|| path.display().to_string());
-        Ok(funcs
+        let out: Vec<_> = funcs
             .into_iter()
             .map(|def| OwnedFunction {
                 file: path.to_path_buf(),
                 rel_path: rel.clone(),
                 def,
             })
-            .collect())
+            .collect();
+        debug!(
+            target: PROFILE_TARGET,
+            path = %path.display(),
+            language = ?lang,
+            bytes = source.len(),
+            function_count = out.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity source parsed"
+        );
+        Ok(out)
     }
 
     /// Pairwise TSED over the corpus, then complete-link clustering. Inlined
@@ -180,61 +226,628 @@ impl SimilarityAnalyzer {
     /// `--diff-only` filter sees the file/line metadata that domain doesn't
     /// know about.
     fn find_clusters<'a>(&self, corpus: &'a [OwnedFunction]) -> Vec<ClusterView<'a>> {
+        let started = Instant::now();
         let changed_by_file = if self.diff_only {
-            collect_changed_ranges(corpus)
+            let diff_started = Instant::now();
+            let changed = collect_changed_ranges(corpus);
+            debug!(
+                target: PROFILE_TARGET,
+                file_count = changed.len(),
+                elapsed_ms = diff_started.elapsed().as_secs_f64() * 1000.0,
+                "similarity changed ranges collected"
+            );
+            changed
         } else {
             HashMap::new()
         };
-        let pair_indices: Vec<(usize, usize, f64)> = candidate_pairs(corpus, self.min_lines)
-            .filter_map(|(i, j)| self.score_pair(corpus, i, j, &changed_by_file))
+        let use_lsh_profiles = similarity_uses_lsh(eligible_function_count(corpus, self.min_lines));
+        let profiles: Vec<TreeProfile> = corpus
+            .iter()
+            .map(|f| {
+                if use_lsh_profiles {
+                    TreeProfile::from_tree_for_scoring(&f.def.tree)
+                } else {
+                    TreeProfile::from_tree(&f.def.tree)
+                }
+            })
             .collect();
-        cluster_similar_pairs(&pair_indices, self.threshold)
+        let candidate_started = Instant::now();
+        let candidates = candidate_pairs(
+            corpus,
+            self.min_lines,
+            &profiles,
+            self.threshold,
+            &self.opts,
+        );
+        debug!(
+            target: PROFILE_TARGET,
+            function_count = corpus.len(),
+            eligible_function_count = candidates.eligible_function_count,
+            min_lines = self.min_lines,
+            strategy = candidates.strategy.as_str(),
+            candidate_count = candidates.total_len(),
+            retained_candidate_count = candidates.len(),
+            size_filtered_count = candidates.size_filtered_count,
+            label_filtered_count = candidates.label_filtered_count,
+            arity_filtered_count = candidates.arity_filtered_count,
+            shingle_filtered_count = candidates.shingle_filtered_count,
+            elapsed_ms = candidate_started.elapsed().as_secs_f64() * 1000.0,
+            "similarity candidates enumerated"
+        );
+
+        let (pairs_to_score, diff_prefiltered_count): (Cow<'_, [(usize, usize)]>, usize) =
+            if self.diff_only {
+                let mut filtered = 0usize;
+                let pairs: Vec<_> = candidates
+                    .pairs
+                    .iter()
+                    .copied()
+                    .filter(|&(i, j)| {
+                        let keep = corpus
+                            .get(i)
+                            .zip(corpus.get(j))
+                            .is_some_and(|(a, b)| pair_touches_changes(a, b, &changed_by_file));
+                        if !keep {
+                            filtered += 1;
+                        }
+                        keep
+                    })
+                    .collect();
+                (Cow::Owned(pairs), filtered)
+            } else {
+                (Cow::Borrowed(candidates.pairs.as_slice()), 0)
+            };
+
+        let score_started = Instant::now();
+        let mut score_stats = pairs_to_score
+            .par_iter()
+            .fold(ScoreStats::default, |mut stats, &(i, j)| {
+                let Some(a) = corpus.get(i) else {
+                    return stats;
+                };
+                let Some(b) = corpus.get(j) else {
+                    return stats;
+                };
+                let Some(profile_a) = profiles.get(i) else {
+                    return stats;
+                };
+                let Some(profile_b) = profiles.get(j) else {
+                    return stats;
+                };
+                let similarity = if trees_match_without_distance(
+                    &a.def.tree,
+                    &b.def.tree,
+                    self.opts.apted.compare_values,
+                ) {
+                    stats.exact_match_count += 1;
+                    1.0
+                } else {
+                    calculate_tsed_with_subtree_sizes(
+                        &a.def.tree,
+                        &b.def.tree,
+                        profile_a.size,
+                        profile_b.size,
+                        &profile_a.subtree_sizes,
+                        &profile_b.subtree_sizes,
+                        &self.opts,
+                    )
+                };
+                if similarity < self.threshold {
+                    stats.below_threshold_count += 1;
+                    return stats;
+                }
+                stats.pairs.push((i, j, similarity));
+                stats
+            })
+            .reduce(ScoreStats::default, |mut a, mut b| {
+                a.below_threshold_count += b.below_threshold_count;
+                a.diff_filtered_count += b.diff_filtered_count;
+                a.exact_match_count += b.exact_match_count;
+                a.pairs.append(&mut b.pairs);
+                a
+            })
+            .sorted();
+        score_stats.diff_filtered_count += diff_prefiltered_count;
+        debug!(
+            target: PROFILE_TARGET,
+            candidate_count = candidates.total_len(),
+            retained_candidate_count = candidates.len(),
+            scored_pair_count = score_stats.scored_pair_count(),
+            matched_pair_count = score_stats.pairs.len(),
+            exact_match_count = score_stats.exact_match_count,
+            size_filtered_count = candidates.size_filtered_count,
+            label_filtered_count = candidates.label_filtered_count,
+            arity_filtered_count = candidates.arity_filtered_count,
+            shingle_filtered_count = candidates.shingle_filtered_count,
+            below_threshold_count = score_stats.below_threshold_count,
+            diff_filtered_count = score_stats.diff_filtered_count,
+            elapsed_ms = score_started.elapsed().as_secs_f64() * 1000.0,
+            "similarity TSED scoring finished"
+        );
+
+        let cluster_started = Instant::now();
+        let clusters: Vec<_> = cluster_similar_pairs(&score_stats.pairs, self.threshold)
             .into_iter()
             .map(|c| ClusterView::from_domain(corpus, c))
-            .collect()
-    }
-
-    /// Score one candidate pair, returning `(i, j, similarity)` when it
-    /// crosses the threshold and survives the `--diff-only` filter.
-    fn score_pair(
-        &self,
-        corpus: &[OwnedFunction],
-        i: usize,
-        j: usize,
-        changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
-    ) -> Option<(usize, usize, f64)> {
-        let a = corpus.get(i)?;
-        let b = corpus.get(j)?;
-        let similarity = calculate_tsed(&a.def.tree, &b.def.tree, &self.opts);
-        if similarity < self.threshold {
-            return None;
-        }
-        if self.diff_only && !pair_touches_changes(a, b, changed_by_file) {
-            return None;
-        }
-        Some((i, j, similarity))
+            .collect();
+        debug!(
+            target: PROFILE_TARGET,
+            matched_pair_count = score_stats.pairs.len(),
+            cluster_count = clusters.len(),
+            cluster_ms = cluster_started.elapsed().as_secs_f64() * 1000.0,
+            total_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity clusters found"
+        );
+        clusters
     }
 }
 
-/// Yield every `(i, j)` index pair from `corpus` (i < j) where both
-/// functions meet the `min_lines` filter. The cartesian product is
-/// generated up front so `find_clusters` reads as a flat `filter_map`.
+#[derive(Debug, Default)]
+struct ScoreStats {
+    pairs: Vec<(usize, usize, f64)>,
+    exact_match_count: usize,
+    below_threshold_count: usize,
+    diff_filtered_count: usize,
+}
+
+impl ScoreStats {
+    fn sorted(mut self) -> Self {
+        self.pairs.sort_by_key(|(i, j, _)| (*i, *j));
+        self
+    }
+
+    fn scored_pair_count(&self) -> usize {
+        self.pairs.len() + self.below_threshold_count
+    }
+}
+
+#[derive(Debug)]
+struct TreeProfile {
+    size: usize,
+    subtree_sizes: lens_domain::SubtreeSizes,
+    filters: Option<TreeFilterProfile>,
+}
+
+#[derive(Debug)]
+struct TreeFilterProfile {
+    label_counts: HashMap<u64, usize>,
+    preorder_shingles: HashMap<u64, usize>,
+    child_sizes: Vec<usize>,
+    root_arity: usize,
+}
+
+impl TreeProfile {
+    fn from_tree(tree: &lens_domain::TreeNode) -> Self {
+        let subtree_sizes = collect_subtree_sizes(tree);
+        let size = subtree_sizes
+            .get(&(std::ptr::from_ref::<lens_domain::TreeNode>(tree) as usize))
+            .copied()
+            .unwrap_or(0);
+        let filters = TreeFilterProfile::from_tree(tree, size, &subtree_sizes);
+        Self {
+            size,
+            subtree_sizes,
+            filters: Some(filters),
+        }
+    }
+
+    fn from_tree_for_scoring(tree: &lens_domain::TreeNode) -> Self {
+        let subtree_sizes = collect_subtree_sizes(tree);
+        let size = subtree_sizes
+            .get(&(std::ptr::from_ref::<lens_domain::TreeNode>(tree) as usize))
+            .copied()
+            .unwrap_or(0);
+        Self {
+            size,
+            subtree_sizes,
+            filters: None,
+        }
+    }
+}
+
+impl TreeFilterProfile {
+    fn from_tree(
+        tree: &lens_domain::TreeNode,
+        size: usize,
+        subtree_sizes: &lens_domain::SubtreeSizes,
+    ) -> Self {
+        let mut labels = Vec::with_capacity(size);
+        collect_preorder_label_hashes(tree, &mut labels);
+        let mut label_counts = HashMap::new();
+        for &label in &labels {
+            *label_counts.entry(label).or_insert(0) += 1;
+        }
+        let preorder_shingles = shingle_counts(&labels, PREORDER_SHINGLE_WIDTH);
+        let child_sizes = tree
+            .children
+            .iter()
+            .filter_map(|child| {
+                subtree_sizes
+                    .get(&(std::ptr::from_ref::<lens_domain::TreeNode>(child) as usize))
+                    .copied()
+            })
+            .collect();
+        Self {
+            label_counts,
+            preorder_shingles,
+            child_sizes,
+            root_arity: tree.children.len(),
+        }
+    }
+}
+
+const PREORDER_SHINGLE_WIDTH: usize = 3;
+
+fn collect_preorder_label_hashes(tree: &lens_domain::TreeNode, out: &mut Vec<u64>) {
+    out.push(label_fingerprint(&tree.label));
+    for child in &tree.children {
+        collect_preorder_label_hashes(child, out);
+    }
+}
+
+fn label_fingerprint(label: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    label.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn shingle_counts(labels: &[u64], width: usize) -> HashMap<u64, usize> {
+    if width == 0 || labels.len() < width {
+        return HashMap::new();
+    }
+    let mut counts = HashMap::new();
+    for window in labels.windows(width) {
+        *counts.entry(shingle_fingerprint(window)).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn shingle_fingerprint(window: &[u64]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for &label in window {
+        hash ^= label;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn trees_match_without_distance(
+    a: &lens_domain::TreeNode,
+    b: &lens_domain::TreeNode,
+    compare_values: bool,
+) -> bool {
+    a.label == b.label
+        && (!compare_values || a.value == b.value)
+        && a.children.len() == b.children.len()
+        && a.children
+            .iter()
+            .zip(&b.children)
+            .all(|(a, b)| trees_match_without_distance(a, b, compare_values))
+}
+
+#[derive(Debug)]
+struct CandidatePairs {
+    pairs: Vec<(usize, usize)>,
+    eligible_function_count: usize,
+    size_filtered_count: usize,
+    label_filtered_count: usize,
+    arity_filtered_count: usize,
+    shingle_filtered_count: usize,
+    strategy: CandidatePairStrategy,
+}
+
+impl CandidatePairs {
+    fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    fn total_len(&self) -> usize {
+        self.pairs.len()
+            + self.size_filtered_count
+            + self.label_filtered_count
+            + self.arity_filtered_count
+            + self.shingle_filtered_count
+    }
+}
+
+#[derive(Debug, Default)]
+struct CheapFilterCounts {
+    size: usize,
+    label: usize,
+    arity: usize,
+    shingle: usize,
+}
+
+#[derive(Debug)]
+enum CandidatePairStrategy {
+    Cartesian,
+    Lsh,
+}
+
+impl CandidatePairStrategy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cartesian => "cartesian",
+            Self::Lsh => "lsh",
+        }
+    }
+}
+
+/// Return every candidate `(i, j)` index pair from `corpus` (i < j) where
+/// both functions meet the `min_lines` filter. Large corpora go through the
+/// same LSH pre-filter used by `lens-domain`; small corpora keep the exact
+/// cartesian path because LSH setup costs more than it saves there.
 fn candidate_pairs(
     corpus: &[OwnedFunction],
     min_lines: usize,
-) -> impl Iterator<Item = (usize, usize)> + '_ {
-    corpus
+    profiles: &[TreeProfile],
+    threshold: f64,
+    opts: &TSEDOptions,
+) -> CandidatePairs {
+    let eligible_indices: Vec<usize> = corpus
         .iter()
         .enumerate()
         .filter(move |(_, a)| a.def.line_count() >= min_lines)
-        .flat_map(move |(i, _)| {
-            corpus
+        .map(|(i, _)| i)
+        .collect();
+    let mut strategy = CandidateStrategy::default();
+    // Keep directory analysis on a high-recall LSH setting. Property tests
+    // cover the exact setting here; tighter banding has missed one-label
+    // near-clones that still clear the analyzer threshold.
+    strategy.lsh.num_bands = 24;
+    let use_lsh = strategy_uses_lsh(&strategy, eligible_indices.len());
+    let (pairs, filter_counts) = if use_lsh {
+        let trees: Vec<&lens_domain::TreeNode> = eligible_indices
+            .iter()
+            .filter_map(|&i| corpus.get(i).map(|f| &f.def.tree))
+            .collect();
+        filter_size_compatible_pairs(
+            lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
+                .into_iter()
+                .filter_map(|(i, j)| {
+                    let a = eligible_indices.get(i).copied()?;
+                    let b = eligible_indices.get(j).copied()?;
+                    Some((a, b))
+                }),
+            profiles,
+            threshold,
+            opts,
+        )
+    } else {
+        filter_tsed_compatible_pairs(
+            eligible_indices
                 .iter()
                 .enumerate()
-                .skip(i + 1)
-                .filter(move |(_, b)| b.def.line_count() >= min_lines)
-                .map(move |(j, _)| (i, j))
-        })
+                .flat_map(|(pos, &i)| eligible_indices[pos + 1..].iter().map(move |&j| (i, j))),
+            profiles,
+            threshold,
+            opts,
+        )
+    };
+    CandidatePairs {
+        pairs,
+        eligible_function_count: eligible_indices.len(),
+        size_filtered_count: filter_counts.size,
+        label_filtered_count: filter_counts.label,
+        arity_filtered_count: filter_counts.arity,
+        shingle_filtered_count: filter_counts.shingle,
+        strategy: if use_lsh {
+            CandidatePairStrategy::Lsh
+        } else {
+            CandidatePairStrategy::Cartesian
+        },
+    }
+}
+
+fn eligible_function_count(corpus: &[OwnedFunction], min_lines: usize) -> usize {
+    corpus
+        .iter()
+        .filter(|function| function.def.line_count() >= min_lines)
+        .count()
+}
+
+fn similarity_uses_lsh(eligible_count: usize) -> bool {
+    strategy_uses_lsh(&CandidateStrategy::default(), eligible_count)
+}
+
+fn strategy_uses_lsh(strategy: &CandidateStrategy, eligible_count: usize) -> bool {
+    strategy
+        .lsh_min_functions
+        .is_some_and(|min_n| eligible_count >= min_n)
+}
+
+fn filter_size_compatible_pairs(
+    pairs: impl IntoIterator<Item = (usize, usize)>,
+    profiles: &[TreeProfile],
+    threshold: f64,
+    opts: &TSEDOptions,
+) -> (Vec<(usize, usize)>, CheapFilterCounts) {
+    let mut out = Vec::new();
+    let mut counts = CheapFilterCounts::default();
+    for (i, j) in pairs {
+        let Some(profile_a) = profiles.get(i) else {
+            continue;
+        };
+        let Some(profile_b) = profiles.get(j) else {
+            continue;
+        };
+        if tsed_upper_bound(profile_a, profile_b, 0.0, opts.size_penalty) < threshold {
+            counts.size += 1;
+        } else {
+            out.push((i, j));
+        }
+    }
+    (out, counts)
+}
+
+fn filter_tsed_compatible_pairs(
+    pairs: impl IntoIterator<Item = (usize, usize)>,
+    profiles: &[TreeProfile],
+    threshold: f64,
+    opts: &TSEDOptions,
+) -> (Vec<(usize, usize)>, CheapFilterCounts) {
+    let mut out = Vec::new();
+    let mut counts = CheapFilterCounts::default();
+    for (i, j) in pairs {
+        match tsed_upper_bound_filter(profiles, i, j, threshold, opts) {
+            Some(CheapFilter::Size) => counts.size += 1,
+            Some(CheapFilter::LabelMultiset) => counts.label += 1,
+            Some(CheapFilter::RootChildArity) => counts.arity += 1,
+            Some(CheapFilter::PreorderShingle) => counts.shingle += 1,
+            None => out.push((i, j)),
+        }
+    }
+    (out, counts)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheapFilter {
+    Size,
+    LabelMultiset,
+    RootChildArity,
+    PreorderShingle,
+}
+
+fn tsed_upper_bound_filter(
+    profiles: &[TreeProfile],
+    i: usize,
+    j: usize,
+    threshold: f64,
+    opts: &TSEDOptions,
+) -> Option<CheapFilter> {
+    let profile_a = profiles.get(i)?;
+    let profile_b = profiles.get(j)?;
+    if tsed_upper_bound(profile_a, profile_b, 0.0, opts.size_penalty) < threshold {
+        return Some(CheapFilter::Size);
+    }
+    let label_distance = label_multiset_distance_lower_bound(profile_a, profile_b, opts);
+    if tsed_upper_bound(profile_a, profile_b, label_distance, opts.size_penalty) < threshold {
+        return Some(CheapFilter::LabelMultiset);
+    }
+    let arity_distance = root_child_arity_distance_lower_bound(profile_a, profile_b, opts);
+    if tsed_upper_bound(profile_a, profile_b, arity_distance, opts.size_penalty) < threshold {
+        return Some(CheapFilter::RootChildArity);
+    }
+    let shingle_distance = preorder_shingle_distance_lower_bound(profile_a, profile_b, opts);
+    if tsed_upper_bound(profile_a, profile_b, shingle_distance, opts.size_penalty) < threshold {
+        return Some(CheapFilter::PreorderShingle);
+    }
+    None
+}
+
+fn tsed_upper_bound(
+    a: &TreeProfile,
+    b: &TreeProfile,
+    distance_lower_bound: f64,
+    size_penalty: bool,
+) -> f64 {
+    let max_size = a.size.max(b.size);
+    if max_size == 0 {
+        return 1.0;
+    }
+    let base = 1.0 - distance_lower_bound / max_size as f64;
+    let penalty = if size_penalty {
+        let min_size = a.size.min(b.size) as f64;
+        (min_size / max_size as f64).sqrt()
+    } else {
+        1.0
+    };
+    (base * penalty).clamp(0.0, 1.0)
+}
+
+fn label_multiset_distance_lower_bound(
+    a: &TreeProfile,
+    b: &TreeProfile,
+    opts: &TSEDOptions,
+) -> f64 {
+    let Some(filter_a) = &a.filters else {
+        return 0.0;
+    };
+    let Some(filter_b) = &b.filters else {
+        return 0.0;
+    };
+    let l1 = multiset_l1(&filter_a.label_counts, &filter_b.label_counts);
+    // A rename can fix at most one missing and one extra label. Insert and
+    // delete each change one multiset slot; use the cheapest per-slot cost.
+    let per_delta_cost = opts
+        .apted
+        .delete_cost
+        .min(opts.apted.insert_cost)
+        .min(opts.apted.rename_cost / 2.0);
+    l1 as f64 * per_delta_cost
+}
+
+fn root_child_arity_distance_lower_bound(
+    a: &TreeProfile,
+    b: &TreeProfile,
+    opts: &TSEDOptions,
+) -> f64 {
+    let Some(filter_a) = &a.filters else {
+        return 0.0;
+    };
+    let Some(filter_b) = &b.filters else {
+        return 0.0;
+    };
+    if filter_a.root_arity == filter_b.root_arity {
+        return 0.0;
+    }
+    let (extra, edit_side, unit_cost) = if filter_a.root_arity > filter_b.root_arity {
+        (
+            filter_a.root_arity - filter_b.root_arity,
+            &filter_a.child_sizes,
+            opts.apted.delete_cost,
+        )
+    } else {
+        (
+            filter_b.root_arity - filter_a.root_arity,
+            &filter_b.child_sizes,
+            opts.apted.insert_cost,
+        )
+    };
+    let mut sizes = edit_side.clone();
+    sizes.sort_unstable();
+    sizes.into_iter().take(extra).sum::<usize>() as f64 * unit_cost
+}
+
+fn preorder_shingle_distance_lower_bound(
+    a: &TreeProfile,
+    b: &TreeProfile,
+    opts: &TSEDOptions,
+) -> f64 {
+    let Some(filter_a) = &a.filters else {
+        return 0.0;
+    };
+    let Some(filter_b) = &b.filters else {
+        return 0.0;
+    };
+    let l1 = multiset_l1(&filter_a.preorder_shingles, &filter_b.preorder_shingles);
+    if l1 == 0 {
+        return 0.0;
+    }
+    let max_changed_shingles_per_edit = 2 * PREORDER_SHINGLE_WIDTH;
+    let unit_cost = opts
+        .apted
+        .rename_cost
+        .min(opts.apted.insert_cost)
+        .min(opts.apted.delete_cost);
+    l1 as f64 * unit_cost / max_changed_shingles_per_edit as f64
+}
+
+fn multiset_l1<K>(a: &HashMap<K, usize>, b: &HashMap<K, usize>) -> usize
+where
+    K: std::hash::Hash + Eq,
+{
+    let mut total = 0usize;
+    for (key, count_a) in a {
+        let count_b = b.get(key).copied().unwrap_or(0);
+        total += count_a.abs_diff(count_b);
+    }
+    for (key, count_b) in b {
+        if !a.contains_key(key) {
+            total += count_b;
+        }
+    }
+    total
 }
 
 fn collect_changed_ranges(corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
@@ -442,6 +1055,8 @@ fn format_markdown(report: &Report<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
     use rstest::rstest;
     use std::io::Write;
     use std::path::PathBuf;
@@ -476,6 +1091,72 @@ fn beta(x: i32) -> i32 {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         path
+    }
+
+    fn arb_tree() -> impl Strategy<Value = lens_domain::TreeNode> {
+        let leaf = prop_oneof![
+            Just(lens_domain::TreeNode::leaf("A")),
+            Just(lens_domain::TreeNode::leaf("B")),
+            Just(lens_domain::TreeNode::leaf("C")),
+            Just(lens_domain::TreeNode::leaf("D")),
+            Just(lens_domain::TreeNode::leaf("E")),
+        ];
+        leaf.prop_recursive(4, 32, 4, |inner| {
+            (
+                prop_oneof![Just("A"), Just("B"), Just("C"), Just("D"), Just("E")],
+                vec(inner, 0..4),
+            )
+                .prop_map(|(label, children)| {
+                    lens_domain::TreeNode::with_children(label, "", children)
+                })
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn cheap_tsed_filters_do_not_drop_pairs_that_reach_threshold(
+            a in arb_tree(),
+            b in arb_tree(),
+            threshold in 0.0_f64..1.0,
+        ) {
+            let opts = TSEDOptions::default();
+            let profiles = vec![TreeProfile::from_tree(&a), TreeProfile::from_tree(&b)];
+            if let Some(filter) = tsed_upper_bound_filter(&profiles, 0, 1, threshold, &opts) {
+                let actual = lens_domain::calculate_tsed(&a, &b, &opts);
+                prop_assert!(
+                    actual < threshold + 1e-9,
+                    "filter {filter:?} dropped pair with TSED {actual} at threshold {threshold}: {a:?} {b:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cheap_filters_prune_structurally_unreachable_pairs() {
+        let a = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![
+                lens_domain::TreeNode::leaf("Let"),
+                lens_domain::TreeNode::leaf("Let"),
+                lens_domain::TreeNode::leaf("Return"),
+            ],
+        );
+        let b = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![
+                lens_domain::TreeNode::leaf("If"),
+                lens_domain::TreeNode::leaf("While"),
+                lens_domain::TreeNode::leaf("Match"),
+            ],
+        );
+        let profiles = vec![TreeProfile::from_tree(&a), TreeProfile::from_tree(&b)];
+        let filter = tsed_upper_bound_filter(&profiles, 0, 1, 0.9, &TSEDOptions::default());
+        assert!(matches!(
+            filter,
+            Some(CheapFilter::LabelMultiset | CheapFilter::PreorderShingle)
+        ));
     }
 
     fn assert_json_pair_report(out: &str) {

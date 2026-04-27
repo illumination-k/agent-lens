@@ -54,7 +54,10 @@ pub mod tree;
 pub mod tsed;
 pub mod wrapper;
 
-pub use apted::{APTEDOptions, compute_edit_distance};
+pub use apted::{
+    APTEDOptions, SubtreeSizes, collect_subtree_sizes, compute_edit_distance,
+    compute_edit_distance_with_subtree_sizes,
+};
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };
@@ -70,8 +73,8 @@ pub use function::{
     find_similar_pair_indices_with_strategy,
 };
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
-pub use lsh::{LshOptions, lsh_candidate_pairs};
+pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use naming::qualify;
 pub use tree::TreeNode;
-pub use tsed::{TSEDOptions, calculate_tsed};
+pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};
 pub use wrapper::{WrapperFinding, args_pass_through_by};

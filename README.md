@@ -286,18 +286,18 @@ command = "agent-lens codex-hook post-tool-use wrapper"
 
 ### Hook handlers
 
-| Agent       | Event           | Handler      | What it does                                                                                              |
-| ----------- | --------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
-| Claude Code | `SessionStart`  | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                                     |
-| Claude Code | `PreToolUse`    | `complexity` | Flags functions in the file about to be edited whose Cyclomatic / Cognitive / Nesting cross a threshold.  |
-| Claude Code | `PreToolUse`    | `cohesion`   | Flags `impl` blocks in the file about to be edited whose LCOM4 is greater than 1 (split-personality).     |
-| Claude Code | `PostToolUse`   | `similarity` | Reports near-duplicate function pairs in the file just edited.                                            |
-| Claude Code | `PostToolUse`   | `wrapper`    | Reports thin forwarding functions in the file just edited.                                                |
-| Codex       | `SessionStart`  | `summary`    | Same hotspot + coupling thumbnail at session start.                                                       |
-| Codex       | `PreToolUse`    | `complexity` | Same complexity heads-up across every file the upcoming `apply_patch` will touch.                         |
-| Codex       | `PreToolUse`    | `cohesion`   | Same LCOM4 heads-up across the touched files.                                                             |
-| Codex       | `PostToolUse`   | `similarity` | Reports near-duplicate function pairs across every file the latest `apply_patch` touched.                 |
-| Codex       | `PostToolUse`   | `wrapper`    | Reports thin forwarding functions across the touched files.                                               |
+| Agent       | Event          | Handler      | What it does                                                                                             |
+| ----------- | -------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
+| Claude Code | `SessionStart` | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                                    |
+| Claude Code | `PreToolUse`   | `complexity` | Flags functions in the file about to be edited whose Cyclomatic / Cognitive / Nesting cross a threshold. |
+| Claude Code | `PreToolUse`   | `cohesion`   | Flags `impl` blocks in the file about to be edited whose LCOM4 is greater than 1 (split-personality).    |
+| Claude Code | `PostToolUse`  | `similarity` | Reports near-duplicate function pairs in the file just edited.                                           |
+| Claude Code | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                                               |
+| Codex       | `SessionStart` | `summary`    | Same hotspot + coupling thumbnail at session start.                                                      |
+| Codex       | `PreToolUse`   | `complexity` | Same complexity heads-up across every file the upcoming `apply_patch` will touch.                        |
+| Codex       | `PreToolUse`   | `cohesion`   | Same LCOM4 heads-up across the touched files.                                                            |
+| Codex       | `PostToolUse`  | `similarity` | Reports near-duplicate function pairs across every file the latest `apply_patch` touched.                |
+| Codex       | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions across the touched files.                                              |
 
 Schemas for the remaining events (`UserPromptSubmit`, `Stop`, `SubagentStop`,
 and Codex's `PermissionRequest`) live in the `agent-hooks` crate, ready for

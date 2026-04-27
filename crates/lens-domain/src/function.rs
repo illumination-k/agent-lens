@@ -11,11 +11,17 @@
 //! down and makes the "these N functions are all near-duplicates of each
 //! other" signal explicit.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::time::Instant;
+
+use rayon::prelude::*;
 
 use crate::lsh::{LshOptions, lsh_candidate_pairs};
 use crate::tree::TreeNode;
 use crate::tsed::{TSEDOptions, calculate_tsed};
+
+const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
 
 /// A single function extracted from a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +182,7 @@ pub fn find_similar_pair_indices_with_strategy(
     opts: &TSEDOptions,
     strategy: &CandidateStrategy,
 ) -> Vec<(usize, usize, f64)> {
+    let started = Instant::now();
     let use_lsh = strategy
         .lsh_min_functions
         .is_some_and(|min_n| functions.len() >= min_n);
@@ -184,13 +191,30 @@ pub fn find_similar_pair_indices_with_strategy(
     } else {
         enumerate_candidate_pairs(functions.len()).collect()
     };
-    candidates
-        .into_iter()
+    let candidate_count = candidates.len();
+    let candidate_elapsed = started.elapsed();
+    let score_started = Instant::now();
+    let mut pairs: Vec<_> = candidates
+        .into_par_iter()
         .filter_map(|(i, j)| {
             let similarity = calculate_tsed(&functions[i].tree, &functions[j].tree, opts);
             (similarity >= threshold).then_some((i, j, similarity))
         })
-        .collect()
+        .collect();
+    pairs.sort_by_key(|(i, j, _)| (*i, *j));
+    tracing::debug!(
+        target: PROFILE_TARGET,
+        functions = functions.len(),
+        threshold,
+        strategy = if use_lsh { "lsh" } else { "cartesian" },
+        candidate_count,
+        matched_pair_count = pairs.len(),
+        candidate_ms = candidate_elapsed.as_secs_f64() * 1000.0,
+        score_ms = score_started.elapsed().as_secs_f64() * 1000.0,
+        total_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "similarity pair scoring finished"
+    );
+    pairs
 }
 
 /// Group `(index_a, index_b, similarity)` triples into complete-link clusters
@@ -206,7 +230,15 @@ pub fn find_similar_pair_indices_with_strategy(
 /// still come back as 2-clusters; items not present in any pair are not
 /// returned. Clusters are sorted by `max_similarity` desc, then by size desc.
 pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> Vec<SimilarCluster> {
+    let started = Instant::now();
     if pairs.is_empty() {
+        tracing::debug!(
+            target: PROFILE_TARGET,
+            pair_count = 0usize,
+            cluster_count = 0usize,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity clustering skipped"
+        );
         return Vec::new();
     }
 
@@ -246,13 +278,37 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
             .or_insert(*s);
     }
 
-    // Each slot holds the current cluster (sorted local indices) or `None`
-    // once it has been merged into another. Avoiding union-find here keeps
-    // the complete-link min lookup straightforward; for the small N typical
-    // of similarity output this is plenty fast.
-    let mut slots: Vec<Option<Vec<usize>>> = (0..active.len()).map(|li| Some(vec![li])).collect();
+    let full_pair_count = complete_pair_count(active.len());
+    if active.len() >= 2 && sim.len() == full_pair_count {
+        let (min_similarity, max_similarity) = sim_minmax(sim.values().copied());
+        let out = vec![SimilarCluster {
+            members: active,
+            min_similarity,
+            max_similarity,
+        }];
+        tracing::debug!(
+            target: PROFILE_TARGET,
+            pair_count = pairs.len(),
+            active_count = out[0].members.len(),
+            cluster_count = out.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity clustering finished"
+        );
+        return out;
+    }
 
-    while let Some((ci, cj)) = find_best_merge(&slots, &sim, threshold) {
+    // Each slot holds the current cluster (sorted local indices) or `None`
+    // once it has been merged into another.
+    let mut slots: Vec<Option<Vec<usize>>> = (0..active.len()).map(|li| Some(vec![li])).collect();
+    let mut cluster_sim = sim.clone();
+    let mut heap = BinaryHeap::with_capacity(cluster_sim.len());
+    for (&(ci, cj), &score) in &cluster_sim {
+        if score >= threshold {
+            heap.push(MergeCandidate { score, ci, cj });
+        }
+    }
+
+    while let Some((ci, cj)) = pop_best_merge(&mut heap, &slots, &cluster_sim, threshold) {
         let Some(mut moved) = slots[cj].take() else {
             break;
         };
@@ -260,6 +316,7 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
             target.append(&mut moved);
             target.sort();
         }
+        update_cluster_similarities(ci, cj, &slots, threshold, &mut cluster_sim, &mut heap);
     }
 
     let mut out: Vec<SimilarCluster> = slots
@@ -282,6 +339,14 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(b.members.len().cmp(&a.members.len()))
     });
+    tracing::debug!(
+        target: PROFILE_TARGET,
+        pair_count = pairs.len(),
+        active_count = active.len(),
+        cluster_count = out.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "similarity clustering finished"
+    );
     out
 }
 
@@ -297,52 +362,123 @@ fn sorted_key(a: usize, b: usize) -> (usize, usize) {
     if a < b { (a, b) } else { (b, a) }
 }
 
-/// Find the best mergeable cluster pair: highest complete-link similarity
-/// (= min cross-cluster pair) above `threshold`. Ties break on lowest
-/// `(ci, cj)` so the output stays deterministic.
-fn find_best_merge(
-    slots: &[Option<Vec<usize>>],
-    sim: &HashMap<(usize, usize), f64>,
-    threshold: f64,
-) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize, f64)> = None;
-    for (ci, slot_a) in slots.iter().enumerate() {
-        let Some(a) = slot_a.as_ref() else {
-            continue;
-        };
-        for (cj, slot_b) in slots.iter().enumerate().skip(ci + 1) {
-            let Some(b) = slot_b.as_ref() else {
-                continue;
-            };
-            let Some(min_cross) = complete_link_min(a, b, sim) else {
-                continue;
-            };
-            if min_cross < threshold {
-                continue;
-            }
-            best = Some(match best {
-                Some((bi, bj, prev)) if prev >= min_cross => (bi, bj, prev),
-                _ => (ci, cj, min_cross),
-            });
-        }
-    }
-    best.map(|(ci, cj, _)| (ci, cj))
+fn complete_pair_count(n: usize) -> usize {
+    n.saturating_mul(n.saturating_sub(1)) / 2
 }
 
-/// Minimum similarity across every (a-member × b-member) pair, or `None`
-/// when any pair is absent from `sim` (i.e., was below threshold). A
-/// missing pair makes a complete-link merge invalid.
-fn complete_link_min(a: &[usize], b: &[usize], sim: &HashMap<(usize, usize), f64>) -> Option<f64> {
-    let mut min_cross = f64::INFINITY;
-    for &x in a {
-        for &y in b {
-            let s = sim.get(&sorted_key(x, y)).copied()?;
-            if s < min_cross {
-                min_cross = s;
-            }
+fn sim_minmax(values: impl IntoIterator<Item = f64>) -> (f64, f64) {
+    let mut min_s = f64::INFINITY;
+    let mut max_s = f64::NEG_INFINITY;
+    for s in values {
+        if s < min_s {
+            min_s = s;
+        }
+        if s > max_s {
+            max_s = s;
         }
     }
-    Some(min_cross)
+    (min_s, max_s)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MergeCandidate {
+    score: f64,
+    ci: usize,
+    cj: usize,
+}
+
+impl PartialEq for MergeCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.total_cmp(&other.score) == Ordering::Equal
+            && self.ci == other.ci
+            && self.cj == other.cj
+    }
+}
+
+impl Eq for MergeCandidate {}
+
+impl PartialOrd for MergeCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MergeCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .total_cmp(&other.score)
+            // BinaryHeap is max-first; reverse indices so lower `(ci, cj)`
+            // wins ties, matching the previous full-scan behaviour.
+            .then_with(|| other.ci.cmp(&self.ci))
+            .then_with(|| other.cj.cmp(&self.cj))
+    }
+}
+
+/// Return the best live merge candidate: highest complete-link similarity
+/// (= min cross-cluster pair) above `threshold`. Stale heap entries are
+/// discarded lazily after their cluster was merged or their score changed.
+fn pop_best_merge(
+    heap: &mut BinaryHeap<MergeCandidate>,
+    slots: &[Option<Vec<usize>>],
+    cluster_sim: &HashMap<(usize, usize), f64>,
+    threshold: f64,
+) -> Option<(usize, usize)> {
+    while let Some(candidate) = heap.pop() {
+        if candidate.score < threshold {
+            return None;
+        }
+        if slots.get(candidate.ci).is_none_or(Option::is_none)
+            || slots.get(candidate.cj).is_none_or(Option::is_none)
+        {
+            continue;
+        }
+        let Some(&current) = cluster_sim.get(&sorted_key(candidate.ci, candidate.cj)) else {
+            continue;
+        };
+        if current.total_cmp(&candidate.score) != Ordering::Equal {
+            continue;
+        }
+        return Some((candidate.ci, candidate.cj));
+    }
+    None
+}
+
+fn update_cluster_similarities(
+    kept: usize,
+    removed: usize,
+    slots: &[Option<Vec<usize>>],
+    threshold: f64,
+    cluster_sim: &mut HashMap<(usize, usize), f64>,
+    heap: &mut BinaryHeap<MergeCandidate>,
+) {
+    cluster_sim.remove(&sorted_key(kept, removed));
+    for (other, slot) in slots.iter().enumerate() {
+        if other == kept || other == removed || slot.is_none() {
+            continue;
+        }
+        let kept_key = sorted_key(kept, other);
+        let removed_key = sorted_key(removed, other);
+        let next = match (
+            cluster_sim.get(&kept_key).copied(),
+            cluster_sim.remove(&removed_key),
+        ) {
+            (Some(a), Some(b)) => a.min(b),
+            _ => {
+                cluster_sim.remove(&kept_key);
+                continue;
+            }
+        };
+        if next >= threshold {
+            cluster_sim.insert(kept_key, next);
+            heap.push(MergeCandidate {
+                score: next,
+                ci: kept_key.0,
+                cj: kept_key.1,
+            });
+        } else {
+            cluster_sim.remove(&kept_key);
+        }
+    }
 }
 
 fn internal_minmax(members: &[usize], sim: &HashMap<(usize, usize), f64>) -> (f64, f64) {

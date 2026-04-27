@@ -7,5 +7,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+rayon = { workspace = true }
+tracing = { workspace = true }
+
 [dev-dependencies]
+proptest = { workspace = true }
 rstest = { workspace = true }

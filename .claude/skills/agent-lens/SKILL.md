@@ -9,15 +9,15 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 
 ## Pick the analyzer
 
-| Question                                            | Subcommand     | Path argument                              |
-| --------------------------------------------------- | -------------- | ------------------------------------------ |
-| Are there near-duplicate functions?                 | `similarity`   | `.rs` / `.ts` / `.js` / `.py` file or dir  |
-| Are there forwarding-only functions worth inlining? | `wrapper`      | `.rs` / `.ts` / `.js` / `.py` file or dir  |
-| Which classes/`impl` blocks are doing too many things? | `cohesion`  | `.rs` / `.ts` / `.js` / `.py` file or dir  |
-| Which functions are landmines to edit?              | `complexity`   | `.rs` / `.ts` / `.js` / `.py` file or dir  |
-| Which modules are Fan-In bottlenecks or cyclic?     | `coupling`     | crate root or directory                    |
-| How many files must I read to understand a module?  | `context-span` | crate root or directory                    |
-| Where do churn and complexity collide?              | `hotspot`      | git-tracked file or directory              |
+| Question                                               | Subcommand     | Path argument                             |
+| ------------------------------------------------------ | -------------- | ----------------------------------------- |
+| Are there near-duplicate functions?                    | `similarity`   | `.rs` / `.ts` / `.js` / `.py` file or dir |
+| Are there forwarding-only functions worth inlining?    | `wrapper`      | `.rs` / `.ts` / `.js` / `.py` file or dir |
+| Which classes/`impl` blocks are doing too many things? | `cohesion`     | `.rs` / `.ts` / `.js` / `.py` file or dir |
+| Which functions are landmines to edit?                 | `complexity`   | `.rs` / `.ts` / `.js` / `.py` file or dir |
+| Which modules are Fan-In bottlenecks or cyclic?        | `coupling`     | crate root or directory                   |
+| How many files must I read to understand a module?     | `context-span` | crate root or directory                   |
+| Where do churn and complexity collide?                 | `hotspot`      | git-tracked file or directory             |
 
 `similarity` / `wrapper` / `cohesion` / `complexity` work on Rust, TypeScript / JavaScript, and Python. `coupling`, `context-span`, and `hotspot` (Rust filter) are Rust-only.
 
