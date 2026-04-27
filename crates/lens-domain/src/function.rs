@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::lsh::{LshOptions, lsh_candidate_pairs};
 use crate::tree::TreeNode;
 use crate::tsed::{TSEDOptions, calculate_tsed};
 
@@ -114,20 +115,77 @@ pub fn find_similar_functions<'a>(
     pairs
 }
 
-/// Compute pairwise similarity for every candidate pair in `functions` and
+/// Strategy for generating candidate pairs before TSED scoring.
+///
+/// The cartesian product is fastest at small N because LSH preprocessing
+/// (signature computation, bucketing) costs more than it saves. Past a
+/// couple hundred functions the dominant cost flips to per-pair TSED, and
+/// the LSH pre-filter cuts the number of pairs that get scored by an
+/// order of magnitude or more. `Default` picks based on `functions.len()`.
+#[derive(Debug, Clone)]
+pub struct CandidateStrategy {
+    /// Switch to LSH when `functions.len() >= lsh_min_functions`. `None`
+    /// disables LSH entirely (always full cartesian product); useful in
+    /// tests that want the deterministic pair set.
+    pub lsh_min_functions: Option<usize>,
+    /// Tuning for the LSH path. Ignored when `lsh_min_functions` is `None`
+    /// or `functions.len()` is below it.
+    pub lsh: LshOptions,
+}
+
+impl Default for CandidateStrategy {
+    fn default() -> Self {
+        // ~200 functions ≈ 19,900 pairs at full cartesian. Below this the
+        // cartesian path is fastest in practice; above it LSH starts
+        // earning its preprocessing cost.
+        Self {
+            lsh_min_functions: Some(200),
+            lsh: LshOptions::default(),
+        }
+    }
+}
+
+/// Compute pairwise similarity for the candidate pairs in `functions` and
 /// return the `(i, j, similarity)` triples that exceed `threshold`.
 ///
 /// Lower-level building block shared by [`find_similar_functions`] (which
 /// materialises [`SimilarPair`]s with references) and clustering callers
-/// (which only need indices). Routing both paths through one candidate
-/// generator means an LSH-based pre-filter can be plugged into
-/// [`enumerate_candidate_pairs`] later without touching downstream code.
+/// (which only need indices). Auto-selects between the cartesian product
+/// and an LSH-based candidate filter via [`CandidateStrategy::default`];
+/// for explicit control use [`find_similar_pair_indices_with_strategy`].
 pub fn find_similar_pair_indices(
     functions: &[FunctionDef],
     threshold: f64,
     opts: &TSEDOptions,
 ) -> Vec<(usize, usize, f64)> {
-    enumerate_candidate_pairs(functions.len())
+    find_similar_pair_indices_with_strategy(
+        functions,
+        threshold,
+        opts,
+        &CandidateStrategy::default(),
+    )
+}
+
+/// [`find_similar_pair_indices`] with an explicit `strategy`. Prefer the
+/// auto-dispatching wrapper unless you need to force a specific path
+/// (most callers — and every test that snapshots TSED scores — should use
+/// the wrapper).
+pub fn find_similar_pair_indices_with_strategy(
+    functions: &[FunctionDef],
+    threshold: f64,
+    opts: &TSEDOptions,
+    strategy: &CandidateStrategy,
+) -> Vec<(usize, usize, f64)> {
+    let use_lsh = strategy
+        .lsh_min_functions
+        .is_some_and(|min_n| functions.len() >= min_n);
+    let candidates: Vec<(usize, usize)> = if use_lsh {
+        lsh_candidate_pairs(functions, &strategy.lsh)
+    } else {
+        enumerate_candidate_pairs(functions.len()).collect()
+    };
+    candidates
+        .into_iter()
         .filter_map(|(i, j)| {
             let similarity = calculate_tsed(&functions[i].tree, &functions[j].tree, opts);
             (similarity >= threshold).then_some((i, j, similarity))
@@ -478,6 +536,73 @@ mod tests {
         assert_eq!(clusters.len(), 2);
         assert!(clusters[0].max_similarity >= clusters[1].max_similarity);
         assert_eq!(clusters[0].members, vec![10, 11]);
+    }
+
+    #[test]
+    fn strategy_default_uses_cartesian_below_threshold() {
+        // Below the auto-LSH threshold the strategy's behaviour should
+        // match the deterministic cartesian path: every pair is scored,
+        // and an identical-pair has score 1.0.
+        let funcs = vec![
+            def("a", fn_tree(&["Let", "Call", "Return"])),
+            def("b", fn_tree(&["Let", "Call", "Return"])),
+        ];
+        let pairs = find_similar_pair_indices(&funcs, 0.5, &TSEDOptions::default());
+        assert_eq!(pairs.len(), 1);
+        assert_eq!((pairs[0].0, pairs[0].1), (0, 1));
+        assert!((pairs[0].2 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn strategy_with_lsh_disabled_keeps_full_cartesian() {
+        // Forcing the LSH gate off must not change which pairs are
+        // returned (full O(N²) sweep).
+        let funcs = vec![
+            def("a", fn_tree(&["Let", "Call", "Return"])),
+            def("b", fn_tree(&["Let", "Call", "Return"])),
+            def("c", fn_tree(&["If", "While", "Match"])),
+        ];
+        let strategy = CandidateStrategy {
+            lsh_min_functions: None,
+            ..Default::default()
+        };
+        let pairs = find_similar_pair_indices_with_strategy(
+            &funcs,
+            0.0,
+            &TSEDOptions::default(),
+            &strategy,
+        );
+        // Cartesian sees all 3 pairs; LSH might prune them.
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn strategy_with_lsh_forced_on_still_recovers_identicals() {
+        // Setting `lsh_min_functions: Some(0)` forces the LSH path even
+        // for tiny inputs. Identical functions must still emerge as a
+        // candidate pair after TSED scoring; otherwise a corpus past the
+        // auto-trip threshold would silently lose true near-duplicates.
+        let funcs = vec![
+            def("a", fn_tree(&["Let", "Call", "Add", "Mul", "Return"])),
+            def("b", fn_tree(&["Let", "Call", "Add", "Mul", "Return"])),
+            def("c", fn_tree(&["If", "While", "Match", "Break", "Loop"])),
+        ];
+        let strategy = CandidateStrategy {
+            lsh_min_functions: Some(0),
+            ..Default::default()
+        };
+        let pairs = find_similar_pair_indices_with_strategy(
+            &funcs,
+            0.85,
+            &TSEDOptions::default(),
+            &strategy,
+        );
+        // The (a, b) pair is identical so its TSED is 1.0; whatever LSH
+        // candidates other pairs contribute, this one must survive.
+        assert!(
+            pairs.iter().any(|(i, j, _)| (*i, *j) == (0, 1)),
+            "LSH path must keep recall on identicals: {pairs:?}",
+        );
     }
 
     #[test]
