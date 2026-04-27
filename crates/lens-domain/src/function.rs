@@ -278,6 +278,25 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
             .or_insert(*s);
     }
 
+    let full_pair_count = complete_pair_count(active.len());
+    if active.len() >= 2 && sim.len() == full_pair_count {
+        let (min_similarity, max_similarity) = sim_minmax(sim.values().copied());
+        let out = vec![SimilarCluster {
+            members: active,
+            min_similarity,
+            max_similarity,
+        }];
+        tracing::debug!(
+            target: PROFILE_TARGET,
+            pair_count = pairs.len(),
+            active_count = out[0].members.len(),
+            cluster_count = out.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity clustering finished"
+        );
+        return out;
+    }
+
     // Each slot holds the current cluster (sorted local indices) or `None`
     // once it has been merged into another.
     let mut slots: Vec<Option<Vec<usize>>> = (0..active.len()).map(|li| Some(vec![li])).collect();
@@ -341,6 +360,24 @@ fn enumerate_candidate_pairs(n: usize) -> impl Iterator<Item = (usize, usize)> {
 
 fn sorted_key(a: usize, b: usize) -> (usize, usize) {
     if a < b { (a, b) } else { (b, a) }
+}
+
+fn complete_pair_count(n: usize) -> usize {
+    n.saturating_mul(n.saturating_sub(1)) / 2
+}
+
+fn sim_minmax(values: impl IntoIterator<Item = f64>) -> (f64, f64) {
+    let mut min_s = f64::INFINITY;
+    let mut max_s = f64::NEG_INFINITY;
+    for s in values {
+        if s < min_s {
+            min_s = s;
+        }
+        if s > max_s {
+            max_s = s;
+        }
+    }
+    (min_s, max_s)
 }
 
 #[derive(Debug, Clone, Copy)]

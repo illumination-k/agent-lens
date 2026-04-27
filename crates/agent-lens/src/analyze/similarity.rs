@@ -148,8 +148,7 @@ impl SimilarityAnalyzer {
 
     fn collect_directory(&self, root: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
         let started = Instant::now();
-        let mut out = Vec::new();
-        let mut file_count = 0usize;
+        let mut files = Vec::new();
         for entry in WalkBuilder::new(root).build() {
             let entry = entry.map_err(|e| AnalyzerError::Io {
                 path: root.to_path_buf(),
@@ -162,18 +161,25 @@ impl SimilarityAnalyzer {
             if SourceLang::from_path(p).is_none() {
                 continue;
             }
-            // Display paths relative to the walk root so cross-file pair
-            // reports stay readable when the analyzer is pointed at a
-            // deep directory.
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            file_count += 1;
-            out.extend(self.collect_file(p, Some(rel))?);
+            files.push(p.to_path_buf());
         }
+        files.sort();
+
+        let parsed: Vec<Vec<OwnedFunction>> = files
+            .par_iter()
+            .map(|p| {
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap_or(p)
+                    .display()
+                    .to_string()
+                    .replace('\\', "/");
+                self.collect_file(p, Some(rel))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let out: Vec<_> = parsed.into_iter().flatten().collect();
+        let file_count = files.len();
         debug!(
             target: PROFILE_TARGET,
             root = %root.display(),
@@ -234,9 +240,16 @@ impl SimilarityAnalyzer {
         } else {
             HashMap::new()
         };
+        let use_lsh_profiles = similarity_uses_lsh(eligible_function_count(corpus, self.min_lines));
         let profiles: Vec<TreeProfile> = corpus
             .iter()
-            .map(|f| TreeProfile::from_tree(&f.def.tree))
+            .map(|f| {
+                if use_lsh_profiles {
+                    TreeProfile::from_tree_for_scoring(&f.def.tree)
+                } else {
+                    TreeProfile::from_tree(&f.def.tree)
+                }
+            })
             .collect();
         let candidate_started = Instant::now();
         let candidates = candidate_pairs(
@@ -391,11 +404,16 @@ impl ScoreStats {
 #[derive(Debug)]
 struct TreeProfile {
     size: usize,
+    subtree_sizes: lens_domain::SubtreeSizes,
+    filters: Option<TreeFilterProfile>,
+}
+
+#[derive(Debug)]
+struct TreeFilterProfile {
     label_counts: HashMap<u64, usize>,
     preorder_shingles: HashMap<u64, usize>,
     child_sizes: Vec<usize>,
     root_arity: usize,
-    subtree_sizes: lens_domain::SubtreeSizes,
 }
 
 impl TreeProfile {
@@ -405,6 +423,34 @@ impl TreeProfile {
             .get(&(std::ptr::from_ref::<lens_domain::TreeNode>(tree) as usize))
             .copied()
             .unwrap_or(0);
+        let filters = TreeFilterProfile::from_tree(tree, size, &subtree_sizes);
+        Self {
+            size,
+            subtree_sizes,
+            filters: Some(filters),
+        }
+    }
+
+    fn from_tree_for_scoring(tree: &lens_domain::TreeNode) -> Self {
+        let subtree_sizes = collect_subtree_sizes(tree);
+        let size = subtree_sizes
+            .get(&(std::ptr::from_ref::<lens_domain::TreeNode>(tree) as usize))
+            .copied()
+            .unwrap_or(0);
+        Self {
+            size,
+            subtree_sizes,
+            filters: None,
+        }
+    }
+}
+
+impl TreeFilterProfile {
+    fn from_tree(
+        tree: &lens_domain::TreeNode,
+        size: usize,
+        subtree_sizes: &lens_domain::SubtreeSizes,
+    ) -> Self {
         let mut labels = Vec::with_capacity(size);
         collect_preorder_label_hashes(tree, &mut labels);
         let mut label_counts = HashMap::new();
@@ -422,12 +468,10 @@ impl TreeProfile {
             })
             .collect();
         Self {
-            size,
             label_counts,
             preorder_shingles,
             child_sizes,
             root_arity: tree.children.len(),
-            subtree_sizes,
         }
     }
 }
@@ -551,15 +595,13 @@ fn candidate_pairs(
     // cover the exact setting here; tighter banding has missed one-label
     // near-clones that still clear the analyzer threshold.
     strategy.lsh.num_bands = 24;
-    let use_lsh = strategy
-        .lsh_min_functions
-        .is_some_and(|min_n| eligible_indices.len() >= min_n);
+    let use_lsh = strategy_uses_lsh(&strategy, eligible_indices.len());
     let (pairs, filter_counts) = if use_lsh {
         let trees: Vec<&lens_domain::TreeNode> = eligible_indices
             .iter()
             .filter_map(|&i| corpus.get(i).map(|f| &f.def.tree))
             .collect();
-        filter_tsed_compatible_pairs(
+        filter_size_compatible_pairs(
             lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
                 .into_iter()
                 .filter_map(|(i, j)| {
@@ -595,6 +637,47 @@ fn candidate_pairs(
             CandidatePairStrategy::Cartesian
         },
     }
+}
+
+fn eligible_function_count(corpus: &[OwnedFunction], min_lines: usize) -> usize {
+    corpus
+        .iter()
+        .filter(|function| function.def.line_count() >= min_lines)
+        .count()
+}
+
+fn similarity_uses_lsh(eligible_count: usize) -> bool {
+    strategy_uses_lsh(&CandidateStrategy::default(), eligible_count)
+}
+
+fn strategy_uses_lsh(strategy: &CandidateStrategy, eligible_count: usize) -> bool {
+    strategy
+        .lsh_min_functions
+        .is_some_and(|min_n| eligible_count >= min_n)
+}
+
+fn filter_size_compatible_pairs(
+    pairs: impl IntoIterator<Item = (usize, usize)>,
+    profiles: &[TreeProfile],
+    threshold: f64,
+    opts: &TSEDOptions,
+) -> (Vec<(usize, usize)>, CheapFilterCounts) {
+    let mut out = Vec::new();
+    let mut counts = CheapFilterCounts::default();
+    for (i, j) in pairs {
+        let Some(profile_a) = profiles.get(i) else {
+            continue;
+        };
+        let Some(profile_b) = profiles.get(j) else {
+            continue;
+        };
+        if tsed_upper_bound(profile_a, profile_b, 0.0, opts.size_penalty) < threshold {
+            counts.size += 1;
+        } else {
+            out.push((i, j));
+        }
+    }
+    (out, counts)
 }
 
 fn filter_tsed_compatible_pairs(
@@ -677,7 +760,13 @@ fn label_multiset_distance_lower_bound(
     b: &TreeProfile,
     opts: &TSEDOptions,
 ) -> f64 {
-    let l1 = multiset_l1(&a.label_counts, &b.label_counts);
+    let Some(filter_a) = &a.filters else {
+        return 0.0;
+    };
+    let Some(filter_b) = &b.filters else {
+        return 0.0;
+    };
+    let l1 = multiset_l1(&filter_a.label_counts, &filter_b.label_counts);
     // A rename can fix at most one missing and one extra label. Insert and
     // delete each change one multiset slot; use the cheapest per-slot cost.
     let per_delta_cost = opts
@@ -693,19 +782,25 @@ fn root_child_arity_distance_lower_bound(
     b: &TreeProfile,
     opts: &TSEDOptions,
 ) -> f64 {
-    if a.root_arity == b.root_arity {
+    let Some(filter_a) = &a.filters else {
+        return 0.0;
+    };
+    let Some(filter_b) = &b.filters else {
+        return 0.0;
+    };
+    if filter_a.root_arity == filter_b.root_arity {
         return 0.0;
     }
-    let (extra, edit_side, unit_cost) = if a.root_arity > b.root_arity {
+    let (extra, edit_side, unit_cost) = if filter_a.root_arity > filter_b.root_arity {
         (
-            a.root_arity - b.root_arity,
-            &a.child_sizes,
+            filter_a.root_arity - filter_b.root_arity,
+            &filter_a.child_sizes,
             opts.apted.delete_cost,
         )
     } else {
         (
-            b.root_arity - a.root_arity,
-            &b.child_sizes,
+            filter_b.root_arity - filter_a.root_arity,
+            &filter_b.child_sizes,
             opts.apted.insert_cost,
         )
     };
@@ -719,7 +814,13 @@ fn preorder_shingle_distance_lower_bound(
     b: &TreeProfile,
     opts: &TSEDOptions,
 ) -> f64 {
-    let l1 = multiset_l1(&a.preorder_shingles, &b.preorder_shingles);
+    let Some(filter_a) = &a.filters else {
+        return 0.0;
+    };
+    let Some(filter_b) = &b.filters else {
+        return 0.0;
+    };
+    let l1 = multiset_l1(&filter_a.preorder_shingles, &filter_b.preorder_shingles);
     if l1 == 0 {
         return 0.0;
     }

@@ -106,9 +106,15 @@ pub fn lsh_candidate_pairs_for_trees(
         }
     }
 
+    const DEDUP_BUCKET_MIN_SIZE: usize = 64;
+
     let mut candidates: HashSet<(usize, usize)> = HashSet::new();
+    let mut expanded_buckets: HashSet<Vec<usize>> = HashSet::new();
     for indices in buckets.into_values() {
         if indices.len() < 2 {
+            continue;
+        }
+        if indices.len() >= DEDUP_BUCKET_MIN_SIZE && !expanded_buckets.insert(indices.clone()) {
             continue;
         }
         for (pos, &i) in indices.iter().enumerate() {
