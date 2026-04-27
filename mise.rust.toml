@@ -47,6 +47,16 @@ run = "cargo test --doc --locked --all-features --workspace"
 description = "Run mutation tests with cargo-mutants (slow; use --in-diff origin/main for PRs)"
 run = "cargo mutants --workspace --no-shuffle"
 
+[tasks."mutants:rust:diff"]
+description = "Run cargo-mutants only on lines changed vs a base git ref (default: main)"
+run = '''
+set -euo pipefail
+base="${1:-main}"
+mkdir -p target
+git diff "$base" -- '*.rs' > target/mutants-diff.patch
+cargo mutants --workspace --no-shuffle --in-diff target/mutants-diff.patch
+'''
+
 [tasks."ci:rust"]
 description = "Run Rust lint and test tasks"
 depends = ["lint:rust", "test:rust", "test:rust:doc"]
