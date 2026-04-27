@@ -246,6 +246,11 @@ fn analyze_tail(
         end_line: line_index.line(end_offset),
         callee,
         adapters,
+        // The TS detector only ever accepts a single tail expression
+        // (`return EXPR;`, `EXPR;`, or an expression-bodied arrow), so
+        // the visible body is structurally a single statement.
+        statement_count: 1,
+        reuse: None,
     })
 }
 

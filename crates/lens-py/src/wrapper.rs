@@ -159,6 +159,11 @@ fn analyze(
         end_line,
         callee,
         adapters,
+        // The Python detector accepts only single-statement bodies
+        // (`return EXPR` or a bare expression), so the visible body is
+        // always one statement.
+        statement_count: 1,
+        reuse: None,
     })
 }
 
