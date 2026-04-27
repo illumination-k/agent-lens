@@ -33,8 +33,52 @@ impl HookEnvelope for CodexPreToolUse {
     type Input = PreToolUseInput;
     type Output = PreToolUseOutput;
 
+    /// Prepare every patched source file the analysers can reason about
+    /// *before* Codex applies the patch.
+    ///
+    /// Returns `Ok(vec![])` for "no opinion" cases — non-`apply_patch`
+    /// tools, missing patch text, or a patch that only touches files in
+    /// unsupported languages or only adds brand-new files.
     fn prepare_sources(input: &Self::Input) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-        prepare_edited_sources(input)
+        if input.tool_name != APPLY_PATCH_TOOL {
+            return Ok(Vec::new());
+        }
+        let Some(command) = extract_patch_command(&input.tool_input) else {
+            return Ok(Vec::new());
+        };
+
+        let rel_paths = parse_pre_edit_paths(&command);
+        let mut out = Vec::with_capacity(rel_paths.len());
+        for rel_path in rel_paths {
+            let rel = Path::new(&rel_path);
+            let Some(lang) = SourceLang::from_path(rel) else {
+                continue;
+            };
+            let abs_path = if rel.is_absolute() {
+                rel.to_path_buf()
+            } else {
+                input.context.cwd.join(rel)
+            };
+            let source = match std::fs::read_to_string(&abs_path) {
+                Ok(s) => s,
+                // The patch claims to update an existing file but it
+                // isn't on disk — for example a stale or speculative
+                // patch. Stay silent rather than failing the tool call.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(ReadEditedSourceError {
+                        path: abs_path,
+                        source,
+                    });
+                }
+            };
+            out.push(EditedSource {
+                rel_path,
+                lang,
+                source,
+            });
+        }
+        Ok(out)
     }
 
     fn wrap_report(report: String) -> Self::Output {
@@ -56,56 +100,6 @@ pub type CohesionHook = crate::hooks::core::CohesionHook<CodexPreToolUse>;
 pub type ComplexityError = crate::hooks::core::HookError;
 /// Re-exported for symmetry with the PostToolUse handlers.
 pub type CohesionError = crate::hooks::core::HookError;
-
-/// Prepare every patched source file the analysers can reason about
-/// *before* Codex applies the patch.
-///
-/// Returns `Ok(vec![])` for "no opinion" cases — non-`apply_patch`
-/// tools, missing patch text, or a patch that only touches files in
-/// unsupported languages or only adds brand-new files.
-pub(crate) fn prepare_edited_sources(
-    input: &PreToolUseInput,
-) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    if input.tool_name != APPLY_PATCH_TOOL {
-        return Ok(Vec::new());
-    }
-    let Some(command) = extract_patch_command(&input.tool_input) else {
-        return Ok(Vec::new());
-    };
-
-    let rel_paths = parse_pre_edit_paths(&command);
-    let mut out = Vec::with_capacity(rel_paths.len());
-    for rel_path in rel_paths {
-        let rel = Path::new(&rel_path);
-        let Some(lang) = SourceLang::from_path(rel) else {
-            continue;
-        };
-        let abs_path = if rel.is_absolute() {
-            rel.to_path_buf()
-        } else {
-            input.context.cwd.join(rel)
-        };
-        let source = match std::fs::read_to_string(&abs_path) {
-            Ok(s) => s,
-            // The patch claims to update an existing file but it isn't
-            // on disk — for example a stale or speculative patch. Stay
-            // silent rather than failing the tool call.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(ReadEditedSourceError {
-                    path: abs_path,
-                    source,
-                });
-            }
-        };
-        out.push(EditedSource {
-            rel_path,
-            lang,
-            source,
-        });
-    }
-    Ok(out)
-}
 
 fn extract_patch_command(tool_input: &serde_json::Value) -> Option<String> {
     tool_input

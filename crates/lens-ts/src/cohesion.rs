@@ -594,12 +594,12 @@ struct LocalNameWalker<'a> {
 
 impl LocalNameWalker<'_> {
     fn walk_stmt(&mut self, stmt: &Statement) {
+        // Per-kind dispatcher only — actual handling lives in the
+        // `walk_*` helpers below. Splitting them out keeps each helper at
+        // cognitive < 5 (the original `walk_stmt` was 46) without
+        // changing the observable behaviour.
         match stmt {
-            Statement::VariableDeclaration(v) => {
-                for d in &v.declarations {
-                    collect_binding_pattern_names(&d.id, self.locals);
-                }
-            }
+            Statement::VariableDeclaration(v) => self.collect_declaration_names(v),
             Statement::FunctionDeclaration(f) => {
                 if let Some(id) = &f.id {
                     self.locals.insert(id.name.to_string());
@@ -612,71 +612,73 @@ impl LocalNameWalker<'_> {
                     self.locals.insert(id.name.to_string());
                 }
             }
-            Statement::BlockStatement(b) => {
-                for s in &b.body {
-                    self.walk_stmt(s);
-                }
-            }
-            Statement::IfStatement(i) => {
-                self.walk_stmt(&i.consequent);
-                if let Some(alt) = &i.alternate {
-                    self.walk_stmt(alt);
-                }
-            }
+            Statement::BlockStatement(b) => self.walk_body(&b.body),
+            Statement::IfStatement(i) => self.walk_if(i),
             Statement::WhileStatement(w) => self.walk_stmt(&w.body),
             Statement::DoWhileStatement(d) => self.walk_stmt(&d.body),
-            Statement::ForStatement(f) => {
-                if let Some(ForStatementInit::VariableDeclaration(v)) = &f.init {
-                    for d in &v.declarations {
-                        collect_binding_pattern_names(&d.id, self.locals);
-                    }
-                }
-                self.walk_stmt(&f.body);
-            }
-            Statement::ForInStatement(f) => {
-                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
-                    for d in &v.declarations {
-                        collect_binding_pattern_names(&d.id, self.locals);
-                    }
-                }
-                self.walk_stmt(&f.body);
-            }
-            Statement::ForOfStatement(f) => {
-                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
-                    for d in &v.declarations {
-                        collect_binding_pattern_names(&d.id, self.locals);
-                    }
-                }
-                self.walk_stmt(&f.body);
-            }
-            Statement::SwitchStatement(s) => {
-                for case in &s.cases {
-                    for cs in &case.consequent {
-                        self.walk_stmt(cs);
-                    }
-                }
-            }
-            Statement::TryStatement(t) => {
-                for s in &t.block.body {
-                    self.walk_stmt(s);
-                }
-                if let Some(handler) = &t.handler {
-                    if let Some(param) = &handler.param {
-                        collect_binding_pattern_names(&param.pattern, self.locals);
-                    }
-                    for s in &handler.body.body {
-                        self.walk_stmt(s);
-                    }
-                }
-                if let Some(finalizer) = &t.finalizer {
-                    for s in &finalizer.body {
-                        self.walk_stmt(s);
-                    }
-                }
-            }
+            Statement::ForStatement(f) => self.walk_for(f),
+            Statement::ForInStatement(f) => self.walk_for_in_like(&f.left, &f.body),
+            Statement::ForOfStatement(f) => self.walk_for_in_like(&f.left, &f.body),
+            Statement::SwitchStatement(s) => self.walk_switch(s),
+            Statement::TryStatement(t) => self.walk_try(t),
             Statement::WithStatement(w) => self.walk_stmt(&w.body),
             Statement::LabeledStatement(l) => self.walk_stmt(&l.body),
             _ => {}
+        }
+    }
+
+    fn walk_body(&mut self, body: &[Statement]) {
+        for s in body {
+            self.walk_stmt(s);
+        }
+    }
+
+    fn collect_declaration_names(&mut self, v: &VariableDeclaration) {
+        for d in &v.declarations {
+            collect_binding_pattern_names(&d.id, self.locals);
+        }
+    }
+
+    fn walk_if(&mut self, i: &IfStatement) {
+        self.walk_stmt(&i.consequent);
+        if let Some(alt) = &i.alternate {
+            self.walk_stmt(alt);
+        }
+    }
+
+    fn walk_for(&mut self, f: &ForStatement) {
+        if let Some(ForStatementInit::VariableDeclaration(v)) = &f.init {
+            self.collect_declaration_names(v);
+        }
+        self.walk_stmt(&f.body);
+    }
+
+    /// Shared body for `for…in` and `for…of`: both bind from `left` and
+    /// then execute `body` once per iteration. Pulled out so the dispatch
+    /// stays a single arm per keyword.
+    fn walk_for_in_like(&mut self, left: &ForStatementLeft, body: &Statement) {
+        if let ForStatementLeft::VariableDeclaration(v) = left {
+            self.collect_declaration_names(v);
+        }
+        self.walk_stmt(body);
+    }
+
+    fn walk_switch(&mut self, s: &SwitchStatement) {
+        for case in &s.cases {
+            self.walk_body(&case.consequent);
+        }
+    }
+
+    fn walk_try(&mut self, t: &TryStatement) {
+        self.walk_body(&t.block.body);
+        if let Some(handler) = &t.handler {
+            if let Some(param) = &handler.param {
+                collect_binding_pattern_names(&param.pattern, self.locals);
+            }
+            self.walk_body(&handler.body.body);
+        }
+        if let Some(finalizer) = &t.finalizer {
+            self.walk_body(&finalizer.body);
         }
     }
 }

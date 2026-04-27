@@ -11,11 +11,13 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ignore::WalkBuilder;
 use lens_domain::WrapperFinding;
 use serde::Serialize;
 
-use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
+use super::{
+    AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, collect_files,
+    read_source,
+};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -39,7 +41,7 @@ impl WrapperAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let files = self.collect_file_reports(path)?;
+        let files = collect_files(path, |p, rel| self.analyze_file(p, rel))?;
         let report = Report::new(path, &files);
         match format {
             OutputFormat::Json => {
@@ -47,51 +49,6 @@ impl WrapperAnalyzer {
             }
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
-    }
-
-    /// Resolve `path` to a list of per-file reports. Single-file inputs
-    /// produce a one-element vec; directory inputs walk recursively,
-    /// honouring `.gitignore`. Files with no findings are dropped so the
-    /// output stays signal-dense.
-    fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
-        if path.is_dir() {
-            self.collect_directory(path)
-        } else {
-            Ok(self
-                .analyze_file(path, None)?
-                .into_iter()
-                .collect::<Vec<_>>())
-        }
-    }
-
-    fn collect_directory(&self, root: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
-        let mut out = Vec::new();
-        for entry in WalkBuilder::new(root).build() {
-            let entry = entry.map_err(|e| AnalyzerError::Io {
-                path: root.to_path_buf(),
-                source: std::io::Error::other(e),
-            })?;
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let p = entry.path();
-            if SourceLang::from_path(p).is_none() {
-                continue;
-            }
-            // Display paths relative to the walk root so per-file entries
-            // stay readable when the analyzer is pointed at a deep
-            // directory.
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            if let Some(report) = self.analyze_file(p, Some(rel))? {
-                out.push(report);
-            }
-        }
-        Ok(out)
     }
 
     /// Analyze a single file. Returns `None` when the file has no

@@ -526,10 +526,31 @@ fn write_stdout_line(report: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Read a hook payload from stdin and pull out the variant the caller
+/// expects. Routing the let-else dance through one helper keeps the six
+/// `run_*` dispatch functions identical except for the per-event match
+/// arms — which is where the actual work happens.
+fn read_hook_payload<I, V>(
+    extract: impl FnOnce(I) -> Option<V>,
+    expected: &'static str,
+) -> Result<V, Box<dyn std::error::Error>>
+where
+    I: serde::de::DeserializeOwned,
+{
+    let raw = read_stdin_json::<I>()?;
+    extract(raw).ok_or_else::<Box<dyn std::error::Error>, _>(|| {
+        format!("expected a {expected} hook payload on stdin").into()
+    })
+}
+
 fn run_session_start(cmd: SessionStartCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let ClaudeCodeHookInput::SessionStart(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
-        return Err("expected a SessionStart hook payload on stdin".into());
-    };
+    let input = read_hook_payload::<ClaudeCodeHookInput, _>(
+        |i| match i {
+            ClaudeCodeHookInput::SessionStart(p) => Some(p),
+            _ => None,
+        },
+        "SessionStart",
+    )?;
     let output = match cmd {
         SessionStartCommand::Summary => SessionStartSummaryHook::new().handle(input)?,
     };
@@ -537,9 +558,13 @@ fn run_session_start(cmd: SessionStartCommand) -> Result<(), Box<dyn std::error:
 }
 
 fn run_pre_tool_use(cmd: PreToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let ClaudeCodeHookInput::PreToolUse(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
-        return Err("expected a PreToolUse hook payload on stdin".into());
-    };
+    let input = read_hook_payload::<ClaudeCodeHookInput, _>(
+        |i| match i {
+            ClaudeCodeHookInput::PreToolUse(p) => Some(p),
+            _ => None,
+        },
+        "PreToolUse",
+    )?;
     let output = match cmd {
         PreToolUseCommand::Complexity => ComplexityHook::new().handle(input)?,
         PreToolUseCommand::Cohesion => CohesionHook::new().handle(input)?,
@@ -548,9 +573,13 @@ fn run_pre_tool_use(cmd: PreToolUseCommand) -> Result<(), Box<dyn std::error::Er
 }
 
 fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let ClaudeCodeHookInput::PostToolUse(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
-        return Err("expected a PostToolUse hook payload on stdin".into());
-    };
+    let input = read_hook_payload::<ClaudeCodeHookInput, _>(
+        |i| match i {
+            ClaudeCodeHookInput::PostToolUse(p) => Some(p),
+            _ => None,
+        },
+        "PostToolUse",
+    )?;
     let output = match cmd {
         PostToolUseCommand::Similarity => SimilarityHook::new().handle(input)?,
         PostToolUseCommand::Wrapper => WrapperHook::new().handle(input)?,
@@ -642,9 +671,13 @@ struct SetupApplyContext<'a> {
 }
 
 fn run_codex_pre_tool_use(cmd: CodexPreToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let CodexHookInput::PreToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
-        return Err("expected a Codex PreToolUse hook payload on stdin".into());
-    };
+    let input = read_hook_payload::<CodexHookInput, _>(
+        |i| match i {
+            CodexHookInput::PreToolUse(p) => Some(p),
+            _ => None,
+        },
+        "Codex PreToolUse",
+    )?;
     let output = match cmd {
         CodexPreToolUseCommand::Complexity => CodexPreComplexityHook::new().handle(input)?,
         CodexPreToolUseCommand::Cohesion => CodexPreCohesionHook::new().handle(input)?,
@@ -653,9 +686,13 @@ fn run_codex_pre_tool_use(cmd: CodexPreToolUseCommand) -> Result<(), Box<dyn std
 }
 
 fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let CodexHookInput::PostToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
-        return Err("expected a Codex PostToolUse hook payload on stdin".into());
-    };
+    let input = read_hook_payload::<CodexHookInput, _>(
+        |i| match i {
+            CodexHookInput::PostToolUse(p) => Some(p),
+            _ => None,
+        },
+        "Codex PostToolUse",
+    )?;
     let output = match cmd {
         CodexPostToolUseCommand::Similarity => CodexSimilarityHook::new().handle(input)?,
         CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
@@ -666,9 +703,13 @@ fn run_codex_post_tool_use(cmd: CodexPostToolUseCommand) -> Result<(), Box<dyn s
 fn run_codex_session_start(
     cmd: CodexSessionStartCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let CodexHookInput::SessionStart(input) = read_stdin_json::<CodexHookInput>()? else {
-        return Err("expected a Codex SessionStart hook payload on stdin".into());
-    };
+    let input = read_hook_payload::<CodexHookInput, _>(
+        |i| match i {
+            CodexHookInput::SessionStart(p) => Some(p),
+            _ => None,
+        },
+        "Codex SessionStart",
+    )?;
     let output = match cmd {
         CodexSessionStartCommand::Summary => CodexSessionStartSummaryHook::new().handle(input)?,
     };

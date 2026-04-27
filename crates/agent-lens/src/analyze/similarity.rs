@@ -13,14 +13,16 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
 use lens_domain::{
     FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, calculate_tsed, cluster_similar_pairs,
 };
 use lens_rust::{RustParser, extract_functions_excluding_tests};
 use serde::Serialize;
 
-use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
+use super::{
+    AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, collect_files,
+    read_source,
+};
 
 /// Default similarity threshold. Picked to match the cutoff used by the
 /// PostToolUse `similarity` hook so the on-demand analyzer reports the
@@ -121,39 +123,8 @@ impl SimilarityAnalyzer {
     /// per-file slice; directory inputs walk recursively, honouring
     /// `.gitignore`.
     fn collect_corpus(&self, path: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-        if path.is_dir() {
-            self.collect_directory(path)
-        } else {
-            self.collect_file(path, None)
-        }
-    }
-
-    fn collect_directory(&self, root: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-        let mut out = Vec::new();
-        for entry in WalkBuilder::new(root).build() {
-            let entry = entry.map_err(|e| AnalyzerError::Io {
-                path: root.to_path_buf(),
-                source: std::io::Error::other(e),
-            })?;
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let p = entry.path();
-            if SourceLang::from_path(p).is_none() {
-                continue;
-            }
-            // Display paths relative to the walk root so cross-file pair
-            // reports stay readable when the analyzer is pointed at a
-            // deep directory.
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            out.extend(self.collect_file(p, Some(rel))?);
-        }
-        Ok(out)
+        let per_file = collect_files(path, |p, rel| Ok(Some(self.collect_file(p, rel)?)))?;
+        Ok(per_file.into_iter().flatten().collect())
     }
 
     fn collect_file(
@@ -298,9 +269,11 @@ type ExtractError = Box<dyn std::error::Error + Send + Sync>;
 
 fn extract_rust(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        extract_functions_excluding_tests(source).map_err(box_err)
+        extract_functions_excluding_tests(source).map_err(|e| Box::new(e) as ExtractError)
     } else {
-        RustParser::new().extract_functions(source).map_err(box_err)
+        RustParser::new()
+            .extract_functions(source)
+            .map_err(|e| Box::new(e) as ExtractError)
     }
 }
 
@@ -310,28 +283,25 @@ fn extract_typescript(
     exclude_tests: bool,
 ) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        lens_ts::extract_functions_excluding_tests(source, dialect).map_err(box_err)
+        lens_ts::extract_functions_excluding_tests(source, dialect)
+            .map_err(|e| Box::new(e) as ExtractError)
     } else {
         <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
             &mut lens_ts::TypeScriptParser::with_dialect(dialect),
             source,
         )
-        .map_err(box_err)
+        .map_err(|e| Box::new(e) as ExtractError)
     }
 }
 
 fn extract_python(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        lens_py::extract_functions_excluding_tests(source).map_err(box_err)
+        lens_py::extract_functions_excluding_tests(source).map_err(|e| Box::new(e) as ExtractError)
     } else {
         lens_py::PythonParser::new()
             .extract_functions(source)
-            .map_err(box_err)
+            .map_err(|e| Box::new(e) as ExtractError)
     }
-}
-
-fn box_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> ExtractError {
-    Box::new(e)
 }
 
 #[derive(Debug, Serialize)]

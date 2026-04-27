@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-use crate::function::FunctionDef;
 use crate::tree::TreeNode;
 
 /// Configuration for [`lsh_candidate_pairs`].
@@ -57,15 +56,19 @@ impl Default for LshOptions {
     }
 }
 
-/// Generate candidate `(i, j)` pairs (`i < j`) from `functions` using
+/// Generate candidate `(i, j)` pairs (`i < j`) from `trees` using
 /// MinHash + banded LSH. Output is sorted for determinism.
 ///
 /// Candidates are an upper bound on the truly-similar pairs: every
 /// near-duplicate above the analyzer's similarity threshold is virtually
 /// guaranteed to be in the output, but the output also contains weakly-
 /// similar pairs that the downstream TSED filter will drop.
-pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<(usize, usize)> {
-    if functions.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
+///
+/// Takes the raw `TreeNode`s rather than higher-level `FunctionDef`s so
+/// `lsh` stays an unconditional dependency of `function` (and not the
+/// other way around).
+pub fn lsh_candidate_pairs(trees: &[&TreeNode], opts: &LshOptions) -> Vec<(usize, usize)> {
+    if trees.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
         return Vec::new();
     }
     let rows_per_band = opts.num_hashes / opts.num_bands;
@@ -73,10 +76,10 @@ pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<
         return Vec::new();
     }
     let family = HashFamily::new(opts.num_hashes, opts.seed);
-    let signatures: Vec<Vec<u64>> = functions
+    let signatures: Vec<Vec<u64>> = trees
         .iter()
-        .map(|f| {
-            let features = extract_shingles(&f.tree, opts.shingle_size);
+        .map(|t| {
+            let features = extract_shingles(t, opts.shingle_size);
             minhash_signature(&features, &family)
         })
         .collect();
@@ -213,17 +216,16 @@ fn minhash_signature(features: &HashSet<u64>, family: &HashFamily) -> Vec<u64> {
 mod tests {
     use super::*;
 
-    fn def(label_kinds: &[&str]) -> FunctionDef {
+    fn tree(label_kinds: &[&str]) -> TreeNode {
         let children = label_kinds
             .iter()
             .map(|k| TreeNode::leaf(*k))
             .collect::<Vec<_>>();
-        FunctionDef {
-            name: "f".into(),
-            start_line: 1,
-            end_line: 10,
-            tree: TreeNode::with_children("Block", "", children),
-        }
+        TreeNode::with_children("Block", "", children)
+    }
+
+    fn refs(trees: &[TreeNode]) -> Vec<&TreeNode> {
+        trees.iter().collect()
     }
 
     #[test]
@@ -233,8 +235,8 @@ mod tests {
 
     #[test]
     fn single_function_yields_no_candidates() {
-        let funcs = vec![def(&["Let", "Call", "Return"])];
-        assert!(lsh_candidate_pairs(&funcs, &LshOptions::default()).is_empty());
+        let trees = vec![tree(&["Let", "Call", "Return"])];
+        assert!(lsh_candidate_pairs(&refs(&trees), &LshOptions::default()).is_empty());
     }
 
     #[test]
@@ -242,11 +244,11 @@ mod tests {
         // The signatures are identical, so every band hashes to the same
         // bucket; the pair must surface as a candidate regardless of
         // tuning.
-        let funcs = vec![
-            def(&["Let", "Call", "Return"]),
-            def(&["Let", "Call", "Return"]),
+        let trees = vec![
+            tree(&["Let", "Call", "Return"]),
+            tree(&["Let", "Call", "Return"]),
         ];
-        let pairs = lsh_candidate_pairs(&funcs, &LshOptions::default());
+        let pairs = lsh_candidate_pairs(&refs(&trees), &LshOptions::default());
         assert_eq!(pairs, vec![(0, 1)]);
     }
 
@@ -255,35 +257,35 @@ mod tests {
         // The two trees share most of their preorder shingles. With the
         // default (K=128, B=32, R=4) tuning, recall should comfortably
         // pick this pair up.
-        let funcs = vec![
-            def(&["Let", "Call", "Add", "Mul", "Return", "Block"]),
-            def(&["Let", "Call", "Add", "Mul", "Return", "If"]),
+        let trees = vec![
+            tree(&["Let", "Call", "Add", "Mul", "Return", "Block"]),
+            tree(&["Let", "Call", "Add", "Mul", "Return", "If"]),
         ];
-        let pairs = lsh_candidate_pairs(&funcs, &LshOptions::default());
+        let pairs = lsh_candidate_pairs(&refs(&trees), &LshOptions::default());
         assert!(pairs.contains(&(0, 1)));
     }
 
     #[test]
     fn deterministic_across_runs() {
-        let funcs = vec![
-            def(&["Let", "Call", "Add", "Return"]),
-            def(&["Let", "Call", "Add", "Return"]),
-            def(&["If", "While", "Match"]),
+        let trees = vec![
+            tree(&["Let", "Call", "Add", "Return"]),
+            tree(&["Let", "Call", "Add", "Return"]),
+            tree(&["If", "While", "Match"]),
         ];
         let opts = LshOptions::default();
-        let first = lsh_candidate_pairs(&funcs, &opts);
-        let second = lsh_candidate_pairs(&funcs, &opts);
+        let first = lsh_candidate_pairs(&refs(&trees), &opts);
+        let second = lsh_candidate_pairs(&refs(&trees), &opts);
         assert_eq!(first, second);
     }
 
     #[test]
     fn output_pairs_are_sorted_and_have_i_lt_j() {
-        let funcs = vec![
-            def(&["A", "B", "C"]),
-            def(&["A", "B", "C"]),
-            def(&["A", "B", "C"]),
+        let trees = vec![
+            tree(&["A", "B", "C"]),
+            tree(&["A", "B", "C"]),
+            tree(&["A", "B", "C"]),
         ];
-        let pairs = lsh_candidate_pairs(&funcs, &LshOptions::default());
+        let pairs = lsh_candidate_pairs(&refs(&trees), &LshOptions::default());
         for (i, j) in &pairs {
             assert!(i < j, "expected i < j, got ({i}, {j})");
         }
@@ -296,48 +298,35 @@ mod tests {
     fn small_trees_fall_back_to_single_shingle() {
         // Trees too small for k=3 windows still need to produce a stable
         // feature so identical small functions stay matchable.
-        let funcs = vec![
-            FunctionDef {
-                name: "a".into(),
-                start_line: 1,
-                end_line: 1,
-                tree: TreeNode::leaf("Lit"),
-            },
-            FunctionDef {
-                name: "b".into(),
-                start_line: 1,
-                end_line: 1,
-                tree: TreeNode::leaf("Lit"),
-            },
-        ];
-        let pairs = lsh_candidate_pairs(&funcs, &LshOptions::default());
+        let trees = vec![TreeNode::leaf("Lit"), TreeNode::leaf("Lit")];
+        let pairs = lsh_candidate_pairs(&refs(&trees), &LshOptions::default());
         assert_eq!(pairs, vec![(0, 1)]);
     }
 
     #[test]
     fn zero_band_or_hash_count_returns_no_candidates() {
-        let funcs = vec![def(&["A", "B", "C"]), def(&["A", "B", "C"])];
+        let trees = vec![tree(&["A", "B", "C"]), tree(&["A", "B", "C"])];
         let opts = LshOptions {
             num_hashes: 0,
             ..Default::default()
         };
-        assert!(lsh_candidate_pairs(&funcs, &opts).is_empty());
+        assert!(lsh_candidate_pairs(&refs(&trees), &opts).is_empty());
         let opts = LshOptions {
             num_bands: 0,
             ..Default::default()
         };
-        assert!(lsh_candidate_pairs(&funcs, &opts).is_empty());
+        assert!(lsh_candidate_pairs(&refs(&trees), &opts).is_empty());
     }
 
     #[test]
     fn rows_per_band_zero_returns_no_candidates() {
         // num_bands > num_hashes ⇒ rows_per_band == 0 ⇒ defensively bail.
-        let funcs = vec![def(&["A", "B", "C"]), def(&["A", "B", "C"])];
+        let trees = vec![tree(&["A", "B", "C"]), tree(&["A", "B", "C"])];
         let opts = LshOptions {
             num_hashes: 4,
             num_bands: 8,
             ..Default::default()
         };
-        assert!(lsh_candidate_pairs(&funcs, &opts).is_empty());
+        assert!(lsh_candidate_pairs(&refs(&trees), &opts).is_empty());
     }
 }

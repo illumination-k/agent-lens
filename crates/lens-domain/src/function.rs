@@ -180,7 +180,8 @@ pub fn find_similar_pair_indices_with_strategy(
         .lsh_min_functions
         .is_some_and(|min_n| functions.len() >= min_n);
     let candidates: Vec<(usize, usize)> = if use_lsh {
-        lsh_candidate_pairs(functions, &strategy.lsh)
+        let trees: Vec<&TreeNode> = functions.iter().map(|f| &f.tree).collect();
+        lsh_candidate_pairs(&trees, &strategy.lsh)
     } else {
         enumerate_candidate_pairs(functions.len()).collect()
     };

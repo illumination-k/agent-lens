@@ -17,6 +17,8 @@ pub mod wrapper;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use ignore::WalkBuilder;
+
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use context_span::ContextSpanAnalyzer;
@@ -182,6 +184,52 @@ fn first_existing_file(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
         .iter()
         .map(|c| root.join(c))
         .find(|p| p.is_file())
+}
+
+/// Walk `path` (a single file or a directory) and accumulate one entry per
+/// supported source file. Directory mode walks recursively, honouring
+/// `.gitignore` via the `ignore` crate, and supplies each callback with a
+/// path display string relative to the walk root. `analyze_file` returns
+/// `None` for files that should be dropped from the output (e.g. when no
+/// findings survive the per-analyzer filter), so empty entries don't
+/// pollute directory reports.
+///
+/// Used by the per-language file-walking analyzers (similarity, wrapper,
+/// cohesion, complexity); the crate-level analyzers (coupling, context-span)
+/// take a single crate root instead.
+pub(crate) fn collect_files<T, F>(path: &Path, mut analyze_file: F) -> Result<Vec<T>, AnalyzerError>
+where
+    F: FnMut(&Path, Option<String>) -> Result<Option<T>, AnalyzerError>,
+{
+    if !path.is_dir() {
+        return Ok(analyze_file(path, None)?.into_iter().collect());
+    }
+    let mut out = Vec::new();
+    for entry in WalkBuilder::new(path).build() {
+        let entry = entry.map_err(|e| AnalyzerError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(e),
+        })?;
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let p = entry.path();
+        if SourceLang::from_path(p).is_none() {
+            continue;
+        }
+        // Display paths relative to the walk root so per-file entries stay
+        // readable when the analyzer is pointed at a deep directory.
+        let rel = p
+            .strip_prefix(path)
+            .unwrap_or(p)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        if let Some(item) = analyze_file(p, Some(rel))? {
+            out.push(item);
+        }
+    }
+    Ok(out)
 }
 
 /// Format an `Option<f64>` for markdown reports: `Some(x)` becomes
