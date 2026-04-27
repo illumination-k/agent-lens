@@ -16,6 +16,9 @@ This is not another lint tool. Lints tell humans how to write nicer code.
 `agent-lens` tells an LLM where the dangerous corners of your repo are, so it
 can plan around them.
 
+The project is pre-alpha. The API, CLI details, and report schemas are still
+allowed to change without a major version bump while the tool settles.
+
 ## Why
 
 Coding agents make decisions on partial context. They can read the file
@@ -113,6 +116,9 @@ agent-lens analyze similarity crates/lens-rust/src
 
 # Same, but emit a compact summary instead of the full JSON
 agent-lens analyze similarity src/foo.rs --format md --threshold 0.9
+
+# Drop test scaffolding and tiny functions before comparing
+agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
 
 # Analyze only functions touching unstaged diff hunks for this file
 agent-lens analyze similarity src/foo.rs --diff-only
@@ -384,6 +390,16 @@ mise run ci       # the full lint + test pipeline CI runs
 mise run mutants  # cargo-mutants (slow; not in CI by default)
 ```
 
+When adding or changing tests, prefer `rstest` for parameterized cases and
+fixture-style setup. Use property-based tests when regression risk is high,
+especially around core logic.
+
+Run diff-scoped mutation testing whenever practical for Rust logic changes.
+For example, create a patch with `git diff` and pass it to
+`mise exec -- cargo mutants --workspace --no-shuffle --in-diff <patch>`. If the
+changed code has Criterion benchmarks, report whether benchmark regression was
+checked and what the result was.
+
 CI (`.github/workflows/`) runs Rust lint/test (`ci_rust.yml`), the base
 toolchain lints (`lint_base.yml`), CodeQL, dependency review, Trivy,
 TruffleHog, SBOM generation, and PR-diff mutation testing
@@ -394,8 +410,8 @@ TruffleHog, SBOM generation, and PR-diff mutation testing
 - **Signal density over decoration.** Reports go to LLMs. Color, ASCII art,
   emoji, and human-only flourishes don't earn their tokens.
 - **One binary, many surfaces.** Hooks and analyzers ship together so the
-  install + config story is `cargo install agent-lens` plus one `settings.json`
-  block — nothing else.
+  install + config story stays simple across direct installs, mise, and hook
+  setup commands.
 - **Schema in one place.** Hook protocol types live in `agent-hooks` so a
   spec change is a one-crate update.
 - **Fail loudly.** Missing required fields error out non-zero. Unknown fields
@@ -403,11 +419,12 @@ TruffleHog, SBOM generation, and PR-diff mutation testing
 
 ## Roadmap
 
-`CLAUDE.md` carries the full catalog of metrics under consideration —
-Temporal Coupling, Code Age / Ownership, Public API Surface, Doc Coverage,
-Dead / Unused `pub`, Token Budget, Onboarding Cost. They're prioritised by
-_does this change how an agent decides what to do?_ rather than _does it
-look nice in a dashboard?_
+The near-term direction is to keep improving the analyzer surfaces that help
+agents make better edit decisions: duplication, wrappers, cohesion,
+complexity, coupling, context span, and hotspots.
+
+New metrics are prioritised by _does this change how an agent decides what to
+do?_ rather than _does it look nice in a dashboard?_
 
 An MCP server front-end is a likely next surface, but the CLI is the source
 of truth.
