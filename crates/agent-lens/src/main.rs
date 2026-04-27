@@ -146,14 +146,15 @@ enum PreToolUseCommand {
 enum PostToolUseCommand {
     /// Report similar function pairs in the file that was just edited.
     ///
-    /// The parser is chosen from the file extension (`.rs` today).
-    /// Files with an unsupported extension are ignored silently.
+    /// The parser is chosen from the file extension (`.rs` / `.ts` /
+    /// `.py`). Files with an unsupported extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
-    /// The parser is chosen from the file extension (`.rs` today).
-    /// Files with an unsupported extension are ignored silently.
+    /// The parser is chosen from the file extension (`.rs` / `.ts`).
+    /// Python is recognised but currently produces no findings. Files
+    /// with an unsupported extension are ignored silently.
     Wrapper,
 }
 
@@ -212,14 +213,16 @@ enum CodexPostToolUseCommand {
     /// Report similar function pairs across every file Codex's
     /// `apply_patch` just touched.
     ///
-    /// The parser is chosen from each file's extension (`.rs` today).
-    /// Files with an unsupported extension are ignored silently.
+    /// The parser is chosen from each file's extension (`.rs` / `.ts` /
+    /// `.py`). Files with an unsupported extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
-    /// Runs against every file Codex's `apply_patch` just touched.
-    /// Files with an unsupported extension are ignored silently.
+    /// Runs against every file Codex's `apply_patch` just touched. The
+    /// parser is chosen from each file's extension (`.rs` / `.ts`);
+    /// Python is recognised but currently produces no findings. Files
+    /// with an unsupported extension are ignored silently.
     Wrapper,
 }
 
@@ -256,9 +259,9 @@ enum CodexSessionStartCommand {
 enum AnalyzeCommand {
     /// Report LCOM4 cohesion units (one per `impl` block) for a source file.
     ///
-    /// The parser is chosen from the file extension (`.rs` today). The JSON
-    /// format is the default machine-readable output; `--format md` emits a
-    /// compact summary tuned for LLM context.
+    /// The parser is chosen from the file extension (`.rs` / `.ts` / `.py`).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
     Cohesion {
         /// Path to a source file to analyze.
         path: PathBuf,
@@ -274,9 +277,9 @@ enum AnalyzeCommand {
     /// Max Nesting, Halstead Volume, Maintainability Index) for a source
     /// file.
     ///
-    /// The parser is chosen from the file extension (`.rs` today). The JSON
-    /// format is the default machine-readable output; `--format md` emits a
-    /// compact summary tuned for LLM context.
+    /// The parser is chosen from the file extension (`.rs` / `.ts` / `.py`).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
     Complexity {
         /// Path to a source file to analyze.
         path: PathBuf,
@@ -324,12 +327,13 @@ enum AnalyzeCommand {
     },
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
-    /// Walks `path` for `.rs` files, asks `git` how many commits each
-    /// file has been touched in (optionally scoped by `--since`), and
-    /// joins the two with cognitive complexity. The resulting ranking
-    /// points at "frequently changed *and* complex" code — where bugs
-    /// concentrate and where a refactor is most likely to pay off.
-    /// `path` must be inside a git working tree.
+    /// Walks `path` for supported source files (`.rs` / `.ts` / `.py`),
+    /// asks `git` how many commits each file has been touched in
+    /// (optionally scoped by `--since`), and joins the two with
+    /// cognitive complexity. The resulting ranking points at
+    /// "frequently changed *and* complex" code — where bugs concentrate
+    /// and where a refactor is most likely to pay off. `path` must be
+    /// inside a git working tree.
     Hotspot {
         /// File or directory to score. Must lie inside a git repo.
         path: PathBuf,
@@ -387,9 +391,9 @@ enum AnalyzeCommand {
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
-    /// The parser is chosen from the file extension (`.rs` today). The JSON
-    /// format is the default machine-readable output; `--format md` emits
-    /// a compact summary tuned for LLM context.
+    /// The parser is chosen from the file extension (`.rs` / `.ts` / `.py`).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
     Wrapper {
         /// Path to a source file to analyze.
         path: PathBuf,

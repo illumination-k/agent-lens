@@ -1,22 +1,22 @@
 //! `analyze hotspot` — rank files by `commits × cognitive_max`.
 //!
-//! Walks a path on disk, parses every `.rs` file for per-function
-//! complexity, asks `git` how often each file has been touched, and
-//! emits the joined ranking. The point is to point an agent at
-//! "frequently changed *and* complex" code: high churn alone is just
-//! noise, high complexity alone is static information, the product is
-//! where bugs live.
+//! Walks a path on disk, parses every supported source file (Rust,
+//! TypeScript, Python) for per-function complexity, asks `git` how often
+//! each file has been touched, and emits the joined ranking. The point
+//! is to point an agent at "frequently changed *and* complex" code:
+//! high churn alone is just noise, high complexity alone is static
+//! information, the product is where bugs live.
 //!
 //! Limitations:
 //!
-//! * Only Rust files are analyzed today (the file walker filters by
-//!   extension).
+//! * Only files whose extension is recognised by [`SourceLang`] (`.rs`,
+//!   `.ts`, `.py` today) are analyzed.
 //! * Git renames are followed via `git log --follow` per file when the
 //!   path is a single file; for directory roots we use a single
 //!   path-scoped `git log` invocation, which counts a renamed file
 //!   under each of its names. This is good enough for ranking.
-//! * `target/`, `node_modules/`, and dotfile-prefixed directories
-//!   (e.g. `.git`) are skipped during the walk.
+//! * `target/`, `node_modules/`, `__pycache__/`, and dotfile-prefixed
+//!   directories (e.g. `.git`) are skipped during the walk.
 //! * Files that fail to parse are reported on stderr and excluded from
 //!   the complexity side; their churn entry (if any) still appears.
 
@@ -25,8 +25,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lens_domain::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
-use lens_rust::extract_complexity_units;
+use lens_domain::{FileChurn, FileComplexity, FunctionComplexity, HotspotEntry, compute_hotspots};
 use serde::Serialize;
 use tracing::warn;
 
@@ -194,7 +193,7 @@ fn collect_complexity(
     repo_root: &Path,
 ) -> Result<Vec<FileComplexity>, HotspotError> {
     let mut files = Vec::new();
-    walk_rust_files(target, &mut files)?;
+    walk_source_files(target, &mut files)?;
 
     let mut out = Vec::with_capacity(files.len());
     for file in files {
@@ -205,12 +204,8 @@ fn collect_complexity(
                 continue;
             }
         };
-        let units = match extract_complexity_units(&source) {
-            Ok(u) => u,
-            Err(err) => {
-                warn!(path = %file.display(), error = %err, "skipping file: parse failed");
-                continue;
-            }
+        let Some(units) = extract_units(&file, &source) else {
+            continue;
         };
         let key = relative_to(&file, repo_root).unwrap_or_else(|| file.display().to_string());
         let function_count = units.len();
@@ -228,12 +223,37 @@ fn collect_complexity(
     Ok(out)
 }
 
-const SKIP_DIRS: &[&str] = &["target", "node_modules"];
+/// Dispatch to the per-language complexity extractor based on `file`'s
+/// extension. Returns `None` (and warns) on parse failure or unsupported
+/// extension so the caller can keep walking other files.
+fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
+    let lang = SourceLang::from_path(file)?;
+    let result: Result<Vec<FunctionComplexity>, Box<dyn std::error::Error>> = match lang {
+        SourceLang::Rust => {
+            lens_rust::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
+        }
+        SourceLang::TypeScript => {
+            lens_ts::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
+        }
+        SourceLang::Python => {
+            lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
+        }
+    };
+    match result {
+        Ok(u) => Some(u),
+        Err(err) => {
+            warn!(path = %file.display(), error = %err, "skipping file: parse failed");
+            None
+        }
+    }
+}
 
-fn walk_rust_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
+const SKIP_DIRS: &[&str] = &["target", "node_modules", "__pycache__"];
+
+fn walk_source_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
     let meta = std::fs::metadata(path).map_err(|source| io_err(path, source))?;
     if meta.is_file() {
-        push_if_rust(path, out);
+        push_if_supported(path, out);
         return Ok(());
     }
     walk_dir(path, out)
@@ -259,17 +279,17 @@ fn process_entry(entry: &std::fs::DirEntry, out: &mut Vec<PathBuf>) -> Result<()
         .file_type()
         .map_err(|source| io_err(&entry_path, source))?;
     if file_type.is_dir() {
-        walk_rust_files(&entry_path, out)
+        walk_source_files(&entry_path, out)
     } else if file_type.is_file() {
-        push_if_rust(&entry_path, out);
+        push_if_supported(&entry_path, out);
         Ok(())
     } else {
         Ok(())
     }
 }
 
-fn push_if_rust(path: &Path, out: &mut Vec<PathBuf>) {
-    if SourceLang::from_path(path) == Some(SourceLang::Rust) {
+fn push_if_supported(path: &Path, out: &mut Vec<PathBuf>) {
+    if SourceLang::from_path(path).is_some() {
         out.push(path.to_path_buf());
     }
 }
@@ -549,13 +569,128 @@ mod tests {
         let files = parsed["files"].as_array().unwrap();
         let a = files.iter().find(|f| f["path"] == "src/a.rs").unwrap();
         // a.rs has nested ifs, so cognitive_max must be > 0. This guards
-        // against `collect_complexity` or `walk_rust_files` short-circuiting.
+        // against `collect_complexity` or `walk_source_files` short-circuiting.
         assert!(
             a["cognitive_max"].as_u64().unwrap() > 0,
             "expected non-zero cognitive complexity, got {a:?}",
         );
         assert!(a["function_count"].as_u64().unwrap() >= 1);
         assert!(a["loc"].as_u64().unwrap() >= 1);
+    }
+
+    fn init_repo_with_typescript_file(dir: &Path) {
+        run_git(dir, &["init", "-q", "-b", "main"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+        write_file(
+            dir,
+            "src/a.ts",
+            "export function nest(n: number): number {\n    if (n > 0) {\n        if (n > 10) { return 1; }\n    }\n    return 0;\n}\n",
+        );
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "initial"]);
+    }
+
+    fn init_repo_with_python_file(dir: &Path) {
+        run_git(dir, &["init", "-q", "-b", "main"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+        write_file(
+            dir,
+            "src/a.py",
+            "def nest(n):\n    if n > 0:\n        if n > 10:\n            return 1\n    return 0\n",
+        );
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "initial"]);
+    }
+
+    #[test]
+    fn typescript_files_are_analyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_typescript_file(dir.path());
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        let a = files.iter().find(|f| f["path"] == "src/a.ts").unwrap();
+        assert!(
+            a["cognitive_max"].as_u64().unwrap() > 0,
+            "expected non-zero cognitive complexity for TS file, got {a:?}",
+        );
+        assert!(a["function_count"].as_u64().unwrap() >= 1);
+        assert!(a["commits"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn python_files_are_analyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_python_file(dir.path());
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        let a = files.iter().find(|f| f["path"] == "src/a.py").unwrap();
+        assert!(
+            a["cognitive_max"].as_u64().unwrap() > 0,
+            "expected non-zero cognitive complexity for Python file, got {a:?}",
+        );
+        assert!(a["function_count"].as_u64().unwrap() >= 1);
+        assert!(a["commits"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn mixed_language_files_appear_together() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(dir.path(), "src/a.rs", "pub fn r() -> i32 { 0 }\n");
+        write_file(
+            dir.path(),
+            "src/b.ts",
+            "export function t(): number { return 0; }\n",
+        );
+        write_file(dir.path(), "src/c.py", "def p():\n    return 0\n");
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"src/a.rs"), "missing rs in {paths:?}");
+        assert!(paths.contains(&"src/b.ts"), "missing ts in {paths:?}");
+        assert!(paths.contains(&"src/c.py"), "missing py in {paths:?}");
+    }
+
+    #[test]
+    fn pycache_directories_are_not_descended() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_python_file(dir.path());
+        // A `.py` file under __pycache__ would be unusual but we still
+        // want the walker to skip the directory entirely as a cache
+        // optimisation. Use a parseable body so a leak would actually
+        // contribute to the report.
+        write_file(
+            dir.path(),
+            "src/__pycache__/extra.py",
+            "def cached():\n    if 1:\n        return 1\n    return 0\n",
+        );
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert!(
+            files
+                .iter()
+                .all(|f| f["path"] != "src/__pycache__/extra.py"),
+            "__pycache__ file leaked into report: {files:?}",
+        );
     }
 
     #[test]
