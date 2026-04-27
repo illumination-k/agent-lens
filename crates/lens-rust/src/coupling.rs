@@ -433,6 +433,22 @@ impl<'a> EdgeVisitor<'a> {
             self.record(target, symbol, kind);
         }
     }
+
+    /// Shared body of `visit_expr_path` and `visit_type_path`: when the
+    /// path has no `<T as Trait>` qualifier, try to resolve it to a
+    /// known module and record the kind-tagged edge.
+    fn record_unqualified_path(
+        &mut self,
+        qself: Option<&syn::QSelf>,
+        path: &syn::Path,
+        kind: EdgeKind,
+    ) {
+        if qself.is_some() {
+            return;
+        }
+        let segs = path_to_segments(path);
+        self.try_record(&segs, kind);
+    }
 }
 
 impl<'ast> Visit<'ast> for EdgeVisitor<'_> {
@@ -448,18 +464,12 @@ impl<'ast> Visit<'ast> for EdgeVisitor<'_> {
     }
 
     fn visit_expr_path(&mut self, p: &'ast ExprPath) {
-        if p.qself.is_none() {
-            let segs = path_to_segments(&p.path);
-            self.try_record(&segs, EdgeKind::Call);
-        }
+        self.record_unqualified_path(p.qself.as_ref(), &p.path, EdgeKind::Call);
         syn::visit::visit_expr_path(self, p);
     }
 
     fn visit_type_path(&mut self, t: &'ast TypePath) {
-        if t.qself.is_none() {
-            let segs = path_to_segments(&t.path);
-            self.try_record(&segs, EdgeKind::Type);
-        }
+        self.record_unqualified_path(t.qself.as_ref(), &t.path, EdgeKind::Type);
         syn::visit::visit_type_path(self, t);
     }
 
