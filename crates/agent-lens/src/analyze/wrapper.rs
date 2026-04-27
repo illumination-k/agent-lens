@@ -240,6 +240,14 @@ fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, B
             lens_ts::find_wrappers(source, dialect).map_err(|e| Box::new(e) as BoxedError)
         }
         SourceLang::Python => lens_py::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
+        // Wrapper detection for Go is not implemented yet; the language
+        // is only wired up for similarity. Returning an empty finding
+        // list keeps directory walks running across mixed-language
+        // repos.
+        SourceLang::Go => {
+            let _ = source;
+            Ok(Vec::new())
+        }
     }
 }
 

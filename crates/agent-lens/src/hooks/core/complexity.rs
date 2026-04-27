@@ -72,6 +72,12 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionCompl
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
+        // Complexity for Go is not implemented yet; the hook returns no
+        // units rather than failing on a `.go` save.
+        SourceLang::Go => {
+            let _ = source;
+            Ok(Vec::new())
+        }
     }
 }
 

@@ -54,6 +54,12 @@ fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, H
         SourceLang::Python => {
             lens_py::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
+        // Wrapper detection for Go is not implemented yet; the hook
+        // returns no findings rather than failing on a `.go` save.
+        SourceLang::Go => {
+            let _ = source;
+            Ok(Vec::new())
+        }
     }
 }
 

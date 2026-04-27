@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn similarity_ignores_unknown_extensions() {
-        for ext in ["README.md", "notes.txt", "app.go"] {
+        for ext in ["README.md", "notes.txt", "app.unknown"] {
             assert_similarity_no_op("Write", json!({ "file_path": ext }));
         }
     }
@@ -308,7 +308,7 @@ function Comp(): JSX.Element { return <div />; }
 
     #[test]
     fn wrapper_ignores_unknown_extensions() {
-        for ext in ["README.md", "notes.txt", "app.go"] {
+        for ext in ["README.md", "notes.txt", "app.unknown"] {
             assert_wrapper_no_op("Write", json!({ "file_path": ext }));
         }
     }

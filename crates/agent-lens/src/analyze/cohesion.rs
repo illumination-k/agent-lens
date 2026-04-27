@@ -118,6 +118,13 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, Bo
         SourceLang::Python => {
             lens_py::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
         }
+        // Cohesion for Go is not implemented yet; the language is only
+        // wired up for similarity. Returning an empty unit list keeps
+        // directory walks running across mixed-language repos.
+        SourceLang::Go => {
+            let _ = source;
+            Ok(Vec::new())
+        }
     }
 }
 

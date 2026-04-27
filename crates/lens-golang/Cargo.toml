@@ -1,0 +1,17 @@
+[package]
+name = "lens-golang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lens-domain = { path = "../lens-domain", version = "0.1.0" }
+thiserror = { workspace = true }
+tree-sitter = "0.26"
+tree-sitter-go = "0.25"
+
+[dev-dependencies]
+rstest = { workspace = true }

@@ -318,15 +318,15 @@ new handlers to plug into the same plumbing.
 
 ### Analyzers
 
-| Subcommand     | What it surfaces                                                                                                                                                                                                                  | Languages             |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| `similarity`   | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                       | Rust, TS / JS, Python |
-| `wrapper`      | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                    | Rust, TS / JS, Python |
-| `cohesion`     | LCOM4 per `impl` block / class (number of connected components in the field-sharing graph).                                                                                                                                       | Rust, TS / JS, Python |
-| `complexity`   | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                | Rust, TS / JS, Python |
-| `coupling`     | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles). | Rust                  |
-| `context-span` | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                         | Rust                  |
-| `hotspot`      | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                  | Rust                  |
+| Subcommand     | What it surfaces                                                                                                                                                                                                                  | Languages                 |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `similarity`   | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                       | Rust, TS / JS, Python, Go |
+| `wrapper`      | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                    | Rust, TS / JS, Python     |
+| `cohesion`     | LCOM4 per `impl` block / class (number of connected components in the field-sharing graph).                                                                                                                                       | Rust, TS / JS, Python     |
+| `complexity`   | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                | Rust, TS / JS, Python     |
+| `coupling`     | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles). | Rust                      |
+| `context-span` | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                         | Rust                      |
+| `hotspot`      | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                  | Rust                      |
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
@@ -345,16 +345,18 @@ Analysis is split into a language-neutral core and per-language adapters.
 Adding a language means writing one adapter crate and wiring it into the
 `SourceLang` match — the metric implementations themselves are shared.
 
-| Language                | Parser                                                     | Adapter crate |
-| ----------------------- | ---------------------------------------------------------- | ------------- |
-| Rust                    | [`syn`](https://docs.rs/syn)                               | `lens-rust`   |
-| TypeScript / JavaScript | [oxc](https://oxc.rs/) (`oxc_parser`, `oxc_ast`)           | `lens-ts`     |
-| Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser) | `lens-py`     |
+| Language                | Parser                                                                          | Adapter crate |
+| ----------------------- | ------------------------------------------------------------------------------- | ------------- |
+| Rust                    | [`syn`](https://docs.rs/syn)                                                    | `lens-rust`   |
+| TypeScript / JavaScript | [oxc](https://oxc.rs/) (`oxc_parser`, `oxc_ast`)                                | `lens-ts`     |
+| Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser)                      | `lens-py`     |
+| Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` (similarity only) | `lens-golang` |
 
-`similarity`, `wrapper`, `cohesion`, and `complexity` are wired through all
-three adapter crates. `coupling`, `context-span`, and `hotspot` are Rust-only
+`similarity`, `wrapper`, `cohesion`, and `complexity` are wired through the
+Rust, TypeScript, and Python adapters. The Go adapter is currently
+similarity-only. `coupling`, `context-span`, and `hotspot` are Rust-only
 today — they reach into `mod` resolution and the git log in ways the other
-two adapters don't yet replicate.
+adapters don't yet replicate.
 
 ## Workspace layout
 
@@ -367,14 +369,15 @@ crates/
 │                  # CouplingReport
 ├── lens-rust/     # syn-based Rust adapter (also: cohesion, coupling, wrapper)
 ├── lens-ts/       # oxc-based TypeScript / JavaScript adapter
-└── lens-py/       # ruff_python_parser-based Python adapter
+├── lens-py/       # ruff_python_parser-based Python adapter
+└── lens-golang/   # tree-sitter-based Go adapter (similarity only)
 ```
 
 Responsibility split:
 
 - **`lens-domain`** owns the metric definitions and the comparison machinery
   (APTED, TSED, LCOM, IFC, Maintainability Index). It is language-neutral.
-- **`lens-{rust,ts,py}`** translate a language's AST into the neutral
+- **`lens-{rust,ts,py,golang}`** translate a language's AST into the neutral
   primitives and nothing else.
 - **`agent-hooks`** defines the stdin/stdout JSON types for both supported
   agents and the `Hook` trait handlers implement.
