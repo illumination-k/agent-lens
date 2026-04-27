@@ -46,60 +46,98 @@ impl Default for APTEDOptions {
 /// pointer keys are only dereferenced via the borrowed references that
 /// produced them.
 pub fn compute_edit_distance(a: &TreeNode, b: &TreeNode, opts: &APTEDOptions) -> f64 {
-    let mut memo = HashMap::new();
-    tree_distance(a, b, opts, &mut memo)
+    let mut ctx = AptedContext::new(opts);
+    ctx.tree_distance(a, b)
 }
 
 type MemoKey = (usize, usize);
 
-fn tree_distance(
-    a: &TreeNode,
-    b: &TreeNode,
-    opts: &APTEDOptions,
-    memo: &mut HashMap<MemoKey, f64>,
-) -> f64 {
-    let key = node_key(a, b);
-    if let Some(&cached) = memo.get(&key) {
-        return cached;
-    }
-
-    let rename = if nodes_match(a, b, opts) {
-        0.0
-    } else {
-        opts.rename_cost
-    };
-    let distance = rename + align_children(&a.children, &b.children, opts, memo);
-    memo.insert(key, distance);
-    distance
+struct AptedContext<'a> {
+    opts: &'a APTEDOptions,
+    memo: HashMap<MemoKey, f64>,
+    subtree_sizes: HashMap<usize, usize>,
 }
 
-fn align_children(
-    ac: &[TreeNode],
-    bc: &[TreeNode],
-    opts: &APTEDOptions,
-    memo: &mut HashMap<MemoKey, f64>,
-) -> f64 {
-    let n = ac.len();
-    let m = bc.len();
-    let mut dp = vec![vec![0.0_f64; m + 1]; n + 1];
-
-    for i in 1..=n {
-        dp[i][0] = dp[i - 1][0] + ac[i - 1].subtree_size() as f64 * opts.delete_cost;
-    }
-    for j in 1..=m {
-        dp[0][j] = dp[0][j - 1] + bc[j - 1].subtree_size() as f64 * opts.insert_cost;
-    }
-
-    for i in 1..=n {
-        for j in 1..=m {
-            let delete = dp[i - 1][j] + ac[i - 1].subtree_size() as f64 * opts.delete_cost;
-            let insert = dp[i][j - 1] + bc[j - 1].subtree_size() as f64 * opts.insert_cost;
-            let rename = dp[i - 1][j - 1] + tree_distance(&ac[i - 1], &bc[j - 1], opts, memo);
-            dp[i][j] = delete.min(insert).min(rename);
+impl<'a> AptedContext<'a> {
+    fn new(opts: &'a APTEDOptions) -> Self {
+        Self {
+            opts,
+            memo: HashMap::new(),
+            subtree_sizes: HashMap::new(),
         }
     }
 
-    dp[n][m]
+    fn tree_distance(&mut self, a: &TreeNode, b: &TreeNode) -> f64 {
+        let key = node_pair_key(a, b);
+        if let Some(&cached) = self.memo.get(&key) {
+            return cached;
+        }
+
+        let rename = if nodes_match(a, b, self.opts) {
+            0.0
+        } else {
+            self.opts.rename_cost
+        };
+        let distance = rename + self.align_children(&a.children, &b.children);
+        self.memo.insert(key, distance);
+        distance
+    }
+
+    fn align_children(&mut self, ac: &[TreeNode], bc: &[TreeNode]) -> f64 {
+        let n = ac.len();
+        let m = bc.len();
+        if n == 0 {
+            return bc
+                .iter()
+                .map(|node| self.subtree_size(node) as f64 * self.opts.insert_cost)
+                .sum();
+        }
+        if m == 0 {
+            return ac
+                .iter()
+                .map(|node| self.subtree_size(node) as f64 * self.opts.delete_cost)
+                .sum();
+        }
+
+        let ac_sizes: Vec<usize> = ac.iter().map(|node| self.subtree_size(node)).collect();
+        let bc_sizes: Vec<usize> = bc.iter().map(|node| self.subtree_size(node)).collect();
+        let mut prev = vec![0.0_f64; m + 1];
+        let mut cur = vec![0.0_f64; m + 1];
+
+        for j in 1..=m {
+            prev[j] = prev[j - 1] + bc_sizes[j - 1] as f64 * self.opts.insert_cost;
+        }
+
+        for i in 1..=n {
+            let delete_cost = ac_sizes[i - 1] as f64 * self.opts.delete_cost;
+            cur[0] = prev[0] + delete_cost;
+            for j in 1..=m {
+                let insert_cost = bc_sizes[j - 1] as f64 * self.opts.insert_cost;
+                let delete = prev[j] + delete_cost;
+                let insert = cur[j - 1] + insert_cost;
+                let rename = prev[j - 1] + self.tree_distance(&ac[i - 1], &bc[j - 1]);
+                cur[j] = delete.min(insert).min(rename);
+            }
+            std::mem::swap(&mut prev, &mut cur);
+        }
+
+        prev[m]
+    }
+
+    fn subtree_size(&mut self, node: &TreeNode) -> usize {
+        let key = node_key(node);
+        if let Some(&size) = self.subtree_sizes.get(&key) {
+            return size;
+        }
+
+        let size = 1 + node
+            .children
+            .iter()
+            .map(|child| self.subtree_size(child))
+            .sum::<usize>();
+        self.subtree_sizes.insert(key, size);
+        size
+    }
 }
 
 fn nodes_match(a: &TreeNode, b: &TreeNode, opts: &APTEDOptions) -> bool {
@@ -112,11 +150,15 @@ fn nodes_match(a: &TreeNode, b: &TreeNode, opts: &APTEDOptions) -> bool {
     true
 }
 
-fn node_key(a: &TreeNode, b: &TreeNode) -> MemoKey {
+fn node_pair_key(a: &TreeNode, b: &TreeNode) -> MemoKey {
     (
         std::ptr::from_ref::<TreeNode>(a) as usize,
         std::ptr::from_ref::<TreeNode>(b) as usize,
     )
+}
+
+fn node_key(node: &TreeNode) -> usize {
+    std::ptr::from_ref::<TreeNode>(node) as usize
 }
 
 #[cfg(test)]
