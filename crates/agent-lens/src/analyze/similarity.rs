@@ -27,7 +27,10 @@ use rayon::prelude::*;
 use serde::Serialize;
 use tracing::debug;
 
-use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
+use super::{
+    AnalyzePathFilter, AnalyzerError, CompiledPathFilter, LineRange, OutputFormat, SourceLang,
+    changed_line_ranges, read_source,
+};
 
 /// Default similarity threshold. Picked to match the cutoff used by the
 /// PostToolUse `similarity` hook so the on-demand analyzer reports the
@@ -50,6 +53,7 @@ pub struct SimilarityAnalyzer {
     opts: TSEDOptions,
     diff_only: bool,
     exclude_tests: bool,
+    path_filter: AnalyzePathFilter,
     min_lines: usize,
 }
 
@@ -73,6 +77,7 @@ impl SimilarityAnalyzer {
             opts: TSEDOptions::default(),
             diff_only: false,
             exclude_tests: false,
+            path_filter: AnalyzePathFilter::new(),
             min_lines: DEFAULT_MIN_LINES,
         }
     }
@@ -89,13 +94,24 @@ impl SimilarityAnalyzer {
         fn with_diff_only, diff_only: bool
     }
 
-    with_setter! {
-        /// Drop test scaffolding before computing similarity. Filters out
-        /// `#[test]` / `#[rstest]` / `#[<runner>::test]` functions and items
-        /// inside `#[cfg(test)] mod` blocks. Table-driven tests otherwise
-        /// dominate the noise floor with parallel-but-distinct fixtures
-        /// that aren't refactor candidates.
-        fn with_exclude_tests, exclude_tests: bool
+    /// Drop test paths and test scaffolding before computing similarity.
+    /// In addition to the shared path-level filter, this filters
+    /// `#[test]` / `#[rstest]` / `#[<runner>::test]` functions and items
+    /// inside `#[cfg(test)] mod` blocks.
+    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+        self.exclude_tests = exclude_tests;
+        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
+        self
+    }
+
+    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+        self.path_filter = self.path_filter.with_only_tests(only_tests);
+        self
+    }
+
+    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
+        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
+        self
     }
 
     with_setter! {
@@ -139,14 +155,21 @@ impl SimilarityAnalyzer {
     /// per-file slice; directory inputs walk recursively, honouring
     /// `.gitignore`.
     fn collect_corpus(&self, path: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+        let filter = self.path_filter.compile(path)?;
         if path.is_dir() {
-            self.collect_directory(path)
-        } else {
+            self.collect_directory(path, &filter)
+        } else if filter.includes_path(path) {
             self.collect_file(path, None)
+        } else {
+            Ok(Vec::new())
         }
     }
 
-    fn collect_directory(&self, root: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+    fn collect_directory(
+        &self,
+        root: &Path,
+        filter: &CompiledPathFilter,
+    ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
         let started = Instant::now();
         let mut files = Vec::new();
         for entry in WalkBuilder::new(root).build() {
@@ -158,6 +181,9 @@ impl SimilarityAnalyzer {
                 continue;
             }
             let p = entry.path();
+            if !filter.includes_path(p) {
+                continue;
+            }
             if SourceLang::from_path(p).is_none() {
                 continue;
             }
@@ -1561,6 +1587,59 @@ fn beta(x: i32) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["function_count"], 1, "got {parsed}");
+    }
+
+    #[test]
+    fn path_filters_apply_to_directory_walks() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", PAIRED_FUNCTIONS);
+        write_file(dir.path(), "tests/lib_test.rs", PAIRED_FUNCTIONS);
+        write_file(dir.path(), "src/generated.rs", PAIRED_FUNCTIONS);
+
+        let only_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_only_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&only_tests).unwrap();
+        assert_eq!(parsed["function_count"], 2);
+        let files: Vec<&str> = parsed["clusters"][0]["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert!(files.iter().all(|f| *f == "tests/lib_test.rs"));
+
+        let exclude_tests = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_exclude_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_tests).unwrap();
+        let files: Vec<&str> = parsed["clusters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["functions"].as_array().unwrap())
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert!(!files.contains(&"tests/lib_test.rs"));
+
+        let exclude_generated = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_exclude_patterns(vec!["generated.rs".to_owned()])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_generated).unwrap();
+        let files: Vec<&str> = parsed["clusters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["functions"].as_array().unwrap())
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert!(!files.contains(&"src/generated.rs"));
     }
 
     #[test]

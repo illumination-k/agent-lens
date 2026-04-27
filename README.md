@@ -122,8 +122,10 @@ agent-lens analyze similarity crates/lens-rust/src
 # Same, but emit a compact summary instead of the full JSON
 agent-lens analyze similarity src/foo.rs --format md --threshold 0.9
 
-# Drop test scaffolding and tiny functions before comparing
+# All analyzers accept path filters: focus tests, drop tests, or exclude globs
+agent-lens analyze complexity crates/agent-lens --only-tests
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
+agent-lens analyze hotspot . --exclude 'target/**' --exclude '**/generated/**'
 
 # Analyze only functions touching unstaged diff hunks for this file
 agent-lens analyze similarity src/foo.rs --diff-only

@@ -17,6 +17,7 @@ dependencies = [
  "agent-hooks",
  "clap",
  "criterion",
+ "globset",
  "ignore",
  "lens-domain",
  "lens-py",
