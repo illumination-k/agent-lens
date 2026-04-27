@@ -90,7 +90,10 @@ impl SourceLang {
 /// `only_tests` is intentionally path-based so it can apply uniformly to
 /// function analyzers, file-level hotspot scoring, and Rust crate graph
 /// analyzers. Language-specific "test function" filtering remains a
-/// separate analyzer option where it exists.
+/// separate analyzer option where it exists. The compiled filter keeps the
+/// input root context so `agent-lens analyze ... tests --only-tests` treats
+/// every file below that root as test code even after paths are made
+/// relative to the root.
 #[derive(Debug, Clone, Default)]
 pub struct AnalyzePathFilter {
     only_tests: bool,
@@ -124,6 +127,7 @@ impl AnalyzePathFilter {
         } else {
             root.parent().unwrap_or_else(|| Path::new("")).to_path_buf()
         };
+        let root_is_test = path_context_looks_like_test(root);
         let mut builder = GlobSetBuilder::new();
         for pattern in &self.exclude {
             add_exclude_pattern(&mut builder, pattern)?;
@@ -136,6 +140,7 @@ impl AnalyzePathFilter {
             })?;
         Ok(CompiledPathFilter {
             base,
+            root_is_test,
             only_tests: self.only_tests,
             exclude_tests: self.exclude_tests,
             exclude,
@@ -157,6 +162,7 @@ pub enum PathFilterError {
 #[derive(Debug)]
 pub struct CompiledPathFilter {
     base: PathBuf,
+    root_is_test: bool,
     only_tests: bool,
     exclude_tests: bool,
     exclude: GlobSet,
@@ -170,7 +176,7 @@ impl CompiledPathFilter {
     }
 
     pub fn includes_relative(&self, rel: &str) -> bool {
-        let is_test = path_looks_like_test(rel);
+        let is_test = self.root_is_test || path_looks_like_test(rel);
         if self.only_tests && !is_test {
             return false;
         }
@@ -253,28 +259,70 @@ fn relative_display_path(path: &Path, base: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn path_context_looks_like_test(path: &Path) -> bool {
+    let context = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok())
+        .unwrap_or(path);
+    let display = context.to_string_lossy();
+    path_looks_like_test(&display)
+}
+
 fn path_looks_like_test(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    let segments: Vec<&str> = normalized.split('/').collect();
-    if segments.iter().any(|segment| {
-        matches!(
-            *segment,
-            "test" | "tests" | "__test__" | "__tests__" | "spec" | "specs"
-        )
-    }) {
+    let segments: Vec<&str> = normalized
+        .split('/')
+        .filter_map(|segment| match segment {
+            "" | "." => None,
+            segment => Some(segment),
+        })
+        .collect();
+    if segments
+        .iter()
+        .any(|segment| path_segment_looks_like_test_dir(segment))
+    {
         return true;
     }
 
     let Some(file) = segments.last().copied() else {
         return false;
     };
-    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    file.contains(".test.")
-        || file.contains(".spec.")
-        || file == "conftest.py"
-        || stem.starts_with("test_")
-        || stem.ends_with("_test")
-        || stem.ends_with("_tests")
+    file_name_looks_like_test(file)
+}
+
+fn path_segment_looks_like_test_dir(segment: &str) -> bool {
+    let segment = segment.to_ascii_lowercase();
+    matches!(
+        segment.as_str(),
+        "test"
+            | "tests"
+            | "__test__"
+            | "__tests__"
+            | "spec"
+            | "specs"
+            | "__spec__"
+            | "__specs__"
+            | "e2e"
+            | "integration_tests"
+            | "integration-test"
+            | "unit_tests"
+            | "unit-test"
+            | "testdata"
+            | "testing"
+    )
+}
+
+fn file_name_looks_like_test(file: &str) -> bool {
+    let file = file.to_ascii_lowercase();
+    if file == "conftest.py" {
+        return true;
+    }
+
+    let stem = file
+        .rsplit_once('.')
+        .map_or(file.as_str(), |(stem, _)| stem);
+    stem.split(['.', '_', '-'])
+        .any(|part| matches!(part, "test" | "tests" | "spec" | "specs" | "e2e" | "cy"))
 }
 
 /// Errors common to single-file analyzers (cohesion, complexity).
@@ -496,6 +544,7 @@ fn parse_unified_zero_hunks(diff: &str) -> Vec<LineRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::error::Error as _;
     use std::io;
     use std::io::Write;
@@ -530,22 +579,38 @@ mod tests {
         assert_eq!(SourceLang::from_extension("md"), None);
     }
 
-    #[test]
-    fn test_path_detection_covers_common_file_conventions() {
-        for path in [
-            "tests/api.rs",
-            "src/__tests__/view.ts",
-            "src/foo.test.ts",
-            "src/foo.spec.ts",
-            "pkg/conftest.py",
-            "pkg/test_api.py",
-            "src/foo_test.rs",
-            "src/foo_tests.rs",
-        ] {
-            assert!(path_looks_like_test(path), "{path} should look like a test");
-        }
-        assert!(!path_looks_like_test("src/testsupport.rs"));
-        assert!(!path_looks_like_test("src/generated.rs"));
+    #[rstest]
+    #[case("tests/api.rs")]
+    #[case("src/__tests__/view.ts")]
+    #[case("src/__specs__/view.ts")]
+    #[case("src/testing/helpers.py")]
+    #[case("pkg/testdata/input.rs")]
+    #[case("src/foo.test.ts")]
+    #[case("src/foo.tests.ts")]
+    #[case("src/foo.spec.ts")]
+    #[case("src/foo.e2e.ts")]
+    #[case("src/foo.cy.ts")]
+    #[case("pkg/conftest.py")]
+    #[case("pkg/test_api.py")]
+    #[case("src/foo_test.rs")]
+    #[case("src/foo_tests.rs")]
+    #[case("src/foo_spec.rs")]
+    #[case("src/foo-test.rs")]
+    #[case("src/foo_test.generated.rs")]
+    fn test_path_detection_covers_common_file_conventions(#[case] path: &str) {
+        assert!(path_looks_like_test(path), "{path} should look like a test");
+    }
+
+    #[rstest]
+    #[case("src/testsupport.rs")]
+    #[case("src/generated.rs")]
+    #[case("src/latest.rs")]
+    #[case("src/contest.rs")]
+    fn test_path_detection_avoids_non_test_substrings(#[case] path: &str) {
+        assert!(
+            !path_looks_like_test(path),
+            "{path} should not look like a test"
+        );
     }
 
     #[test]
@@ -574,6 +639,23 @@ mod tests {
             .unwrap();
         assert!(!exclude_bare.includes_relative("src/generated.rs"));
         assert!(exclude_bare.includes_relative("src/handwritten.rs"));
+    }
+
+    #[test]
+    fn compiled_path_filter_keeps_test_root_context() {
+        let only_tests = AnalyzePathFilter::new()
+            .with_only_tests(true)
+            .compile(Path::new("tests"))
+            .unwrap();
+        assert!(only_tests.includes_relative("api.rs"));
+        assert!(only_tests.includes_relative("nested/api.rs"));
+
+        let exclude_tests = AnalyzePathFilter::new()
+            .with_exclude_tests(true)
+            .compile(Path::new("tests"))
+            .unwrap();
+        assert!(!exclude_tests.includes_relative("api.rs"));
+        assert!(!exclude_tests.includes_relative("nested/api.rs"));
     }
 
     #[test]
