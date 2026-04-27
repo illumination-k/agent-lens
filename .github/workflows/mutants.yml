@@ -2,6 +2,13 @@ name: Mutation Tests
 
 on:
   pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "mise.rust.toml"
+      - "mise.base.toml"
+      - ".github/workflows/mutants.yml"
   workflow_dispatch:
 
 jobs:

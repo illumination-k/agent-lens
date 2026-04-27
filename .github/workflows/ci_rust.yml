@@ -3,7 +3,25 @@ name: CI Rust
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "deny.toml"
+      - "mise.rust.toml"
+      - "mise.base.toml"
+      - ".github/workflows/ci_rust.yml"
   pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "deny.toml"
+      - "mise.rust.toml"
+      - "mise.base.toml"
+      - ".github/workflows/ci_rust.yml"
 
 jobs:
   ci:

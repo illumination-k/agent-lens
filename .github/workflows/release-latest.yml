@@ -3,6 +3,16 @@ name: Release Latest
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "mise.rust.toml"
+      - "mise.base.toml"
+      - "README.md"
+      - "install.sh"
+      - ".github/workflows/release-latest.yml"
   workflow_dispatch:
 
 permissions:
