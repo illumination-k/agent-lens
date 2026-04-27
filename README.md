@@ -38,13 +38,65 @@ protocol payloads and reports; everything else goes to stderr through
 
 ## Install
 
-From source (requires the Rust toolchain):
+### One-liner (Linux x86_64, macOS arm64 / x86_64)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
+```
+
+This pulls the matching tarball from the rolling `latest` release, verifies its
+SHA-256, and drops the binary into `$HOME/.local/bin`. Override with flags or
+environment variables:
+
+```bash
+# explicit destination
+curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh \
+  | bash -s -- --dir /usr/local/bin
+
+# pin a specific release tag (default: latest)
+AGENT_LENS_TAG=latest AGENT_LENS_DIR="$HOME/.local/bin" \
+  bash <(curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh)
+```
+
+### Via mise (GitHub backend)
+
+[mise](https://mise.jdx.dev/) can install directly from GitHub Releases — no
+Rust toolchain required, and the version is pinned per project:
+
+```bash
+# user-global
+mise use -g github:illumination-k/agent-lens
+
+# project-local (writes mise.toml in the repo root)
+mise use github:illumination-k/agent-lens
+
+# pin a specific release tag
+mise use github:illumination-k/agent-lens@latest
+```
+
+Or add it to `mise.toml` directly:
+
+```toml
+[tools]
+"github:illumination-k/agent-lens" = "latest"
+```
+
+mise auto-detects the right asset for your OS / arch from the
+`agent-lens-<target>.tar.gz` artifacts published by `release-latest.yml`.
+
+### From source
+
+Requires a recent Rust toolchain (the workspace is on `edition = "2024"`, so
+rustc 1.85+):
 
 ```bash
 cargo install --path crates/agent-lens
 ```
 
-Pre-built binaries for `main` are published as a rolling release — see the
+### Manual download
+
+Pre-built binaries for `main` are published as a rolling release — grab a
+tarball or `.zip` directly from the
 [GitHub Releases page](https://github.com/illumination-k/agent-lens/releases)
 (`release-latest.yml` keeps it current).
 
