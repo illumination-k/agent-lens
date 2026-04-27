@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-use crate::function::FunctionDef;
 use crate::tree::TreeNode;
 
 /// Configuration for [`lsh_candidate_pairs`].
@@ -57,15 +56,27 @@ impl Default for LshOptions {
     }
 }
 
-/// Generate candidate `(i, j)` pairs (`i < j`) from `functions` using
+/// A corpus item that can expose the AST tree used for LSH candidate
+/// generation.
+pub trait LshTree {
+    fn tree(&self) -> &TreeNode;
+}
+
+impl LshTree for &TreeNode {
+    fn tree(&self) -> &TreeNode {
+        self
+    }
+}
+
+/// Generate candidate `(i, j)` pairs (`i < j`) from `items` using
 /// MinHash + banded LSH. Output is sorted for determinism.
 ///
 /// Candidates are an upper bound on the truly-similar pairs: every
 /// near-duplicate above the analyzer's similarity threshold is virtually
 /// guaranteed to be in the output, but the output also contains weakly-
 /// similar pairs that the downstream TSED filter will drop.
-pub fn lsh_candidate_pairs(functions: &[FunctionDef], opts: &LshOptions) -> Vec<(usize, usize)> {
-    let trees: Vec<&TreeNode> = functions.iter().map(|function| &function.tree).collect();
+pub fn lsh_candidate_pairs<T: LshTree>(items: &[T], opts: &LshOptions) -> Vec<(usize, usize)> {
+    let trees: Vec<&TreeNode> = items.iter().map(LshTree::tree).collect();
     lsh_candidate_pairs_for_trees(&trees, opts)
 }
 
@@ -230,6 +241,7 @@ fn minhash_signature(features: &HashSet<u64>, family: &HashFamily) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::function::FunctionDef;
     use proptest::collection::vec;
     use proptest::prelude::*;
 
@@ -248,7 +260,8 @@ mod tests {
 
     #[test]
     fn empty_corpus_yields_no_candidates() {
-        assert!(lsh_candidate_pairs(&[], &LshOptions::default()).is_empty());
+        let funcs: Vec<FunctionDef> = Vec::new();
+        assert!(lsh_candidate_pairs(&funcs, &LshOptions::default()).is_empty());
     }
 
     #[test]

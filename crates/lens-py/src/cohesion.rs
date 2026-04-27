@@ -35,7 +35,11 @@ use std::collections::HashSet;
 
 use lens_domain::{CohesionUnit, CohesionUnitKind, MethodCohesion};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
-use ruff_python_ast::{Decorator, ExceptHandler, Expr, Stmt, StmtClassDef, StmtFunctionDef};
+use ruff_python_ast::{
+    Decorator, ExceptHandler, Expr, Stmt, StmtAnnAssign, StmtAssign, StmtAugAssign, StmtClassDef,
+    StmtFor, StmtFunctionDef, StmtIf, StmtImport, StmtImportFrom, StmtMatch, StmtReturn, StmtTry,
+    StmtWhile, StmtWith,
+};
 use ruff_python_parser::{ParseError, parse_module};
 use ruff_text_size::Ranged;
 
@@ -422,147 +426,153 @@ struct LocalNameWalker<'a> {
 impl LocalNameWalker<'_> {
     fn walk_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Assign(a) => {
-                for target in &a.targets {
-                    self.collect_target(target);
-                }
-                self.walk_expr(&a.value);
-            }
-            Stmt::AnnAssign(a) => {
-                self.collect_target(&a.target);
-                if let Some(value) = &a.value {
-                    self.walk_expr(value);
-                }
-            }
-            Stmt::AugAssign(a) => {
-                self.collect_target(&a.target);
-                self.walk_expr(&a.value);
-            }
-            Stmt::For(f) => {
-                self.collect_target(&f.target);
-                self.walk_expr(&f.iter);
-                for s in &f.body {
-                    self.walk_stmt(s);
-                }
-                for s in &f.orelse {
-                    self.walk_stmt(s);
-                }
-            }
-            Stmt::While(w) => {
-                self.walk_expr(&w.test);
-                for s in &w.body {
-                    self.walk_stmt(s);
-                }
-                for s in &w.orelse {
-                    self.walk_stmt(s);
-                }
-            }
-            Stmt::If(i) => {
-                self.walk_expr(&i.test);
-                for s in &i.body {
-                    self.walk_stmt(s);
-                }
-                for clause in &i.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.walk_expr(test);
-                    }
-                    for s in &clause.body {
-                        self.walk_stmt(s);
-                    }
-                }
-            }
-            Stmt::With(w) => {
-                for item in &w.items {
-                    self.walk_expr(&item.context_expr);
-                    if let Some(opt) = &item.optional_vars {
-                        self.collect_target(opt);
-                    }
-                }
-                for s in &w.body {
-                    self.walk_stmt(s);
-                }
-            }
-            Stmt::Try(t) => {
-                for s in &t.body {
-                    self.walk_stmt(s);
-                }
-                for handler in &t.handlers {
-                    let ExceptHandler::ExceptHandler(h) = handler;
-                    if let Some(name) = &h.name {
-                        self.locals.insert(name.as_str().to_owned());
-                    }
-                    if let Some(typ) = &h.type_ {
-                        self.walk_expr(typ);
-                    }
-                    for s in &h.body {
-                        self.walk_stmt(s);
-                    }
-                }
-                for s in &t.orelse {
-                    self.walk_stmt(s);
-                }
-                for s in &t.finalbody {
-                    self.walk_stmt(s);
-                }
-            }
-            Stmt::Match(m) => {
-                self.walk_expr(&m.subject);
-                for case in &m.cases {
-                    for s in &case.body {
-                        self.walk_stmt(s);
-                    }
-                }
-            }
-            Stmt::FunctionDef(f) => {
-                self.locals.insert(f.name.as_str().to_owned());
-            }
-            Stmt::ClassDef(c) => {
-                self.locals.insert(c.name.as_str().to_owned());
-            }
-            Stmt::Global(g) => {
-                for name in &g.names {
-                    self.globals.insert(name.as_str().to_owned());
-                }
-            }
-            Stmt::Nonlocal(n) => {
-                for name in &n.names {
-                    self.globals.insert(name.as_str().to_owned());
-                }
-            }
-            Stmt::Import(i) => {
-                for alias in &i.names {
-                    let name = alias
-                        .asname
-                        .as_ref()
-                        .map(|a| a.as_str())
-                        .unwrap_or_else(|| {
-                            alias
-                                .name
-                                .as_str()
-                                .split('.')
-                                .next()
-                                .unwrap_or(alias.name.as_str())
-                        });
-                    self.locals.insert(name.to_owned());
-                }
-            }
-            Stmt::ImportFrom(i) => {
-                for alias in &i.names {
-                    let name = alias
-                        .asname
-                        .as_ref()
-                        .map(|a| a.as_str())
-                        .unwrap_or_else(|| alias.name.as_str());
-                    self.locals.insert(name.to_owned());
-                }
-            }
+            Stmt::Assign(a) => self.walk_assign(a),
+            Stmt::AnnAssign(a) => self.walk_ann_assign(a),
+            Stmt::AugAssign(a) => self.walk_aug_assign(a),
+            Stmt::For(f) => self.walk_for(f),
+            Stmt::While(w) => self.walk_while(w),
+            Stmt::If(i) => self.walk_if(i),
+            Stmt::With(w) => self.walk_with(w),
+            Stmt::Try(t) => self.walk_try(t),
+            Stmt::Match(m) => self.walk_match(m),
+            Stmt::FunctionDef(f) => self.record_binding(f.name.as_str()),
+            Stmt::ClassDef(c) => self.record_binding(c.name.as_str()),
+            Stmt::Global(g) => self.record_globals(g.names.iter().map(|name| name.as_str())),
+            Stmt::Nonlocal(n) => self.record_globals(n.names.iter().map(|name| name.as_str())),
+            Stmt::Import(i) => self.walk_import(i),
+            Stmt::ImportFrom(i) => self.walk_import_from(i),
             Stmt::Expr(e) => self.walk_expr(&e.value),
-            Stmt::Return(r) => {
-                if let Some(value) = &r.value {
-                    self.walk_expr(value);
-                }
-            }
+            Stmt::Return(r) => self.walk_return(r),
             _ => {}
+        }
+    }
+
+    fn walk_assign(&mut self, stmt: &StmtAssign) {
+        for target in &stmt.targets {
+            self.collect_target(target);
+        }
+        self.walk_expr(&stmt.value);
+    }
+
+    fn walk_ann_assign(&mut self, stmt: &StmtAnnAssign) {
+        self.collect_target(&stmt.target);
+        if let Some(value) = &stmt.value {
+            self.walk_expr(value);
+        }
+    }
+
+    fn walk_aug_assign(&mut self, stmt: &StmtAugAssign) {
+        self.collect_target(&stmt.target);
+        self.walk_expr(&stmt.value);
+    }
+
+    fn walk_for(&mut self, stmt: &StmtFor) {
+        self.collect_target(&stmt.target);
+        self.walk_expr(&stmt.iter);
+        self.walk_suite(&stmt.body);
+        self.walk_suite(&stmt.orelse);
+    }
+
+    fn walk_while(&mut self, stmt: &StmtWhile) {
+        self.walk_expr(&stmt.test);
+        self.walk_suite(&stmt.body);
+        self.walk_suite(&stmt.orelse);
+    }
+
+    fn walk_if(&mut self, stmt: &StmtIf) {
+        self.walk_expr(&stmt.test);
+        self.walk_suite(&stmt.body);
+        for clause in &stmt.elif_else_clauses {
+            if let Some(test) = &clause.test {
+                self.walk_expr(test);
+            }
+            self.walk_suite(&clause.body);
+        }
+    }
+
+    fn walk_with(&mut self, stmt: &StmtWith) {
+        for item in &stmt.items {
+            self.walk_expr(&item.context_expr);
+            if let Some(opt) = &item.optional_vars {
+                self.collect_target(opt);
+            }
+        }
+        self.walk_suite(&stmt.body);
+    }
+
+    fn walk_try(&mut self, stmt: &StmtTry) {
+        self.walk_suite(&stmt.body);
+        for handler in &stmt.handlers {
+            self.walk_except_handler(handler);
+        }
+        self.walk_suite(&stmt.orelse);
+        self.walk_suite(&stmt.finalbody);
+    }
+
+    fn walk_except_handler(&mut self, handler: &ExceptHandler) {
+        let ExceptHandler::ExceptHandler(handler) = handler;
+        if let Some(name) = &handler.name {
+            self.record_binding(name.as_str());
+        }
+        if let Some(typ) = &handler.type_ {
+            self.walk_expr(typ);
+        }
+        self.walk_suite(&handler.body);
+    }
+
+    fn walk_match(&mut self, stmt: &StmtMatch) {
+        self.walk_expr(&stmt.subject);
+        for case in &stmt.cases {
+            self.walk_suite(&case.body);
+        }
+    }
+
+    fn walk_import(&mut self, stmt: &StmtImport) {
+        for alias in &stmt.names {
+            let name = alias.asname.as_ref().map_or_else(
+                || {
+                    alias
+                        .name
+                        .as_str()
+                        .split('.')
+                        .next()
+                        .unwrap_or(alias.name.as_str())
+                },
+                |asname| asname.as_str(),
+            );
+            self.record_binding(name);
+        }
+    }
+
+    fn walk_import_from(&mut self, stmt: &StmtImportFrom) {
+        for alias in &stmt.names {
+            let name = alias
+                .asname
+                .as_ref()
+                .map_or_else(|| alias.name.as_str(), |asname| asname.as_str());
+            self.record_binding(name);
+        }
+    }
+
+    fn walk_return(&mut self, stmt: &StmtReturn) {
+        if let Some(value) = &stmt.value {
+            self.walk_expr(value);
+        }
+    }
+
+    fn walk_suite(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            self.walk_stmt(stmt);
+        }
+    }
+
+    fn record_binding(&mut self, name: &str) {
+        self.locals.insert(name.to_owned());
+    }
+
+    fn record_globals<'a>(&mut self, names: impl Iterator<Item = &'a str>) {
+        for name in names {
+            self.globals.insert(name.to_owned());
         }
     }
 
