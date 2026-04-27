@@ -43,10 +43,7 @@ use ruff_python_ast::{
 use ruff_python_parser::{ParseError, parse_module};
 use ruff_text_size::Ranged;
 
-use crate::attrs::{
-    class_inherits_test_case, has_pytest_decorator, has_unittest_skip_decorator, inherits_protocol,
-    is_stub_function, name_looks_like_test_class, name_looks_like_test_function,
-};
+use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
 use crate::line_index::LineIndex;
 
 /// Failures produced while extracting cohesion units.
@@ -88,7 +85,7 @@ fn unit_from_class(class: &StmtClassDef, lines: &LineIndex) -> Option<CohesionUn
     if inherits_protocol(class) {
         return None;
     }
-    if name_looks_like_test_class(&class.name) || class_inherits_test_case(class) {
+    if is_test_class(class) {
         return None;
     }
     let class_name = class.name.as_str();
@@ -254,7 +251,7 @@ fn unit_from_module(body: &[Stmt], lines: &LineIndex) -> Option<CohesionUnit> {
     let functions: Vec<&StmtFunctionDef> = body
         .iter()
         .filter_map(|stmt| match stmt {
-            Stmt::FunctionDef(f) if !is_stub_function(f) && !is_test_function_decl(f) => Some(f),
+            Stmt::FunctionDef(f) if !is_stub_function(f) && !is_test_function(f) => Some(f),
             _ => None,
         })
         .collect();
@@ -281,12 +278,6 @@ fn unit_from_module(body: &[Stmt], lines: &LineIndex) -> Option<CohesionUnit> {
         end_line,
         cohesions,
     ))
-}
-
-fn is_test_function_decl(func: &StmtFunctionDef) -> bool {
-    name_looks_like_test_function(&func.name)
-        || has_pytest_decorator(&func.decorator_list)
-        || has_unittest_skip_decorator(&func.decorator_list)
 }
 
 /// Names of every top-level binding that participates in cohesion as a

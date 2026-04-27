@@ -54,16 +54,33 @@ pub(crate) fn has_pytest_decorator(decorators: &[Decorator]) -> bool {
 /// (`@unittest.skip`, `@unittest.skipIf`, `@unittest.skipUnless`,
 /// `@unittest.expectedFailure`, or the same names imported bare).
 pub(crate) fn has_unittest_skip_decorator(decorators: &[Decorator]) -> bool {
+    has_decorator_from_namespace(
+        decorators,
+        "unittest",
+        &["skip", "skipIf", "skipUnless", "expectedFailure"],
+    )
+}
+
+/// True iff one of `decorators` resolves to either a bare leaf in `leaves`
+/// or to `<namespace>.<leaf>` for a leaf in `leaves`. Multi-segment paths
+/// rooted anywhere other than `namespace` are rejected so a tail-name
+/// collision (e.g. `@asyncio.skip` for the unittest skip family) doesn't
+/// match.
+fn has_decorator_from_namespace(
+    decorators: &[Decorator],
+    namespace: &str,
+    leaves: &[&str],
+) -> bool {
     decorators.iter().any(|d| {
         let Some(path) = dotted_path(&d.expression) else {
             return false;
         };
         let last = match path.as_slice() {
             [name] => *name,
-            [.., last] if path[0] == "unittest" => *last,
+            [.., last] if path[0] == namespace => *last,
             _ => return false,
         };
-        matches!(last, "skip" | "skipIf" | "skipUnless" | "expectedFailure")
+        leaves.contains(&last)
     })
 }
 
@@ -120,20 +137,16 @@ pub(crate) fn inherits_protocol(class: &StmtClassDef) -> bool {
 /// either bare (`from abc import abstractmethod`) or qualified through
 /// `abc.*`.
 pub(crate) fn has_abstractmethod_decorator(decorators: &[Decorator]) -> bool {
-    decorators.iter().any(|d| {
-        let Some(path) = dotted_path(&d.expression) else {
-            return false;
-        };
-        let last = match path.as_slice() {
-            [name] => *name,
-            [.., last] if path[0] == "abc" => *last,
-            _ => return false,
-        };
-        matches!(
-            last,
-            "abstractmethod" | "abstractproperty" | "abstractclassmethod" | "abstractstaticmethod"
-        )
-    })
+    has_decorator_from_namespace(
+        decorators,
+        "abc",
+        &[
+            "abstractmethod",
+            "abstractproperty",
+            "abstractclassmethod",
+            "abstractstaticmethod",
+        ],
+    )
 }
 
 /// True iff one of `decorators` is `@overload` (or `@typing.overload` /
@@ -194,6 +207,25 @@ pub(crate) fn is_stub_function(func: &StmtFunctionDef) -> bool {
     has_overload_decorator(&func.decorator_list)
         || has_abstractmethod_decorator(&func.decorator_list)
         || is_stub_body(&func.body)
+}
+
+/// True iff `func` is a pytest- or unittest-flavoured test function:
+/// its name follows the pytest convention (`test_*` / `test`), it
+/// carries a pytest fixture / `pytest.mark.*` decorator, or it carries
+/// an `@unittest.skip*` / `@expectedFailure` decorator. Shared across
+/// the similarity / wrapper / cohesion / complexity analysers so the
+/// `--exclude-tests` policy stays in lock-step.
+pub(crate) fn is_test_function(func: &StmtFunctionDef) -> bool {
+    name_looks_like_test_function(&func.name)
+        || has_pytest_decorator(&func.decorator_list)
+        || has_unittest_skip_decorator(&func.decorator_list)
+}
+
+/// True iff `class` is a pytest- or unittest-flavoured test class: its
+/// name starts with `Test` or it (directly) inherits from `TestCase` /
+/// `unittest.TestCase`.
+pub(crate) fn is_test_class(class: &StmtClassDef) -> bool {
+    name_looks_like_test_class(&class.name) || class_inherits_test_case(class)
 }
 
 #[cfg(test)]
