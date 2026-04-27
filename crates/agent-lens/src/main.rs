@@ -389,11 +389,14 @@ enum AnalyzeCommand {
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts` / `.py`).
-    /// The JSON format is the default machine-readable output;
-    /// `--format md` emits a compact summary tuned for LLM context.
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep) and groups findings per file. The parser is chosen from
+    /// each file extension (`.rs` / `.ts` / `.py`). The JSON format is the
+    /// default machine-readable output; `--format md` emits a compact
+    /// summary tuned for LLM context.
     Wrapper {
-        /// Path to a source file to analyze.
+        /// Path to a source file or a directory to analyze.
         path: PathBuf,
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
