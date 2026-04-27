@@ -30,6 +30,11 @@ pub(crate) struct FunctionItem<'a> {
     pub start_line: usize,
     pub end_line: usize,
     pub body: &'a FunctionBody<'a>,
+    pub params: &'a FormalParameters<'a>,
+    /// True for class constructors; analyzers like `wrapper` use this to
+    /// skip mandatory boilerplate (`super(...)`) that structurally looks
+    /// like a thin forwarding call.
+    pub is_constructor: bool,
 }
 
 /// Receiver for function-shaped items found by [`walk_program`].
@@ -142,6 +147,8 @@ fn walk_class<V: FunctionVisitor>(class: &Class, line_index: &LineIndex, visitor
                 start_line: line_index.line(m.span.start),
                 end_line: line_index.line(m.span.end),
                 body,
+                params: &m.value.params,
+                is_constructor: matches!(m.kind, MethodDefinitionKind::Constructor),
             });
         }
     }
@@ -168,6 +175,8 @@ fn visit_function<V: FunctionVisitor>(
         start_line: line_index.line(func.span.start),
         end_line: line_index.line(body.span.end),
         body,
+        params: &func.params,
+        is_constructor: false,
     });
 }
 
@@ -188,6 +197,8 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                 start_line: line_index.line(decl.span.start),
                 end_line: line_index.line(arrow.body.span.end),
                 body: &arrow.body,
+                params: &arrow.params,
+                is_constructor: false,
             });
         }
         Expression::FunctionExpression(f) => {
@@ -197,6 +208,8 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                     start_line: line_index.line(decl.span.start),
                     end_line: line_index.line(body.span.end),
                     body,
+                    params: &f.params,
+                    is_constructor: false,
                 });
             }
         }
