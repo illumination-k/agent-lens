@@ -46,7 +46,7 @@ impl ComplexityAnalyzer {
         let mut functions = match lang {
             SourceLang::Rust => lens_rust::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::TypeScript => lens_ts::extract_complexity_units(&source)
+            SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(&source, dialect)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
             SourceLang::Python => lens_py::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,

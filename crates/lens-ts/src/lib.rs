@@ -22,5 +22,5 @@ mod wrapper;
 
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
-pub use parser::{TsParseError, TypeScriptParser, extract_functions_excluding_tests};
+pub use parser::{Dialect, TsParseError, TypeScriptParser, extract_functions_excluding_tests};
 pub use wrapper::find_wrappers;

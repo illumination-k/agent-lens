@@ -288,7 +288,7 @@ fn extract_functions(
 ) -> Result<Vec<FunctionDef>, AnalyzerError> {
     match lang {
         SourceLang::Rust => extract_rust(source, exclude_tests),
-        SourceLang::TypeScript => extract_typescript(source, exclude_tests),
+        SourceLang::TypeScript(dialect) => extract_typescript(source, dialect, exclude_tests),
         SourceLang::Python => extract_python(source, exclude_tests),
     }
     .map_err(AnalyzerError::Parse)
@@ -304,12 +304,16 @@ fn extract_rust(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, E
     }
 }
 
-fn extract_typescript(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
+fn extract_typescript(
+    source: &str,
+    dialect: lens_ts::Dialect,
+    exclude_tests: bool,
+) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        lens_ts::extract_functions_excluding_tests(source).map_err(box_err)
+        lens_ts::extract_functions_excluding_tests(source, dialect).map_err(box_err)
     } else {
         <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
-            &mut lens_ts::TypeScriptParser::new(),
+            &mut lens_ts::TypeScriptParser::with_dialect(dialect),
             source,
         )
         .map_err(box_err)
