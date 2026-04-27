@@ -8,7 +8,7 @@
 //! transformations, literal arguments) keep the function out of the
 //! report.
 
-use lens_domain::WrapperFinding;
+use lens_domain::{WrapperFinding, args_pass_through_by, qualify as qualify_name};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -18,6 +18,7 @@ use syn::{
 };
 
 use crate::attrs::has_cfg_test;
+use crate::common::type_path_last_ident;
 use crate::parser::RustParseError;
 
 /// Method names with no arguments that we treat as "no semantic content":
@@ -129,25 +130,6 @@ fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<WrapperFinding>) {
         {
             out.push(finding);
         }
-    }
-}
-
-fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
-    if let syn::Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-    } else {
-        None
-    }
-}
-
-fn qualify_name(owner: Option<&str>, method: &str) -> String {
-    match owner {
-        Some(owner) => format!("{owner}::{method}"),
-        None => method.to_owned(),
     }
 }
 
@@ -327,23 +309,8 @@ fn args_pass_through(
     args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>,
     params: &[String],
 ) -> bool {
-    if args.len() != params.len() {
-        return false;
-    }
-    let mut seen = vec![false; params.len()];
-    for arg in args {
-        let Some(name) = passthrough_ident(arg) else {
-            return false;
-        };
-        let Some(pos) = params.iter().position(|p| p == &name) else {
-            return false;
-        };
-        if seen[pos] {
-            return false;
-        }
-        seen[pos] = true;
-    }
-    seen.iter().all(|hit| *hit)
+    let args: Vec<&Expr> = args.iter().collect();
+    args_pass_through_by(&args, params, |a| passthrough_ident(a))
 }
 
 fn passthrough_ident(expr: &Expr) -> Option<String> {

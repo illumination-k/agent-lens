@@ -24,7 +24,9 @@
 
 use std::collections::HashMap;
 
-use lens_domain::{FunctionComplexity, HalsteadCounts};
+use lens_domain::{FunctionComplexity, HalsteadCounts, qualify};
+
+use crate::common::type_path_last_ident;
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -108,25 +110,6 @@ fn analyze_fn(name: String, sig: &syn::Signature, block: &Block) -> FunctionComp
         cognitive: visitor.cognitive,
         max_nesting: visitor.max_nesting,
         halstead,
-    }
-}
-
-fn qualify(owner: Option<&str>, method: &str) -> String {
-    match owner {
-        Some(o) => format!("{o}::{method}"),
-        None => method.to_owned(),
-    }
-}
-
-fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
-    if let syn::Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-    } else {
-        None
     }
 }
 

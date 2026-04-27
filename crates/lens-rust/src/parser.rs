@@ -1,12 +1,13 @@
 //! syn-based implementation of [`lens_domain::LanguageParser`] for Rust.
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode};
+use lens_domain::{FunctionDef, LanguageParser, TreeNode, qualify as qualify_name};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemTrait, TraitItem};
 
 use crate::attrs::{has_cfg_test, is_test_function};
+use crate::common::type_path_last_ident;
 
 /// A Rust-language parser backed by [`syn`].
 ///
@@ -160,25 +161,6 @@ fn function_def_from_fn(item_fn: &ItemFn) -> FunctionDef {
         start_line: line_of(&item_fn.sig),
         end_line: line_of_end(&item_fn.block),
         tree: token_stream_to_tree("Block", item_fn.block.to_token_stream()),
-    }
-}
-
-fn qualify_name(owner: Option<&str>, method: &str) -> String {
-    match owner {
-        Some(owner) => format!("{owner}::{method}"),
-        None => method.to_owned(),
-    }
-}
-
-fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
-    if let syn::Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-    } else {
-        None
     }
 }
 

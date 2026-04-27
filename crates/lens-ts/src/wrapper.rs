@@ -13,7 +13,7 @@
 //! lists differ because TS uses `await` / `as T` / `!` / `?.` rather
 //! than `?` / `.unwrap()` / `.into()`.
 
-use lens_domain::WrapperFinding;
+use lens_domain::{WrapperFinding, args_pass_through_by};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
@@ -251,12 +251,7 @@ fn analyze_tail(
 }
 
 fn method_name(method: &MethodDefinition) -> Option<String> {
-    match &method.key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-        PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name)),
-        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-        _ => None,
-    }
+    crate::walk::method_key_name(&method.key)
 }
 
 /// Extract the single tail expression from a block-bodied function:
@@ -429,23 +424,7 @@ fn collect_param_idents(params: &FormalParameters) -> Vec<String> {
 /// True iff every call argument is a parameter passed through, every
 /// parameter is used exactly once, and the arity matches.
 fn args_pass_through(args: &[Argument], params: &[String]) -> bool {
-    if args.len() != params.len() {
-        return false;
-    }
-    let mut seen = vec![false; params.len()];
-    for arg in args {
-        let Some(name) = passthrough_ident(arg) else {
-            return false;
-        };
-        let Some(pos) = params.iter().position(|p| p == &name) else {
-            return false;
-        };
-        if seen[pos] {
-            return false;
-        }
-        seen[pos] = true;
-    }
-    seen.iter().all(|hit| *hit)
+    args_pass_through_by(args, params, passthrough_ident)
 }
 
 fn passthrough_ident(arg: &Argument) -> Option<String> {

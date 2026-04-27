@@ -187,12 +187,7 @@ fn method_cohesion(
 }
 
 fn method_name(method: &MethodDefinition) -> Option<String> {
-    match &method.key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-        PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name)),
-        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-        _ => None,
-    }
+    crate::walk::method_key_name(&method.key)
 }
 
 #[derive(Default)]

@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use lens_domain::{FunctionComplexity, HalsteadCounts};
+use lens_domain::{FunctionComplexity, HalsteadCounts, qualify};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{
     BoolOp, CmpOp, Expr, ExprBoolOp, ExprCall, ExprCompare, ExprIf, ExprUnaryOp, Number, Stmt,
@@ -76,13 +76,6 @@ fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<Function
     let class_name = class.name.as_str();
     for inner in &class.body {
         collect_stmt(inner, Some(class_name), lines, out);
-    }
-}
-
-fn qualify(owner: Option<&str>, method: &str) -> String {
-    match owner {
-        Some(o) => format!("{o}::{method}"),
-        None => method.to_owned(),
     }
 }
 

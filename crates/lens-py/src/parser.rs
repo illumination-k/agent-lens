@@ -1,6 +1,6 @@
 //! ruff-based implementation of [`lens_domain::LanguageParser`] for Python.
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode};
+use lens_domain::{FunctionDef, LanguageParser, TreeNode, qualify as qualify_name};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_parser::{ParseError, parse_module};
@@ -155,13 +155,6 @@ fn function_def_from(func: &StmtFunctionDef, name: &str, lines: &LineIndex) -> F
         start_line,
         end_line,
         tree: builder.finish(),
-    }
-}
-
-fn qualify_name(owner: Option<&str>, method: &str) -> String {
-    match owner {
-        Some(owner) => format!("{owner}::{method}"),
-        None => method.to_owned(),
     }
 }
 

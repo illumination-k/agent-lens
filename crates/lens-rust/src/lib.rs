@@ -11,6 +11,7 @@
 
 mod attrs;
 mod cohesion;
+mod common;
 mod complexity;
 mod coupling;
 mod parser;
