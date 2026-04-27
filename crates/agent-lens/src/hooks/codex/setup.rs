@@ -30,36 +30,30 @@ const CONFIG_RELATIVE: &str = ".codex/config.toml";
 /// is the only source-modifying tool today and is the one our handlers
 /// care about; anchoring keeps a future `apply_patch_v2` from sneaking
 /// in.
-pub const POST_TOOL_USE_MATCHER: &str = "^apply_patch$";
+pub const POST_TOOL_USE_MATCHER: &str = setup_common::CODEX_APPLY_PATCH_MATCHER;
 
 /// Commands the setup writes into `[[hooks.PostToolUse.hooks]]`. One
 /// entry per installed handler; matching against the leading prefix of
 /// an existing `command` string makes the merge tolerant of user-added
 /// flags.
-pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
-    "agent-lens codex-hook post-tool-use similarity",
-    "agent-lens codex-hook post-tool-use wrapper",
-];
+pub const POST_TOOL_USE_COMMANDS: &[&str] = setup_common::CODEX_POST_TOOL_USE_COMMANDS;
 
 /// Regex Codex matches the about-to-run tool name against. The pre-edit
 /// handlers reason about the same `apply_patch` payload as the post-edit
 /// handlers, so the matcher matches [`POST_TOOL_USE_MATCHER`] today.
-pub const PRE_TOOL_USE_MATCHER: &str = "^apply_patch$";
+pub const PRE_TOOL_USE_MATCHER: &str = setup_common::CODEX_APPLY_PATCH_MATCHER;
 
 /// Commands the setup writes into `[[hooks.PreToolUse.hooks]]`.
-pub const PRE_TOOL_USE_COMMANDS: &[&str] = &[
-    "agent-lens codex-hook pre-tool-use complexity",
-    "agent-lens codex-hook pre-tool-use cohesion",
-];
+pub const PRE_TOOL_USE_COMMANDS: &[&str] = setup_common::CODEX_PRE_TOOL_USE_COMMANDS;
 
 /// Regex Codex matches the SessionStart `source` field against
 /// (`startup` / `resume` / `clear`). A summary on every clear would be
 /// noisy, so by default we only fire on a fresh start or a resumed
 /// session.
-pub const SESSION_START_MATCHER: &str = "^(startup|resume)$";
+pub const SESSION_START_MATCHER: &str = setup_common::CODEX_SESSION_START_MATCHER;
 
 /// Commands the setup writes into `[[hooks.SessionStart.hooks]]`.
-pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens codex-hook session-start summary"];
+pub const SESSION_START_COMMANDS: &[&str] = setup_common::CODEX_SESSION_START_COMMANDS;
 
 /// Per-event metadata for the merge loop. The shape mirrors the Claude
 /// Code setup's [`crate::hooks::setup`] so the two stay in sync as new
@@ -82,7 +76,7 @@ struct EventBlock {
 
 const EVENTS: &[EventBlock] = &[
     EventBlock {
-        event: "SessionStart",
+        event: setup_common::SESSION_START_EVENT,
         array_field: "hooks.SessionStart",
         inner_array_field: "hooks.SessionStart[].hooks",
         command_field: "hooks.SessionStart[].hooks[].command",
@@ -90,7 +84,7 @@ const EVENTS: &[EventBlock] = &[
         commands: SESSION_START_COMMANDS,
     },
     EventBlock {
-        event: "PreToolUse",
+        event: setup_common::PRE_TOOL_USE_EVENT,
         array_field: "hooks.PreToolUse",
         inner_array_field: "hooks.PreToolUse[].hooks",
         command_field: "hooks.PreToolUse[].hooks[].command",
@@ -98,7 +92,7 @@ const EVENTS: &[EventBlock] = &[
         commands: PRE_TOOL_USE_COMMANDS,
     },
     EventBlock {
-        event: "PostToolUse",
+        event: setup_common::POST_TOOL_USE_EVENT,
         array_field: "hooks.PostToolUse",
         inner_array_field: "hooks.PostToolUse[].hooks",
         command_field: "hooks.PostToolUse[].hooks[].command",

@@ -526,6 +526,7 @@ fn module_dir_of(file: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::io::Write;
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
@@ -707,23 +708,145 @@ mod tests {
         })
     }
 
-    #[test]
-    fn use_statement_records_use_edge() {
-        let src = r#"
+    // Each case asserts that `extract_edges` records the expected
+    // (from, to, symbol, kind) edge. Cases with multiple assertions or
+    // negative checks live as standalone tests below.
+    #[rstest]
+    #[case::use_statement_records_use_edge(
+        r#"
             mod a { pub struct Foo; }
             mod b {
                 use crate::a::Foo;
                 fn _x(_f: Foo) {}
             }
-        "#;
+        "#,
+        "crate::b",
+        "crate::a",
+        "Foo",
+        EdgeKind::Use
+    )]
+    #[case::glob_use_records_star_symbol(
+        r#"
+            mod a { pub struct Foo; pub struct Bar; }
+            mod b { use crate::a::*; }
+        "#,
+        "crate::b",
+        "crate::a",
+        "*",
+        EdgeKind::Use
+    )]
+    // `super::Foo` from inside crate::a::inner resolves to the parent module.
+    #[case::super_prefix_resolves_to_parent_module(
+        r#"
+            mod a {
+                pub struct Foo;
+                pub mod inner {
+                    fn _x(_f: super::Foo) {}
+                }
+            }
+        "#,
+        "crate::a::inner",
+        "crate::a",
+        "Foo",
+        EdgeKind::Type
+    )]
+    // self::Foo inside crate::a resolves to crate::a; the resulting
+    // self-loop is emitted by the raw extractor and filtered downstream
+    // by compute_report.
+    #[case::self_prefix_anchors_to_current_module(
+        r#"
+            mod a {
+                pub struct Foo;
+                fn _x() -> self::Foo { unimplemented!() }
+            }
+        "#,
+        "crate::a",
+        "crate::a",
+        "Foo",
+        EdgeKind::Type
+    )]
+    #[case::cross_module_function_call_records_call_edge(
+        r#"
+            mod a { pub fn helper() {} }
+            mod b {
+                fn _x() { crate::a::helper(); }
+            }
+        "#,
+        "crate::b",
+        "crate::a",
+        "helper",
+        EdgeKind::Call
+    )]
+    #[case::type_reference_records_type_edge(
+        r#"
+            mod a { pub struct Foo; }
+            mod b {
+                fn _x(_f: crate::a::Foo) {}
+            }
+        "#,
+        "crate::b",
+        "crate::a",
+        "Foo",
+        EdgeKind::Type
+    )]
+    // The trait path on `impl Trait for T` crosses modules as ImplFor.
+    #[case::impl_block_records_impl_for_edge(
+        r#"
+            mod a { pub trait Greet { fn hi(&self); } }
+            mod b {
+                pub struct Local;
+                impl crate::a::Greet for Local {
+                    fn hi(&self) {}
+                }
+            }
+        "#,
+        "crate::b",
+        "crate::a",
+        "Greet",
+        EdgeKind::ImplFor
+    )]
+    #[case::aliased_use_lets_bare_path_resolve(
+        r#"
+            mod a { pub fn helper() {} }
+            mod b {
+                use crate::a;
+                fn _x() { a::helper(); }
+            }
+        "#,
+        "crate::b",
+        "crate::a",
+        "helper",
+        EdgeKind::Call
+    )]
+    // `use` deep inside an item is picked up on pass 2 because the
+    // visitor recurses into the whole item tree.
+    #[case::use_inside_function_still_records_edge(
+        r#"
+            mod a { pub fn helper() {} }
+            mod b {
+                fn _x() {
+                    use crate::a::helper;
+                    helper();
+                }
+            }
+        "#,
+        "crate::b",
+        "crate::a",
+        "helper",
+        EdgeKind::Use
+    )]
+    fn edge_recorded(
+        #[case] src: &str,
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] symbol: &str,
+        #[case] kind: EdgeKind,
+    ) {
         let (_, edges) = edges_for(src);
-        assert!(has_edge(
-            &edges,
-            "crate::b",
-            "crate::a",
-            "Foo",
-            EdgeKind::Use
-        ));
+        assert!(
+            has_edge(&edges, from, to, symbol, kind),
+            "expected edge {from} -> {to} :: {symbol} ({kind:?}) in {edges:#?}"
+        );
     }
 
     #[test]
@@ -739,16 +862,6 @@ mod tests {
             !edges.iter().any(|e| e.symbol.contains("HashMap")),
             "found unexpected edge for std type: {edges:?}"
         );
-    }
-
-    #[test]
-    fn glob_use_records_star_symbol() {
-        let src = r#"
-            mod a { pub struct Foo; pub struct Bar; }
-            mod b { use crate::a::*; }
-        "#;
-        let (_, edges) = edges_for(src);
-        assert!(has_edge(&edges, "crate::b", "crate::a", "*", EdgeKind::Use));
     }
 
     #[test]
@@ -777,150 +890,6 @@ mod tests {
             "crate::a",
             "Foo",
             EdgeKind::Type
-        ));
-    }
-
-    #[test]
-    fn super_prefix_resolves_to_parent_module() {
-        let src = r#"
-            mod a {
-                pub struct Foo;
-                pub mod inner {
-                    fn _x(_f: super::Foo) {}
-                }
-            }
-        "#;
-        let (_, edges) = edges_for(src);
-        assert!(has_edge(
-            &edges,
-            "crate::a::inner",
-            "crate::a",
-            "Foo",
-            EdgeKind::Type
-        ));
-    }
-
-    #[test]
-    fn self_prefix_anchors_to_current_module() {
-        let src = r#"
-            mod a {
-                pub struct Foo;
-                fn _x() -> self::Foo { unimplemented!() }
-            }
-        "#;
-        let (_, edges) = edges_for(src);
-        // self::Foo from inside crate::a resolves to crate::a::Foo, but
-        // Foo lives directly in crate::a — the longest matching module
-        // is crate::a, so symbol is "Foo".
-        assert!(has_edge(
-            &edges,
-            "crate::a",
-            "crate::a",
-            "Foo",
-            EdgeKind::Type
-        ));
-        // Self-loops will be filtered downstream by compute_report; the
-        // raw extractor still emits them so callers can see what was
-        // referenced.
-    }
-
-    #[test]
-    fn cross_module_function_call_records_call_edge() {
-        let src = r#"
-            mod a { pub fn helper() {} }
-            mod b {
-                fn _x() { crate::a::helper(); }
-            }
-        "#;
-        let (_, edges) = edges_for(src);
-        assert!(has_edge(
-            &edges,
-            "crate::b",
-            "crate::a",
-            "helper",
-            EdgeKind::Call
-        ));
-    }
-
-    #[test]
-    fn type_reference_records_type_edge() {
-        let src = r#"
-            mod a { pub struct Foo; }
-            mod b {
-                fn _x(_f: crate::a::Foo) {}
-            }
-        "#;
-        let (_, edges) = edges_for(src);
-        assert!(has_edge(
-            &edges,
-            "crate::b",
-            "crate::a",
-            "Foo",
-            EdgeKind::Type
-        ));
-    }
-
-    #[test]
-    fn impl_block_records_impl_for_edge() {
-        let src = r#"
-            mod a { pub trait Greet { fn hi(&self); } }
-            mod b {
-                pub struct Local;
-                impl crate::a::Greet for Local {
-                    fn hi(&self) {}
-                }
-            }
-        "#;
-        let (_, edges) = edges_for(src);
-        // The trait path crosses to crate::a as ImplFor.
-        assert!(has_edge(
-            &edges,
-            "crate::b",
-            "crate::a",
-            "Greet",
-            EdgeKind::ImplFor
-        ));
-    }
-
-    #[test]
-    fn aliased_use_lets_bare_path_resolve() {
-        let src = r#"
-            mod a { pub fn helper() {} }
-            mod b {
-                use crate::a;
-                fn _x() { a::helper(); }
-            }
-        "#;
-        let (_, edges) = edges_for(src);
-        assert!(has_edge(
-            &edges,
-            "crate::b",
-            "crate::a",
-            "helper",
-            EdgeKind::Call
-        ));
-    }
-
-    #[test]
-    fn use_inside_function_still_records_edge() {
-        // `use` deep inside an item is picked up on pass 2 because the
-        // visitor recurses into the whole item tree.
-        let src = r#"
-            mod a { pub fn helper() {} }
-            mod b {
-                fn _x() {
-                    use crate::a::helper;
-                    helper();
-                }
-            }
-        "#;
-        let (_, edges) = edges_for(src);
-        assert!(has_edge(
-            &edges,
-            "crate::b",
-            "crate::a",
-            "helper",
-            EdgeKind::Use
         ));
     }
 

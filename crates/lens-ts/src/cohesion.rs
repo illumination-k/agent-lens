@@ -15,16 +15,22 @@
 //! declarations and `const` / `let` / `var` bindings to arrow / function
 //! expressions act as the methods, top-level `let` / `const` / `var`
 //! bindings to non-function values act as the fields, and free
-//! identifier references / sibling calls form edges. Locally-bound
+//! identifier references / sibling references form edges. Locally-bound
 //! names inside a function (parameters, body-level `var`/`let`/`const`,
 //! nested function / class declarations, destructuring targets, catch
 //! params) shadow module-level names, so a `const counter = 0` inside
 //! a function is not counted as a reference to the module-level one.
 //!
-//! Calls are matched verbatim against the names of *sibling* methods on
-//! the same class (or sibling functions on the same module). Calls to
-//! anything else are dropped — the cohesion graph only ever sees
-//! in-unit edges, mirroring `lens-rust`.
+//! Sibling references are matched verbatim against the names of *sibling*
+//! methods on the same class (or sibling functions in the same module),
+//! and a reference counts whether or not it sits in callee position.
+//! That is, `helper()`, `xs.map(helper)`, `<Helper />` and
+//! `{ Helper, other }` all add the same edge from the enclosing function
+//! to `helper` / `Helper`. References to anything else are dropped — the
+//! cohesion graph only ever sees in-unit edges, mirroring `lens-rust`.
+//! Capturing non-call references matters for idiomatic TS / React
+//! modules where wrappers reach for sibling components through JSX
+//! children or callback props rather than direct calls (see issue #66).
 
 use std::collections::HashSet;
 
@@ -710,7 +716,13 @@ impl<'a, 'ast> Visit<'ast> for ModuleRefVisitor<'a> {
         if self.locals.contains(name) {
             return;
         }
-        if self.in_callee && self.siblings.contains(name) {
+        // Any reference to a sibling — whether in callee position or
+        // not — counts as an edge: that covers JSX children
+        // (`<Helper />`), callback props (`xs.map(helper)`) and
+        // shorthand object exports (`{ Helper }`), all of which are
+        // idiomatic ways for one TS / React function to reach for
+        // another in the same module.
+        if self.siblings.contains(name) {
             self.calls.push(name.to_owned());
         } else if !self.in_callee && self.module_fields.contains(name) {
             self.fields.push(name.to_owned());
@@ -767,7 +779,11 @@ mod tests {
     }
 
     fn module_unit(src: &str) -> CohesionUnit {
-        extract_cohesion_units(src, Dialect::Ts)
+        module_unit_for(src, Dialect::Ts)
+    }
+
+    fn module_unit_for(src: &str, dialect: Dialect) -> CohesionUnit {
+        extract_cohesion_units(src, dialect)
             .unwrap()
             .into_iter()
             .find(|u| matches!(u.kind, CohesionUnitKind::Module))
@@ -1194,5 +1210,109 @@ function destructured(o: { tag: number }): number {
 "#;
         let u = module_unit(src);
         assert_eq!(u.lcom4(), 2);
+    }
+
+    /// Regression for issue #66: a wrapper component that renders a
+    /// sibling helper as a JSX child must form an edge to that helper.
+    /// Before the fix the analyzer only counted call-position
+    /// references, so `<Icon />` was invisible and `Wrapper`/`Icon`
+    /// looked like two disconnected components.
+    #[test]
+    fn module_jsx_child_reference_forms_an_edge() {
+        let src = r#"
+function Wrapper(): JSX.Element { return <div><Icon /></div>; }
+function Icon(): JSX.Element { return <svg />; }
+"#;
+        let u = module_unit_for(src, Dialect::Tsx);
+        assert_eq!(u.methods.len(), 2);
+        assert_eq!(u.lcom4(), 1);
+        let wrapper = u.methods.iter().find(|m| m.name == "Wrapper").unwrap();
+        assert_eq!(wrapper.calls, vec!["Icon"]);
+    }
+
+    /// JSX member-expression tags (`<Foo.Bar />`) walk the head as an
+    /// `IdentifierReference`, so a wrapper that renders `<Sibling.Item />`
+    /// should connect to `Sibling` even though there is no plain
+    /// `<Sibling />` anywhere.
+    #[test]
+    fn module_jsx_member_expression_head_forms_an_edge() {
+        let src = r#"
+function Wrapper(): JSX.Element { return <Helper.Item />; }
+function Helper(): JSX.Element { return <span />; }
+"#;
+        let u = module_unit_for(src, Dialect::Tsx);
+        assert_eq!(u.lcom4(), 1);
+        let wrapper = u.methods.iter().find(|m| m.name == "Wrapper").unwrap();
+        assert_eq!(wrapper.calls, vec!["Helper"]);
+    }
+
+    /// Passing a sibling as a callback (`xs.map(helper)`) is an
+    /// identifier reference in argument position, not a callee. Issue #66
+    /// asks for that to count as an edge alongside direct calls.
+    #[test]
+    fn module_callback_reference_forms_an_edge() {
+        let src = r#"
+function outer(xs: number[]): number[] { return xs.map(helper); }
+function helper(x: number): number { return x + 1; }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 1);
+        let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
+        assert_eq!(outer.calls, vec!["helper"]);
+    }
+
+    /// Object-literal shorthand (`{ helper }`) emits an
+    /// `IdentifierReference` for the value. A re-exporter that bundles
+    /// siblings into a single record should still link to them.
+    #[test]
+    fn module_object_shorthand_reference_forms_an_edge() {
+        let src = r#"
+function bundle() { return { helper }; }
+function helper(x: number): number { return x + 1; }
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.lcom4(), 1);
+        let bundle = u.methods.iter().find(|m| m.name == "bundle").unwrap();
+        assert_eq!(bundle.calls, vec!["helper"]);
+    }
+
+    /// The shadow-tracking guard must still win over the new
+    /// non-call-reference path: a function whose local rebinding
+    /// happens to share a name with a sibling should not pretend to
+    /// reference the sibling.
+    #[test]
+    fn module_local_shadow_blocks_sibling_reference_edge() {
+        let src = r#"
+function outer(): number {
+    const helper = 1;
+    return helper;
+}
+function helper(): number { return 0; }
+function caller(): number { return helper(); }
+"#;
+        let u = module_unit(src);
+        // `outer` only sees its local `helper`, so it must remain its
+        // own component; `caller` and `helper` connect via the call.
+        assert_eq!(u.lcom4(), 2);
+        let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
+        assert!(outer.calls.is_empty());
+    }
+
+    /// JSX tags whose name is lowercase (`<div />`, `<span />`) lower to
+    /// `JSXIdentifier`, not `IdentifierReference`, so they must not be
+    /// confused with a sibling reference even if a sibling happens to
+    /// share the name.
+    #[test]
+    fn module_lowercase_jsx_tag_is_not_a_sibling_reference() {
+        let src = r#"
+function Wrapper(): JSX.Element { return <div />; }
+function div(): number { return 0; }
+"#;
+        let u = module_unit_for(src, Dialect::Tsx);
+        // `Wrapper` and `div` should stay disconnected — `<div />`
+        // here is the HTML element, not a reference to the sibling.
+        assert_eq!(u.lcom4(), 2);
+        let wrapper = u.methods.iter().find(|m| m.name == "Wrapper").unwrap();
+        assert!(wrapper.calls.is_empty());
     }
 }

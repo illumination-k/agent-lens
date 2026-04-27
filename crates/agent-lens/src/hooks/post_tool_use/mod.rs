@@ -6,12 +6,14 @@
 //! adapter (input shape → `EditedSource` list, output string →
 //! `systemMessage`).
 
+#[cfg(test)]
 use std::path::Path;
 
 use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
 
-use crate::analyze::SourceLang;
-use crate::hooks::core::{EditedSource, HookEnvelope, ReadEditedSourceError};
+use crate::hooks::core::{
+    EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError, read_edited_source,
+};
 
 /// Claude Code's PostToolUse adapter for the engine-agnostic hook
 /// runner.
@@ -64,24 +66,11 @@ pub(crate) fn prepare_edited_sources(
     let Some(rel_path) = extract_file_path(&input.tool_input) else {
         return Ok(Vec::new());
     };
-    let rel = Path::new(&rel_path);
-    let Some(lang) = SourceLang::from_path(rel) else {
-        return Ok(Vec::new());
-    };
-    let abs_path = if rel.is_absolute() {
-        rel.to_path_buf()
-    } else {
-        input.context.cwd.join(rel)
-    };
-    let source = std::fs::read_to_string(&abs_path).map_err(|source| ReadEditedSourceError {
-        path: abs_path,
-        source,
-    })?;
-    Ok(vec![EditedSource {
-        rel_path,
-        lang,
-        source,
-    }])
+    Ok(
+        read_edited_source(&input.context.cwd, rel_path, MissingFilePolicy::Error)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {

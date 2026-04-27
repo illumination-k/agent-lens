@@ -12,13 +12,12 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ignore::WalkBuilder;
 use lens_domain::{ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
 use super::{
-    AnalyzePathFilter, AnalyzerError, CompiledPathFilter, LineRange, OutputFormat, SourceLang,
-    changed_line_ranges, read_source,
+    AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, SourceLang, changed_line_ranges,
+    collect_source_files, overlaps_any, read_source,
 };
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
@@ -78,55 +77,25 @@ impl WrapperAnalyzer {
     /// output stays signal-dense.
     fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
         let filter = self.path_filter.compile(path)?;
-        if path.is_dir() {
-            self.collect_directory(path, &filter)
-        } else if filter.includes_path(path) {
-            Ok(self
-                .analyze_file(path, None)?
-                .into_iter()
-                .collect::<Vec<_>>())
-        } else {
-            Ok(Vec::new())
-        }
-    }
-
-    fn collect_directory(
-        &self,
-        root: &Path,
-        filter: &CompiledPathFilter,
-    ) -> Result<Vec<FileReport>, AnalyzerError> {
-        // Pass 1: per-file walk that produces wrapper findings AND a
-        // call-site index. Pass 2 then enriches every finding with the
-        // workspace-wide [`ReuseMetrics`] derived from those indices.
-        // Splitting it lets reuse metrics see calls in files that
-        // themselves contain no wrappers.
+        // Pass 1: produce wrapper findings AND a call-site index for
+        // every supported source file. Splitting it from the metric
+        // rollup lets reuse metrics see calls in files that themselves
+        // contain no wrappers.
         let mut per_files: Vec<PerFile> = Vec::new();
-        for entry in WalkBuilder::new(root).build() {
-            let entry = entry.map_err(|e| AnalyzerError::Io {
-                path: root.to_path_buf(),
-                source: std::io::Error::other(e),
-            })?;
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let p = entry.path();
-            if !filter.includes_path(p) {
-                continue;
-            }
-            if SourceLang::from_path(p).is_none() {
-                continue;
-            }
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            if let Some(per) = self.scan_file(p, rel)? {
+        for source_file in collect_source_files(path, &filter)? {
+            if let Some(per) = self.scan_file(&source_file)? {
                 per_files.push(per);
             }
         }
-        annotate_reuse(&mut per_files);
+        // Reuse metrics are workspace-wide by construction. A
+        // single-file input only sees calls inside that one file, so
+        // every cross-file rollup would trivially be 0. To avoid
+        // emitting that misleading "0 sites" signal we leave reuse at
+        // `None` in single-file mode and only annotate when the input
+        // path is a directory.
+        if path.is_dir() {
+            annotate_reuse(&mut per_files);
+        }
         Ok(per_files
             .into_iter()
             .filter_map(PerFile::into_report)
@@ -134,17 +103,13 @@ impl WrapperAnalyzer {
     }
 
     /// Walk a single file, returning the per-file slice (wrappers +
-    /// call sites) used by `collect_directory`. Files with neither a
-    /// wrapper nor a call site are dropped at the next stage.
-    fn scan_file(
-        &self,
-        path: &Path,
-        display_path: String,
-    ) -> Result<Option<PerFile>, AnalyzerError> {
-        let (lang, source) = read_source(path)?;
+    /// call sites) used by `collect_file_reports`. Files with neither
+    /// a wrapper nor a call site are dropped at the next stage.
+    fn scan_file(&self, file: &SourceFile) -> Result<Option<PerFile>, AnalyzerError> {
+        let (lang, source) = read_source(&file.path)?;
         let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
         if self.diff_only {
-            let changed = changed_line_ranges(path);
+            let changed = changed_line_ranges(&file.path);
             findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
         }
         // Call sites are only used by the reuse-metrics pass, which is
@@ -164,37 +129,10 @@ impl WrapperAnalyzer {
             return Ok(None);
         }
         Ok(Some(PerFile {
-            file: display_path,
+            file: file.display_path.clone(),
             findings,
             calls,
             reuse_eligible,
-        }))
-    }
-
-    /// Analyze a single file. Returns `None` when the file has no
-    /// wrappers (after filtering), so empty entries don't pollute the
-    /// directory-mode report.
-    ///
-    /// Single-file mode does not enumerate workspace call sites, so
-    /// every finding leaves [`WrapperFinding::reuse`] at `None`.
-    fn analyze_file(
-        &self,
-        path: &Path,
-        rel_override: Option<String>,
-    ) -> Result<Option<FileReport>, AnalyzerError> {
-        let (lang, source) = read_source(path)?;
-        let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
-        if self.diff_only {
-            let changed = changed_line_ranges(path);
-            findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
-        }
-        if findings.is_empty() {
-            return Ok(None);
-        }
-        let display_path = rel_override.unwrap_or_else(|| path.display().to_string());
-        Ok(Some(FileReport {
-            file: display_path,
-            findings,
         }))
     }
 }
@@ -291,10 +229,6 @@ fn annotate_reuse(per_files: &mut [PerFile]) {
 /// `handle`).
 fn name_last_segment(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
-}
-
-fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bool {
-    ranges.iter().any(|r| r.overlaps(start, end))
 }
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;

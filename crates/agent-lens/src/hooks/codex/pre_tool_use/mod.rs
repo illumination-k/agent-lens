@@ -16,12 +16,14 @@
 //!   that way and lets future Codex versions opt into a richer surface
 //!   without a schema change here.
 
+#[cfg(test)]
 use std::path::Path;
 
 use agent_hooks::codex::{CommonHookOutput, PreToolUseInput, PreToolUseOutput};
 
-use crate::analyze::SourceLang;
-use crate::hooks::core::{EditedSource, HookEnvelope, ReadEditedSourceError};
+use crate::hooks::core::{
+    EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError, read_edited_source,
+};
 
 /// Tool name Codex uses for the patch-style edit tool.
 pub(crate) const APPLY_PATCH_TOOL: &str = "apply_patch";
@@ -76,33 +78,11 @@ pub(crate) fn prepare_edited_sources(
     let rel_paths = parse_pre_edit_paths(&command);
     let mut out = Vec::with_capacity(rel_paths.len());
     for rel_path in rel_paths {
-        let rel = Path::new(&rel_path);
-        let Some(lang) = SourceLang::from_path(rel) else {
-            continue;
-        };
-        let abs_path = if rel.is_absolute() {
-            rel.to_path_buf()
-        } else {
-            input.context.cwd.join(rel)
-        };
-        let source = match std::fs::read_to_string(&abs_path) {
-            Ok(s) => s,
-            // The patch claims to update an existing file but it isn't
-            // on disk — for example a stale or speculative patch. Stay
-            // silent rather than failing the tool call.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(ReadEditedSourceError {
-                    path: abs_path,
-                    source,
-                });
-            }
-        };
-        out.push(EditedSource {
-            rel_path,
-            lang,
-            source,
-        });
+        if let Some(source) =
+            read_edited_source(&input.context.cwd, rel_path, MissingFilePolicy::Skip)?
+        {
+            out.push(source);
+        }
     }
     Ok(out)
 }

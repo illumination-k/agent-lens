@@ -7,6 +7,36 @@
 
 use std::path::PathBuf;
 
+pub(crate) const SESSION_START_EVENT: &str = "SessionStart";
+pub(crate) const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
+pub(crate) const POST_TOOL_USE_EVENT: &str = "PostToolUse";
+
+pub(crate) const CLAUDE_EDITING_TOOL_MATCHER: &str = "Edit|Write|MultiEdit";
+pub(crate) const CLAUDE_SESSION_START_MATCHER: &str = "startup|resume";
+pub(crate) const CLAUDE_SESSION_START_COMMANDS: &[&str] =
+    &["agent-lens hook session-start summary"];
+pub(crate) const CLAUDE_PRE_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens hook pre-tool-use complexity",
+    "agent-lens hook pre-tool-use cohesion",
+];
+pub(crate) const CLAUDE_POST_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens hook post-tool-use similarity",
+    "agent-lens hook post-tool-use wrapper",
+];
+
+pub(crate) const CODEX_APPLY_PATCH_MATCHER: &str = "^apply_patch$";
+pub(crate) const CODEX_SESSION_START_MATCHER: &str = "^(startup|resume)$";
+pub(crate) const CODEX_SESSION_START_COMMANDS: &[&str] =
+    &["agent-lens codex-hook session-start summary"];
+pub(crate) const CODEX_PRE_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens codex-hook pre-tool-use complexity",
+    "agent-lens codex-hook pre-tool-use cohesion",
+];
+pub(crate) const CODEX_POST_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens codex-hook post-tool-use similarity",
+    "agent-lens codex-hook post-tool-use wrapper",
+];
+
 /// Resolve `$HOME/<relative>` as a [`PathBuf`], or `None` if `$HOME` is
 /// unset. Each caller maps `None` to its own scope-specific error.
 pub(crate) fn home_scoped_path(relative: &str) -> Option<PathBuf> {
