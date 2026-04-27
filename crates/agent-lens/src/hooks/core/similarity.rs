@@ -7,7 +7,10 @@
 
 use std::fmt::Write as _;
 
-use lens_domain::{FunctionDef, LanguageParser, SimilarPair, TSEDOptions, find_similar_functions};
+use lens_domain::{
+    FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, cluster_similar_pairs,
+    find_similar_pair_indices,
+};
 use lens_rust::RustParser;
 
 use crate::analyze::SourceLang;
@@ -46,28 +49,31 @@ impl SimilarityCore {
 
     /// Analyse every source and produce a single report.
     ///
-    /// Returns `Ok(None)` when no file produced any pair, so callers can
+    /// Returns `Ok(None)` when no file produced any cluster, so callers can
     /// treat "no findings" as "no message" without inspecting the report
     /// string.
     pub fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError> {
         let mut body = String::new();
-        let mut total = 0usize;
+        let mut total_clusters = 0usize;
 
         for src in sources {
             let funcs = extract_functions(src.lang, &src.source)?;
-            let pairs = find_similar_functions(&funcs, self.threshold, &self.opts);
-            if pairs.is_empty() {
+            let pair_indices = find_similar_pair_indices(&funcs, self.threshold, &self.opts);
+            let clusters = cluster_similar_pairs(&pair_indices, self.threshold);
+            if clusters.is_empty() {
                 continue;
             }
-            total += pairs.len();
-            append_section(&mut body, &src.rel_path, &pairs);
+            total_clusters += clusters.len();
+            append_section(&mut body, &src.rel_path, &funcs, &clusters);
         }
 
-        if total == 0 {
+        if total_clusters == 0 {
             return Ok(None);
         }
 
-        let header = format!("agent-lens similarity: {total} similar function pair(s) detected\n");
+        let header = format!(
+            "agent-lens similarity: {total_clusters} similar function cluster(s) detected\n",
+        );
         Ok(Some(format!("{header}{body}")))
     }
 }
@@ -97,22 +103,27 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>,
     }
 }
 
-fn append_section(out: &mut String, file_path: &str, pairs: &[SimilarPair<'_>]) {
+fn append_section(
+    out: &mut String,
+    file_path: &str,
+    funcs: &[FunctionDef],
+    clusters: &[SimilarCluster],
+) {
     // writeln! into a String cannot fail; the result is swallowed
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
     let _ = writeln!(out, "{file_path}:");
-    for pair in pairs {
+    for cluster in clusters {
         let _ = writeln!(
             out,
-            "- {} (L{}-{}) <-> {} (L{}-{}): {:.0}% similar",
-            pair.a.name,
-            pair.a.start_line,
-            pair.a.end_line,
-            pair.b.name,
-            pair.b.start_line,
-            pair.b.end_line,
-            pair.similarity * 100.0,
+            "- {} functions, similarity {:.0}–{:.0}%:",
+            cluster.members.len(),
+            cluster.min_similarity * 100.0,
+            cluster.max_similarity * 100.0,
         );
+        for idx in &cluster.members {
+            let Some(f) = funcs.get(*idx) else { continue };
+            let _ = writeln!(out, "  - {} (L{}-{})", f.name, f.start_line, f.end_line);
+        }
     }
 }

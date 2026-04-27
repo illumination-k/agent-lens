@@ -4,6 +4,14 @@
 //! text to a list of [`FunctionDef`] values; this module then takes care of
 //! comparing every pair with [`crate::calculate_tsed`] and returning the
 //! ones that cross a user-supplied threshold.
+//!
+//! Pairs can be reported flat ([`find_similar_functions`]) or grouped into
+//! complete-link clusters ([`cluster_similar_pairs`]). Clustering is the
+//! preferred surface for agent-facing output: it keeps the context size
+//! down and makes the "these N functions are all near-duplicates of each
+//! other" signal explicit.
+
+use std::collections::{HashMap, HashSet};
 
 use crate::tree::TreeNode;
 use crate::tsed::{TSEDOptions, calculate_tsed};
@@ -67,6 +75,22 @@ pub struct SimilarPair<'a> {
     pub similarity: f64,
 }
 
+/// A complete-link cluster of similar items.
+///
+/// Every pair of `members` had a recorded similarity `>= threshold` in the
+/// input — no chaining through weaker links. `min_similarity` /
+/// `max_similarity` summarise the tightest and loosest pair inside the
+/// cluster.
+///
+/// `members` are indices back into the slice that produced the input pairs.
+/// Clusters always contain `>= 2` members; singletons are dropped.
+#[derive(Debug, Clone)]
+pub struct SimilarCluster {
+    pub members: Vec<usize>,
+    pub min_similarity: f64,
+    pub max_similarity: f64,
+}
+
 /// Compute pairwise similarity over `functions` and return every pair whose
 /// TSED score is `>= threshold`, sorted from most to least similar.
 pub fn find_similar_functions<'a>(
@@ -74,21 +98,211 @@ pub fn find_similar_functions<'a>(
     threshold: f64,
     opts: &TSEDOptions,
 ) -> Vec<SimilarPair<'a>> {
-    let mut pairs = Vec::new();
-    for (i, a) in functions.iter().enumerate() {
-        for b in &functions[i + 1..] {
-            let similarity = calculate_tsed(&a.tree, &b.tree, opts);
-            if similarity >= threshold {
-                pairs.push(SimilarPair { a, b, similarity });
-            }
-        }
-    }
+    let mut pairs: Vec<SimilarPair<'a>> = find_similar_pair_indices(functions, threshold, opts)
+        .into_iter()
+        .map(|(i, j, similarity)| SimilarPair {
+            a: &functions[i],
+            b: &functions[j],
+            similarity,
+        })
+        .collect();
     pairs.sort_by(|x, y| {
         y.similarity
             .partial_cmp(&x.similarity)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     pairs
+}
+
+/// Compute pairwise similarity for every candidate pair in `functions` and
+/// return the `(i, j, similarity)` triples that exceed `threshold`.
+///
+/// Lower-level building block shared by [`find_similar_functions`] (which
+/// materialises [`SimilarPair`]s with references) and clustering callers
+/// (which only need indices). Routing both paths through one candidate
+/// generator means an LSH-based pre-filter can be plugged into
+/// [`enumerate_candidate_pairs`] later without touching downstream code.
+pub fn find_similar_pair_indices(
+    functions: &[FunctionDef],
+    threshold: f64,
+    opts: &TSEDOptions,
+) -> Vec<(usize, usize, f64)> {
+    enumerate_candidate_pairs(functions.len())
+        .filter_map(|(i, j)| {
+            let similarity = calculate_tsed(&functions[i].tree, &functions[j].tree, opts);
+            (similarity >= threshold).then_some((i, j, similarity))
+        })
+        .collect()
+}
+
+/// Group `(index_a, index_b, similarity)` triples into complete-link clusters
+/// cut at `threshold`.
+///
+/// "Complete-link" means every pair of members in an output cluster had a
+/// recorded similarity `>= threshold`: no member sneaks in via a weaker
+/// transitive chain (`A ~ B ~ C` with `A` and `C` unrelated). Output is a
+/// partition of the active items, so an item never appears in two clusters
+/// even when it is similar to functions in different families.
+///
+/// Items appearing in `pairs` but never merged past their first partnership
+/// still come back as 2-clusters; items not present in any pair are not
+/// returned. Clusters are sorted by `max_similarity` desc, then by size desc.
+pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> Vec<SimilarCluster> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+
+    // Densely re-index the items that actually appear in pairs. Working in
+    // local index space keeps the similarity hashmap small even when the
+    // caller's index space is sparse (e.g. one cluster carved out of a
+    // 10k-function corpus).
+    let mut active_set: HashSet<usize> = HashSet::new();
+    for (a, b, _) in pairs {
+        active_set.insert(*a);
+        active_set.insert(*b);
+    }
+    let mut active: Vec<usize> = active_set.into_iter().collect();
+    active.sort();
+    let local_of: HashMap<usize, usize> =
+        active.iter().enumerate().map(|(li, &i)| (i, li)).collect();
+
+    // Sparse similarity matrix keyed by sorted local indices. Duplicate
+    // input triples for the same pair keep the highest score.
+    let mut sim: HashMap<(usize, usize), f64> = HashMap::with_capacity(pairs.len());
+    for (a, b, s) in pairs {
+        if *s < threshold {
+            continue;
+        }
+        let (Some(&la), Some(&lb)) = (local_of.get(a), local_of.get(b)) else {
+            continue;
+        };
+        if la == lb {
+            continue;
+        }
+        sim.entry(sorted_key(la, lb))
+            .and_modify(|cur| {
+                if *s > *cur {
+                    *cur = *s;
+                }
+            })
+            .or_insert(*s);
+    }
+
+    // Each slot holds the current cluster (sorted local indices) or `None`
+    // once it has been merged into another. Avoiding union-find here keeps
+    // the complete-link min lookup straightforward; for the small N typical
+    // of similarity output this is plenty fast.
+    let mut slots: Vec<Option<Vec<usize>>> = (0..active.len()).map(|li| Some(vec![li])).collect();
+
+    while let Some((ci, cj)) = find_best_merge(&slots, &sim, threshold) {
+        let Some(mut moved) = slots[cj].take() else {
+            break;
+        };
+        if let Some(target) = slots[ci].as_mut() {
+            target.append(&mut moved);
+            target.sort();
+        }
+    }
+
+    let mut out: Vec<SimilarCluster> = slots
+        .into_iter()
+        .flatten()
+        .filter(|c| c.len() >= 2)
+        .map(|c| {
+            let (min_s, max_s) = internal_minmax(&c, &sim);
+            let members: Vec<usize> = c.iter().filter_map(|li| active.get(*li).copied()).collect();
+            SimilarCluster {
+                members,
+                min_similarity: min_s,
+                max_similarity: max_s,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.max_similarity
+            .partial_cmp(&a.max_similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.members.len().cmp(&a.members.len()))
+    });
+    out
+}
+
+/// Enumerate candidate pairs `(i, j)` with `i < j` for an index range of
+/// size `n`. Currently the full cartesian product (O(n²)); replacing this
+/// with an LSH-based candidate generator is the planned escape hatch when
+/// pair counts start dominating runtime.
+fn enumerate_candidate_pairs(n: usize) -> impl Iterator<Item = (usize, usize)> {
+    (0..n).flat_map(move |i| (i + 1..n).map(move |j| (i, j)))
+}
+
+fn sorted_key(a: usize, b: usize) -> (usize, usize) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
+/// Find the best mergeable cluster pair: highest complete-link similarity
+/// (= min cross-cluster pair) above `threshold`. Ties break on lowest
+/// `(ci, cj)` so the output stays deterministic.
+fn find_best_merge(
+    slots: &[Option<Vec<usize>>],
+    sim: &HashMap<(usize, usize), f64>,
+    threshold: f64,
+) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize, f64)> = None;
+    for (ci, slot_a) in slots.iter().enumerate() {
+        let Some(a) = slot_a.as_ref() else {
+            continue;
+        };
+        for (cj, slot_b) in slots.iter().enumerate().skip(ci + 1) {
+            let Some(b) = slot_b.as_ref() else {
+                continue;
+            };
+            let Some(min_cross) = complete_link_min(a, b, sim) else {
+                continue;
+            };
+            if min_cross < threshold {
+                continue;
+            }
+            best = Some(match best {
+                Some((bi, bj, prev)) if prev >= min_cross => (bi, bj, prev),
+                _ => (ci, cj, min_cross),
+            });
+        }
+    }
+    best.map(|(ci, cj, _)| (ci, cj))
+}
+
+/// Minimum similarity across every (a-member × b-member) pair, or `None`
+/// when any pair is absent from `sim` (i.e., was below threshold). A
+/// missing pair makes a complete-link merge invalid.
+fn complete_link_min(a: &[usize], b: &[usize], sim: &HashMap<(usize, usize), f64>) -> Option<f64> {
+    let mut min_cross = f64::INFINITY;
+    for &x in a {
+        for &y in b {
+            let s = sim.get(&sorted_key(x, y)).copied()?;
+            if s < min_cross {
+                min_cross = s;
+            }
+        }
+    }
+    Some(min_cross)
+}
+
+fn internal_minmax(members: &[usize], sim: &HashMap<(usize, usize), f64>) -> (f64, f64) {
+    let mut min_s = f64::INFINITY;
+    let mut max_s = f64::NEG_INFINITY;
+    for (i, &x) in members.iter().enumerate() {
+        for &y in &members[i + 1..] {
+            if let Some(&s) = sim.get(&sorted_key(x, y)) {
+                if s < min_s {
+                    min_s = s;
+                }
+                if s > max_s {
+                    max_s = s;
+                }
+            }
+        }
+    }
+    (min_s, max_s)
 }
 
 #[cfg(test)]
@@ -181,5 +395,103 @@ mod tests {
         for w in pairs.windows(2) {
             assert!(w[0].similarity >= w[1].similarity);
         }
+    }
+
+    #[test]
+    fn cluster_empty_input_returns_empty_output() {
+        let clusters = cluster_similar_pairs(&[], 0.85);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn cluster_single_pair_yields_one_two_member_cluster() {
+        let clusters = cluster_similar_pairs(&[(0, 1, 0.92)], 0.85);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].members, vec![0, 1]);
+        assert!((clusters[0].min_similarity - 0.92).abs() < 1e-9);
+        assert!((clusters[0].max_similarity - 0.92).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cluster_full_clique_merges_into_single_group() {
+        // Three items pairwise similar: should form one cluster of size 3.
+        let pairs = [(0, 1, 0.95), (0, 2, 0.91), (1, 2, 0.93)];
+        let clusters = cluster_similar_pairs(&pairs, 0.85);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].members, vec![0, 1, 2]);
+        assert!((clusters[0].min_similarity - 0.91).abs() < 1e-9);
+        assert!((clusters[0].max_similarity - 0.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cluster_chain_does_not_merge_through_missing_edge() {
+        // A~B and B~C are above threshold but A~C is missing (below
+        // threshold and so absent from input). Complete-link must NOT
+        // pull A and C into the same cluster: B can only land in one.
+        let pairs = [(0, 1, 0.90), (1, 2, 0.90)];
+        let clusters = cluster_similar_pairs(&pairs, 0.85);
+        assert_eq!(
+            clusters.len(),
+            1,
+            "expected one of the two pairs to win the merge",
+        );
+        assert_eq!(clusters[0].members.len(), 2);
+        // The other pair's items don't both appear; B is in exactly one cluster.
+        let appears = |x: usize| clusters[0].members.contains(&x);
+        assert!(appears(1), "shared vertex must be in the surviving cluster");
+        assert!(appears(0) ^ appears(2), "exactly one of A/C, not both");
+    }
+
+    #[test]
+    fn cluster_two_disjoint_cliques_stay_separate() {
+        // Two independent triangles, no cross edges.
+        let pairs = [
+            (0, 1, 0.95),
+            (0, 2, 0.93),
+            (1, 2, 0.94),
+            (10, 11, 0.92),
+            (10, 12, 0.91),
+            (11, 12, 0.90),
+        ];
+        let mut clusters = cluster_similar_pairs(&pairs, 0.85);
+        clusters.sort_by_key(|c| c.members[0]);
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(clusters[0].members, vec![0, 1, 2]);
+        assert_eq!(clusters[1].members, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn cluster_drops_pairs_below_threshold_defensively() {
+        // The clusterer is normally fed pre-filtered pairs, but defensively
+        // drop any triple whose score has slipped under the threshold so
+        // upstream bugs don't relax cohesion silently.
+        let pairs = [(0, 1, 0.95), (1, 2, 0.5)];
+        let clusters = cluster_similar_pairs(&pairs, 0.85);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].members, vec![0, 1]);
+    }
+
+    #[test]
+    fn cluster_output_sorted_by_max_similarity_desc() {
+        let pairs = [(0, 1, 0.86), (10, 11, 0.99)];
+        let clusters = cluster_similar_pairs(&pairs, 0.85);
+        assert_eq!(clusters.len(), 2);
+        assert!(clusters[0].max_similarity >= clusters[1].max_similarity);
+        assert_eq!(clusters[0].members, vec![10, 11]);
+    }
+
+    #[test]
+    fn cluster_partial_clique_only_merges_full_complete_link() {
+        // 4-node graph: {0,1,2} is a triangle, plus edge (2,3). 3 cannot
+        // join the triangle because edges (0,3) and (1,3) are missing.
+        let pairs = [(0, 1, 0.95), (0, 2, 0.93), (1, 2, 0.94), (2, 3, 0.91)];
+        let clusters = cluster_similar_pairs(&pairs, 0.85);
+        // Exactly one of the two competing clusterings wins:
+        //   A) {0,1,2} (triangle) + dropped (2,3)
+        //   B) {2,3} (two-pair) + dropped triangle pairs
+        // The greedy picks the merge with the highest min-cross first,
+        // which is the triangle (min 0.93), so we expect option A.
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].members, vec![0, 1, 2]);
     }
 }

@@ -10,8 +10,10 @@
 //!   operation costs), modelled after `similarity-ts-core`'s APTED.
 //! * [`tsed`] — a normalised similarity score derived from the edit distance,
 //!   with an optional size penalty for short functions.
-//! * [`function`] — the [`LanguageParser`] trait, [`FunctionDef`] type, and
-//!   [`find_similar_functions`] helper that drives pairwise comparison.
+//! * [`function`] — the [`LanguageParser`] trait, [`FunctionDef`] type, the
+//!   [`find_similar_functions`] helper that drives pairwise comparison, and
+//!   [`cluster_similar_pairs`] for collapsing pairs into complete-link
+//!   clusters.
 //! * [`cohesion`] — LCOM4-style cohesion metric over method graphs that the
 //!   language adapters (e.g. `lens-rust`) populate.
 //! * [`complexity`] — per-function Cyclomatic / Cognitive / Nesting / Halstead
@@ -58,7 +60,10 @@ pub use coupling::{
     CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,
     PairCoupling, compute_report,
 };
-pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
+pub use function::{
+    FunctionDef, LanguageParser, SimilarCluster, SimilarPair, cluster_similar_pairs,
+    find_similar_functions, find_similar_pair_indices,
+};
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use naming::qualify;
 pub use tree::TreeNode;
