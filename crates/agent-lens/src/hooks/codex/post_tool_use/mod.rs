@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn similarity_reports_pairs_via_additional_context() {
+    fn similarity_reports_clusters_via_additional_context() {
         let dir = tempfile::tempdir().unwrap();
         let source = r#"
             fn alpha(x: i32) -> i32 { let y = x + 1; let z = y * 2; z }

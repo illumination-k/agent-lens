@@ -144,7 +144,7 @@ enum PreToolUseCommand {
 
 #[derive(Debug, Subcommand)]
 enum PostToolUseCommand {
-    /// Report similar function pairs in the file that was just edited.
+    /// Report clusters of similar functions in the file that was just edited.
     ///
     /// The parser is chosen from the file extension (`.rs` / `.ts` /
     /// `.py`). Files with an unsupported extension are ignored silently.
@@ -209,7 +209,7 @@ impl From<CodexSetupScope> for codex_setup::ConfigScope {
 
 #[derive(Debug, Subcommand)]
 enum CodexPostToolUseCommand {
-    /// Report similar function pairs across every file Codex's
+    /// Report clusters of similar functions across every file Codex's
     /// `apply_patch` just touched.
     ///
     /// The parser is chosen from each file's extension (`.rs` / `.ts` /
@@ -348,16 +348,18 @@ enum AnalyzeCommand {
         #[arg(long)]
         top: Option<usize>,
     },
-    /// Report near-duplicate function pairs.
+    /// Report clusters of near-duplicate functions.
     ///
     /// Accepts either a single source file or a directory; in directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
-    /// ripgrep) and reports cross-file pairs alongside in-file ones.
-    /// Function bodies are compared via TSED on their normalised AST and
-    /// reported when their similarity is at or above `--threshold`. The
-    /// parser is chosen from each file extension (`.rs` / `.ts` / `.py`).
-    /// The JSON format is the default machine-readable output;
-    /// `--format md` emits a compact summary tuned for LLM context.
+    /// ripgrep) and reports cross-file clusters alongside in-file ones.
+    /// Function bodies are compared via TSED on their normalised AST;
+    /// pairs scoring at or above `--threshold` are folded into complete-link
+    /// clusters where every member is similar to every other (no chaining
+    /// through weaker links). The parser is chosen from each file extension
+    /// (`.rs` / `.ts` / `.py`). The JSON format is the default
+    /// machine-readable output; `--format md` emits a compact summary
+    /// tuned for LLM context.
     Similarity {
         /// Path to a source file or a directory to analyze.
         path: PathBuf,
@@ -375,8 +377,10 @@ enum AnalyzeCommand {
         #[arg(long)]
         exclude_tests: bool,
         /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
-        /// this value are reported. Defaults to the same cutoff used by
-        /// the PostToolUse `similarity` hook.
+        /// this value are eligible for clustering, and the same threshold
+        /// is the complete-link cut so every pair inside a reported cluster
+        /// stays at or above it. Defaults to the same cutoff used by the
+        /// PostToolUse `similarity` hook.
         #[arg(long, default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
         threshold: f64,
         /// Minimum source line count for a function to be considered.

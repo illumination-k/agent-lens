@@ -10,8 +10,13 @@
 //!   operation costs), modelled after `similarity-ts-core`'s APTED.
 //! * [`tsed`] — a normalised similarity score derived from the edit distance,
 //!   with an optional size penalty for short functions.
-//! * [`function`] — the [`LanguageParser`] trait, [`FunctionDef`] type, and
-//!   [`find_similar_functions`] helper that drives pairwise comparison.
+//! * [`function`] — the [`LanguageParser`] trait, [`FunctionDef`] type, the
+//!   [`find_similar_functions`] helper that drives pairwise comparison, and
+//!   [`cluster_similar_pairs`] for collapsing pairs into complete-link
+//!   clusters.
+//! * [`lsh`] — MinHash + banded LSH used to pre-filter candidate pairs once
+//!   the corpus grows past a couple hundred functions, replacing the
+//!   quadratic cartesian product with a near-linear pass.
 //! * [`cohesion`] — LCOM4-style cohesion metric over method graphs that the
 //!   language adapters (e.g. `lens-rust`) populate.
 //! * [`complexity`] — per-function Cyclomatic / Cognitive / Nesting / Halstead
@@ -43,6 +48,7 @@ pub mod context_span;
 pub mod coupling;
 pub mod function;
 pub mod hotspot;
+pub mod lsh;
 pub mod naming;
 pub mod tree;
 pub mod tsed;
@@ -58,8 +64,13 @@ pub use coupling::{
     CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,
     PairCoupling, compute_report,
 };
-pub use function::{FunctionDef, LanguageParser, SimilarPair, find_similar_functions};
+pub use function::{
+    CandidateStrategy, FunctionDef, LanguageParser, SimilarCluster, SimilarPair,
+    cluster_similar_pairs, find_similar_functions, find_similar_pair_indices,
+    find_similar_pair_indices_with_strategy,
+};
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
+pub use lsh::{LshOptions, lsh_candidate_pairs};
 pub use naming::qualify;
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed};

@@ -14,7 +14,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
-use lens_domain::{FunctionDef, LanguageParser, TSEDOptions, calculate_tsed};
+use lens_domain::{
+    FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, calculate_tsed, cluster_similar_pairs,
+};
 use lens_rust::{RustParser, extract_functions_excluding_tests};
 use serde::Serialize;
 
@@ -98,8 +100,14 @@ impl SimilarityAnalyzer {
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let corpus = self.collect_corpus(path)?;
         let function_count = corpus.len();
-        let pairs = self.find_pairs(&corpus);
-        let report = Report::new(path, self.threshold, self.min_lines, function_count, &pairs);
+        let clusters = self.find_clusters(&corpus);
+        let report = Report::new(
+            path,
+            self.threshold,
+            self.min_lines,
+            function_count,
+            &clusters,
+        );
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
@@ -166,30 +174,37 @@ impl SimilarityAnalyzer {
             .collect())
     }
 
-    /// Pairwise TSED over the corpus, applying `min_lines` and `diff_only`
-    /// filters. Inlined rather than calling [`lens_domain::find_similar_functions`]
-    /// so the per-pair file metadata stays attached without a second lookup.
-    fn find_pairs<'a>(&self, corpus: &'a [OwnedFunction]) -> Vec<PairView<'a>> {
+    /// Pairwise TSED over the corpus, then complete-link clustering. Inlined
+    /// rather than calling [`lens_domain::find_similar_pair_indices`] +
+    /// [`lens_domain::cluster_similar_pairs`] in two passes so the per-pair
+    /// `--diff-only` filter sees the file/line metadata that domain doesn't
+    /// know about.
+    fn find_clusters<'a>(&self, corpus: &'a [OwnedFunction]) -> Vec<ClusterView<'a>> {
         let changed_by_file = if self.diff_only {
             collect_changed_ranges(corpus)
         } else {
             HashMap::new()
         };
-        let mut pairs: Vec<PairView<'a>> = candidate_pairs(corpus, self.min_lines)
-            .filter_map(|(a, b)| self.score_pair(a, b, &changed_by_file))
+        let pair_indices: Vec<(usize, usize, f64)> = candidate_pairs(corpus, self.min_lines)
+            .filter_map(|(i, j)| self.score_pair(corpus, i, j, &changed_by_file))
             .collect();
-        sort_by_similarity_desc(&mut pairs);
-        pairs
+        cluster_similar_pairs(&pair_indices, self.threshold)
+            .into_iter()
+            .map(|c| ClusterView::from_domain(corpus, c))
+            .collect()
     }
 
-    /// Score one candidate pair. Returns `None` when the pair fails the
-    /// threshold or, in `--diff-only` mode, doesn't touch a changed line.
-    fn score_pair<'a>(
+    /// Score one candidate pair, returning `(i, j, similarity)` when it
+    /// crosses the threshold and survives the `--diff-only` filter.
+    fn score_pair(
         &self,
-        a: &'a OwnedFunction,
-        b: &'a OwnedFunction,
+        corpus: &[OwnedFunction],
+        i: usize,
+        j: usize,
         changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
-    ) -> Option<PairView<'a>> {
+    ) -> Option<(usize, usize, f64)> {
+        let a = corpus.get(i)?;
+        let b = corpus.get(j)?;
         let similarity = calculate_tsed(&a.def.tree, &b.def.tree, &self.opts);
         if similarity < self.threshold {
             return None;
@@ -197,39 +212,29 @@ impl SimilarityAnalyzer {
         if self.diff_only && !pair_touches_changes(a, b, changed_by_file) {
             return None;
         }
-        Some(PairView {
-            a: FunctionRef::from(a),
-            b: FunctionRef::from(b),
-            similarity,
-        })
+        Some((i, j, similarity))
     }
 }
 
-/// Yield every (a, b) pair from `corpus` (i < j) where both functions
-/// meet the `min_lines` filter. The cartesian product is generated up
-/// front so `find_pairs` reads as a flat `filter_map`.
+/// Yield every `(i, j)` index pair from `corpus` (i < j) where both
+/// functions meet the `min_lines` filter. The cartesian product is
+/// generated up front so `find_clusters` reads as a flat `filter_map`.
 fn candidate_pairs(
     corpus: &[OwnedFunction],
     min_lines: usize,
-) -> impl Iterator<Item = (&OwnedFunction, &OwnedFunction)> + '_ {
+) -> impl Iterator<Item = (usize, usize)> + '_ {
     corpus
         .iter()
         .enumerate()
         .filter(move |(_, a)| a.def.line_count() >= min_lines)
-        .flat_map(move |(i, a)| {
-            corpus[i + 1..]
+        .flat_map(move |(i, _)| {
+            corpus
                 .iter()
-                .filter(move |b| b.def.line_count() >= min_lines)
-                .map(move |b| (a, b))
+                .enumerate()
+                .skip(i + 1)
+                .filter(move |(_, b)| b.def.line_count() >= min_lines)
+                .map(move |(j, _)| (i, j))
         })
-}
-
-fn sort_by_similarity_desc(pairs: &mut [PairView<'_>]) {
-    pairs.sort_by(|x, y| {
-        y.similarity
-            .partial_cmp(&x.similarity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
 }
 
 fn collect_changed_ranges(corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
@@ -332,8 +337,8 @@ struct Report<'a> {
     function_count: usize,
     threshold: f64,
     min_lines: usize,
-    pair_count: usize,
-    pairs: &'a [PairView<'a>],
+    cluster_count: usize,
+    clusters: &'a [ClusterView<'a>],
 }
 
 impl<'a> Report<'a> {
@@ -342,24 +347,41 @@ impl<'a> Report<'a> {
         threshold: f64,
         min_lines: usize,
         function_count: usize,
-        pairs: &'a [PairView<'a>],
+        clusters: &'a [ClusterView<'a>],
     ) -> Self {
         Self {
             root: path.display().to_string(),
             function_count,
             threshold,
             min_lines,
-            pair_count: pairs.len(),
-            pairs,
+            cluster_count: clusters.len(),
+            clusters,
         }
     }
 }
 
 #[derive(Debug, Serialize)]
-struct PairView<'a> {
-    a: FunctionRef<'a>,
-    b: FunctionRef<'a>,
-    similarity: f64,
+struct ClusterView<'a> {
+    size: usize,
+    min_similarity: f64,
+    max_similarity: f64,
+    functions: Vec<FunctionRef<'a>>,
+}
+
+impl<'a> ClusterView<'a> {
+    fn from_domain(corpus: &'a [OwnedFunction], cluster: SimilarCluster) -> Self {
+        let functions: Vec<FunctionRef<'a>> = cluster
+            .members
+            .iter()
+            .filter_map(|i| corpus.get(*i).map(FunctionRef::from))
+            .collect();
+        Self {
+            size: functions.len(),
+            min_similarity: cluster.min_similarity,
+            max_similarity: cluster.max_similarity,
+            functions,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -386,28 +408,29 @@ fn format_markdown(report: &Report<'_>) -> String {
         "# Similarity report: {} ({} function(s), threshold {:.2}, min lines {})\n",
         report.root, report.function_count, report.threshold, report.min_lines,
     );
-    if report.pairs.is_empty() {
-        out.push_str("\n_No similar function pairs at or above threshold._\n");
+    if report.clusters.is_empty() {
+        out.push_str("\n_No similar function clusters at or above threshold._\n");
         return out;
     }
-    let _ = writeln!(out, "\n## {} similar pair(s)", report.pair_count);
-    for pair in report.pairs {
+    let _ = writeln!(out, "\n## {} similar cluster(s)", report.cluster_count);
+    for cluster in report.clusters {
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
         let _ = writeln!(
             out,
-            "- {}:`{}` (L{}-{}) <-> {}:`{}` (L{}-{}): {:.0}% similar",
-            pair.a.file,
-            pair.a.name,
-            pair.a.start_line,
-            pair.a.end_line,
-            pair.b.file,
-            pair.b.name,
-            pair.b.start_line,
-            pair.b.end_line,
-            pair.similarity * 100.0,
+            "\n- {} functions, similarity {:.0}–{:.0}%",
+            cluster.size,
+            cluster.min_similarity * 100.0,
+            cluster.max_similarity * 100.0,
         );
+        for f in &cluster.functions {
+            let _ = writeln!(
+                out,
+                "  - {}:`{}` (L{}-{})",
+                f.file, f.name, f.start_line, f.end_line,
+            );
+        }
     }
     out
 }
@@ -454,32 +477,33 @@ fn beta(x: i32) -> i32 {
     fn assert_json_pair_report(out: &str) {
         let parsed: serde_json::Value = serde_json::from_str(out).unwrap();
         assert_eq!(parsed["function_count"], 2);
-        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
-        let pairs = parsed["pairs"].as_array().unwrap();
-        let names: Vec<&str> = pairs
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
+        let clusters = parsed["clusters"].as_array().unwrap();
+        let cluster = &clusters[0];
+        assert!(cluster["size"].as_u64().unwrap() >= 2);
+        let names: Vec<&str> = cluster["functions"]
+            .as_array()
+            .unwrap()
             .iter()
-            .flat_map(|p| {
-                [
-                    p["a"]["name"].as_str().unwrap(),
-                    p["b"]["name"].as_str().unwrap(),
-                ]
-            })
+            .map(|f| f["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
-        // Each function reference now carries a file path so cross-file
-        // pairs from directory mode are unambiguous; assert the field is
-        // present even for single-file input.
-        assert!(pairs[0]["a"]["file"].as_str().is_some());
-        assert!(pairs[0]["b"]["file"].as_str().is_some());
+        // Each function reference still carries a file path so cross-file
+        // clusters from directory mode are unambiguous; assert the field
+        // is present even for single-file input.
+        assert!(cluster["functions"][0]["file"].as_str().is_some());
+        // The cluster summary stats accompany the members so an agent can
+        // judge cohesion without re-deriving from pairs.
+        assert!(cluster["min_similarity"].as_f64().is_some());
+        assert!(cluster["max_similarity"].as_f64().is_some());
     }
 
     fn assert_markdown_pair_report(out: &str) {
         assert!(out.contains("Similarity report"));
-        assert!(out.contains("similar pair"));
+        assert!(out.contains("similar cluster"));
         assert!(out.contains("alpha"));
         assert!(out.contains("beta"));
-        assert!(out.contains("% similar"));
     }
 
     /// Both output formats must surface the matched function names; only the
@@ -524,7 +548,7 @@ fn beta(xs: &[i32]) -> i32 {
         let md = SimilarityAnalyzer::new()
             .analyze(&file, OutputFormat::Md)
             .unwrap();
-        assert!(md.contains("No similar function pairs"));
+        assert!(md.contains("No similar function clusters"));
     }
 
     #[test]
@@ -536,7 +560,7 @@ fn beta(xs: &[i32]) -> i32 {
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["cluster_count"], 0);
     }
 
     #[test]
@@ -557,7 +581,7 @@ fn beta(x: i32)  -> i32 { x + 1 }
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&permissive).unwrap();
-        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
 
         let strict = SimilarityAnalyzer::new()
             .with_threshold(0.5)
@@ -565,7 +589,7 @@ fn beta(x: i32)  -> i32 { x + 1 }
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&strict).unwrap();
-        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["cluster_count"], 0);
     }
 
     #[test]
@@ -573,7 +597,7 @@ fn beta(x: i32)  -> i32 { x + 1 }
         // Two parallel `#[test]` fixtures alongside a single
         // production function. Without `--exclude-tests` the two test
         // bodies form a similar pair; with it they're filtered before
-        // similarity is computed and `pair_count` falls to zero.
+        // similarity is computed and `cluster_count` falls to zero.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 fn production(x: i32) -> i32 {
@@ -609,7 +633,7 @@ mod tests {
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
-        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
 
         let without_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)
@@ -617,7 +641,7 @@ mod tests {
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
-        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["cluster_count"], 0);
         assert_eq!(parsed["function_count"], 1);
     }
 
@@ -647,17 +671,12 @@ def beta(ys):
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["function_count"], 2);
-        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
-        let names: Vec<&str> = parsed["pairs"]
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
+        let names: Vec<&str> = parsed["clusters"][0]["functions"]
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|p| {
-                [
-                    p["a"]["name"].as_str().unwrap(),
-                    p["b"]["name"].as_str().unwrap(),
-                ]
-            })
+            .map(|f| f["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
@@ -695,7 +714,7 @@ def test_beta():
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
-        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
 
         let without_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)
@@ -703,7 +722,7 @@ def test_beta():
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
-        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["cluster_count"], 0);
         assert_eq!(parsed["function_count"], 1);
     }
 
@@ -743,7 +762,7 @@ function test_beta(): void {
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
-        assert!(parsed["pair_count"].as_u64().unwrap() >= 1);
+        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
 
         let without_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)
@@ -751,7 +770,7 @@ function test_beta(): void {
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
-        assert_eq!(parsed["pair_count"], 0);
+        assert_eq!(parsed["cluster_count"], 0);
         assert_eq!(parsed["function_count"], 1);
     }
 
@@ -793,12 +812,15 @@ fn beta(x: i32) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["function_count"], 2);
-        assert_eq!(parsed["pair_count"], 1);
-        let pair = &parsed["pairs"][0];
-        let files = [
-            pair["a"]["file"].as_str().unwrap(),
-            pair["b"]["file"].as_str().unwrap(),
-        ];
+        assert_eq!(parsed["cluster_count"], 1);
+        let cluster = &parsed["clusters"][0];
+        assert_eq!(cluster["size"], 2);
+        let files: Vec<&str> = cluster["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
         assert!(files.contains(&"a.rs"));
         assert!(files.contains(&"nested/b.rs"));
     }
@@ -912,7 +934,8 @@ fn beta(x: i32) -> i32 {
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["pair_count"], 1);
+        assert_eq!(parsed["cluster_count"], 1);
+        assert_eq!(parsed["clusters"][0]["size"], 2);
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
