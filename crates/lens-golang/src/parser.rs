@@ -365,6 +365,64 @@ mod tests {
         assert!(format!("{err}").contains("parse"));
     }
 
+    /// Identifier-bearing leaves must round-trip their source text into
+    /// the lowered node's `value` so value-aware comparisons can tell
+    /// `x` from `y`, `Foo.bar` from `Foo.baz`, and `package p` from
+    /// `package q`. Without this, every identifier collapses to an
+    /// empty value and clones-with-rename score 1.0 against unrelated
+    /// functions. The five kinds share a single match arm in
+    /// `node_value`; this rstest pins that arm so deleting it
+    /// regresses every covered shape.
+    #[rstest]
+    #[case::plain_identifier(
+        "package p\nfunc f() int { x := 1; return x }\n",
+        "identifier",
+        &["x"][..],
+    )]
+    #[case::type_identifier(
+        "package p\nfunc f(s Service) Service { return s }\n",
+        "type_identifier",
+        &["Service"][..],
+    )]
+    #[case::field_identifier(
+        "package p\ntype S struct{}\nfunc f(s S) int { return s.foo }\n",
+        "field_identifier",
+        &["foo"][..],
+    )]
+    #[case::package_identifier(
+        "package mypkg\nfunc f() int { return 0 }\n",
+        "package_identifier",
+        &["mypkg"][..],
+    )]
+    #[case::label_name(
+        "package p\nfunc f() {\n    Outer:\n    for {\n        break Outer\n    }\n}\n",
+        "label_name",
+        &["Outer"][..],
+    )]
+    fn identifier_leaves_carry_their_source_text_as_value(
+        #[case] src: &str,
+        #[case] label: &str,
+        #[case] expected_values: &[&str],
+    ) {
+        fn collect_values<'a>(node: &'a TreeNode, label: &str, out: &mut Vec<&'a str>) {
+            if node.label == label {
+                out.push(node.value.as_str());
+            }
+            for c in &node.children {
+                collect_values(c, label, out);
+            }
+        }
+        let tree = parse_tree(src);
+        let mut got = Vec::new();
+        collect_values(&tree, label, &mut got);
+        for want in expected_values {
+            assert!(
+                got.contains(want),
+                "{label} nodes should carry their text as `value` (looking for {want:?}); got {got:?}",
+            );
+        }
+    }
+
     #[test]
     fn parse_records_function_declaration_label_and_name_value() {
         let tree = parse_tree("package p\nfunc Hello() int { return 1 }\n");
