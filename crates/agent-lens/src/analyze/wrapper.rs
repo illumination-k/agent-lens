@@ -1,17 +1,17 @@
-//! `analyze wrapper` — surface thin forwarding wrappers in a Rust source
-//! file.
+//! `analyze wrapper` — surface thin forwarding wrappers in source files.
 //!
-//! Today the analyzer is single-file, single-language: pass it a `.rs` path
-//! and it reports every function whose body, after stripping a short chain
-//! of trivial adapters (`?`, `.unwrap()`, `.into()`, …), is just a
-//! forwarding call to another function. Output is JSON by default; the
-//! markdown mode emits a compact summary tuned for LLM context windows
-//! rather than for humans, in line with the project's "agent-friendly lint"
-//! ethos.
+//! Accepts either a single source file or a directory. When the input is a
+//! directory the analyzer walks it recursively (respecting `.gitignore`
+//! via the `ignore` crate, the same one used by ripgrep), parses every
+//! supported file, and reports wrappers grouped by file. Output is JSON by
+//! default; the markdown mode emits a compact summary tuned for LLM
+//! context windows rather than for humans, in line with the project's
+//! "agent-friendly lint" ethos.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
+use ignore::WalkBuilder;
 use lens_domain::WrapperFinding;
 use serde::Serialize;
 
@@ -39,19 +39,83 @@ impl WrapperAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let (lang, source) = read_source(path)?;
-        let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
-        if self.diff_only {
-            let changed = changed_line_ranges(path);
-            findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
-        }
-        let report = Report::new(path, &findings);
+        let files = self.collect_file_reports(path)?;
+        let report = Report::new(path, &files);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
+    }
+
+    /// Resolve `path` to a list of per-file reports. Single-file inputs
+    /// produce a one-element vec; directory inputs walk recursively,
+    /// honouring `.gitignore`. Files with no findings are dropped so the
+    /// output stays signal-dense.
+    fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+        if path.is_dir() {
+            self.collect_directory(path)
+        } else {
+            Ok(self
+                .analyze_file(path, None)?
+                .into_iter()
+                .collect::<Vec<_>>())
+        }
+    }
+
+    fn collect_directory(&self, root: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+        let mut out = Vec::new();
+        for entry in WalkBuilder::new(root).build() {
+            let entry = entry.map_err(|e| AnalyzerError::Io {
+                path: root.to_path_buf(),
+                source: std::io::Error::other(e),
+            })?;
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let p = entry.path();
+            if SourceLang::from_path(p).is_none() {
+                continue;
+            }
+            // Display paths relative to the walk root so per-file entries
+            // stay readable when the analyzer is pointed at a deep
+            // directory.
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if let Some(report) = self.analyze_file(p, Some(rel))? {
+                out.push(report);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Analyze a single file. Returns `None` when the file has no
+    /// wrappers (after filtering), so empty entries don't pollute the
+    /// directory-mode report.
+    fn analyze_file(
+        &self,
+        path: &Path,
+        rel_override: Option<String>,
+    ) -> Result<Option<FileReport>, AnalyzerError> {
+        let (lang, source) = read_source(path)?;
+        let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
+        if self.diff_only {
+            let changed = changed_line_ranges(path);
+            findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
+        }
+        if findings.is_empty() {
+            return Ok(None);
+        }
+        let display_path = rel_override.unwrap_or_else(|| path.display().to_string());
+        Ok(Some(FileReport {
+            file: display_path,
+            findings,
+        }))
     }
 }
 
@@ -71,19 +135,49 @@ fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, B
     }
 }
 
+/// Per-file slice of the report. Owns the display path so directory mode
+/// can attach a path relative to the walk root without storing the original
+/// `PathBuf`.
+#[derive(Debug)]
+struct FileReport {
+    file: String,
+    findings: Vec<WrapperFinding>,
+}
+
 #[derive(Debug, Serialize)]
 struct Report<'a> {
-    file: String,
+    /// Input path: a single source file, or the root directory walked.
+    root: String,
+    file_count: usize,
+    wrapper_count: usize,
+    files: Vec<FileView<'a>>,
+}
+
+impl<'a> Report<'a> {
+    fn new(path: &Path, files: &'a [FileReport]) -> Self {
+        let wrapper_count = files.iter().map(|f| f.findings.len()).sum();
+        Self {
+            root: path.display().to_string(),
+            file_count: files.len(),
+            wrapper_count,
+            files: files.iter().map(FileView::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FileView<'a> {
+    file: &'a str,
     wrapper_count: usize,
     wrappers: Vec<WrapperView<'a>>,
 }
 
-impl<'a> Report<'a> {
-    fn new(path: &Path, findings: &'a [WrapperFinding]) -> Self {
+impl<'a> From<&'a FileReport> for FileView<'a> {
+    fn from(f: &'a FileReport) -> Self {
         Self {
-            file: path.display().to_string(),
-            wrapper_count: findings.len(),
-            wrappers: findings.iter().map(WrapperView::from).collect(),
+            file: f.file.as_str(),
+            wrapper_count: f.findings.len(),
+            wrappers: f.findings.iter().map(WrapperView::from).collect(),
         }
     }
 }
@@ -111,33 +205,40 @@ impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
 
 fn format_markdown(report: &Report<'_>) -> String {
     let mut out = format!(
-        "# Wrapper report: {} ({} wrapper(s))\n",
-        report.file, report.wrapper_count,
+        "# Wrapper report: {} ({} file(s), {} wrapper(s))\n",
+        report.root, report.file_count, report.wrapper_count,
     );
-    if report.wrappers.is_empty() {
+    if report.wrapper_count == 0 {
         out.push_str("\n_No thin forwarding wrappers found._\n");
         return out;
     }
-    for w in &report.wrappers {
+    for file in &report.files {
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
-        if w.adapters.is_empty() {
-            let _ = writeln!(
-                out,
-                "- `{}` (L{}-{}) -> {}",
-                w.name, w.start_line, w.end_line, w.callee,
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "- `{}` (L{}-{}) -> {} [via {}]",
-                w.name,
-                w.start_line,
-                w.end_line,
-                w.callee,
-                w.adapters.join(""),
-            );
+        let _ = writeln!(
+            out,
+            "\n## {} ({} wrapper(s))",
+            file.file, file.wrapper_count
+        );
+        for w in &file.wrappers {
+            if w.adapters.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "- `{}` (L{}-{}) -> {}",
+                    w.name, w.start_line, w.end_line, w.callee,
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "- `{}` (L{}-{}) -> {} [via {}]",
+                    w.name,
+                    w.start_line,
+                    w.end_line,
+                    w.callee,
+                    w.adapters.join(""),
+                );
+            }
         }
     }
     out
@@ -151,6 +252,9 @@ mod tests {
 
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         path
@@ -169,7 +273,10 @@ fn meaningful(x: i32) -> i32 { let y = x + 1; y * 2 }
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["wrapper_count"], 1);
-        let wrappers = parsed["wrappers"].as_array().unwrap();
+        assert_eq!(parsed["file_count"], 1);
+        let files = parsed["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        let wrappers = files[0]["wrappers"].as_array().unwrap();
         assert_eq!(wrappers[0]["name"], "render");
         assert_eq!(wrappers[0]["callee"], "internal_render");
         let names: Vec<&str> = wrappers
@@ -188,7 +295,9 @@ fn meaningful(x: i32) -> i32 { let y = x + 1; y * 2 }
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let adapters = parsed["wrappers"][0]["adapters"].as_array().unwrap();
+        let adapters = parsed["files"][0]["wrappers"][0]["adapters"]
+            .as_array()
+            .unwrap();
         let joined: String = adapters
             .iter()
             .map(|v| v.as_str().unwrap())
@@ -258,8 +367,9 @@ def meaningful(x):
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["wrapper_count"], 1);
-        assert_eq!(parsed["wrappers"][0]["name"], "render");
-        assert_eq!(parsed["wrappers"][0]["callee"], "internal_render");
+        let wrapper = &parsed["files"][0]["wrappers"][0];
+        assert_eq!(wrapper["name"], "render");
+        assert_eq!(wrapper["callee"], "internal_render");
     }
 
     #[test]
@@ -314,7 +424,113 @@ fn passthrough(x: i32) -> i32 { compute(x) }
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["wrapper_count"], 1);
-        assert_eq!(parsed["wrappers"][0]["name"], "render");
+        assert_eq!(parsed["files"][0]["wrappers"][0]["name"], "render");
+    }
+
+    #[test]
+    fn directory_mode_groups_wrappers_per_file() {
+        // Two wrappers split across two files: only visible to the
+        // analyzer once it walks the directory. The output shape is
+        // grouped per file so the agent can attribute each finding.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            "fn render(x: &str) -> String { internal_render(x) }\n",
+        );
+        write_file(
+            dir.path(),
+            "nested/b.rs",
+            "fn shim(x: i32) -> u64 { compute(x).unwrap().into() }\n",
+        );
+        // A file with no wrappers should not appear in the report at all.
+        write_file(
+            dir.path(),
+            "noop.rs",
+            r#"
+fn meaningful(xs: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in xs { total += *x; }
+    total
+}
+"#,
+        );
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["wrapper_count"], 2);
+        assert_eq!(parsed["file_count"], 2);
+        let files = parsed["files"].as_array().unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f["file"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"a.rs"), "got {paths:?}");
+        assert!(paths.contains(&"nested/b.rs"), "got {paths:?}");
+        assert!(!paths.contains(&"noop.rs"), "got {paths:?}");
+    }
+
+    #[test]
+    fn directory_mode_skips_unsupported_extensions_and_gitignored_files() {
+        // `.gitignore` should be honoured (the `ignore` walker is
+        // gitignore-aware out of the box), and unsupported extensions
+        // should be silently skipped.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            "fn render(x: &str) -> String { internal_render(x) }\n",
+        );
+        write_file(
+            dir.path(),
+            "ignored.rs",
+            "fn shim(x: i32) -> u64 { compute(x).unwrap().into() }\n",
+        );
+        write_file(dir.path(), "notes.txt", "not a source file");
+        write_file(dir.path(), ".gitignore", "ignored.rs\n");
+
+        // The `ignore` crate honours .gitignore only inside a git repo
+        // by default; bootstrap one so the test exercises the gitignore
+        // path rather than just the extension filter.
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["wrapper_count"], 1, "got {parsed}");
+        assert_eq!(parsed["file_count"], 1, "got {parsed}");
+        assert_eq!(parsed["files"][0]["file"], "a.rs");
+    }
+
+    #[test]
+    fn directory_mode_markdown_renders_per_file_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            "fn render(x: &str) -> String { internal_render(x) }\n",
+        );
+        write_file(
+            dir.path(),
+            "nested/b.rs",
+            "fn shim(x: i32) -> u64 { compute(x).unwrap().into() }\n",
+        );
+
+        let md = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("Wrapper report"));
+        assert!(md.contains("2 file(s)"));
+        assert!(md.contains("2 wrapper(s)"));
+        assert!(md.contains("## a.rs"));
+        assert!(md.contains("## nested/b.rs"));
+        assert!(md.contains("render"));
+        assert!(md.contains("shim"));
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
