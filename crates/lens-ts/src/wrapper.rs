@@ -456,74 +456,110 @@ mod tests {
         findings.iter().map(|f| f.name.as_str()).collect()
     }
 
-    #[test]
-    fn detects_simple_forward() {
-        let src = "function a(x: number): number { return b(x); }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert!(findings[0].adapters.is_empty());
-    }
-
-    #[test]
-    fn detects_method_delegation() {
-        let src = r#"
+    #[rstest]
+    #[case::simple_forward(
+        "function a(x: number): number { return b(x); }\n",
+        "a",
+        "b",
+        &[]
+    )]
+    #[case::method_delegation(
+        r#"
 class Service {
     inner = { handle(_x: number): number { return 0; } };
     handle(x: number): number { return this.inner.handle(x); }
 }
-"#;
+"#,
+        "Service::handle",
+        "this.inner.handle",
+        &[]
+    )]
+    #[case::as_adapter(
+        "function a(x: number): bigint { return b(x) as bigint; }\n",
+        "a",
+        "b",
+        &[" as T"]
+    )]
+    #[case::non_null_assertion(
+        "function a(x: number): number { return b(x)!; }\n",
+        "a",
+        "b",
+        &["!"]
+    )]
+    #[case::await_adapter(
+        "async function a(x: number): Promise<number> { return await b(x); }\n",
+        "a",
+        "b",
+        &["await"]
+    )]
+    #[case::to_string_adapter(
+        "function a(x: number): string { return b(x).toString(); }\n",
+        "a",
+        "b",
+        &[".toString()"]
+    )]
+    #[case::arrow_expression("const a = (x: number): number => b(x);\n", "a", "b", &[])]
+    #[case::arrow_block("const a = (x: number): number => { return b(x); };\n", "a", "b", &[])]
+    #[case::reordered_args(
+        "function a(x: number, y: number): number { return b(y, x); }\n",
+        "a",
+        "b",
+        &[]
+    )]
+    #[case::class_method(
+        r#"
+class Foo {
+    a(x: number): number { return b(x); }
+}
+"#,
+        "Foo::a",
+        "b",
+        &[]
+    )]
+    #[case::private_class_method(
+        r#"
+class Foo {
+    #a(x: number): number { return b(x); }
+}
+"#,
+        "Foo::#a",
+        "b",
+        &[]
+    )]
+    #[case::namespace_function(
+        r#"
+namespace inner {
+    export function shim(x: number): number { return core(x); }
+}
+"#,
+        "shim",
+        "core",
+        &[]
+    )]
+    #[case::parenthesised_adapter(
+        "function a(x: number): number { return (b(x))!; }\n",
+        "a",
+        "b",
+        &["!"]
+    )]
+    #[case::function_expression_const(
+        "const a = function (x: number): number { return b(x); };\n",
+        "a",
+        "b",
+        &[]
+    )]
+    fn detects_wrapper(
+        #[case] src: &str,
+        #[case] expected_name: &str,
+        #[case] expected_callee: &str,
+        #[case] expected_adapters: &[&str],
+    ) {
         let findings = run(src);
-        assert_eq!(names(&findings), ["Service::handle"]);
-        assert_eq!(findings[0].callee, "this.inner.handle");
-    }
-
-    #[test]
-    fn detects_with_as_adapter() {
-        let src = "function a(x: number): bigint { return b(x) as bigint; }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert_eq!(findings[0].adapters, vec![" as T".to_owned()]);
-    }
-
-    #[test]
-    fn detects_with_non_null_assertion() {
-        let src = "function a(x: number): number { return b(x)!; }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].adapters, vec!["!".to_owned()]);
-    }
-
-    #[test]
-    fn detects_with_await() {
-        let src = "async function a(x: number): Promise<number> { return await b(x); }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].adapters, vec!["await".to_owned()]);
-    }
-
-    #[test]
-    fn detects_with_to_string_adapter() {
-        let src = "function a(x: number): string { return b(x).toString(); }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].adapters, vec![".toString()".to_owned()]);
-    }
-
-    #[test]
-    fn detects_arrow_expression_body() {
-        let src = "const a = (x: number): number => b(x);\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-    }
-
-    #[test]
-    fn detects_arrow_block_body_with_return() {
-        let src = "const a = (x: number): number => { return b(x); };\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
+        assert_eq!(names(&findings), [expected_name]);
+        assert_eq!(findings[0].callee, expected_callee);
+        let expected_adapters: Vec<String> =
+            expected_adapters.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(findings[0].adapters, expected_adapters);
     }
 
     /// Body shapes that disqualify a function from being a wrapper. The
@@ -547,34 +583,6 @@ class Service {
     }
 
     #[test]
-    fn detects_passthrough_with_reordered_args() {
-        let src = "function a(x: number, y: number): number { return b(y, x); }\n";
-        assert_eq!(names(&run(src)), ["a"]);
-    }
-
-    #[test]
-    fn class_method_gets_qualified_name() {
-        let src = r#"
-class Foo {
-    a(x: number): number { return b(x); }
-}
-"#;
-        let findings = run(src);
-        assert_eq!(names(&findings), ["Foo::a"]);
-    }
-
-    #[test]
-    fn private_class_method_keeps_hash_prefix() {
-        let src = r#"
-class Foo {
-    #a(x: number): number { return b(x); }
-}
-"#;
-        let findings = run(src);
-        assert_eq!(names(&findings), ["Foo::#a"]);
-    }
-
-    #[test]
     fn constructor_is_not_reported() {
         // `super(x)` in a constructor body looks structurally like a
         // wrapper, but it is mandatory boilerplate, not a refactor
@@ -590,39 +598,12 @@ class Child extends Parent {
     }
 
     #[test]
-    fn finds_wrappers_in_namespace() {
-        let src = r#"
-namespace inner {
-    export function shim(x: number): number { return core(x); }
-}
-"#;
-        let findings = run(src);
-        assert_eq!(names(&findings), ["shim"]);
-    }
-
-    #[test]
     fn records_line_numbers_from_signature_to_block_end() {
         let src = "\nfunction first(x: number): number {\n    return b(x);\n}\n";
         let findings = run(src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].start_line, 2);
         assert_eq!(findings[0].end_line, 4);
-    }
-
-    #[test]
-    fn parenthesised_call_with_adapter_is_peeled() {
-        let src = "function a(x: number): number { return (b(x))!; }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert_eq!(findings[0].adapters, vec!["!".to_owned()]);
-    }
-
-    #[test]
-    fn function_expression_assigned_to_const_is_detected() {
-        let src = "const a = function (x: number): number { return b(x); };\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
     }
 
     #[test]

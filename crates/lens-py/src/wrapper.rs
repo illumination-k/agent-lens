@@ -349,80 +349,51 @@ mod tests {
         findings.iter().map(|f| f.name.as_str()).collect()
     }
 
-    #[test]
-    fn detects_simple_forward() {
-        let src = "def a(x):\n    return b(x)\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert!(findings[0].adapters.is_empty());
-    }
-
-    #[test]
-    fn detects_method_delegation() {
-        let src = "
+    #[rstest]
+    #[case::simple_forward("def a(x):\n    return b(x)\n", "a", "b", &[])]
+    #[case::method_delegation(
+        "
 class Service:
     def handle(self, x):
         return self.inner.handle(x)
-";
+",
+        "Service::handle",
+        "self.inner.handle",
+        &[]
+    )]
+    #[case::await_adapter("async def a(x):\n    return await b(x)\n", "a", "b", &["await"])]
+    #[case::str_coercion("def a(x):\n    return str(b(x))\n", "a", "b", &["str()"])]
+    #[case::method_adapter("def a(x):\n    return b(x).encode()\n", "a", "b", &[".encode()"])]
+    #[case::chained_adapters(
+        "async def a(x):\n    return await b(x).decode()\n",
+        "a",
+        "b",
+        &[".decode()", "await"]
+    )]
+    #[case::reordered_args("def a(x, y):\n    return b(y, x)\n", "a", "b", &[])]
+    #[case::bare_call_expression("def a(x):\n    b(x)\n", "a", "b", &[])]
+    #[case::class_method(
+        "
+class Foo:
+    def a(self, x):
+        return b(self, x)
+",
+        "Foo::a",
+        "b",
+        &[]
+    )]
+    fn detects_wrapper(
+        #[case] src: &str,
+        #[case] expected_name: &str,
+        #[case] expected_callee: &str,
+        #[case] expected_adapters: &[&str],
+    ) {
         let findings = run(src);
-        assert_eq!(names(&findings), ["Service::handle"]);
-        assert_eq!(findings[0].callee, "self.inner.handle");
-    }
-
-    #[test]
-    fn detects_with_await() {
-        let src = "async def a(x):\n    return await b(x)\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].adapters, vec!["await".to_owned()]);
-    }
-
-    #[test]
-    fn detects_with_str_coercion() {
-        let src = "def a(x):\n    return str(b(x))\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert_eq!(findings[0].adapters, vec!["str()".to_owned()]);
-    }
-
-    #[test]
-    fn detects_with_method_adapter() {
-        let src = "def a(x):\n    return b(x).encode()\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert_eq!(findings[0].adapters, vec![".encode()".to_owned()]);
-    }
-
-    #[test]
-    fn detects_with_chained_adapters() {
-        let src = "async def a(x):\n    return await b(x).decode()\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        // outer-to-inner: await wraps decode wraps b(x); rendered
-        // inner-first as [".decode()", "await"].
-        assert_eq!(
-            findings[0].adapters,
-            vec![".decode()".to_owned(), "await".to_owned()]
-        );
-    }
-
-    #[test]
-    fn detects_passthrough_with_reordered_args() {
-        let src = "def a(x, y):\n    return b(y, x)\n";
-        assert_eq!(names(&run(src)), ["a"]);
-    }
-
-    #[test]
-    fn detects_bare_call_expression_body() {
-        // No `return` — a bare expression statement carrying a call is
-        // still a wrapper (e.g. logging shim that returns None).
-        let src = "def a(x):\n    b(x)\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
+        assert_eq!(names(&findings), [expected_name]);
+        assert_eq!(findings[0].callee, expected_callee);
+        let expected_adapters: Vec<String> =
+            expected_adapters.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(findings[0].adapters, expected_adapters);
     }
 
     /// Body shapes that disqualify a function from being a wrapper.
@@ -443,17 +414,6 @@ class Service:
     #[case::chain_receiver_call("def a(x):\n    return foo(x).bar(x)\n")]
     fn rejects_non_wrapper_shape(#[case] src: &str) {
         assert!(run(src).is_empty(), "expected no wrapper for: {src}");
-    }
-
-    #[test]
-    fn class_method_gets_qualified_name() {
-        let src = "
-class Foo:
-    def a(self, x):
-        return b(self, x)
-";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["Foo::a"]);
     }
 
     #[test]

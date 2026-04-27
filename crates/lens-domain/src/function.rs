@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::lsh::{LshOptions, lsh_candidate_pairs};
+use crate::lsh::{LshOptions, LshTree, lsh_candidate_pairs};
 use crate::tree::TreeNode;
 use crate::tsed::{TSEDOptions, calculate_tsed};
 
@@ -52,6 +52,12 @@ impl FunctionDef {
     /// ```
     pub fn line_count(&self) -> usize {
         self.end_line.saturating_sub(self.start_line) + 1
+    }
+}
+
+impl LshTree for FunctionDef {
+    fn tree(&self) -> &TreeNode {
+        &self.tree
     }
 }
 

@@ -512,6 +512,7 @@ fn number_literal_repr(num: &Number) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn extract(src: &str) -> Vec<FunctionComplexity> {
         extract_complexity_units(src).unwrap()
@@ -523,25 +524,16 @@ mod tests {
         units.remove(0)
     }
 
-    #[test]
-    fn linear_function_has_cc_one() {
-        let f = one("def noop():\n    x = 1 + 2\n");
-        assert_eq!(f.cyclomatic, 1);
-        assert_eq!(f.cognitive, 0);
-        assert_eq!(f.max_nesting, 0);
-    }
-
-    #[test]
-    fn single_if_adds_one_to_cyclomatic() {
-        let f = one("def f(x):\n    if x > 0:\n        return 1\n    else:\n        return 0\n");
-        assert_eq!(f.cyclomatic, 2);
-        // outer if: +1 at nest 0; plain else: +1; total 2.
-        assert_eq!(f.cognitive, 2);
-    }
-
-    #[test]
-    fn elif_chain_pays_else_penalty_only_for_trailing_bare_else() {
-        let f = one("
+    #[rstest]
+    #[case::linear_function("def noop():\n    x = 1 + 2\n", 1, 0, 0)]
+    #[case::single_if(
+        "def f(x):\n    if x > 0:\n        return 1\n    else:\n        return 0\n",
+        2,
+        2,
+        1
+    )]
+    #[case::elif_chain(
+        "
 def f(n):
     if n > 0:
         return 1
@@ -549,17 +541,13 @@ def f(n):
         return -1
     else:
         return 0
-");
-        // base 1 + if + elif = 3
-        assert_eq!(f.cyclomatic, 3);
-        // outer if: +1, elif: +1 (Sonar treats `elif` like a chained if
-        // at the same nesting level), trailing else: +1. Total 3.
-        assert_eq!(f.cognitive, 3);
-    }
-
-    #[test]
-    fn match_adds_arms_minus_one_to_cyclomatic() {
-        let f = one("
+",
+        3,
+        3,
+        1
+    )]
+    #[case::match_statement(
+        "
 def f(n):
     match n:
         case 0:
@@ -568,54 +556,135 @@ def f(n):
             return 1
         case _:
             return -1
-");
-        // base 1 + (3 arms - 1) = 3
-        assert_eq!(f.cyclomatic, 3);
-        // top-level match contributes a single +1 to cognitive.
-        assert_eq!(f.cognitive, 1);
-    }
-
-    #[test]
-    fn each_logical_step_adds_one() {
-        let f = one("def f(a, b, c):\n    return a and b or c\n");
-        // `a and b` is one BoolOp with values = [a, b] → +1
-        // `... or c` wraps that: another BoolOp with values = [(a and b), c] → +1
-        // base 1 + 2 = 3
-        assert_eq!(f.cyclomatic, 3);
-        assert_eq!(f.cognitive, 2);
-    }
-
-    #[test]
-    fn ternary_expression_adds_one_to_cyclomatic() {
-        let f = one("def f(x):\n    return 1 if x > 0 else 0\n");
-        assert_eq!(f.cyclomatic, 2);
-        assert_eq!(f.cognitive, 1);
-    }
-
-    #[test]
-    fn try_except_adds_one_to_cyclomatic() {
-        let f = one("
+",
+        3,
+        1,
+        1
+    )]
+    #[case::logical_steps("def f(a, b, c):\n    return a and b or c\n", 3, 2, 0)]
+    #[case::ternary_expression("def f(x):\n    return 1 if x > 0 else 0\n", 2, 1, 1)]
+    #[case::try_except(
+        "
 def f():
     try:
         return 1
     except Exception:
         return 0
-");
-        assert_eq!(f.cyclomatic, 2);
-        // try itself doesn't bump cognitive; only the except clause does.
-        assert_eq!(f.cognitive, 1);
-    }
-
-    #[test]
-    fn nested_loops_track_max_nesting() {
-        let f = one("
+",
+        2,
+        1,
+        1
+    )]
+    #[case::nested_loops(
+        "
 def f():
     for i in range(10):
         for j in range(10):
             if i == j:
                 pass
-");
-        assert_eq!(f.max_nesting, 3);
+",
+        4,
+        6,
+        3
+    )]
+    #[case::while_inside_if(
+        "
+def f(go):
+    if go:
+        i = 0
+        while i < 10:
+            i += 1
+",
+        3,
+        3,
+        2
+    )]
+    #[case::for_inside_if(
+        "
+def f(go):
+    if go:
+        for x in range(5):
+            pass
+",
+        3,
+        3,
+        2
+    )]
+    #[case::match_inside_if(
+        "
+def f(go, n):
+    if go:
+        match n:
+            case 0:
+                return 0
+            case 1:
+                return 1
+    return -1
+",
+        3,
+        3,
+        2
+    )]
+    #[case::assert_statement("def f(x):\n    assert x > 0\n", 2, 0, 0)]
+    #[case::match_guard(
+        "
+def f(n):
+    match n:
+        case x if x > 0:
+            return 1
+        case _:
+            return 0
+",
+        3,
+        1,
+        1
+    )]
+    #[case::elif_inside_if(
+        "
+def f(x, y):
+    if x:
+        if y > 0:
+            return 1
+        elif y < 0:
+            return -1
+",
+        4,
+        5,
+        2
+    )]
+    #[case::except_inside_if(
+        "
+def f(go):
+    if go:
+        try:
+            return 1
+        except Exception:
+            return 0
+",
+        3,
+        3,
+        2
+    )]
+    #[case::ternary_inside_if(
+        "
+def f(x, y):
+    if x:
+        return 1 if y else 0
+",
+        3,
+        3,
+        2
+    )]
+    fn complexity_metrics_match(
+        #[case] src: &str,
+        #[case] cyclomatic: u32,
+        #[case] cognitive: u32,
+        #[case] max_nesting: u32,
+    ) {
+        let f = one(src);
+        assert_eq!(f.cyclomatic, cyclomatic);
+        assert_eq!(f.cognitive, cognitive);
+        assert_eq!(f.max_nesting, max_nesting);
     }
 
     #[test]
@@ -640,40 +709,29 @@ def nested(n):
         assert_eq!(nested.cognitive, 3);
     }
 
-    #[test]
-    fn class_methods_get_qualified_names() {
-        // Real body: a `pass`-only method now reads as a stub and is
-        // dropped before complexity is measured.
-        let units = extract(
-            "
+    #[rstest]
+    #[case::class_method(
+        "
 class Foo:
     def bar(self):
         return 1
 ",
-        );
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "Foo::bar");
-    }
-
-    #[test]
-    fn async_function_is_extracted() {
-        let units = extract("async def fetch(url):\n    return await get(url)\n");
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].name, "fetch");
-    }
-
-    #[test]
-    fn nested_functions_are_not_separate_units() {
-        let units = extract(
-            "
+        &["Foo::bar"]
+    )]
+    #[case::async_function("async def fetch(url):\n    return await get(url)\n", &["fetch"])]
+    #[case::nested_function_is_not_separate_unit(
+        "
 def outer():
     def inner():
         return 1
     return inner
 ",
-        );
+        &["outer"]
+    )]
+    fn extracted_names_match(#[case] src: &str, #[case] expected: &[&str]) {
+        let units = extract(src);
         let names: Vec<_> = units.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["outer"]);
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -789,132 +847,12 @@ def real():
     }
 
     #[test]
-    fn while_inside_if_pays_nesting_penalty() {
-        let f = one("
-def f(go):
-    if go:
-        i = 0
-        while i < 10:
-            i += 1
-");
-        // 1 (base) + 1 (if) + 1 (while) = 3
-        assert_eq!(f.cyclomatic, 3);
-        // if at nest 0 → +1; while at nest 1 → +(1+1)=2; total 3.
-        assert_eq!(f.cognitive, 3);
-        assert_eq!(f.max_nesting, 2);
-    }
-
-    #[test]
-    fn for_inside_if_pays_nesting_penalty() {
-        let f = one("
-def f(go):
-    if go:
-        for x in range(5):
-            pass
-");
-        assert_eq!(f.cyclomatic, 3);
-        assert_eq!(f.cognitive, 3);
-    }
-
-    #[test]
-    fn match_inside_if_pays_nesting_penalty() {
-        let f = one("
-def f(go, n):
-    if go:
-        match n:
-            case 0:
-                return 0
-            case 1:
-                return 1
-    return -1
-");
-        // 1 (if) + 2 (match at nest 1) = 3
-        assert_eq!(f.cognitive, 3);
-    }
-
-    #[test]
-    fn assert_adds_one_to_cyclomatic() {
-        let f = one("def f(x):\n    assert x > 0\n");
-        assert_eq!(f.cyclomatic, 2);
-    }
-
-    #[test]
-    fn match_guard_adds_one_to_cyclomatic() {
-        let f = one("
-def f(n):
-    match n:
-        case x if x > 0:
-            return 1
-        case _:
-            return 0
-");
-        // base 1 + (2 arms - 1) + 1 (guard) = 3
-        assert_eq!(f.cyclomatic, 3);
-    }
-
-    #[test]
     fn comparison_chain_records_each_op() {
         // `a < b < c` is one Compare node with two ops; both should
         // appear in the operator total.
         let f = one("def f(a, b, c):\n    return a < b < c\n");
         assert!(f.halstead.distinct_operators >= 1);
         assert!(f.halstead.total_operators >= 2);
-    }
-
-    #[test]
-    fn elif_inside_if_pays_nesting_penalty() {
-        // `elif`'s cognitive bump is `1 + nesting`; without that
-        // `+ self.nesting` term, a nested elif would score the same
-        // as a top-level one. Putting the elif under another `if`
-        // raises `nesting` to 1 so the `+ → -` mutation flips the
-        // visible cognitive total.
-        let f = one("
-def f(x, y):
-    if x:
-        if y > 0:
-            return 1
-        elif y < 0:
-            return -1
-");
-        // outer if (nest 0): +1
-        // inner if  (nest 1): +(1+1) = 2
-        // inner elif (nest 1): +(1+1) = 2
-        // total: 5
-        assert_eq!(f.cognitive, 5);
-    }
-
-    #[test]
-    fn except_inside_if_pays_nesting_penalty() {
-        // The except clause's cognitive bump is `1 + nesting`. With
-        // the outer `if` raising nesting to 1 the bump is +2 rather
-        // than +1, so the `+ → -` mutation in `visit_try` is
-        // observable here.
-        let f = one("
-def f(go):
-    if go:
-        try:
-            return 1
-        except Exception:
-            return 0
-");
-        // outer if (nest 0): +1
-        // except    (nest 1): +(1+1) = 2
-        // total: 3
-        assert_eq!(f.cognitive, 3);
-    }
-
-    #[test]
-    fn ternary_inside_if_pays_nesting_penalty() {
-        // Mirror of the elif/except cases for `visit_ternary`.
-        let f = one("
-def f(x, y):
-    if x:
-        return 1 if y else 0
-");
-        // outer if (nest 0): +1
-        // ternary  (nest 1): +(1+1) = 2
-        // total: 3
-        assert_eq!(f.cognitive, 3);
     }
 
     #[test]

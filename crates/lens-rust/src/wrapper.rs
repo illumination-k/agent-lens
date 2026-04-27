@@ -337,62 +337,82 @@ mod tests {
         findings.iter().map(|f| f.name.as_str()).collect()
     }
 
-    #[test]
-    fn detects_simple_forward() {
-        let src = "fn a(x: i32) -> i32 { b(x) }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert!(findings[0].adapters.is_empty());
-    }
-
-    #[test]
-    fn detects_method_delegation() {
-        let src = r#"
+    #[rstest]
+    #[case::simple_forward("fn a(x: i32) -> i32 { b(x) }\n", "a", "b", &[])]
+    #[case::method_delegation(
+        r#"
 struct Service;
 impl Service {
     fn handle(&self, x: i32) -> i32 { self.inner.handle(x) }
 }
-"#;
+"#,
+        "Service::handle",
+        "self.inner.handle",
+        &[]
+    )]
+    #[case::into_adapter("fn a(x: i32) -> u64 { b(x).into() }\n", "a", "b", &[".into()"])]
+    #[case::try_operator("fn a(x: i32) -> Result<i32, E> { b(x)? }\n", "a", "b", &["?"])]
+    #[case::chained_adapters(
+        "fn a(x: i32) -> String { b(x).unwrap().to_string() }\n",
+        "a",
+        "b",
+        &[".unwrap()", ".to_string()"]
+    )]
+    #[case::expect_literal(
+        "fn a(x: i32) -> i32 { b(x).expect(\"oops\") }\n",
+        "a",
+        "b",
+        &[".expect()"]
+    )]
+    #[case::trait_default_method(
+        r#"
+trait Greet {
+    fn say(&self, x: i32) -> i32 { other(x) }
+}
+"#,
+        "Greet::say",
+        "other",
+        &[]
+    )]
+    #[case::inline_module(
+        r#"
+mod inner {
+    fn shim(x: i32) -> i32 { core(x) }
+}
+"#,
+        "shim",
+        "core",
+        &[]
+    )]
+    #[case::inherent_method_named_from(
+        r#"
+struct T;
+impl T {
+    fn from(s: &str) -> Self { build(s) }
+}
+"#,
+        "T::from",
+        "build",
+        &[]
+    )]
+    #[case::parenthesised_adapter_chain(
+        "fn a(x: i32) -> i32 { (b(x)).unwrap() }\n",
+        "a",
+        "b",
+        &[".unwrap()"]
+    )]
+    fn detects_wrapper(
+        #[case] src: &str,
+        #[case] expected_name: &str,
+        #[case] expected_callee: &str,
+        #[case] expected_adapters: &[&str],
+    ) {
         let findings = run(src);
-        assert_eq!(names(&findings), ["Service::handle"]);
-        assert_eq!(findings[0].callee, "self.inner.handle");
-    }
-
-    #[test]
-    fn detects_with_into_adapter() {
-        let src = "fn a(x: i32) -> u64 { b(x).into() }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert_eq!(findings[0].adapters, vec![".into()".to_string()]);
-    }
-
-    #[test]
-    fn detects_with_try_operator() {
-        let src = "fn a(x: i32) -> Result<i32, E> { b(x)? }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].adapters, vec!["?".to_string()]);
-    }
-
-    #[test]
-    fn detects_with_chained_adapters() {
-        let src = "fn a(x: i32) -> String { b(x).unwrap().to_string() }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(
-            findings[0].adapters,
-            vec![".unwrap()".to_string(), ".to_string()".to_string()]
-        );
-    }
-
-    #[test]
-    fn detects_with_expect_literal_adapter() {
-        let src = "fn a(x: i32) -> i32 { b(x).expect(\"oops\") }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].adapters, vec![".expect()".to_string()]);
+        assert_eq!(names(&findings), [expected_name]);
+        assert_eq!(findings[0].callee, expected_callee);
+        let expected_adapters: Vec<String> =
+            expected_adapters.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(findings[0].adapters, expected_adapters);
     }
 
     /// Pure passthrough variants: each body forwards arguments to a
@@ -426,34 +446,12 @@ impl Service {
     }
 
     #[test]
-    fn extracts_qualified_method_name_for_traits() {
-        let src = r#"
-trait Greet {
-    fn say(&self, x: i32) -> i32 { other(x) }
-}
-"#;
-        let findings = run(src);
-        assert_eq!(names(&findings), ["Greet::say"]);
-    }
-
-    #[test]
     fn records_line_numbers_from_signature_to_block_end() {
         let src = "\nfn first(x: i32) -> i32 {\n    b(x)\n}\n";
         let findings = run(src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].start_line, 2);
         assert_eq!(findings[0].end_line, 4);
-    }
-
-    #[test]
-    fn finds_wrappers_in_inline_modules() {
-        let src = r#"
-mod inner {
-    fn shim(x: i32) -> i32 { core(x) }
-}
-"#;
-        let findings = run(src);
-        assert_eq!(names(&findings), ["shim"]);
     }
 
     #[test]
@@ -519,21 +517,6 @@ impl AsRef<str> for W {
     }
 
     #[test]
-    fn does_not_skip_inherent_method_named_from() {
-        // The boilerplate filter is keyed on `(trait, method)`, so an
-        // inherent `fn from(...)` (not part of `impl From for ...`)
-        // should still be reported.
-        let src = r#"
-struct T;
-impl T {
-    fn from(s: &str) -> Self { build(s) }
-}
-"#;
-        let findings = run(src);
-        assert_eq!(names(&findings), ["T::from"]);
-    }
-
-    #[test]
     fn boilerplate_filter_requires_both_trait_and_method_match() {
         // `From::other` shares the trait but not the method name; if the
         // filter degenerated to "trait OR method matches" it would drop
@@ -570,17 +553,5 @@ impl Other<i32> for T {
             ["T::from"],
             "Other::from shares method but not trait, must still report",
         );
-    }
-
-    #[test]
-    fn parenthesised_adapter_chain_is_peeled() {
-        // `(b(x).unwrap())` — the call sits inside parentheses, then
-        // `.unwrap()`. `peel_adapters` must descend into Expr::Paren so
-        // the underlying call is exposed and the wrapper is detected.
-        let src = "fn a(x: i32) -> i32 { (b(x)).unwrap() }\n";
-        let findings = run(src);
-        assert_eq!(names(&findings), ["a"]);
-        assert_eq!(findings[0].callee, "b");
-        assert_eq!(findings[0].adapters, vec![".unwrap()".to_string()]);
     }
 }

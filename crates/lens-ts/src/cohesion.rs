@@ -595,88 +595,88 @@ struct LocalNameWalker<'a> {
 impl LocalNameWalker<'_> {
     fn walk_stmt(&mut self, stmt: &Statement) {
         match stmt {
-            Statement::VariableDeclaration(v) => {
-                for d in &v.declarations {
-                    collect_binding_pattern_names(&d.id, self.locals);
-                }
-            }
-            Statement::FunctionDeclaration(f) => {
-                if let Some(id) = &f.id {
-                    self.locals.insert(id.name.to_string());
-                }
-                // Don't descend into the function body — its locals
-                // belong to that function's scope.
-            }
-            Statement::ClassDeclaration(c) => {
-                if let Some(id) = &c.id {
-                    self.locals.insert(id.name.to_string());
-                }
-            }
-            Statement::BlockStatement(b) => {
-                for s in &b.body {
-                    self.walk_stmt(s);
-                }
-            }
-            Statement::IfStatement(i) => {
-                self.walk_stmt(&i.consequent);
-                if let Some(alt) = &i.alternate {
-                    self.walk_stmt(alt);
-                }
-            }
+            Statement::VariableDeclaration(v) => self.collect_var_declaration(v),
+            Statement::FunctionDeclaration(f) => self.record_optional_binding(&f.id),
+            Statement::ClassDeclaration(c) => self.record_optional_binding(&c.id),
+            Statement::BlockStatement(b) => self.walk_statement_list(&b.body),
+            Statement::IfStatement(i) => self.walk_if(i),
             Statement::WhileStatement(w) => self.walk_stmt(&w.body),
             Statement::DoWhileStatement(d) => self.walk_stmt(&d.body),
-            Statement::ForStatement(f) => {
-                if let Some(ForStatementInit::VariableDeclaration(v)) = &f.init {
-                    for d in &v.declarations {
-                        collect_binding_pattern_names(&d.id, self.locals);
-                    }
-                }
-                self.walk_stmt(&f.body);
-            }
-            Statement::ForInStatement(f) => {
-                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
-                    for d in &v.declarations {
-                        collect_binding_pattern_names(&d.id, self.locals);
-                    }
-                }
-                self.walk_stmt(&f.body);
-            }
-            Statement::ForOfStatement(f) => {
-                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
-                    for d in &v.declarations {
-                        collect_binding_pattern_names(&d.id, self.locals);
-                    }
-                }
-                self.walk_stmt(&f.body);
-            }
-            Statement::SwitchStatement(s) => {
-                for case in &s.cases {
-                    for cs in &case.consequent {
-                        self.walk_stmt(cs);
-                    }
-                }
-            }
-            Statement::TryStatement(t) => {
-                for s in &t.block.body {
-                    self.walk_stmt(s);
-                }
-                if let Some(handler) = &t.handler {
-                    if let Some(param) = &handler.param {
-                        collect_binding_pattern_names(&param.pattern, self.locals);
-                    }
-                    for s in &handler.body.body {
-                        self.walk_stmt(s);
-                    }
-                }
-                if let Some(finalizer) = &t.finalizer {
-                    for s in &finalizer.body {
-                        self.walk_stmt(s);
-                    }
-                }
-            }
+            Statement::ForStatement(f) => self.walk_for(f),
+            Statement::ForInStatement(f) => self.walk_for_in(f),
+            Statement::ForOfStatement(f) => self.walk_for_of(f),
+            Statement::SwitchStatement(s) => self.walk_switch(s),
+            Statement::TryStatement(t) => self.walk_try(t),
             Statement::WithStatement(w) => self.walk_stmt(&w.body),
             Statement::LabeledStatement(l) => self.walk_stmt(&l.body),
             _ => {}
+        }
+    }
+
+    fn walk_if(&mut self, stmt: &IfStatement) {
+        self.walk_stmt(&stmt.consequent);
+        if let Some(alt) = &stmt.alternate {
+            self.walk_stmt(alt);
+        }
+    }
+
+    fn walk_for(&mut self, stmt: &ForStatement) {
+        if let Some(ForStatementInit::VariableDeclaration(decl)) = &stmt.init {
+            self.collect_var_declaration(decl);
+        }
+        self.walk_stmt(&stmt.body);
+    }
+
+    fn walk_for_in(&mut self, stmt: &ForInStatement) {
+        self.collect_for_left(&stmt.left);
+        self.walk_stmt(&stmt.body);
+    }
+
+    fn walk_for_of(&mut self, stmt: &ForOfStatement) {
+        self.collect_for_left(&stmt.left);
+        self.walk_stmt(&stmt.body);
+    }
+
+    fn walk_switch(&mut self, stmt: &SwitchStatement) {
+        for case in &stmt.cases {
+            self.walk_statement_list(&case.consequent);
+        }
+    }
+
+    fn walk_try(&mut self, stmt: &TryStatement) {
+        self.walk_statement_list(&stmt.block.body);
+        if let Some(handler) = &stmt.handler {
+            if let Some(param) = &handler.param {
+                collect_binding_pattern_names(&param.pattern, self.locals);
+            }
+            self.walk_statement_list(&handler.body.body);
+        }
+        if let Some(finalizer) = &stmt.finalizer {
+            self.walk_statement_list(&finalizer.body);
+        }
+    }
+
+    fn collect_for_left(&mut self, left: &ForStatementLeft) {
+        if let ForStatementLeft::VariableDeclaration(decl) = left {
+            self.collect_var_declaration(decl);
+        }
+    }
+
+    fn collect_var_declaration(&mut self, decl: &VariableDeclaration) {
+        for declarator in &decl.declarations {
+            collect_binding_pattern_names(&declarator.id, self.locals);
+        }
+    }
+
+    fn walk_statement_list(&mut self, stmts: &[Statement]) {
+        for stmt in stmts {
+            self.walk_stmt(stmt);
+        }
+    }
+
+    fn record_optional_binding(&mut self, id: &Option<BindingIdentifier>) {
+        if let Some(id) = id {
+            self.locals.insert(id.name.to_string());
         }
     }
 }
@@ -757,6 +757,7 @@ impl<'a, 'ast> Visit<'ast> for ModuleRefVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn unit(src: &str) -> CohesionUnit {
         let mut units = extract_cohesion_units(src, Dialect::Ts).unwrap();
@@ -958,14 +959,28 @@ export default class Foo {
         assert_eq!(units[0].type_name, "Foo");
     }
 
-    #[test]
-    fn classes_with_only_static_methods_are_skipped() {
-        let src = r#"
+    #[rstest]
+    #[case::only_static_methods(
+        r#"
 class Foo {
     static a(): void {}
     static b(): void {}
 }
-"#;
+"#
+    )]
+    #[case::anonymous_class(
+        r#"
+const F = class { get(): number { return 1; } };
+"#
+    )]
+    #[case::pure_type_or_import_file(
+        r#"
+import { foo } from "bar";
+type T = number;
+interface I { x: number; }
+"#
+    )]
+    fn extracts_no_units(#[case] src: &str) {
         let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
         assert!(units.is_empty());
     }
@@ -985,17 +1000,6 @@ class Foo {
         assert!(external.fields.is_empty());
         assert_eq!(local.fields, vec!["tag"]);
         assert_eq!(u.lcom4(), 2);
-    }
-
-    #[test]
-    fn anonymous_class_is_skipped() {
-        // We cannot name the unit, so we drop it rather than emit a
-        // generic placeholder.
-        let src = r#"
-const F = class { get(): number { return 1; } };
-"#;
-        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
-        assert!(units.is_empty());
     }
 
     #[test]
@@ -1160,19 +1164,6 @@ namespace inner {
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "inner");
         assert_eq!(module_units[0].lcom4(), 1);
-    }
-
-    #[test]
-    fn module_unit_skips_pure_type_or_import_files() {
-        // A file with only type aliases / interfaces / imports has no
-        // top-level function, so no module unit is emitted.
-        let src = r#"
-import { foo } from "bar";
-type T = number;
-interface I { x: number; }
-"#;
-        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
-        assert!(units.is_empty());
     }
 
     #[test]
