@@ -6,8 +6,8 @@ use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_parser::{ParseError, parse_module};
 
 use crate::attrs::{
-    class_inherits_test_case, has_pytest_decorator, has_unittest_skip_decorator,
-    name_looks_like_test_class, name_looks_like_test_function,
+    class_inherits_test_case, has_pytest_decorator, has_unittest_skip_decorator, inherits_protocol,
+    is_stub_function, name_looks_like_test_class, name_looks_like_test_function,
 };
 use crate::line_index::LineIndex;
 
@@ -99,6 +99,15 @@ fn collect_stmt(
 ) {
     match stmt {
         Stmt::FunctionDef(func) => {
+            // Stub-shaped functions (`@overload`, `@abstractmethod`,
+            // `pass` / `...` / docstring-only / `raise NotImplementedError`)
+            // carry no analysable content — every Protocol method
+            // collapses to the same one-node tree, which would dominate
+            // similarity reports. Filter unconditionally; this is not
+            // a `--exclude-tests`-style policy choice.
+            if is_stub_function(func) {
+                return;
+            }
             if opts.exclude_tests && is_test_function(func) {
                 return;
             }
@@ -121,6 +130,14 @@ fn collect_class(
     out: &mut Vec<FunctionDef>,
     opts: ExtractOptions,
 ) {
+    // PEP 544 `Protocol` classes describe a structural contract; their
+    // methods are stubs by definition. Drop the whole subtree so a
+    // generic Protocol with default `...` bodies doesn't pollute
+    // similarity / wrapper reports. Mirrors how `lens-rust` filters
+    // `trait` methods that have no `default` body.
+    if inherits_protocol(class) {
+        return;
+    }
     if opts.exclude_tests && is_test_class(class) {
         return;
     }
@@ -315,7 +332,9 @@ mod tests {
 
     #[test]
     fn extracts_top_level_function_name_and_lines() {
-        let src = "def first():\n    pass\ndef second():\n    x = 1\n";
+        // Real bodies for both functions: a stub like `pass` would now
+        // be filtered as Protocol/abstract noise, defeating the test.
+        let src = "def first():\n    return 1\ndef second():\n    x = 1\n";
         let funcs = parse_functions(src);
         assert_eq!(funcs.len(), 2);
         assert_eq!(funcs[0].name, "first");
@@ -393,14 +412,19 @@ mod tests {
     /// `collect_*` ever degrade to constants the default contract would
     /// silently break, so each test-flavoured shape gets a default-mode
     /// case here.
+    // Bodies use `assert True` / `return 1` rather than `pass` so that
+    // the stub filter (Protocol / abstract / `pass`-only) doesn't drop
+    // these items before the test-flavour filter has a chance to be
+    // observed. The test is about the test-flavour filter; the stub
+    // filter is orthogonal and applies always.
     #[rstest]
-    #[case::pytest_test_function("def test_foo():\n    pass\n", &["test_foo"][..])]
+    #[case::pytest_test_function("def test_foo():\n    assert True\n", &["test_foo"][..])]
     #[case::pytest_fixture(
         "import pytest\n@pytest.fixture\ndef sample():\n    return 1\n",
         &["sample"][..],
     )]
     #[case::pytest_mark_skip(
-        "import pytest\n@pytest.mark.skip\ndef test_skip():\n    pass\n",
+        "import pytest\n@pytest.mark.skip\ndef test_skip():\n    assert True\n",
         &["test_skip"][..],
     )]
     #[case::test_class(
@@ -408,7 +432,7 @@ mod tests {
         &["TestThing::helper"][..],
     )]
     #[case::unittest_testcase(
-        "import unittest\nclass Foo(unittest.TestCase):\n    def test_a(self):\n        pass\n",
+        "import unittest\nclass Foo(unittest.TestCase):\n    def test_a(self):\n        assert True\n",
         &["Foo::test_a"][..],
     )]
     fn default_extraction_includes_test_flavoured_items(
@@ -489,6 +513,56 @@ def disabled():
         let mut parser = PythonParser::new();
         let err = parser.parse("def !!!(:").unwrap_err();
         assert!(format!("{err}").contains("failed to parse Python source"));
+    }
+
+    /// Protocol / abstract / overload / stub-bodied functions carry no
+    /// analysable content; every Protocol method body collapses to the
+    /// same one-node tree, which would dominate similarity reports.
+    /// These cases must be dropped by the parser before any analyser
+    /// sees them.
+    #[rstest]
+    #[case::protocol_class(
+        "from typing import Protocol\nclass Foo(Protocol):\n    def f(self, x): ...\n    def g(self, x): ...\n"
+    )]
+    #[case::generic_protocol_class(
+        "from typing import Protocol\nclass Foo(Protocol[T]):\n    def f(self, x): ...\n"
+    )]
+    #[case::abstractmethod(
+        "from abc import abstractmethod\nclass Foo:\n    @abstractmethod\n    def f(self): ...\n"
+    )]
+    #[case::overload("from typing import overload\n@overload\ndef f(x: int) -> int: ...\n")]
+    #[case::ellipsis_body("def f(x): ...\n")]
+    #[case::pass_body("def f(x):\n    pass\n")]
+    #[case::docstring_only("def f(x):\n    \"\"\"docstring\"\"\"\n")]
+    #[case::raise_not_implemented("def f(x):\n    raise NotImplementedError\n")]
+    fn stub_shaped_functions_are_dropped(#[case] src: &str) {
+        let funcs = parse_functions(src);
+        assert!(
+            funcs.is_empty(),
+            "stub-shaped function should be filtered, got {:?}",
+            funcs.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn abc_subclass_keeps_concrete_methods_and_drops_abstract_ones() {
+        // Mixed ABC: only the `@abstractmethod` method is a stub. The
+        // concrete sibling must survive — a class-level filter that
+        // dropped the whole subtree would over-reach the same way
+        // skipping every Protocol class would not.
+        let src = "
+from abc import ABC, abstractmethod
+
+class Animal(ABC):
+    @abstractmethod
+    def speak(self): ...
+
+    def common(self):
+        return 'common'
+";
+        let funcs = parse_functions(src);
+        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Animal::common"]);
     }
 
     #[test]
