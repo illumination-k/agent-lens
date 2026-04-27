@@ -22,10 +22,7 @@ use ruff_python_ast::{
 };
 use ruff_python_parser::{ParseError, parse_module};
 
-use crate::attrs::{
-    class_inherits_test_case, has_pytest_decorator, has_unittest_skip_decorator, inherits_protocol,
-    is_stub_function, name_looks_like_test_class, name_looks_like_test_function,
-};
+use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
 use crate::line_index::LineIndex;
 
 /// Method names with no arguments that we treat as "no semantic
@@ -104,19 +101,13 @@ fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<WrapperF
     if inherits_protocol(class) {
         return;
     }
-    if name_looks_like_test_class(&class.name) || class_inherits_test_case(class) {
+    if is_test_class(class) {
         return;
     }
     let class_name = class.name.as_str();
     for inner in &class.body {
         collect_stmt(inner, Some(class_name), lines, out);
     }
-}
-
-fn is_test_function(func: &StmtFunctionDef) -> bool {
-    name_looks_like_test_function(&func.name)
-        || has_pytest_decorator(&func.decorator_list)
-        || has_unittest_skip_decorator(&func.decorator_list)
 }
 
 fn analyze(
