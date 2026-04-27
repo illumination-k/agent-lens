@@ -10,11 +10,13 @@ pub mod cohesion;
 pub mod complexity;
 pub mod error;
 pub mod runner;
+pub mod session_summary;
 pub mod similarity;
 pub mod wrapper;
 
 pub use error::{HookError, ReadEditedSourceError};
 pub use runner::{CohesionHook, ComplexityHook, HookEnvelope, SimilarityHook, WrapperHook};
+pub use session_summary::{SessionSummaryError, render_summary};
 
 use crate::analyze::SourceLang;
 

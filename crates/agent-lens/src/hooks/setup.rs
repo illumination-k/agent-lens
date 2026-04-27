@@ -1,10 +1,10 @@
-//! `setup` — wire `agent-lens`'s PostToolUse hooks into a Claude Code
+//! `setup` — wire `agent-lens`'s hooks into a Claude Code
 //! `settings.json` so users don't have to hand-edit it.
 //!
 //! The merge is conservative: every existing key is preserved, and a
-//! fresh `PostToolUse` block is appended only with the commands that
-//! aren't already wired up anywhere under `hooks.PostToolUse`. Re-running
-//! the command is a no-op once everything is installed.
+//! fresh block is appended only with the commands that aren't already
+//! wired up anywhere under that event. Re-running the command is a
+//! no-op once everything is installed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use crate::hooks::setup_common;
 
 const SETTINGS_RELATIVE: &str = ".claude/settings.json";
 
-/// Tool matcher used for the block this command writes. Mirrors the
+/// Tool matcher used for the PostToolUse block. Mirrors the
 /// `EDITING_TOOL_NAMES` constant the handlers themselves filter on.
 pub const POST_TOOL_USE_MATCHER: &str = "Edit|Write|MultiEdit";
 
@@ -26,6 +26,52 @@ pub const POST_TOOL_USE_MATCHER: &str = "Edit|Write|MultiEdit";
 pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
     "agent-lens hook post-tool-use similarity",
     "agent-lens hook post-tool-use wrapper",
+];
+
+/// Source matcher for the SessionStart block. Claude Code dispatches on
+/// the `source` field (`startup` / `resume` / `clear` / `compact`); a
+/// summary on every clear/compact would be noisy, so by default we only
+/// fire on a fresh start or a resumed session.
+pub const SESSION_START_MATCHER: &str = "startup|resume";
+
+/// Commands the setup writes into `hooks.SessionStart`.
+pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens hook session-start summary"];
+
+/// Per-event metadata used by [`merge`]. Field labels are baked in as
+/// `&'static str` so they can flow into [`SetupError::UnexpectedShape`]
+/// without an allocation.
+struct EventBlock {
+    /// Key under `hooks.` in settings.json (e.g. `"PostToolUse"`).
+    event: &'static str,
+    /// Field path used in error messages for the outer array.
+    array_field: &'static str,
+    /// Field path used in error messages for an entry in the array.
+    entry_field: &'static str,
+    /// Field path used in error messages for an entry's `hooks` array.
+    inner_array_field: &'static str,
+    /// Matcher string written for this event's block.
+    matcher: &'static str,
+    /// Commands the setup may install under this event.
+    commands: &'static [&'static str],
+}
+
+const EVENTS: &[EventBlock] = &[
+    EventBlock {
+        event: "SessionStart",
+        array_field: "hooks.SessionStart",
+        entry_field: "hooks.SessionStart[]",
+        inner_array_field: "hooks.SessionStart[].hooks",
+        matcher: SESSION_START_MATCHER,
+        commands: SESSION_START_COMMANDS,
+    },
+    EventBlock {
+        event: "PostToolUse",
+        array_field: "hooks.PostToolUse",
+        entry_field: "hooks.PostToolUse[]",
+        inner_array_field: "hooks.PostToolUse[].hooks",
+        matcher: POST_TOOL_USE_MATCHER,
+        commands: POST_TOOL_USE_COMMANDS,
+    },
 ];
 
 /// Where to install the hook entries.
@@ -172,49 +218,55 @@ fn merge(path: &Path, root: &mut Value) -> Result<Vec<String>, SetupError> {
             field: "hooks",
         })?;
 
-    let post_tool_use = hooks
-        .entry("PostToolUse")
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .ok_or_else(|| SetupError::UnexpectedShape {
-            path: path.to_path_buf(),
-            field: "hooks.PostToolUse",
-        })?;
+    let mut added: Vec<String> = Vec::new();
+    for block in EVENTS {
+        let entries = hooks
+            .entry(block.event)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| SetupError::UnexpectedShape {
+                path: path.to_path_buf(),
+                field: block.array_field,
+            })?;
 
-    let installed = collect_installed_commands(post_tool_use, path)?;
-    let missing: Vec<String> = POST_TOOL_USE_COMMANDS
-        .iter()
-        .filter(|cmd| {
-            !installed
-                .iter()
-                .any(|seen| setup_common::has_command_prefix(seen, cmd))
-        })
-        .map(|s| (*s).to_string())
-        .collect();
+        let installed = collect_installed_commands(entries, path, block)?;
+        let missing: Vec<String> = block
+            .commands
+            .iter()
+            .filter(|cmd| {
+                !installed
+                    .iter()
+                    .any(|seen| setup_common::has_command_prefix(seen, cmd))
+            })
+            .map(|s| (*s).to_string())
+            .collect();
 
-    if !missing.is_empty() {
-        post_tool_use.push(json!({
-            "matcher": POST_TOOL_USE_MATCHER,
-            "hooks": missing
-                .iter()
-                .map(|cmd| json!({ "type": "command", "command": cmd }))
-                .collect::<Vec<_>>(),
-        }));
+        if !missing.is_empty() {
+            entries.push(json!({
+                "matcher": block.matcher,
+                "hooks": missing
+                    .iter()
+                    .map(|cmd| json!({ "type": "command", "command": cmd }))
+                    .collect::<Vec<_>>(),
+            }));
+            added.extend(missing);
+        }
     }
 
-    Ok(missing)
+    Ok(added)
 }
 
 fn collect_installed_commands(
-    post_tool_use: &[Value],
+    entries: &[Value],
     path: &Path,
+    block: &EventBlock,
 ) -> Result<Vec<String>, SetupError> {
     let mut out = Vec::new();
-    for entry in post_tool_use {
+    for entry in entries {
         let Some(entry_obj) = entry.as_object() else {
             return Err(SetupError::UnexpectedShape {
                 path: path.to_path_buf(),
-                field: "hooks.PostToolUse[]",
+                field: block.entry_field,
             });
         };
         let Some(hooks) = entry_obj.get("hooks") else {
@@ -223,7 +275,7 @@ fn collect_installed_commands(
         let Some(hooks) = hooks.as_array() else {
             return Err(SetupError::UnexpectedShape {
                 path: path.to_path_buf(),
-                field: "hooks.PostToolUse[].hooks",
+                field: block.inner_array_field,
             });
         };
         for hook in hooks {
@@ -254,11 +306,20 @@ mod tests {
         let plan = plan(path.clone()).unwrap();
         assert!(plan.before.is_none());
         assert!(plan.changed());
-        assert_eq!(plan.added_commands.len(), POST_TOOL_USE_COMMANDS.len());
+        assert_eq!(
+            plan.added_commands.len(),
+            POST_TOOL_USE_COMMANDS.len() + SESSION_START_COMMANDS.len(),
+        );
         assert_eq!(
             plan.after,
             json!({
                 "hooks": {
+                    "SessionStart": [{
+                        "matcher": SESSION_START_MATCHER,
+                        "hooks": [
+                            {"type": "command", "command": "agent-lens hook session-start summary"},
+                        ],
+                    }],
                     "PostToolUse": [{
                         "matcher": POST_TOOL_USE_MATCHER,
                         "hooks": [
@@ -269,6 +330,37 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn plan_installs_session_start_alongside_existing_post_tool_use() {
+        // When a user has only the older PostToolUse block, re-running
+        // setup should add the new SessionStart block without disturbing
+        // the existing one.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let existing = json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": POST_TOOL_USE_MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook post-tool-use similarity"},
+                        {"type": "command", "command": "agent-lens hook post-tool-use wrapper"},
+                    ],
+                }],
+            },
+        });
+        fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        let plan = plan(path).unwrap();
+        assert_eq!(
+            plan.added_commands,
+            vec!["agent-lens hook session-start summary".to_string()],
+        );
+        assert!(plan.changed());
+        let session_start = plan.after["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(session_start.len(), 1);
+        assert_eq!(session_start[0]["matcher"], SESSION_START_MATCHER);
     }
 
     #[test]
@@ -341,6 +433,13 @@ mod tests {
         let path = dir.path().join("settings.json");
         let existing = json!({
             "hooks": {
+                "SessionStart": [{
+                    "matcher": "startup",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "agent-lens hook session-start summary",
+                    }],
+                }],
                 "PostToolUse": [{
                     "matcher": "Write",
                     "hooks": [{
@@ -366,6 +465,12 @@ mod tests {
         let path = dir.path().join("settings.json");
         let existing = json!({
             "hooks": {
+                "SessionStart": [{
+                    "matcher": SESSION_START_MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook session-start summary --quiet"},
+                    ],
+                }],
                 "PostToolUse": [{
                     "matcher": "Edit|Write",
                     "hooks": [
