@@ -17,6 +17,8 @@ pub mod wrapper;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use context_span::ContextSpanAnalyzer;
@@ -76,6 +78,152 @@ impl SourceLang {
     }
 }
 
+/// Path-level filters shared by every on-demand analyzer.
+///
+/// `only_tests` is intentionally path-based so it can apply uniformly to
+/// function analyzers, file-level hotspot scoring, and Rust crate graph
+/// analyzers. Language-specific "test function" filtering remains a
+/// separate analyzer option where it exists.
+#[derive(Debug, Clone, Default)]
+pub struct AnalyzePathFilter {
+    only_tests: bool,
+    exclude_tests: bool,
+    exclude: Vec<String>,
+}
+
+impl AnalyzePathFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+        self.only_tests = only_tests;
+        self
+    }
+
+    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+        self.exclude_tests = exclude_tests;
+        self
+    }
+
+    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
+        self.exclude = exclude;
+        self
+    }
+
+    pub fn compile(&self, root: &Path) -> Result<CompiledPathFilter, PathFilterError> {
+        let base = if root.is_dir() {
+            root.to_path_buf()
+        } else {
+            root.parent().unwrap_or_else(|| Path::new("")).to_path_buf()
+        };
+        let mut builder = GlobSetBuilder::new();
+        for pattern in &self.exclude {
+            add_exclude_pattern(&mut builder, pattern)?;
+        }
+        let exclude = builder
+            .build()
+            .map_err(|source| PathFilterError::InvalidExcludePattern {
+                pattern: self.exclude.join(", "),
+                source,
+            })?;
+        Ok(CompiledPathFilter {
+            base,
+            only_tests: self.only_tests,
+            exclude_tests: self.exclude_tests,
+            exclude,
+            has_excludes: !self.exclude.is_empty(),
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PathFilterError {
+    #[error("invalid --exclude pattern {pattern:?}: {source}")]
+    InvalidExcludePattern {
+        pattern: String,
+        #[source]
+        source: globset::Error,
+    },
+}
+
+#[derive(Debug)]
+pub struct CompiledPathFilter {
+    base: PathBuf,
+    only_tests: bool,
+    exclude_tests: bool,
+    exclude: GlobSet,
+    has_excludes: bool,
+}
+
+impl CompiledPathFilter {
+    pub fn includes_path(&self, path: &Path) -> bool {
+        let rel = relative_display_path(path, &self.base);
+        self.includes_relative(&rel)
+    }
+
+    pub fn includes_relative(&self, rel: &str) -> bool {
+        let is_test = path_looks_like_test(rel);
+        if self.only_tests && !is_test {
+            return false;
+        }
+        if self.exclude_tests && is_test {
+            return false;
+        }
+        !self.has_excludes || !self.exclude.is_match(rel)
+    }
+}
+
+fn add_exclude_pattern(builder: &mut GlobSetBuilder, pattern: &str) -> Result<(), PathFilterError> {
+    let glob = Glob::new(pattern).map_err(|source| PathFilterError::InvalidExcludePattern {
+        pattern: pattern.to_owned(),
+        source,
+    })?;
+    builder.add(glob);
+
+    if !pattern.contains('/') && !pattern.contains('\\') {
+        let recursive = format!("**/{pattern}");
+        let glob =
+            Glob::new(&recursive).map_err(|source| PathFilterError::InvalidExcludePattern {
+                pattern: pattern.to_owned(),
+                source,
+            })?;
+        builder.add(glob);
+    }
+    Ok(())
+}
+
+fn relative_display_path(path: &Path, base: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn path_looks_like_test(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let segments: Vec<&str> = normalized.split('/').collect();
+    if segments.iter().any(|segment| {
+        matches!(
+            *segment,
+            "test" | "tests" | "__test__" | "__tests__" | "spec" | "specs"
+        )
+    }) {
+        return true;
+    }
+
+    let Some(file) = segments.last().copied() else {
+        return false;
+    };
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    file.contains(".test.")
+        || file.contains(".spec.")
+        || file == "conftest.py"
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || stem.ends_with("_tests")
+}
+
 /// Errors common to single-file analyzers (cohesion, complexity).
 ///
 /// Coupling and context-span carry extra variants (`UnsupportedRoot`,
@@ -95,6 +243,8 @@ pub enum AnalyzerError {
     Parse(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("failed to serialize report: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathFilter(#[from] PathFilterError),
 }
 
 /// Errors raised by analyzers that walk a Rust crate from a `.rs` root
@@ -134,6 +284,8 @@ pub enum CrateAnalyzerError {
     },
     #[error("failed to serialize report: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathFilter(#[from] PathFilterError),
 }
 
 impl From<lens_rust::CouplingError> for CrateAnalyzerError {
@@ -323,6 +475,62 @@ mod tests {
         assert_eq!(SourceLang::from_extension("rs"), Some(SourceLang::Rust));
         assert_eq!(SourceLang::from_extension("py"), Some(SourceLang::Python));
         assert_eq!(SourceLang::from_extension("md"), None);
+    }
+
+    #[test]
+    fn test_path_detection_covers_common_file_conventions() {
+        for path in [
+            "tests/api.rs",
+            "src/__tests__/view.ts",
+            "src/foo.test.ts",
+            "src/foo.spec.ts",
+            "pkg/conftest.py",
+            "pkg/test_api.py",
+            "src/foo_test.rs",
+            "src/foo_tests.rs",
+        ] {
+            assert!(path_looks_like_test(path), "{path} should look like a test");
+        }
+        assert!(!path_looks_like_test("src/testsupport.rs"));
+        assert!(!path_looks_like_test("src/generated.rs"));
+    }
+
+    #[test]
+    fn compiled_path_filter_combines_test_modes_and_exclude_globs() {
+        let root = Path::new("/repo");
+        let include_all = AnalyzePathFilter::new().compile(root).unwrap();
+        assert!(include_all.includes_relative("src/lib.rs"));
+
+        let only_tests = AnalyzePathFilter::new()
+            .with_only_tests(true)
+            .compile(root)
+            .unwrap();
+        assert!(only_tests.includes_relative("tests/api.rs"));
+        assert!(!only_tests.includes_relative("src/lib.rs"));
+
+        let exclude_tests = AnalyzePathFilter::new()
+            .with_exclude_tests(true)
+            .compile(root)
+            .unwrap();
+        assert!(!exclude_tests.includes_relative("tests/api.rs"));
+        assert!(exclude_tests.includes_relative("src/lib.rs"));
+
+        let exclude_bare = AnalyzePathFilter::new()
+            .with_exclude_patterns(vec!["generated.rs".to_owned()])
+            .compile(root)
+            .unwrap();
+        assert!(!exclude_bare.includes_relative("src/generated.rs"));
+        assert!(exclude_bare.includes_relative("src/handwritten.rs"));
+    }
+
+    #[test]
+    fn exclude_globs_with_slashes_are_not_promoted_to_any_depth() {
+        let filter = AnalyzePathFilter::new()
+            .with_exclude_patterns(vec!["generated/*.rs".to_owned()])
+            .compile(Path::new("/repo"))
+            .unwrap();
+        assert!(!filter.includes_relative("generated/bindings.rs"));
+        assert!(filter.includes_relative("src/generated/bindings.rs"));
     }
 
     #[test]

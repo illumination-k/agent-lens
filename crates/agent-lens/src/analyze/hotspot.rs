@@ -29,7 +29,7 @@ use lens_domain::{FileChurn, FileComplexity, FunctionComplexity, HotspotEntry, c
 use serde::Serialize;
 use tracing::warn;
 
-use super::{OutputFormat, SourceLang};
+use super::{AnalyzePathFilter, CompiledPathFilter, OutputFormat, PathFilterError, SourceLang};
 
 /// Errors raised while running the hotspot analyzer.
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +49,8 @@ pub enum HotspotError {
     NotInGitRepo { path: PathBuf },
     #[error("failed to serialize report: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathFilter(#[from] PathFilterError),
 }
 
 /// Stateful hotspot runner. `since` is plumbed through to git's
@@ -58,6 +60,7 @@ pub enum HotspotError {
 pub struct HotspotAnalyzer {
     since: Option<String>,
     top: Option<usize>,
+    path_filter: AnalyzePathFilter,
 }
 
 impl HotspotAnalyzer {
@@ -90,13 +93,30 @@ impl HotspotAnalyzer {
         self
     }
 
+    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+        self.path_filter = self.path_filter.with_only_tests(only_tests);
+        self
+    }
+
+    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
+        self
+    }
+
+    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
+        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
+        self
+    }
+
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, HotspotError> {
         let abs = canonicalize(path)?;
         let repo_root = git_repo_root(&abs)?;
         let scope_rel = relative_to(&abs, &repo_root);
+        let filter = self.path_filter.compile(&repo_root)?;
 
-        let churn = collect_churn(&repo_root, scope_rel.as_deref(), self.since.as_deref())?;
-        let complexity = collect_complexity(&abs, &repo_root)?;
+        let mut churn = collect_churn(&repo_root, scope_rel.as_deref(), self.since.as_deref())?;
+        churn.retain(|c| filter.includes_relative(&c.path));
+        let complexity = collect_complexity(&abs, &repo_root, &filter)?;
         let entries = compute_hotspots(churn, complexity);
 
         let view = ReportView::new(&abs, &repo_root, self.since.as_deref(), &entries);
@@ -191,9 +211,10 @@ fn collect_churn(
 fn collect_complexity(
     target: &Path,
     repo_root: &Path,
+    filter: &CompiledPathFilter,
 ) -> Result<Vec<FileComplexity>, HotspotError> {
     let mut files = Vec::new();
-    walk_source_files(target, &mut files)?;
+    walk_source_files(target, filter, &mut files)?;
 
     let mut out = Vec::with_capacity(files.len());
     for file in files {
@@ -250,25 +271,37 @@ fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
 
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "__pycache__"];
 
-fn walk_source_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
+fn walk_source_files(
+    path: &Path,
+    filter: &CompiledPathFilter,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), HotspotError> {
     let meta = std::fs::metadata(path).map_err(|source| io_err(path, source))?;
     if meta.is_file() {
-        push_if_supported(path, out);
+        push_if_supported(path, filter, out);
         return Ok(());
     }
-    walk_dir(path, out)
+    walk_dir(path, filter, out)
 }
 
-fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
+fn walk_dir(
+    dir: &Path,
+    filter: &CompiledPathFilter,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), HotspotError> {
     let entries = std::fs::read_dir(dir).map_err(|source| io_err(dir, source))?;
     for entry in entries {
         let entry = entry.map_err(|source| io_err(dir, source))?;
-        process_entry(&entry, out)?;
+        process_entry(&entry, filter, out)?;
     }
     Ok(())
 }
 
-fn process_entry(entry: &std::fs::DirEntry, out: &mut Vec<PathBuf>) -> Result<(), HotspotError> {
+fn process_entry(
+    entry: &std::fs::DirEntry,
+    filter: &CompiledPathFilter,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), HotspotError> {
     let name = entry.file_name();
     let name_str = name.to_string_lossy();
     if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
@@ -279,17 +312,17 @@ fn process_entry(entry: &std::fs::DirEntry, out: &mut Vec<PathBuf>) -> Result<()
         .file_type()
         .map_err(|source| io_err(&entry_path, source))?;
     if file_type.is_dir() {
-        walk_source_files(&entry_path, out)
+        walk_source_files(&entry_path, filter, out)
     } else if file_type.is_file() {
-        push_if_supported(&entry_path, out);
+        push_if_supported(&entry_path, filter, out);
         Ok(())
     } else {
         Ok(())
     }
 }
 
-fn push_if_supported(path: &Path, out: &mut Vec<PathBuf>) {
-    if SourceLang::from_path(path).is_some() {
+fn push_if_supported(path: &Path, filter: &CompiledPathFilter, out: &mut Vec<PathBuf>) {
+    if filter.includes_path(path) && SourceLang::from_path(path).is_some() {
         out.push(path.to_path_buf());
     }
 }
@@ -771,6 +804,55 @@ mod tests {
         // The non-Rust file is not committed, so it must not appear via
         // churn either; the file list is empty.
         assert_eq!(parsed["file_count"], 0);
+    }
+
+    #[test]
+    fn path_filters_apply_to_churn_and_complexity_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        let body = "pub fn f(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\n";
+        write_file(dir.path(), "src/lib.rs", body);
+        write_file(dir.path(), "tests/lib_test.rs", body);
+        write_file(dir.path(), "src/generated.rs", body);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let only_tests = HotspotAnalyzer::new()
+            .with_only_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&only_tests).unwrap();
+        assert_eq!(parsed["file_count"], 1);
+        assert_eq!(parsed["files"][0]["path"], "tests/lib_test.rs");
+
+        let exclude_tests = HotspotAnalyzer::new()
+            .with_exclude_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_tests).unwrap();
+        let paths: Vec<&str> = parsed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"src/lib.rs"));
+        assert!(!paths.contains(&"tests/lib_test.rs"));
+
+        let exclude_generated = HotspotAnalyzer::new()
+            .with_exclude_patterns(vec!["generated.rs".to_owned()])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_generated).unwrap();
+        let paths: Vec<&str> = parsed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert!(!paths.contains(&"src/generated.rs"));
     }
 
     #[test]

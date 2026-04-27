@@ -30,17 +30,36 @@ use lens_domain::{
 use lens_rust::{CrateModule, build_module_tree, extract_edges};
 use serde::Serialize;
 
-use super::{ContextSpanAnalyzerError, OutputFormat, resolve_crate_root};
+use super::{AnalyzePathFilter, ContextSpanAnalyzerError, OutputFormat, resolve_crate_root};
 
 /// Stateless analyzer entry point. Kept as a struct so per-run
 /// configuration (e.g. a `--top` cap) can be added later without
 /// changing the call site.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ContextSpanAnalyzer;
+#[derive(Debug, Default, Clone)]
+pub struct ContextSpanAnalyzer {
+    path_filter: AnalyzePathFilter,
+}
 
 impl ContextSpanAnalyzer {
     pub fn new() -> Self {
-        Self
+        Self {
+            path_filter: AnalyzePathFilter::new(),
+        }
+    }
+
+    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+        self.path_filter = self.path_filter.with_only_tests(only_tests);
+        self
+    }
+
+    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
+        self
+    }
+
+    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
+        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
+        self
     }
 
     /// Resolve `path`, build the crate's module tree, and produce a
@@ -51,7 +70,9 @@ impl ContextSpanAnalyzer {
         format: OutputFormat,
     ) -> Result<String, ContextSpanAnalyzerError> {
         let root = resolve_crate_root(path)?;
-        let modules = build_module_tree(&root)?;
+        let filter = self.path_filter.compile(&root)?;
+        let mut modules = build_module_tree(&root)?;
+        modules.retain(|m| filter.includes_path(&m.file));
         let edges = extract_edges(&modules);
         // `compute_report` deduplicates and drops self-loops; reuse its
         // cleaned edge list so the closure walk doesn't re-do that work.
@@ -287,6 +308,55 @@ mod tests {
         assert!(md.contains("crate::a"));
         assert!(md.contains("crate::b"));
         assert!(md.contains("crate::c"));
+    }
+
+    #[test]
+    fn path_filters_apply_to_module_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            "pub mod prod;\npub mod foo_test;\npub mod generated;\n",
+        );
+        write_file(dir.path(), "prod.rs", "pub fn prod() {}\n");
+        write_file(dir.path(), "foo_test.rs", "pub fn test_case() {}\n");
+        write_file(dir.path(), "generated.rs", "pub fn generated() {}\n");
+
+        let only_tests = ContextSpanAnalyzer::new()
+            .with_only_tests(true)
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&only_tests).unwrap();
+        assert_eq!(parsed["module_count"], 1);
+        assert_eq!(parsed["modules"][0]["path"], "crate::foo_test");
+
+        let exclude_tests = ContextSpanAnalyzer::new()
+            .with_exclude_tests(true)
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_tests).unwrap();
+        let modules: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(modules.contains(&"crate"));
+        assert!(modules.contains(&"crate::prod"));
+        assert!(!modules.contains(&"crate::foo_test"));
+
+        let exclude_generated = ContextSpanAnalyzer::new()
+            .with_exclude_patterns(vec!["generated.rs".to_owned()])
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_generated).unwrap();
+        let modules: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(!modules.contains(&"crate::generated"));
     }
 
     #[test]

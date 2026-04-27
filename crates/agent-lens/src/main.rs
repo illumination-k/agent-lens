@@ -273,6 +273,8 @@ enum AnalyzeCommand {
         /// changed lines in `git diff -U0`.
         #[arg(long)]
         diff_only: bool,
+        #[command(flatten)]
+        path_filter: AnalyzePathArgs,
     },
     /// Report per-function complexity metrics (Cyclomatic, Cognitive,
     /// Max Nesting, Halstead Volume, Maintainability Index).
@@ -294,6 +296,8 @@ enum AnalyzeCommand {
         /// lines in `git diff -U0`.
         #[arg(long)]
         diff_only: bool,
+        #[command(flatten)]
+        path_filter: AnalyzePathArgs,
     },
     /// Report module-level coupling metrics for a Rust crate.
     ///
@@ -310,6 +314,8 @@ enum AnalyzeCommand {
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+        #[command(flatten)]
+        path_filter: AnalyzePathArgs,
     },
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
@@ -328,6 +334,8 @@ enum AnalyzeCommand {
         /// Output format. Defaults to JSON.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+        #[command(flatten)]
+        path_filter: AnalyzePathArgs,
     },
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
@@ -353,6 +361,8 @@ enum AnalyzeCommand {
         /// carries the full list).
         #[arg(long)]
         top: Option<usize>,
+        #[command(flatten)]
+        path_filter: AnalyzePathArgs,
     },
     /// Report clusters of near-duplicate functions.
     ///
@@ -376,12 +386,10 @@ enum AnalyzeCommand {
         /// lines in `git diff -U0`.
         #[arg(long)]
         diff_only: bool,
-        /// Drop test scaffolding before computing similarity: free
-        /// functions tagged `#[test]` / `#[rstest]` / `#[<runner>::test]`
-        /// and everything inside a `#[cfg(test)] mod` block. Useful when
-        /// table-driven tests dominate the report.
-        #[arg(long)]
-        exclude_tests: bool,
+        /// Shared path filters. `--exclude-tests` also drops
+        /// language-level test functions for similarity.
+        #[command(flatten)]
+        path_filter: AnalyzePathArgs,
         /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
         /// this value are eligible for clustering, and the same threshold
         /// is the complete-link cut so every pair inside a reported cluster
@@ -415,7 +423,27 @@ enum AnalyzeCommand {
         /// lines in `git diff -U0`.
         #[arg(long)]
         diff_only: bool,
+        #[command(flatten)]
+        path_filter: AnalyzePathArgs,
     },
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct AnalyzePathArgs {
+    /// Analyze only files that look like tests (`tests/`, `*_test.*`,
+    /// `*.test.*`, `test_*`, etc.).
+    #[arg(long, conflicts_with = "exclude_tests")]
+    only_tests: bool,
+    /// Exclude files that look like tests. For `similarity`, this also
+    /// drops language-level test functions such as Rust `#[cfg(test)]`
+    /// modules.
+    #[arg(long, conflicts_with = "only_tests")]
+    exclude_tests: bool,
+    /// Exclude paths matching this glob. Repeatable. Bare patterns also
+    /// match at any depth, so `--exclude generated.rs` matches
+    /// `src/generated.rs`.
+    #[arg(long = "exclude", value_name = "GLOB")]
+    exclude: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -469,48 +497,80 @@ impl AnalyzeCommand {
                 path,
                 format,
                 diff_only,
+                path_filter,
             } => CohesionAnalyzer::new()
                 .with_diff_only(diff_only)
+                .with_only_tests(path_filter.only_tests)
+                .with_exclude_tests(path_filter.exclude_tests)
+                .with_exclude_patterns(path_filter.exclude)
                 .analyze(&path, format)?,
             Self::Complexity {
                 path,
                 format,
                 diff_only,
+                path_filter,
             } => ComplexityAnalyzer::new()
                 .with_diff_only(diff_only)
+                .with_only_tests(path_filter.only_tests)
+                .with_exclude_tests(path_filter.exclude_tests)
+                .with_exclude_patterns(path_filter.exclude)
                 .analyze(&path, format)?,
-            Self::Coupling { path, format } => CouplingAnalyzer::new().analyze(&path, format)?,
-            Self::ContextSpan { path, format } => {
-                ContextSpanAnalyzer::new().analyze(&path, format)?
-            }
+            Self::Coupling {
+                path,
+                format,
+                path_filter,
+            } => CouplingAnalyzer::new()
+                .with_only_tests(path_filter.only_tests)
+                .with_exclude_tests(path_filter.exclude_tests)
+                .with_exclude_patterns(path_filter.exclude)
+                .analyze(&path, format)?,
+            Self::ContextSpan {
+                path,
+                format,
+                path_filter,
+            } => ContextSpanAnalyzer::new()
+                .with_only_tests(path_filter.only_tests)
+                .with_exclude_tests(path_filter.exclude_tests)
+                .with_exclude_patterns(path_filter.exclude)
+                .analyze(&path, format)?,
             Self::Hotspot {
                 path,
                 format,
                 since,
                 top,
+                path_filter,
             } => HotspotAnalyzer::new()
                 .with_top(top)
                 .with_since_opt(since)
+                .with_only_tests(path_filter.only_tests)
+                .with_exclude_tests(path_filter.exclude_tests)
+                .with_exclude_patterns(path_filter.exclude)
                 .analyze(&path, format)?,
             Self::Similarity {
                 path,
                 format,
                 diff_only,
-                exclude_tests,
+                path_filter,
                 threshold,
                 min_lines,
             } => SimilarityAnalyzer::new()
                 .with_threshold(threshold)
                 .with_diff_only(diff_only)
-                .with_exclude_tests(exclude_tests)
+                .with_only_tests(path_filter.only_tests)
+                .with_exclude_tests(path_filter.exclude_tests)
+                .with_exclude_patterns(path_filter.exclude)
                 .with_min_lines(min_lines)
                 .analyze(&path, format)?,
             Self::Wrapper {
                 path,
                 format,
                 diff_only,
+                path_filter,
             } => WrapperAnalyzer::new()
                 .with_diff_only(diff_only)
+                .with_only_tests(path_filter.only_tests)
+                .with_exclude_tests(path_filter.exclude_tests)
+                .with_exclude_patterns(path_filter.exclude)
                 .analyze(&path, format)?,
         })
     }
@@ -870,6 +930,8 @@ mod tests {
             "md",
             "--diff-only",
             "--exclude-tests",
+            "--exclude",
+            "generated/**",
             "--min-lines",
             "8",
         ])
@@ -878,7 +940,7 @@ mod tests {
             path,
             format,
             diff_only,
-            exclude_tests,
+            path_filter,
             threshold,
             min_lines,
         }) = cli.command
@@ -888,7 +950,8 @@ mod tests {
         assert_eq!(path, PathBuf::from("src/lib.rs"));
         assert_eq!(format, OutputFormat::Md);
         assert!(diff_only);
-        assert!(exclude_tests);
+        assert!(path_filter.exclude_tests);
+        assert_eq!(path_filter.exclude, ["generated/**"]);
         assert!((threshold - 0.85).abs() < f64::EPSILON);
         assert_eq!(min_lines, 8);
     }
@@ -921,7 +984,7 @@ mod tests {
     fn parses_analyze_coupling_default_format_is_json() {
         let cli =
             Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Coupling { path, format }) = cli.command else {
+        let Command::Analyze(AnalyzeCommand::Coupling { path, format, .. }) = cli.command else {
             panic!("expected analyze coupling");
         };
         assert_eq!(path, PathBuf::from("."));
@@ -939,7 +1002,7 @@ mod tests {
             "md",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::ContextSpan { path, format }) = cli.command else {
+        let Command::Analyze(AnalyzeCommand::ContextSpan { path, format, .. }) = cli.command else {
             panic!("expected analyze context-span");
         };
         assert_eq!(path, PathBuf::from("src/lib.rs"));

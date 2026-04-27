@@ -15,25 +15,47 @@ use ignore::WalkBuilder;
 use lens_domain::WrapperFinding;
 use serde::Serialize;
 
-use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, changed_line_ranges, read_source};
+use super::{
+    AnalyzePathFilter, AnalyzerError, CompiledPathFilter, LineRange, OutputFormat, SourceLang,
+    changed_line_ranges, read_source,
+};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
 /// CLI surface.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct WrapperAnalyzer {
     diff_only: bool,
+    path_filter: AnalyzePathFilter,
 }
 
 impl WrapperAnalyzer {
     pub fn new() -> Self {
-        Self { diff_only: false }
+        Self {
+            diff_only: false,
+            path_filter: AnalyzePathFilter::new(),
+        }
     }
 
     /// Restrict reports to wrappers intersecting an unstaged changed line
     /// in `git diff -U0`.
     pub fn with_diff_only(mut self, diff_only: bool) -> Self {
         self.diff_only = diff_only;
+        self
+    }
+
+    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+        self.path_filter = self.path_filter.with_only_tests(only_tests);
+        self
+    }
+
+    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
+        self
+    }
+
+    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
+        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
         self
     }
 
@@ -54,17 +76,24 @@ impl WrapperAnalyzer {
     /// honouring `.gitignore`. Files with no findings are dropped so the
     /// output stays signal-dense.
     fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+        let filter = self.path_filter.compile(path)?;
         if path.is_dir() {
-            self.collect_directory(path)
-        } else {
+            self.collect_directory(path, &filter)
+        } else if filter.includes_path(path) {
             Ok(self
                 .analyze_file(path, None)?
                 .into_iter()
                 .collect::<Vec<_>>())
+        } else {
+            Ok(Vec::new())
         }
     }
 
-    fn collect_directory(&self, root: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+    fn collect_directory(
+        &self,
+        root: &Path,
+        filter: &CompiledPathFilter,
+    ) -> Result<Vec<FileReport>, AnalyzerError> {
         let mut out = Vec::new();
         for entry in WalkBuilder::new(root).build() {
             let entry = entry.map_err(|e| AnalyzerError::Io {
@@ -75,6 +104,9 @@ impl WrapperAnalyzer {
                 continue;
             }
             let p = entry.path();
+            if !filter.includes_path(p) {
+                continue;
+            }
             if SourceLang::from_path(p).is_none() {
                 continue;
             }
@@ -531,6 +563,50 @@ fn meaningful(xs: &[i32]) -> i32 {
         assert!(md.contains("## nested/b.rs"));
         assert!(md.contains("render"));
         assert!(md.contains("shim"));
+    }
+
+    #[test]
+    fn path_filters_apply_to_directory_walks() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = "fn render(x: &str) -> String { internal_render(x) }\n";
+        write_file(dir.path(), "src/lib.rs", wrapper);
+        write_file(dir.path(), "tests/lib_test.rs", wrapper);
+        write_file(dir.path(), "src/generated.rs", wrapper);
+
+        let only_tests = WrapperAnalyzer::new()
+            .with_only_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&only_tests).unwrap();
+        assert_eq!(parsed["file_count"], 1);
+        assert_eq!(parsed["files"][0]["file"], "tests/lib_test.rs");
+
+        let exclude_tests = WrapperAnalyzer::new()
+            .with_exclude_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_tests).unwrap();
+        let files: Vec<&str> = parsed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert!(files.contains(&"src/lib.rs"));
+        assert!(!files.contains(&"tests/lib_test.rs"));
+
+        let exclude_generated = WrapperAnalyzer::new()
+            .with_exclude_patterns(vec!["generated.rs".to_owned()])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&exclude_generated).unwrap();
+        let files: Vec<&str> = parsed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert!(!files.contains(&"src/generated.rs"));
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
