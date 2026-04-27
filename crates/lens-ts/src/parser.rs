@@ -17,6 +17,8 @@
 //! [`LanguageParser`]-shaped adapter that converts each visited
 //! [`crate::walk::FunctionItem`] into a [`FunctionDef`].
 
+use std::path::Path;
+
 use lens_domain::{FunctionDef, LanguageParser, TreeNode};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -28,14 +30,102 @@ use crate::line_index::LineIndex;
 use crate::tree::{expr_tree, function_body_tree};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
-/// TypeScript / JavaScript parser. Stateless; configurable per call via
-/// `SourceType` (defaults to `.ts`).
+/// Source dialect handed to the oxc parser.
+///
+/// Picking the right dialect matters because the JSX-flavoured variants
+/// (`Tsx`, `Jsx`) tell the parser to accept `<Foo />` as an expression;
+/// passing a plain `Ts` source type to a `.tsx` file errors out. The
+/// JavaScript variants additionally carry the right module-kind (script
+/// vs ESM vs CommonJS) so analyses don't trip over `module.exports = ...`
+/// in `.cjs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    /// `.ts` — TypeScript without JSX.
+    #[default]
+    Ts,
+    /// `.tsx` — TypeScript with JSX.
+    Tsx,
+    /// `.mts` — TypeScript ES module.
+    Mts,
+    /// `.cts` — TypeScript CommonJS module.
+    Cts,
+    /// `.js` — JavaScript without JSX.
+    Js,
+    /// `.jsx` — JavaScript with JSX.
+    Jsx,
+    /// `.mjs` — JavaScript ES module.
+    Mjs,
+    /// `.cjs` — JavaScript CommonJS module.
+    Cjs,
+}
+
+impl Dialect {
+    /// Resolve a [`Dialect`] from a bare file extension (no leading dot).
+    /// Returns `None` for anything outside the TS/JS family.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "ts" => Some(Self::Ts),
+            "tsx" => Some(Self::Tsx),
+            "mts" => Some(Self::Mts),
+            "cts" => Some(Self::Cts),
+            "js" => Some(Self::Js),
+            "jsx" => Some(Self::Jsx),
+            "mjs" => Some(Self::Mjs),
+            "cjs" => Some(Self::Cjs),
+            _ => None,
+        }
+    }
+
+    /// Resolve a [`Dialect`] from a file path's extension.
+    pub fn from_path(path: &Path) -> Option<Self> {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .and_then(Self::from_extension)
+    }
+
+    /// Convert to the oxc parser's [`SourceType`]. Each arm is spelled out
+    /// rather than calling `SourceType::from_extension` so the mapping is
+    /// total and infallible at compile time.
+    pub(crate) fn source_type(self) -> SourceType {
+        match self {
+            Self::Ts => SourceType::ts(),
+            Self::Tsx => SourceType::tsx(),
+            Self::Mts => SourceType::ts().with_module(true),
+            Self::Cts => SourceType::ts().with_commonjs(true),
+            // `.js` and `.mjs` are both ESM under oxc's `from_path` rules;
+            // we keep `.js` as plain JavaScript without JSX so a stray
+            // `<` is parsed as a comparison, not a JSX element. Files
+            // that need JSX should be named `.jsx`.
+            Self::Js => SourceType::mjs().with_jsx(false),
+            Self::Jsx => SourceType::jsx(),
+            Self::Mjs => SourceType::mjs(),
+            Self::Cjs => SourceType::cjs(),
+        }
+    }
+}
+
+/// TypeScript / JavaScript parser.
+///
+/// The parser carries its [`Dialect`] so a single instance always feeds
+/// the same `SourceType` to oxc. Use [`TypeScriptParser::new`] for the
+/// default `.ts` dialect, or [`TypeScriptParser::with_dialect`] when the
+/// caller already knows the file's extension.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct TypeScriptParser;
+pub struct TypeScriptParser {
+    dialect: Dialect,
+}
 
 impl TypeScriptParser {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_dialect(dialect: Dialect) -> Self {
+        Self { dialect }
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
     }
 }
 
@@ -80,7 +170,7 @@ impl LanguageParser for TypeScriptParser {
 
     fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error> {
         let alloc = Allocator::default();
-        let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+        let ret = Parser::new(&alloc, source, self.dialect.source_type()).parse();
         if !ret.errors.is_empty() {
             return Err(TsParseError::from_diagnostics(
                 ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
@@ -94,7 +184,7 @@ impl LanguageParser for TypeScriptParser {
     }
 
     fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        extract_with(source, ExtractOptions::default())
+        extract_with(source, self.dialect, ExtractOptions::default())
     }
 }
 
@@ -108,9 +198,13 @@ impl LanguageParser for TypeScriptParser {
 /// so this filter only catches the named, declaration-level shapes
 /// that slip through. Used by analysers (similarity, future cohesion /
 /// complexity reports) that want to look at production code only.
-pub fn extract_functions_excluding_tests(source: &str) -> Result<Vec<FunctionDef>, TsParseError> {
+pub fn extract_functions_excluding_tests(
+    source: &str,
+    dialect: Dialect,
+) -> Result<Vec<FunctionDef>, TsParseError> {
     extract_with(
         source,
+        dialect,
         ExtractOptions {
             exclude_tests: true,
         },
@@ -122,9 +216,13 @@ struct ExtractOptions {
     exclude_tests: bool,
 }
 
-fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, TsParseError> {
+fn extract_with(
+    source: &str,
+    dialect: Dialect,
+    opts: ExtractOptions,
+) -> Result<Vec<FunctionDef>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.errors.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
@@ -385,7 +483,7 @@ class TestThing {
     }
 }
 "#;
-        let funcs = extract_functions_excluding_tests(src).unwrap();
+        let funcs = extract_functions_excluding_tests(src, Dialect::Ts).unwrap();
         let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["production", "Service::compute"]);
     }
@@ -396,7 +494,7 @@ class TestThing {
         // public surface still reports every production function.
         let src = "function a(): void {}\nfunction b(): void {}\n";
         let baseline = parse_functions(src);
-        let filtered = extract_functions_excluding_tests(src).unwrap();
+        let filtered = extract_functions_excluding_tests(src, Dialect::Ts).unwrap();
         assert_eq!(
             baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
             filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
@@ -405,8 +503,67 @@ class TestThing {
 
     #[test]
     fn excluding_tests_surfaces_parse_errors() {
-        let err = extract_functions_excluding_tests("function ??? {").unwrap_err();
+        let err = extract_functions_excluding_tests("function ??? {", Dialect::Ts).unwrap_err();
         assert!(format!("{err}").contains("failed to parse TypeScript source"));
+    }
+
+    #[test]
+    fn tsx_dialect_accepts_jsx_syntax() {
+        // Plain `Dialect::Ts` rejects `<Foo />` because the `<` is read
+        // as a less-than. `Dialect::Tsx` flips the JSX flag on the oxc
+        // parser, so the same source must round-trip.
+        let src = "function Comp(): JSX.Element { return <div />; }\n";
+        let mut parser = TypeScriptParser::with_dialect(Dialect::Tsx);
+        let funcs =
+            <TypeScriptParser as LanguageParser>::extract_functions(&mut parser, src).unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "Comp");
+    }
+
+    #[test]
+    fn jsx_dialect_accepts_jsx_in_javascript() {
+        // `.jsx` files have no type annotations but do use JSX.
+        let src = "function Comp() { return <div className=\"x\">hi</div>; }\n";
+        let mut parser = TypeScriptParser::with_dialect(Dialect::Jsx);
+        let funcs =
+            <TypeScriptParser as LanguageParser>::extract_functions(&mut parser, src).unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "Comp");
+    }
+
+    #[test]
+    fn ts_dialect_rejects_jsx_syntax() {
+        // Negative case — without TSX, the same input must not silently
+        // succeed (a regression here would mean the dialect is ignored).
+        let src = "function Comp(): JSX.Element { return <div />; }\n";
+        let mut parser = TypeScriptParser::with_dialect(Dialect::Ts);
+        assert!(<TypeScriptParser as LanguageParser>::extract_functions(&mut parser, src).is_err());
+    }
+
+    #[test]
+    fn dialect_resolves_from_extensions() {
+        for (ext, expected) in [
+            ("ts", Dialect::Ts),
+            ("tsx", Dialect::Tsx),
+            ("mts", Dialect::Mts),
+            ("cts", Dialect::Cts),
+            ("js", Dialect::Js),
+            ("jsx", Dialect::Jsx),
+            ("mjs", Dialect::Mjs),
+            ("cjs", Dialect::Cjs),
+        ] {
+            assert_eq!(Dialect::from_extension(ext), Some(expected));
+        }
+        assert_eq!(Dialect::from_extension("rs"), None);
+    }
+
+    #[test]
+    fn dialect_resolves_from_path() {
+        assert_eq!(
+            Dialect::from_path(Path::new("src/App.tsx")),
+            Some(Dialect::Tsx),
+        );
+        assert_eq!(Dialect::from_path(Path::new("Makefile")), None);
     }
 
     #[test]

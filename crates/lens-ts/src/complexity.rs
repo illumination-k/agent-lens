@@ -34,10 +34,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
 
 use crate::line_index::LineIndex;
-use crate::parser::TsParseError;
+use crate::parser::{Dialect, TsParseError};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
 /// Failures produced while extracting complexity units.
@@ -48,9 +47,12 @@ pub enum ComplexityError {
 }
 
 /// Extract one [`FunctionComplexity`] per function-shaped item in `source`.
-pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, ComplexityError> {
+pub fn extract_complexity_units(
+    source: &str,
+    dialect: Dialect,
+) -> Result<Vec<FunctionComplexity>, ComplexityError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.errors.is_empty() {
         return Err(ComplexityError::Parse(TsParseError::from_diagnostics(
             ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
@@ -381,7 +383,7 @@ mod tests {
     use super::*;
 
     fn extract(src: &str) -> Vec<FunctionComplexity> {
-        extract_complexity_units(src).unwrap()
+        extract_complexity_units(src, Dialect::Ts).unwrap()
     }
 
     fn one(src: &str) -> FunctionComplexity {
@@ -556,7 +558,7 @@ function add(a: number, b: number): number {
 
     #[test]
     fn invalid_source_surfaces_parse_error() {
-        let err = extract_complexity_units("function ??? {").unwrap_err();
+        let err = extract_complexity_units("function ??? {", Dialect::Ts).unwrap_err();
         assert!(matches!(err, ComplexityError::Parse(_)));
     }
 
@@ -568,7 +570,7 @@ function add(a: number, b: number): number {
 
     #[test]
     fn complexity_error_display_includes_inner() {
-        let err = extract_complexity_units("function ??? {").unwrap_err();
+        let err = extract_complexity_units("function ??? {", Dialect::Ts).unwrap_err();
         let msg = err.to_string();
         assert!(!msg.is_empty(), "expected non-empty error message");
     }
@@ -576,7 +578,7 @@ function add(a: number, b: number): number {
     #[test]
     fn complexity_error_source_is_present() {
         use std::error::Error as _;
-        let err = extract_complexity_units("function ??? {").unwrap_err();
+        let err = extract_complexity_units("function ??? {", Dialect::Ts).unwrap_err();
         assert!(err.source().is_some());
     }
 

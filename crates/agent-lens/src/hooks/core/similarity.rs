@@ -86,8 +86,8 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>,
                 .extract_functions(source)
                 .map_err(|e| HookError::Parse(Box::new(e)))
         }
-        SourceLang::TypeScript => {
-            let mut parser = lens_ts::TypeScriptParser::new();
+        SourceLang::TypeScript(dialect) => {
+            let mut parser = lens_ts::TypeScriptParser::with_dialect(dialect);
             <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
                 &mut parser,
                 source,

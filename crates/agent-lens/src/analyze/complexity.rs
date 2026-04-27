@@ -132,9 +132,8 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<FunctionComplexit
         SourceLang::Rust => {
             lens_rust::extract_complexity_units(source).map_err(|e| Box::new(e) as BoxedError)
         }
-        SourceLang::TypeScript => {
-            lens_ts::extract_complexity_units(source).map_err(|e| Box::new(e) as BoxedError)
-        }
+        SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(source, dialect)
+            .map_err(|e| Box::new(e) as BoxedError),
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as BoxedError)
         }

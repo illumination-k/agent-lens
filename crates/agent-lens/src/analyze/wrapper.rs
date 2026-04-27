@@ -128,8 +128,8 @@ type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, BoxedError> {
     match lang {
         SourceLang::Rust => lens_rust::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
-        SourceLang::TypeScript => {
-            lens_ts::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError)
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::find_wrappers(source, dialect).map_err(|e| Box::new(e) as BoxedError)
         }
         SourceLang::Python => lens_py::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
     }

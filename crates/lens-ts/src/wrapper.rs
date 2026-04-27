@@ -17,10 +17,9 @@ use lens_domain::{WrapperFinding, args_pass_through_by};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
 
 use crate::line_index::LineIndex;
-use crate::parser::TsParseError;
+use crate::parser::{Dialect, TsParseError};
 
 /// Method names with no arguments that we treat as "no semantic content":
 /// type/borrow coercions and stringification.
@@ -35,9 +34,9 @@ const TRIVIAL_NULLARY_ADAPTERS: &[&str] = &[
 
 /// Walk the source and return every function whose body is just a
 /// forwarding call.
-pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, TsParseError> {
+pub fn find_wrappers(source: &str, dialect: Dialect) -> Result<Vec<WrapperFinding>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.errors.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
@@ -450,7 +449,7 @@ mod tests {
     use rstest::rstest;
 
     fn run(src: &str) -> Vec<WrapperFinding> {
-        find_wrappers(src).unwrap()
+        find_wrappers(src, Dialect::Ts).unwrap()
     }
 
     fn names(findings: &[WrapperFinding]) -> Vec<&str> {
@@ -628,7 +627,18 @@ namespace inner {
 
     #[test]
     fn invalid_source_surfaces_parse_error() {
-        let err = find_wrappers("function ??? {").unwrap_err();
+        let err = find_wrappers("function ??? {", Dialect::Ts).unwrap_err();
         assert!(format!("{err}").contains("failed to parse TypeScript source"));
+    }
+
+    #[test]
+    fn tsx_dialect_lets_jsx_wrappers_be_detected() {
+        // A component whose body is a forwarding call should still
+        // surface when the file uses JSX. Plain `Dialect::Ts` would
+        // fail to parse the JSX bodies that surround it.
+        let src = "function shim(x: number): number { return core(x); }\n\
+                   function Comp(): JSX.Element { return <div />; }\n";
+        let findings = find_wrappers(src, Dialect::Tsx).unwrap();
+        assert_eq!(names(&findings), ["shim"]);
     }
 }
