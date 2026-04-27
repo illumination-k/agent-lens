@@ -6,4 +6,6 @@
 //! handler entries into the user's `~/.codex/config.toml`.
 
 pub mod post_tool_use;
+pub mod pre_tool_use;
+pub mod session_start;
 pub mod setup;

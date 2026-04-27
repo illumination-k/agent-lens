@@ -6,13 +6,15 @@
 //! formatting) so each agent's hook module is just a thin trait
 //! implementation that wires up the engine-specific input/output shapes.
 
+pub mod cohesion;
+pub mod complexity;
 pub mod error;
 pub mod runner;
 pub mod similarity;
 pub mod wrapper;
 
 pub use error::{HookError, ReadEditedSourceError};
-pub use runner::{HookEnvelope, SimilarityHook, WrapperHook};
+pub use runner::{CohesionHook, ComplexityHook, HookEnvelope, SimilarityHook, WrapperHook};
 
 use crate::analyze::SourceLang;
 
