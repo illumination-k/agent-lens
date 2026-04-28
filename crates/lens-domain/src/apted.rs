@@ -403,4 +403,126 @@ mod tests {
         let d = compute_edit_distance(&a, &b, &opts);
         assert!((d - 1.5).abs() < 1e-9, "got {d}");
     }
+
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+
+    /// Same shape as [`crate::tree::tests::arb_tree`] — duplicated rather
+    /// than shared because cross-module test fixtures aren't worth the
+    /// `#[cfg(test)] pub(crate)` plumbing for two call sites.
+    fn arb_tree() -> impl Strategy<Value = TreeNode> {
+        let leaf =
+            (0u8..8, 0u8..4).prop_map(|(l, v)| TreeNode::new(format!("L{l}"), format!("V{v}")));
+        leaf.prop_recursive(4, 24, 4, |inner| {
+            (0u8..8, 0u8..4, prop_vec(inner, 0..4)).prop_map(|(l, v, kids)| {
+                TreeNode::with_children(format!("L{l}"), format!("V{v}"), kids)
+            })
+        })
+    }
+
+    proptest! {
+        /// `d(a, a) == 0` is the defining identity for an edit distance:
+        /// the optimal alignment of a tree with itself has zero edits.
+        #[test]
+        fn distance_to_self_is_zero(tree in arb_tree()) {
+            let opts = APTEDOptions::default();
+            let d = compute_edit_distance(&tree, &tree, &opts);
+            prop_assert!(d.abs() < 1e-9, "got {d}");
+        }
+
+        /// `compare_values: true` only adds a constraint to `nodes_match`;
+        /// a tree against itself still matches at every node, so the
+        /// identity must continue to hold.
+        #[test]
+        fn distance_to_self_is_zero_with_value_comparison(tree in arb_tree()) {
+            let opts = APTEDOptions { compare_values: true, ..Default::default() };
+            let d = compute_edit_distance(&tree, &tree, &opts);
+            prop_assert!(d.abs() < 1e-9, "got {d}");
+        }
+
+        /// Edit costs are non-negative inputs, so the minimum-cost path
+        /// can never go below zero — a regression here would mean the DP
+        /// is producing nonsense floats.
+        #[test]
+        fn distance_is_non_negative(a in arb_tree(), b in arb_tree()) {
+            let opts = APTEDOptions::default();
+            let d = compute_edit_distance(&a, &b, &opts);
+            prop_assert!(d >= 0.0, "got {d}");
+        }
+
+        /// When `delete_cost == insert_cost`, swapping `a` and `b` swaps
+        /// the role of insert and delete at the same per-op cost, so the
+        /// optimal cost is invariant.
+        #[test]
+        fn distance_is_symmetric_when_indel_costs_match(
+            a in arb_tree(),
+            b in arb_tree(),
+            rename in 0.0_f64..3.0,
+            indel in 0.1_f64..3.0,
+        ) {
+            let opts = APTEDOptions {
+                rename_cost: rename,
+                delete_cost: indel,
+                insert_cost: indel,
+                compare_values: false,
+            };
+            let d_ab = compute_edit_distance(&a, &b, &opts);
+            let d_ba = compute_edit_distance(&b, &a, &opts);
+            prop_assert!((d_ab - d_ba).abs() < 1e-9, "d_ab={d_ab}, d_ba={d_ba}");
+        }
+
+        /// Trivial upper bound: pay one rename at the root, then delete every
+        /// remaining node of `a` and insert every node of `b`. Any optimum
+        /// the algorithm finds must be ≤ this.
+        #[test]
+        fn distance_bounded_by_trivial_rename_then_indel(
+            a in arb_tree(),
+            b in arb_tree(),
+            rename in 0.1_f64..3.0,
+            delete in 0.1_f64..3.0,
+            insert in 0.1_f64..3.0,
+        ) {
+            let opts = APTEDOptions {
+                rename_cost: rename,
+                delete_cost: delete,
+                insert_cost: insert,
+                compare_values: false,
+            };
+            let d = compute_edit_distance(&a, &b, &opts);
+            let bound = rename
+                + delete * a.subtree_size() as f64
+                + insert * b.subtree_size() as f64;
+            prop_assert!(d <= bound + 1e-9, "d={d}, bound={bound}");
+        }
+
+        /// The precomputed-sizes variant is an optimisation, not a
+        /// different algorithm: it must agree exactly with the on-the-fly
+        /// computation across arbitrary trees and cost configurations.
+        #[test]
+        fn precomputed_subtree_sizes_agree_with_on_the_fly(
+            a in arb_tree(),
+            b in arb_tree(),
+            rename in 0.1_f64..3.0,
+            delete in 0.1_f64..3.0,
+            insert in 0.1_f64..3.0,
+            compare_values in any::<bool>(),
+        ) {
+            let opts = APTEDOptions {
+                rename_cost: rename,
+                delete_cost: delete,
+                insert_cost: insert,
+                compare_values,
+            };
+            let d_naive = compute_edit_distance(&a, &b, &opts);
+            let sizes_a = collect_subtree_sizes(&a);
+            let sizes_b = collect_subtree_sizes(&b);
+            let d_cached = compute_edit_distance_with_subtree_sizes(
+                &a, &b, &opts, &sizes_a, &sizes_b,
+            );
+            prop_assert!(
+                (d_naive - d_cached).abs() < 1e-9,
+                "naive={d_naive}, cached={d_cached}",
+            );
+        }
+    }
 }
