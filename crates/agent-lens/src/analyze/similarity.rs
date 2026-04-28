@@ -11,29 +11,25 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{
-    FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, calculate_tsed_with_subtree_sizes,
-    cluster_similar_pairs,
-};
-use lens_rust::{RustParser, extract_functions_excluding_tests};
+use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_similar_pairs};
 use rayon::prelude::*;
-use serde::Serialize;
 use tracing::debug;
 
-use super::{
-    AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat, SourceFile, SourceLang,
-    changed_line_ranges, collect_source_files, read_source,
-};
+use super::{AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
 
 mod candidates;
+mod corpus;
+mod extract;
+mod report;
 
 #[cfg(test)]
 use candidates::{CheapFilter, tsed_upper_bound_filter};
 use candidates::{TreeProfile, candidate_pairs, eligible_function_count, similarity_uses_lsh};
+use corpus::{OwnedFunction, collect_corpus};
+use report::{ClusterView, Report, format_markdown};
 
 /// Default similarity threshold. Picked to match the cutoff used by the
 /// PostToolUse `similarity` hook so the on-demand analyzer reports the
@@ -127,7 +123,7 @@ impl SimilarityAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
-        let corpus = self.collect_corpus(path)?;
+        let corpus = collect_corpus(path, &self.path_filter, self.exclude_tests)?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus);
         let report = Report::new(
@@ -151,57 +147,6 @@ impl SimilarityAnalyzer {
             }
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
-    }
-
-    /// Collect every function under `path` into a flat corpus, tagging each
-    /// with the file it came from. Single-file inputs return a 1-element
-    /// per-file slice; directory inputs walk recursively, honouring
-    /// `.gitignore`.
-    fn collect_corpus(&self, path: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-        let filter = self.path_filter.compile(path)?;
-        let started = Instant::now();
-        let files = collect_source_files(path, &filter)?;
-
-        let parsed: Vec<Vec<OwnedFunction>> = files
-            .par_iter()
-            .map(|source_file| self.collect_file(source_file))
-            .collect::<Result<_, _>>()?;
-
-        let out: Vec<_> = parsed.into_iter().flatten().collect();
-        let file_count = files.len();
-        debug!(
-            target: PROFILE_TARGET,
-            root = %path.display(),
-            file_count,
-            function_count = out.len(),
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "similarity corpus directory collected"
-        );
-        Ok(out)
-    }
-
-    fn collect_file(&self, file: &SourceFile) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-        let started = Instant::now();
-        let (lang, source) = read_source(&file.path)?;
-        let funcs = extract_functions(lang, &source, self.exclude_tests)?;
-        let out: Vec<_> = funcs
-            .into_iter()
-            .map(|def| OwnedFunction {
-                file: file.path.clone(),
-                rel_path: file.display_path.clone(),
-                def,
-            })
-            .collect();
-        debug!(
-            target: PROFILE_TARGET,
-            path = %file.path.display(),
-            language = ?lang,
-            bytes = source.len(),
-            function_count = out.len(),
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "similarity source parsed"
-        );
-        Ok(out)
     }
 
     /// Pairwise TSED over the corpus, then complete-link clustering. Inlined
@@ -451,187 +396,6 @@ impl Default for SimilarityAnalyzer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// A single function plus the file it originated from. The corpus that
-/// drives pairwise similarity is a flat `Vec<OwnedFunction>` so cross-file
-/// pairs are just regular pairs with different `file`s.
-#[derive(Debug)]
-struct OwnedFunction {
-    /// Filesystem path used for `git diff` lookups.
-    file: PathBuf,
-    /// Display path (relative to the walk root for directory mode).
-    rel_path: String,
-    def: FunctionDef,
-}
-
-fn extract_functions(
-    lang: SourceLang,
-    source: &str,
-    exclude_tests: bool,
-) -> Result<Vec<FunctionDef>, AnalyzerError> {
-    match lang {
-        SourceLang::Rust => extract_rust(source, exclude_tests),
-        SourceLang::TypeScript(dialect) => extract_typescript(source, dialect, exclude_tests),
-        SourceLang::Python => extract_python(source, exclude_tests),
-        SourceLang::Go => extract_go(source, exclude_tests),
-    }
-    .map_err(AnalyzerError::Parse)
-}
-
-type ExtractError = Box<dyn std::error::Error + Send + Sync>;
-
-fn extract_rust(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
-    if exclude_tests {
-        extract_functions_excluding_tests(source).map_err(box_err)
-    } else {
-        RustParser::new().extract_functions(source).map_err(box_err)
-    }
-}
-
-fn extract_typescript(
-    source: &str,
-    dialect: lens_ts::Dialect,
-    exclude_tests: bool,
-) -> Result<Vec<FunctionDef>, ExtractError> {
-    if exclude_tests {
-        lens_ts::extract_functions_excluding_tests(source, dialect).map_err(box_err)
-    } else {
-        <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
-            &mut lens_ts::TypeScriptParser::with_dialect(dialect),
-            source,
-        )
-        .map_err(box_err)
-    }
-}
-
-fn extract_python(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
-    if exclude_tests {
-        lens_py::extract_functions_excluding_tests(source).map_err(box_err)
-    } else {
-        lens_py::PythonParser::new()
-            .extract_functions(source)
-            .map_err(box_err)
-    }
-}
-
-fn extract_go(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
-    if exclude_tests {
-        lens_golang::extract_functions_excluding_tests(source).map_err(box_err)
-    } else {
-        lens_golang::GoParser::new()
-            .extract_functions(source)
-            .map_err(box_err)
-    }
-}
-
-fn box_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> ExtractError {
-    Box::new(e)
-}
-
-#[derive(Debug, Serialize)]
-struct Report<'a> {
-    /// Input path: a single source file, or the root directory walked.
-    root: String,
-    function_count: usize,
-    threshold: f64,
-    min_lines: usize,
-    cluster_count: usize,
-    clusters: &'a [ClusterView<'a>],
-}
-
-impl<'a> Report<'a> {
-    fn new(
-        path: &Path,
-        threshold: f64,
-        min_lines: usize,
-        function_count: usize,
-        clusters: &'a [ClusterView<'a>],
-    ) -> Self {
-        Self {
-            root: path.display().to_string(),
-            function_count,
-            threshold,
-            min_lines,
-            cluster_count: clusters.len(),
-            clusters,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ClusterView<'a> {
-    size: usize,
-    min_similarity: f64,
-    max_similarity: f64,
-    functions: Vec<FunctionRef<'a>>,
-}
-
-impl<'a> ClusterView<'a> {
-    fn from_domain(corpus: &'a [OwnedFunction], cluster: SimilarCluster) -> Self {
-        let functions: Vec<FunctionRef<'a>> = cluster
-            .members
-            .iter()
-            .filter_map(|i| corpus.get(*i).map(FunctionRef::from))
-            .collect();
-        Self {
-            size: functions.len(),
-            min_similarity: cluster.min_similarity,
-            max_similarity: cluster.max_similarity,
-            functions,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct FunctionRef<'a> {
-    file: &'a str,
-    name: &'a str,
-    start_line: usize,
-    end_line: usize,
-}
-
-impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
-    fn from(f: &'a OwnedFunction) -> Self {
-        Self {
-            file: f.rel_path.as_str(),
-            name: f.def.name.as_str(),
-            start_line: f.def.start_line,
-            end_line: f.def.end_line,
-        }
-    }
-}
-
-fn format_markdown(report: &Report<'_>) -> String {
-    let mut out = format!(
-        "# Similarity report: {} ({} function(s), threshold {:.2}, min lines {})\n",
-        report.root, report.function_count, report.threshold, report.min_lines,
-    );
-    if report.clusters.is_empty() {
-        out.push_str("\n_No similar function clusters at or above threshold._\n");
-        return out;
-    }
-    let _ = writeln!(out, "\n## {} similar cluster(s)", report.cluster_count);
-    for cluster in report.clusters {
-        // writeln! into a String cannot fail; the result is swallowed
-        // deliberately rather than unwrapped to satisfy the workspace's
-        // `unwrap_used` lint.
-        let _ = writeln!(
-            out,
-            "\n- {} functions, similarity {:.0}–{:.0}%",
-            cluster.size,
-            cluster.min_similarity * 100.0,
-            cluster.max_similarity * 100.0,
-        );
-        for f in &cluster.functions {
-            let _ = writeln!(
-                out,
-                "  - {}:`{}` (L{}-{})",
-                f.file, f.name, f.start_line, f.end_line,
-            );
-        }
-    }
-    out
 }
 
 #[cfg(test)]
