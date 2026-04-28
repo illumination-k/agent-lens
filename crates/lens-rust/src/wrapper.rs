@@ -146,6 +146,9 @@ fn analyze_fn(
     let tail = single_tail_expr(block)?;
     let (core, adapters) = peel_adapters(tail);
     let (callee, call_args) = core_call(core)?;
+    if is_constructor_default_shim(owner, &method_name, &callee) {
+        return None;
+    }
     let params = collect_param_idents(sig);
     if !args_pass_through(call_args, &params) {
         return None;
@@ -159,6 +162,25 @@ fn analyze_fn(
         statement_count: block.stmts.len(),
         reuse: None,
     })
+}
+
+/// Inherent constructor/default shims (`new -> default` or
+/// `default -> new`) are usually naming conventions, not refactor
+/// opportunities.
+fn is_constructor_default_shim(owner: Option<&str>, method: &str, callee: &str) -> bool {
+    let Some(owner) = owner else {
+        return false;
+    };
+    match method {
+        "new" => {
+            matches!(callee, "Self::default" | "Self::default()")
+                || callee == format!("{owner}::default")
+        }
+        "default" => {
+            matches!(callee, "Self::new" | "Self::new()") || callee == format!("{owner}::new")
+        }
+        _ => false,
+    }
 }
 
 fn is_boilerplate_trait_method(trait_name: Option<&str>, method: &str) -> bool {
@@ -554,6 +576,46 @@ impl Other<i32> for T {
             names(&findings),
             ["T::from"],
             "Other::from shares method but not trait, must still report",
+        );
+    }
+
+    #[rstest]
+    #[case::new_calls_self_default(
+        r#"
+struct T;
+impl T {
+    fn new() -> Self { Self::default() }
+}
+"#
+    )]
+    #[case::default_calls_self_new(
+        r#"
+struct T;
+impl T {
+    fn default() -> Self { Self::new() }
+}
+"#
+    )]
+    #[case::new_calls_type_default(
+        r#"
+struct T;
+impl T {
+    fn new() -> Self { T::default() }
+}
+"#
+    )]
+    #[case::default_calls_type_new(
+        r#"
+struct T;
+impl T {
+    fn default() -> Self { T::new() }
+}
+"#
+    )]
+    fn skips_constructor_default_shims(#[case] src: &str) {
+        assert!(
+            run(src).is_empty(),
+            "constructor/default shim should be filtered"
         );
     }
 }
