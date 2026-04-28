@@ -398,6 +398,7 @@ mise run lint     # clippy, rustfmt --check, cargo-deny, cargo-audit,
 mise run test     # cargo nextest run --locked --all-features
 mise run ci       # the full lint + test pipeline CI runs
 mise run mutants  # cargo-mutants (slow; not in CI by default)
+mise run mutants:rust:diff [base]  # mutation-test Rust changes vs base
 ```
 
 When adding or changing tests, prefer `rstest` for parameterized cases and
@@ -405,10 +406,10 @@ fixture-style setup. Use property-based tests when regression risk is high,
 especially around core logic.
 
 Run diff-scoped mutation testing whenever practical for Rust logic changes.
-For example, create a patch with `git diff` and pass it to
-`mise exec -- cargo mutants --workspace --no-shuffle --in-diff <patch>`. If the
-changed code has Criterion benchmarks, report whether benchmark regression was
-checked and what the result was.
+For example, run `mise run mutants:rust:diff origin/main...HEAD` for a PR-style
+diff or omit the argument to compare against `main`. If the changed code has
+Criterion benchmarks, report whether benchmark regression was checked and what
+the result was.
 
 CI (`.github/workflows/`) runs Rust lint/test (`ci_rust.yml`), the base
 toolchain lints (`lint_base.yml`), CodeQL, dependency review, Trivy,
