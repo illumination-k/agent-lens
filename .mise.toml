@@ -13,4 +13,3 @@ depends = "test:*"
 [tasks.ci]
 description = "Run all ci:* tasks"
 depends = "ci:*"
-

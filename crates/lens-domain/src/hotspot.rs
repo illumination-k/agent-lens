@@ -57,12 +57,14 @@ impl Eq for HotspotEntry {}
 
 /// Merge churn and complexity into a single scored list.
 ///
-/// Files appearing only in `churn` (commits but no analyzed source) and
-/// files appearing only in `complexity` (analyzed but never committed)
-/// are both included — the agent benefits from seeing both ends of the
-/// distribution. The resulting list is sorted by descending `score`
-/// with ties broken by descending `commits`, then lexicographic path
-/// (for determinism).
+/// By default the result is scoped to currently analyzed source files
+/// plus any positive-score entries. Churn-only paths from git history
+/// are dropped because they have no current complexity signal and would
+/// otherwise flood JSON reports with zero-score deleted, generated, or
+/// non-source files.
+///
+/// The resulting list is sorted by descending `score` with ties broken
+/// by descending `commits`, then lexicographic path (for determinism).
 pub fn compute_hotspots(
     churn: Vec<FileChurn>,
     complexity: Vec<FileComplexity>,
@@ -89,27 +91,29 @@ pub fn compute_hotspots(
         paths.insert(k.clone(), ());
     }
 
-    let mut out: Vec<HotspotEntry> = paths
-        .into_keys()
-        .map(|p| {
-            let commits = churn_by_path.get(&p).copied().unwrap_or(0);
-            let fc = complexity_by_path.get(&p);
-            let function_count = fc.map_or(0, |f| f.function_count);
-            let loc = fc.map_or(0, |f| f.loc);
-            let cyclomatic_max = fc.map_or(0, |f| f.cyclomatic_max);
-            let cognitive_max = fc.map_or(0, |f| f.cognitive_max);
-            let score = u64::from(commits).saturating_mul(u64::from(cognitive_max));
-            HotspotEntry {
-                path: p,
-                commits,
-                function_count,
-                loc,
-                cyclomatic_max,
-                cognitive_max,
-                score,
-            }
-        })
-        .collect();
+    let mut out = Vec::new();
+    for p in paths.into_keys() {
+        let commits = churn_by_path.get(&p).copied().unwrap_or(0);
+        let fc = complexity_by_path.get(&p);
+        let is_current_source = fc.is_some();
+        let function_count = fc.map_or(0, |f| f.function_count);
+        let loc = fc.map_or(0, |f| f.loc);
+        let cyclomatic_max = fc.map_or(0, |f| f.cyclomatic_max);
+        let cognitive_max = fc.map_or(0, |f| f.cognitive_max);
+        let score = u64::from(commits).saturating_mul(u64::from(cognitive_max));
+        if score == 0 && !is_current_source {
+            continue;
+        }
+        out.push(HotspotEntry {
+            path: p,
+            commits,
+            function_count,
+            loc,
+            cyclomatic_max,
+            cognitive_max,
+            score,
+        });
+    }
 
     out.sort_by(|a, b| {
         b.score
@@ -164,12 +168,9 @@ mod tests {
     }
 
     #[test]
-    fn files_with_only_churn_are_kept_with_zero_score() {
+    fn files_with_only_churn_are_dropped_by_default() {
         let entries = compute_hotspots(vec![churn("config.toml", 50)], vec![]);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].score, 0);
-        assert_eq!(entries[0].commits, 50);
-        assert_eq!(entries[0].cognitive_max, 0);
+        assert!(entries.is_empty());
     }
 
     #[test]
