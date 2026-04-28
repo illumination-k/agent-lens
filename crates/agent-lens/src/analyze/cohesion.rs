@@ -8,6 +8,7 @@
 //! rather than for humans, in line with the project's "agent-friendly lint"
 //! ethos.
 
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -25,6 +26,8 @@ use super::{
 #[derive(Debug, Default, Clone)]
 pub struct CohesionAnalyzer {
     diff_only: bool,
+    top: Option<usize>,
+    min_score: Option<usize>,
     path_filter: AnalyzePathFilter,
 }
 
@@ -32,6 +35,8 @@ impl CohesionAnalyzer {
     pub fn new() -> Self {
         Self {
             diff_only: false,
+            top: None,
+            min_score: None,
             path_filter: AnalyzePathFilter::new(),
         }
     }
@@ -40,6 +45,21 @@ impl CohesionAnalyzer {
     /// an unstaged changed line in `git diff -U0`.
     pub fn with_diff_only(mut self, diff_only: bool) -> Self {
         self.diff_only = diff_only;
+        self
+    }
+
+    /// Cap the markdown report's ranked unit list to the top-N entries.
+    /// JSON output always carries the full list.
+    pub fn with_top(mut self, top: Option<usize>) -> Self {
+        self.top = top;
+        self
+    }
+
+    /// Only include cohesion units whose LCOM4 is at least this score in
+    /// the markdown ranking. `None` uses the markdown default of hiding
+    /// cohesive LCOM4=1 units. JSON output always carries the full list.
+    pub fn with_min_score(mut self, min_score: Option<usize>) -> Self {
+        self.min_score = min_score;
         self
     }
 
@@ -66,7 +86,7 @@ impl CohesionAnalyzer {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
-            OutputFormat::Md => Ok(format_markdown(&report)),
+            OutputFormat::Md => Ok(format_markdown(&report, self.top, self.min_score)),
         }
     }
 
@@ -245,7 +265,10 @@ impl<'a> From<&'a lens_domain::MethodCohesion> for MethodView<'a> {
     }
 }
 
-fn format_markdown(report: &Report<'_>) -> String {
+const DEFAULT_TOP: usize = 20;
+const DEFAULT_MIN_SCORE: usize = 2;
+
+fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<usize>) -> String {
     let mut out = format!(
         "# Cohesion report: {} ({} file(s), {} unit(s))\n",
         report.root, report.file_count, report.unit_count,
@@ -254,16 +277,66 @@ fn format_markdown(report: &Report<'_>) -> String {
         out.push_str("\n_No cohesion units (no `impl` block / class / module-level functions)._\n");
         return out;
     }
-    for file in &report.files {
-        let _ = writeln!(out, "\n## {} ({} unit(s))", file.file, file.unit_count);
-        for unit in &file.units {
-            render_unit(&mut out, unit);
-        }
-    }
+    render_ranked_units(&mut out, &report.files, top, min_score);
     out
 }
 
-fn render_unit(out: &mut String, unit: &UnitView<'_>) {
+struct TopUnitRow<'a> {
+    file: &'a str,
+    unit: &'a UnitView<'a>,
+}
+
+fn render_ranked_units(
+    out: &mut String,
+    files: &[FileView<'_>],
+    top: Option<usize>,
+    min_score: Option<usize>,
+) {
+    let min_score = min_score.unwrap_or(DEFAULT_MIN_SCORE);
+    let limit = top.unwrap_or(DEFAULT_TOP);
+    let mut rows: Vec<TopUnitRow<'_>> = files
+        .iter()
+        .flat_map(|file| {
+            file.units.iter().map(|unit| TopUnitRow {
+                file: file.file,
+                unit,
+            })
+        })
+        .filter(|row| row.unit.lcom4 >= min_score)
+        .collect();
+    rows.sort_by(|a, b| {
+        b.unit
+            .lcom4
+            .cmp(&a.unit.lcom4)
+            .then_with(|| compare_lcom96_desc(a.unit.lcom96, b.unit.lcom96))
+            .then_with(|| b.unit.method_count.cmp(&a.unit.method_count))
+            .then_with(|| a.unit.start_line.cmp(&b.unit.start_line))
+            .then_with(|| a.file.cmp(b.file))
+    });
+
+    let _ = writeln!(
+        out,
+        "\n## Top {limit} by cohesion risk (LCOM4 >= {min_score})"
+    );
+    if rows.is_empty() {
+        let _ = writeln!(out, "\n_No cohesion units at or above LCOM4 {min_score}._");
+        return;
+    }
+    for row in rows.iter().take(limit) {
+        render_unit(out, row.file, row.unit);
+    }
+}
+
+fn compare_lcom96_desc(a: Option<f64>, b: Option<f64>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => b.total_cmp(&a),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn render_unit(out: &mut String, file: &str, unit: &UnitView<'_>) {
     let header = match (unit.kind, unit.trait_name) {
         ("module", _) => format!("module {}", unit.type_name),
         (_, Some(t)) => format!("impl {t} for {}", unit.type_name),
@@ -275,7 +348,7 @@ fn render_unit(out: &mut String, unit: &UnitView<'_>) {
     // `unwrap_used` lint.
     let _ = writeln!(
         out,
-        "- {header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
+        "- {file}:{header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
         unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
     );
     for component in &unit.components {
@@ -376,9 +449,55 @@ impl Foo {
 "#;
         let file = write_file(dir.path(), "lib.rs", src);
         let md = CohesionAnalyzer::new()
+            .with_min_score(Some(1))
             .analyze(&file, OutputFormat::Md)
             .unwrap();
         assert!(md.contains("LCOM96 = n/a"));
+    }
+
+    #[test]
+    fn markdown_hides_cohesive_lcom4_one_units_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+struct Foo { n: i32 }
+impl Foo {
+    fn get(&self) -> i32 { self.n }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let md = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("LCOM4 2"), "got: {md}");
+        assert!(!md.contains("impl Foo"), "got: {md}");
+    }
+
+    #[test]
+    fn markdown_top_and_min_score_rank_units_by_lcom4() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+struct High { a: i32, b: i32, c: i32 }
+impl High {
+    fn ga(&self) -> i32 { self.a }
+    fn gb(&self) -> i32 { self.b }
+    fn gc(&self) -> i32 { self.c }
+}
+
+struct Low { a: i32, b: i32 }
+impl Low {
+    fn ga(&self) -> i32 { self.a }
+    fn gb(&self) -> i32 { self.b }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let md = CohesionAnalyzer::new()
+            .with_top(Some(1))
+            .with_min_score(Some(2))
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("Top 1 by cohesion risk"));
+        assert!(md.contains("impl High"), "got: {md}");
+        assert!(!md.contains("impl Low"), "got: {md}");
     }
 
     #[test]

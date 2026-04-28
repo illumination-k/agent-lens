@@ -120,10 +120,10 @@ agent-lens analyze similarity src/foo.rs
 agent-lens analyze similarity crates/lens-rust/src
 
 # Same, but emit a compact summary instead of the full JSON
-agent-lens analyze similarity src/foo.rs --format md --threshold 0.9
+agent-lens analyze similarity src/foo.rs --format md --top 10 --min-score 0.9
 
 # All analyzers accept path filters: focus tests, drop tests, or exclude globs
-agent-lens analyze complexity crates/agent-lens --only-tests
+agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
 agent-lens analyze hotspot . --exclude 'target/**' --exclude '**/generated/**'
 
@@ -131,7 +131,7 @@ agent-lens analyze hotspot . --exclude 'target/**' --exclude '**/generated/**'
 agent-lens analyze similarity src/foo.rs --diff-only
 
 # Cohesion (LCOM4) per impl block (Rust) / class (TS, Python)
-agent-lens analyze cohesion src/foo.rs
+agent-lens analyze cohesion src/foo.rs --format md --top 20 --min-score 2
 
 # Cohesion only for impl blocks overlapping `git diff -U0` hunks
 agent-lens analyze cohesion src/foo.rs --diff-only
@@ -330,6 +330,10 @@ new handlers to plug into the same plumbing.
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
+For `complexity`, `cohesion`, and `similarity`, `--top` caps the Markdown
+ranking while JSON stays complete. `--min-score` filters the Markdown ranking
+for `complexity` (cognitive score) and `cohesion` (LCOM4); for `similarity` it
+is an alias of `--threshold`.
 
 ### Output discipline
 

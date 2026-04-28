@@ -273,6 +273,15 @@ enum AnalyzeCommand {
         /// changed lines in `git diff -U0`.
         #[arg(long)]
         diff_only: bool,
+        /// Cap the markdown ranking to the top-N units. JSON output
+        /// always carries the full list.
+        #[arg(long)]
+        top: Option<usize>,
+        /// Minimum LCOM4 score included in the markdown ranking. The
+        /// markdown default is 2, which hides cohesive LCOM4=1 units;
+        /// pass `--min-score 1` to include them.
+        #[arg(long)]
+        min_score: Option<usize>,
         #[command(flatten)]
         path_filter: AnalyzePathArgs,
     },
@@ -296,6 +305,14 @@ enum AnalyzeCommand {
         /// lines in `git diff -U0`.
         #[arg(long)]
         diff_only: bool,
+        /// Cap the markdown ranking to the top-N functions. JSON output
+        /// always carries the full list.
+        #[arg(long)]
+        top: Option<usize>,
+        /// Minimum cognitive complexity score included in the markdown
+        /// ranking. JSON output always carries the full list.
+        #[arg(long)]
+        min_score: Option<u32>,
         #[command(flatten)]
         path_filter: AnalyzePathArgs,
     },
@@ -395,7 +412,7 @@ enum AnalyzeCommand {
         /// is the complete-link cut so every pair inside a reported cluster
         /// stays at or above it. Defaults to the same cutoff used by the
         /// PostToolUse `similarity` hook.
-        #[arg(long, default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
+        #[arg(long, visible_alias = "min-score", default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
         threshold: f64,
         /// Minimum source line count for a function to be considered.
         /// Functions shorter than this are dropped before pairwise
@@ -403,6 +420,10 @@ enum AnalyzeCommand {
         /// keeps trivial getters / one-liners out of the report.
         #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
         min_lines: usize,
+        /// Cap the markdown report to the top-N similar clusters. JSON
+        /// output always carries the full list.
+        #[arg(long)]
+        top: Option<usize>,
     },
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
@@ -497,9 +518,13 @@ impl AnalyzeCommand {
                 path,
                 format,
                 diff_only,
+                top,
+                min_score,
                 path_filter,
             } => CohesionAnalyzer::new()
                 .with_diff_only(diff_only)
+                .with_top(top)
+                .with_min_score(min_score)
                 .with_only_tests(path_filter.only_tests)
                 .with_exclude_tests(path_filter.exclude_tests)
                 .with_exclude_patterns(path_filter.exclude)
@@ -508,9 +533,13 @@ impl AnalyzeCommand {
                 path,
                 format,
                 diff_only,
+                top,
+                min_score,
                 path_filter,
             } => ComplexityAnalyzer::new()
                 .with_diff_only(diff_only)
+                .with_top(top)
+                .with_min_score(min_score)
                 .with_only_tests(path_filter.only_tests)
                 .with_exclude_tests(path_filter.exclude_tests)
                 .with_exclude_patterns(path_filter.exclude)
@@ -553,6 +582,7 @@ impl AnalyzeCommand {
                 path_filter,
                 threshold,
                 min_lines,
+                top,
             } => SimilarityAnalyzer::new()
                 .with_threshold(threshold)
                 .with_diff_only(diff_only)
@@ -560,6 +590,7 @@ impl AnalyzeCommand {
                 .with_exclude_tests(path_filter.exclude_tests)
                 .with_exclude_patterns(path_filter.exclude)
                 .with_min_lines(min_lines)
+                .with_top(top)
                 .analyze(&path, format)?,
             Self::Wrapper {
                 path,
@@ -776,6 +807,15 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
@@ -934,6 +974,8 @@ mod tests {
             "generated/**",
             "--min-lines",
             "8",
+            "--top",
+            "3",
         ])
         .expect("clean parse");
         let Command::Analyze(AnalyzeCommand::Similarity {
@@ -943,6 +985,7 @@ mod tests {
             path_filter,
             threshold,
             min_lines,
+            top,
         }) = cli.command
         else {
             panic!("expected analyze similarity");
@@ -954,6 +997,101 @@ mod tests {
         assert_eq!(path_filter.exclude, ["generated/**"]);
         assert!((threshold - 0.85).abs() < f64::EPSILON);
         assert_eq!(min_lines, 8);
+        assert_eq!(top, Some(3));
+    }
+
+    #[test]
+    fn parses_analyze_similarity_min_score_alias() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--min-score",
+            "0.91",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity { threshold, .. }) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert!((threshold - 0.91).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_analyze_complexity_with_top_and_min_score() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "complexity",
+            "src/lib.rs",
+            "--top",
+            "12",
+            "--min-score",
+            "8",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Complexity { top, min_score, .. }) = cli.command
+        else {
+            panic!("expected analyze complexity");
+        };
+        assert_eq!(top, Some(12));
+        assert_eq!(min_score, Some(8));
+    }
+
+    #[test]
+    fn parses_analyze_cohesion_with_top_and_min_score() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "cohesion",
+            "src/lib.rs",
+            "--top",
+            "7",
+            "--min-score",
+            "2",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Cohesion { top, min_score, .. }) = cli.command else {
+            panic!("expected analyze cohesion");
+        };
+        assert_eq!(top, Some(7));
+        assert_eq!(min_score, Some(2));
+    }
+
+    #[test]
+    fn analyze_command_run_executes_analyzer_with_markdown_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn quiet() {}
+fn branchy(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }
+fn dispatch(n: i32) -> i32 {
+    match n { 0 => 0, 1 => 1, 2 => 2, _ => 3 }
+}
+"#,
+        );
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "complexity",
+            file.to_str().unwrap(),
+            "--format",
+            "md",
+            "--top",
+            "1",
+            "--min-score",
+            "2",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(cmd) = cli.command else {
+            panic!("expected analyze command");
+        };
+        let out = cmd.run().unwrap();
+        assert!(out.contains("Top 1 by complexity"), "got: {out}");
+        assert!(out.contains("`branchy`"), "got: {out}");
+        assert!(!out.contains("`dispatch`"), "got: {out}");
     }
 
     #[test]
