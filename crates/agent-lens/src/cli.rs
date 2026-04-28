@@ -1,10 +1,11 @@
 //! `agent-lens` CLI parsing and command dispatch.
 //!
-//! Each PostToolUse handler is a clap subcommand, so `agent-lens hook
-//! post-tool-use similarity` is parsed statically instead of routed by
-//! a runtime name string. Analyzers live under `agent-lens analyze ...`
-//! and write their report to stdout. Stdout is otherwise reserved for the
-//! hook's JSON response; diagnostics go to stderr via `tracing`.
+//! Each hook handler is a clap subcommand, so `agent-lens hook
+//! post-tool-use similarity` and `agent-lens codex-hook pre-tool-use
+//! complexity` are parsed statically instead of routed by runtime name
+//! strings. Analyzers live under `agent-lens analyze ...` and write their
+//! report to stdout. Stdout is otherwise reserved for the hook's JSON
+//! response; diagnostics go to stderr via `tracing`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -127,18 +128,18 @@ enum PreToolUseCommand {
     /// cognitive / nesting) crosses a non-trivial threshold in the
     /// file the agent is about to edit.
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts` /
-    /// `.py` / `.go`). Files with an unsupported extension are ignored
-    /// silently. `Write` against a brand-new path is a silent no-op
-    /// (no current state to read).
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently. `Write` against a brand-new path
+    /// is a silent no-op (no current state to read).
     Complexity,
     /// Report `impl` blocks whose pre-edit LCOM4 cohesion is above 1
     /// (split-personality types) in the file the agent is about to
     /// edit.
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts` /
-    /// `.py`). Files with an unsupported extension are ignored
-    /// silently.
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, or Python). Files with an unsupported
+    /// extension are ignored silently.
     Cohesion,
 }
 
@@ -146,14 +147,16 @@ enum PreToolUseCommand {
 enum PostToolUseCommand {
     /// Report clusters of similar functions in the file that was just edited.
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts` /
-    /// `.py` / `.go`). Files with an unsupported extension are ignored silently.
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
-    /// The parser is chosen from the file extension (`.rs` / `.ts` /
-    /// `.py`). Files with an unsupported extension are ignored silently.
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, or Python). Files with an unsupported
+    /// extension are ignored silently.
     Wrapper,
 }
 
@@ -168,12 +171,13 @@ enum CodexHookCommand {
     /// Handle a Codex `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(CodexPostToolUseCommand),
-    /// Wire `agent-lens`'s Codex PostToolUse handlers into a Codex
+    /// Wire `agent-lens`'s Codex hook handlers into a Codex
     /// `config.toml`.
     ///
     /// The merge is conservative: existing keys and comments are
-    /// preserved, and a `[[hooks.PostToolUse]]` block is appended only
-    /// for handlers that aren't already wired up. Re-running the
+    /// preserved, and `[[hooks.SessionStart]]`, `[[hooks.PreToolUse]]`,
+    /// and `[[hooks.PostToolUse]]` blocks are appended only for handlers
+    /// that aren't already wired up. Re-running the
     /// command is a no-op once every handler is installed.
     Setup(CodexSetupArgs),
 }
@@ -212,15 +216,17 @@ enum CodexPostToolUseCommand {
     /// Report clusters of similar functions across every file Codex's
     /// `apply_patch` just touched.
     ///
-    /// The parser is chosen from each file's extension (`.rs` / `.ts` /
-    /// `.py` / `.go`). Files with an unsupported extension are ignored silently.
+    /// The parser is chosen from each file's extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
     /// Runs against every file Codex's `apply_patch` just touched. The
-    /// parser is chosen from each file's extension (`.rs` / `.ts` /
-    /// `.py`). Files with an unsupported extension are ignored silently.
+    /// parser is chosen from each file's extension (Rust,
+    /// TypeScript/JavaScript, or Python). Files with an unsupported
+    /// extension are ignored silently.
     Wrapper,
 }
 
@@ -255,14 +261,15 @@ enum CodexSessionStartCommand {
 
 #[derive(Debug, Subcommand)]
 enum AnalyzeCommand {
-    /// Report LCOM4 cohesion units (one per `impl` block).
+    /// Report LCOM4 cohesion units (`impl` blocks, classes, or module
+    /// units).
     ///
     /// Accepts either a single source file or a directory; in directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep) and groups findings per file. The parser is chosen from
-    /// each file extension (`.rs` / `.ts` / `.py`). The JSON format is the
-    /// default machine-readable output; `--format md` emits a compact
-    /// summary tuned for LLM context.
+    /// each file extension (Rust, TypeScript/JavaScript, or Python).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
     Cohesion(AnalyzeCohesionArgs),
     /// Report per-function complexity metrics (Cyclomatic, Cognitive,
     /// Max Nesting, Halstead Volume, Maintainability Index).
@@ -271,9 +278,9 @@ enum AnalyzeCommand {
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep), groups findings per file, and aggregates the top-level
     /// summary across the whole corpus. The parser is chosen from each
-    /// file extension (`.rs` / `.ts` / `.py` / `.go`). The JSON format is the
-    /// default machine-readable output; `--format md` emits a compact
-    /// summary tuned for LLM context.
+    /// file extension (Rust, TypeScript/JavaScript, Python, or Go).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
     Complexity(AnalyzeComplexityArgs),
     /// Report module-level coupling metrics for a Rust crate.
     ///
@@ -297,8 +304,9 @@ enum AnalyzeCommand {
     ContextSpan(AnalyzeCommonArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
-    /// Walks `path` for supported source files (`.rs` / `.ts` / `.py` / `.go`),
-    /// asks `git` how many commits each file has been touched in
+    /// Walks `path` for supported source files (Rust,
+    /// TypeScript/JavaScript, Python, or Go), asks `git` how many
+    /// commits each file has been touched in
     /// (optionally scoped by `--since`), and joins the two with
     /// cognitive complexity. The resulting ranking points at
     /// "frequently changed *and* complex" code — where bugs concentrate
@@ -314,9 +322,9 @@ enum AnalyzeCommand {
     /// pairs scoring at or above `--threshold` are folded into complete-link
     /// clusters where every member is similar to every other (no chaining
     /// through weaker links). The parser is chosen from each file extension
-    /// (`.rs` / `.ts` / `.py` / `.go`). The JSON format is the default
-    /// machine-readable output; `--format md` emits a compact summary
-    /// tuned for LLM context.
+    /// (Rust, TypeScript/JavaScript, Python, or Go). The JSON format is
+    /// the default machine-readable output; `--format md` emits a
+    /// compact summary tuned for LLM context.
     Similarity(AnalyzeSimilarityArgs),
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
@@ -324,9 +332,9 @@ enum AnalyzeCommand {
     /// Accepts either a single source file or a directory; in directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep) and groups findings per file. The parser is chosen from
-    /// each file extension (`.rs` / `.ts` / `.py`). The JSON format is the
-    /// default machine-readable output; `--format md` emits a compact
-    /// summary tuned for LLM context.
+    /// each file extension (Rust, TypeScript/JavaScript, or Python).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
     Wrapper(AnalyzeWrapperArgs),
 }
 
