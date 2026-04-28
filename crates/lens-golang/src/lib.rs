@@ -1,4 +1,4 @@
-//! Go-language adapter for `agent-lens` similarity and complexity analysis.
+//! Go-language adapter for `agent-lens` analysis.
 //!
 //! Implements [`lens_domain::LanguageParser`] on top of
 //! [`tree-sitter-go`](https://crates.io/crates/tree-sitter-go), pulling

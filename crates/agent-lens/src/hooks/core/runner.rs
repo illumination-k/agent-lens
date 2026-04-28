@@ -139,7 +139,7 @@ pub type SimilarityHook<E> = CoreHook<SimilarityCore, E>;
 pub type WrapperHook<E> = CoreHook<WrapperCore, E>;
 /// Per-function complexity hook generic over the engine envelope.
 pub type ComplexityHook<E> = CoreHook<ComplexityCore, E>;
-/// `impl`-block cohesion hook generic over the engine envelope.
+/// Cohesion hook generic over the engine envelope.
 pub type CohesionHook<E> = CoreHook<CohesionCore, E>;
 
 impl<E: HookEnvelope> CoreHook<SimilarityCore, E> {

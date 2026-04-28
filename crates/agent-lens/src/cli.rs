@@ -133,12 +133,12 @@ enum PreToolUseCommand {
     /// extension are ignored silently. `Write` against a brand-new path
     /// is a silent no-op (no current state to read).
     Complexity,
-    /// Report `impl` blocks whose pre-edit LCOM4 cohesion is above 1
-    /// (split-personality types) in the file the agent is about to
-    /// edit.
+    /// Report cohesion units (`impl` blocks, classes, or module units)
+    /// whose pre-edit LCOM4 is above 1 in the file the agent is about
+    /// to edit.
     ///
     /// The parser is chosen from the file extension (Rust,
-    /// TypeScript/JavaScript, or Python). Files with an unsupported
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
     /// extension are ignored silently.
     Cohesion,
 }
@@ -155,7 +155,7 @@ enum PostToolUseCommand {
     /// trivial adapters, is just a forwarding call to another function.
     ///
     /// The parser is chosen from the file extension (Rust,
-    /// TypeScript/JavaScript, or Python). Files with an unsupported
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
     /// extension are ignored silently.
     Wrapper,
 }
@@ -225,7 +225,7 @@ enum CodexPostToolUseCommand {
     ///
     /// Runs against every file Codex's `apply_patch` just touched. The
     /// parser is chosen from each file's extension (Rust,
-    /// TypeScript/JavaScript, or Python). Files with an unsupported
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
     /// extension are ignored silently.
     Wrapper,
 }
@@ -238,12 +238,19 @@ enum CodexPreToolUseCommand {
     ///
     /// `*** Add File:` entries are skipped (no current state on disk);
     /// only `*** Update File:` paths are inspected.
+    /// The parser is chosen from each updated file's extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
     Complexity,
-    /// Report `impl` blocks whose pre-patch LCOM4 cohesion is above 1
-    /// across every file Codex's `apply_patch` is about to update.
+    /// Report cohesion units (`impl` blocks, classes, or module units)
+    /// whose pre-patch LCOM4 is above 1 across every file Codex's
+    /// `apply_patch` is about to update.
     ///
     /// `*** Add File:` entries are skipped (no current state on disk);
     /// only `*** Update File:` paths are inspected.
+    /// The parser is chosen from each updated file's extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
     Cohesion,
 }
 
@@ -267,7 +274,7 @@ enum AnalyzeCommand {
     /// Accepts either a single source file or a directory; in directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep) and groups findings per file. The parser is chosen from
-    /// each file extension (Rust, TypeScript/JavaScript, or Python).
+    /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
     Cohesion(AnalyzeCohesionArgs),
@@ -294,13 +301,13 @@ enum AnalyzeCommand {
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
     ///
-    /// For every module in a Rust crate, lists the directly-depended
+    /// For every module in the graph, lists the directly-depended
     /// modules, the modules reachable through one or more outgoing
     /// edges, and the count of distinct source files those modules
     /// span. Useful as an "onboarding cost" estimate — how many files
     /// an agent must open to reason about a given module. `path` may
-    /// be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
-    /// containing one.
+    /// be a Rust crate root (or a directory containing one), a
+    /// TypeScript/JavaScript entry file, or a Python file/directory.
     ContextSpan(AnalyzeCommonArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
@@ -332,7 +339,7 @@ enum AnalyzeCommand {
     /// Accepts either a single source file or a directory; in directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep) and groups findings per file. The parser is chosen from
-    /// each file extension (Rust, TypeScript/JavaScript, or Python).
+    /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
     Wrapper(AnalyzeWrapperArgs),
@@ -340,7 +347,7 @@ enum AnalyzeCommand {
 
 #[derive(Debug, Clone, Args)]
 struct AnalyzeCommonArgs {
-    /// Path to a source file, crate root, or directory to analyze.
+    /// Path to a source file, Rust crate root, or directory to analyze.
     path: PathBuf,
     /// Output format. Defaults to JSON.
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
@@ -430,8 +437,8 @@ struct AnalyzeSimilarityArgs {
     threshold: f64,
     /// Minimum source line count for a function to be considered.
     /// Functions shorter than this are dropped before pairwise
-    /// comparison; mirrors `similarity-ts`'s `--min-lines` knob and
-    /// keeps trivial getters / one-liners out of the report.
+    /// comparison; keeps trivial getters / one-liners out of the
+    /// report.
     #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
     min_lines: usize,
 }
@@ -450,9 +457,9 @@ struct AnalyzePathArgs {
     /// `*.test.*`, `test_*`, etc.).
     #[arg(long, conflicts_with = "exclude_tests")]
     only_tests: bool,
-    /// Exclude files that look like tests. For `similarity`, this also
-    /// drops language-level test functions such as Rust `#[cfg(test)]`
-    /// modules.
+    /// Exclude files that look like tests. For similarity reports, this
+    /// also drops language-level test functions such as Rust
+    /// `#[cfg(test)]` modules.
     #[arg(long, conflicts_with = "only_tests")]
     exclude_tests: bool,
     /// Exclude paths matching this glob. Repeatable. Bare patterns also
@@ -800,6 +807,40 @@ mod tests {
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    fn help_for(args: &[&str]) -> String {
+        let mut argv = args.to_vec();
+        argv.push("--help");
+        let err = Cli::try_parse_from(argv).expect_err("help exits before parsing");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        err.to_string()
+    }
+
+    #[test]
+    fn cohesion_hook_help_describes_all_supported_unit_kinds() {
+        let help = help_for(&["agent-lens", "hook", "pre-tool-use", "cohesion"]);
+        assert!(help.contains("cohesion units"), "got: {help}");
+        assert!(help.contains("classes"), "got: {help}");
+        assert!(help.contains("module units"), "got: {help}");
+        assert!(help.contains("Python, or Go"), "got: {help}");
+    }
+
+    #[test]
+    fn similarity_help_does_not_mention_retired_tool_name() {
+        let help = help_for(&["agent-lens", "analyze", "similarity"]);
+        assert!(!help.contains("similarity-ts"), "got: {help}");
+        assert!(help.contains("keeps trivial getters"), "got: {help}");
+    }
+
+    #[test]
+    fn context_span_help_lists_non_rust_entry_shapes() {
+        let help = help_for(&["agent-lens", "analyze", "context-span"]);
+        assert!(
+            help.contains("TypeScript/JavaScript entry file"),
+            "got: {help}"
+        );
+        assert!(help.contains("Python file/directory"), "got: {help}");
     }
 
     #[rstest]

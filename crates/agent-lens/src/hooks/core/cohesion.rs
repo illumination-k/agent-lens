@@ -1,8 +1,8 @@
-//! Engine-agnostic per-`impl` cohesion report for PreToolUse hooks.
+//! Engine-agnostic cohesion report for PreToolUse hooks.
 //!
 //! Mirrors [`super::complexity`]: the hook adapters call
 //! [`CohesionCore::run`] with the files about to be touched and get back
-//! a fully-formatted report — or `None` when every `impl` block is
+//! a fully-formatted report — or `None` when every cohesion unit is
 //! trivially cohesive. Each agent then wraps that string in the
 //! engine-specific output envelope.
 
@@ -13,9 +13,9 @@ use lens_domain::{CohesionUnit, CohesionUnitKind};
 use crate::analyze::SourceLang;
 use crate::hooks::core::{EditedSource, HookError};
 
-/// LCOM4 value at or above which an `impl` block is reported. `1` means
+/// LCOM4 value at or above which a cohesion unit is reported. `1` means
 /// "every method touches the same shared state" — no signal. `2` is the
-/// first level that hints at a split-personality `impl`.
+/// first level that hints at split responsibilities.
 const LCOM4_FLOOR: usize = 2;
 
 /// Runner for the pre-edit cohesion hook.
@@ -66,11 +66,8 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, Ho
         SourceLang::Python => {
             lens_py::extract_cohesion_units(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
-        // Cohesion for Go is not implemented yet; the hook returns no
-        // units rather than failing on a `.go` save.
         SourceLang::Go => {
-            let _ = source;
-            Ok(Vec::new())
+            lens_golang::extract_cohesion_units(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
     }
 }
