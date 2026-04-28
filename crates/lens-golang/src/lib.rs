@@ -17,8 +17,12 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod attrs;
+mod cohesion;
 mod complexity;
 mod parser;
+mod wrapper;
 
+pub use cohesion::extract_cohesion_units;
 pub use complexity::extract_complexity_units;
 pub use parser::{GoParseError, GoParser, extract_functions_excluding_tests};
+pub use wrapper::find_wrappers;
