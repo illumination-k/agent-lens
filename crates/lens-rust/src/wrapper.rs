@@ -12,13 +12,9 @@ use lens_domain::{WrapperFinding, args_pass_through_by, qualify as qualify_name}
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
-use syn::{
-    Block, Expr, ExprCall, ExprMethodCall, FnArg, ImplItem, Item, ItemImpl, ItemMod, ItemTrait,
-    Pat, PatIdent, Signature, Stmt, TraitItem, UnOp,
-};
+use syn::{Block, Expr, ExprCall, ExprMethodCall, FnArg, Pat, PatIdent, Signature, Stmt, UnOp};
 
-use crate::attrs::has_cfg_test;
-use crate::common::type_path_last_ident;
+use crate::common::{WalkOptions, walk_fn_items};
 use crate::parser::RustParseError;
 
 /// Method names with no arguments that we treat as "no semantic content":
@@ -62,75 +58,23 @@ const BOILERPLATE_TRAIT_METHODS: &[(&str, &str)] = &[
 
 /// Walk the file and return every function whose body is just a
 /// forwarding call.
+///
+/// `#[cfg(test)]`-gated `mod`/`impl`/`trait` blocks are skipped: their
+/// methods are forwarding by design (test helpers shorten `assert_eq!`
+/// call sites, they don't reflect a wrapper a refactor should remove).
 pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError> {
     let file = syn::parse_file(source)?;
+    let opts = WalkOptions {
+        skip_cfg_test_blocks: true,
+        skip_test_fns: false,
+    };
     let mut out = Vec::new();
-    for item in &file.items {
-        collect_item(item, &mut out);
-    }
+    walk_fn_items(&file.items, opts, &mut |site| {
+        if let Some(finding) = analyze_fn(site.owner, site.trait_name, site.sig, site.block) {
+            out.push(finding);
+        }
+    });
     Ok(out)
-}
-
-fn collect_item(item: &Item, out: &mut Vec<WrapperFinding>) {
-    match item {
-        Item::Fn(item_fn) => {
-            if let Some(finding) = analyze_fn(None, None, &item_fn.sig, &item_fn.block) {
-                out.push(finding);
-            }
-        }
-        Item::Impl(item_impl) => collect_impl(item_impl, out),
-        Item::Trait(item_trait) => collect_trait(item_trait, out),
-        Item::Mod(item_mod) => collect_mod(item_mod, out),
-        _ => {}
-    }
-}
-
-fn collect_mod(item_mod: &ItemMod, out: &mut Vec<WrapperFinding>) {
-    // Skip `#[cfg(test)] mod tests { ... }` (and any other cfg(test)-gated
-    // module). Test helpers are forwarding by design — they exist to
-    // shorten call sites in `assert_eq!` lines, not because the wrapped
-    // function needed an extra layer. Reporting them is pure noise.
-    if has_cfg_test(&item_mod.attrs) {
-        return;
-    }
-    if let Some((_, items)) = &item_mod.content {
-        for nested in items {
-            collect_item(nested, out);
-        }
-    }
-}
-
-fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<WrapperFinding>) {
-    let self_name = type_path_last_ident(&item_impl.self_ty);
-    let trait_name = item_impl
-        .trait_
-        .as_ref()
-        .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
-    for impl_item in &item_impl.items {
-        if let ImplItem::Fn(method) = impl_item
-            && let Some(finding) = analyze_fn(
-                self_name.as_deref(),
-                trait_name.as_deref(),
-                &method.sig,
-                &method.block,
-            )
-        {
-            out.push(finding);
-        }
-    }
-}
-
-fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<WrapperFinding>) {
-    let trait_name = item_trait.ident.to_string();
-    for trait_item in &item_trait.items {
-        if let TraitItem::Fn(method) = trait_item
-            && let Some(block) = &method.default
-            && let Some(finding) =
-                analyze_fn(Some(&trait_name), Some(&trait_name), &method.sig, block)
-        {
-            out.push(finding);
-        }
-    }
 }
 
 fn analyze_fn(

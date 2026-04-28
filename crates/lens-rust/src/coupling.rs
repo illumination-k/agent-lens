@@ -264,9 +264,7 @@ impl<'a> PathResolver<'a> {
         if segments.len() == 1 {
             return None;
         }
-        let mut v = self.current_segments();
-        v.extend(segments.iter().skip(1).cloned());
-        Some(v)
+        Some(prefix_with_tail(self.current_segments(), segments))
     }
 
     fn absolutize_super(&self, segments: &[String]) -> Option<Vec<String>> {
@@ -289,9 +287,7 @@ impl<'a> PathResolver<'a> {
 
     fn absolutize_alias(&self, head: &str, segments: &[String]) -> Option<Vec<String>> {
         let alias = self.aliases.get(head)?;
-        let mut v = alias.clone();
-        v.extend(segments.iter().skip(1).cloned());
-        Some(v)
+        Some(prefix_with_tail(alias.clone(), segments))
     }
 
     /// Resolve a path that names a value or type — the trailing segments
@@ -323,6 +319,14 @@ impl<'a> PathResolver<'a> {
             None
         }
     }
+}
+
+/// Build `prefix` followed by `segments[1..]` — the shared shape of
+/// `absolutize_self` and `absolutize_alias`, where the first segment
+/// (`self`, an alias name) is replaced by its expansion.
+fn prefix_with_tail(mut prefix: Vec<String>, segments: &[String]) -> Vec<String> {
+    prefix.extend(segments.iter().skip(1).cloned());
+    prefix
 }
 
 /// Walk a `use` tree, recording an edge for each leaf and updating

@@ -4,10 +4,8 @@ use lens_domain::{FunctionDef, LanguageParser, TreeNode, qualify as qualify_name
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
-use syn::{ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemTrait, TraitItem};
 
-use crate::attrs::{has_cfg_test, is_test_function};
-use crate::common::type_path_last_ident;
+use crate::common::{WalkOptions, walk_fn_items};
 
 /// A Rust-language parser backed by [`syn`].
 ///
@@ -44,7 +42,7 @@ impl LanguageParser for RustParser {
     }
 
     fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        extract_with(source, ExtractOptions::default())
+        extract_with(source, WalkOptions::default())
     }
 }
 
@@ -60,116 +58,25 @@ impl LanguageParser for RustParser {
 pub fn extract_functions_excluding_tests(source: &str) -> Result<Vec<FunctionDef>, RustParseError> {
     extract_with(
         source,
-        ExtractOptions {
-            exclude_tests: true,
+        WalkOptions {
+            skip_cfg_test_blocks: true,
+            skip_test_fns: true,
         },
     )
 }
 
-#[derive(Default, Clone, Copy)]
-struct ExtractOptions {
-    exclude_tests: bool,
-}
-
-fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, RustParseError> {
+fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, RustParseError> {
     let file = syn::parse_file(source)?;
     let mut out = Vec::new();
-    for item in &file.items {
-        collect_item(item, &mut out, opts);
-    }
-    Ok(out)
-}
-
-fn collect_item(item: &Item, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
-    match item {
-        Item::Fn(item_fn) => {
-            if opts.exclude_tests && is_test_function(&item_fn.attrs) {
-                return;
-            }
-            out.push(function_def_from_fn(item_fn));
-        }
-        Item::Impl(item_impl) => collect_impl(item_impl, out, opts),
-        Item::Trait(item_trait) => collect_trait(item_trait, out, opts),
-        Item::Mod(item_mod) => collect_mod(item_mod, out, opts),
-        _ => {}
-    }
-}
-
-fn collect_mod(item_mod: &ItemMod, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
-    if opts.exclude_tests && has_cfg_test(&item_mod.attrs) {
-        return;
-    }
-    if let Some((_, items)) = &item_mod.content {
-        for nested in items {
-            collect_item(nested, out, opts);
-        }
-    }
-}
-
-fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
-    if opts.exclude_tests && has_cfg_test(&item_impl.attrs) {
-        return;
-    }
-    let self_name = type_path_last_ident(&item_impl.self_ty);
-    let methods = item_impl.items.iter().filter_map(|item| match item {
-        ImplItem::Fn(method) => Some((method.attrs.as_slice(), &method.sig, &method.block)),
-        _ => None,
-    });
-    push_methods(self_name.as_deref(), methods, out, opts);
-}
-
-fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<FunctionDef>, opts: ExtractOptions) {
-    if opts.exclude_tests && has_cfg_test(&item_trait.attrs) {
-        return;
-    }
-    let trait_name = item_trait.ident.to_string();
-    let methods = item_trait.items.iter().filter_map(|item| match item {
-        TraitItem::Fn(method) => method
-            .default
-            .as_ref()
-            .map(|block| (method.attrs.as_slice(), &method.sig, block)),
-        _ => None,
-    });
-    push_methods(Some(&trait_name), methods, out, opts);
-}
-
-/// Push every `(attrs, sig, block)` triple that survives the
-/// `exclude_tests` filter as a [`FunctionDef`] qualified by `owner`
-/// (e.g. `Foo::bar` for `impl Foo`, `Tr::baz` for `trait Tr`).
-fn push_methods<'a>(
-    owner: Option<&str>,
-    methods: impl IntoIterator<Item = (&'a [syn::Attribute], &'a syn::Signature, &'a syn::Block)>,
-    out: &mut Vec<FunctionDef>,
-    opts: ExtractOptions,
-) {
-    for (attrs, sig, block) in methods {
-        if opts.exclude_tests && is_test_function(attrs) {
-            continue;
-        }
+    walk_fn_items(&file.items, opts, &mut |site| {
         out.push(FunctionDef {
-            name: qualify_name(owner, &sig.ident.to_string()),
-            start_line: line_of(sig),
-            end_line: line_of_end(block),
-            tree: token_stream_to_tree("Block", block.to_token_stream()),
+            name: qualify_name(site.owner, &site.sig.ident.to_string()),
+            start_line: site.sig.span().start().line,
+            end_line: site.block.span().end().line,
+            tree: token_stream_to_tree("Block", site.block.to_token_stream()),
         });
-    }
-}
-
-fn function_def_from_fn(item_fn: &ItemFn) -> FunctionDef {
-    FunctionDef {
-        name: item_fn.sig.ident.to_string(),
-        start_line: line_of(&item_fn.sig),
-        end_line: line_of_end(&item_fn.block),
-        tree: token_stream_to_tree("Block", item_fn.block.to_token_stream()),
-    }
-}
-
-fn line_of<T: Spanned>(item: &T) -> usize {
-    item.span().start().line
-}
-
-fn line_of_end<T: Spanned>(item: &T) -> usize {
-    item.span().end().line
+    });
+    Ok(out)
 }
 
 fn token_stream_to_tree(label: &str, stream: TokenStream) -> TreeNode {

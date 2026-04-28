@@ -25,7 +25,7 @@
 use lens_domain::qualify;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprCall, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, TraitItem};
+use syn::{Block, Expr, ExprCall, ExprMethodCall, Ident, ImplItem, Item, TraitItem};
 
 use crate::attrs::has_cfg_test;
 use crate::common::type_path_last_ident;
@@ -111,22 +111,18 @@ impl CallVisitor {
                 }
                 self.impl_owners.pop();
             }
-            Item::Fn(item_fn) => self.visit_item_fn_scoped(item_fn),
+            Item::Fn(item_fn) => self.visit_block_in_fn_scope(&item_fn.sig.ident, &item_fn.block),
             other => visit::visit_item(self, other),
         }
     }
 
-    fn visit_item_fn_scoped(&mut self, item_fn: &ItemFn) {
-        let name = qualify(self.current_owner(), &item_fn.sig.ident.to_string());
+    /// Push the qualified name of `ident` onto the caller stack, walk
+    /// `block`, and pop. Shared by the `Item::Fn` and `ImplItem::Fn`
+    /// arms — both used to spell this loop out themselves.
+    fn visit_block_in_fn_scope(&mut self, ident: &Ident, block: &Block) {
+        let name = qualify(self.current_owner(), &ident.to_string());
         self.callers.push(name);
-        visit::visit_block(self, &item_fn.block);
-        self.callers.pop();
-    }
-
-    fn visit_impl_item_fn_scoped(&mut self, method: &ImplItemFn) {
-        let name = qualify(self.current_owner(), &method.sig.ident.to_string());
-        self.callers.push(name);
-        visit::visit_block(self, &method.block);
+        visit::visit_block(self, block);
         self.callers.pop();
     }
 
@@ -154,7 +150,7 @@ impl<'ast> Visit<'ast> for CallVisitor {
 
     fn visit_impl_item(&mut self, impl_item: &'ast ImplItem) {
         if let ImplItem::Fn(method) = impl_item {
-            self.visit_impl_item_fn_scoped(method);
+            self.visit_block_in_fn_scope(&method.sig.ident, &method.block);
         } else {
             visit::visit_impl_item(self, impl_item);
         }
@@ -164,10 +160,7 @@ impl<'ast> Visit<'ast> for CallVisitor {
         if let TraitItem::Fn(method) = trait_item
             && let Some(block) = &method.default
         {
-            let name = qualify(self.current_owner(), &method.sig.ident.to_string());
-            self.callers.push(name);
-            visit::visit_block(self, block);
-            self.callers.pop();
+            self.visit_block_in_fn_scope(&method.sig.ident, block);
         } else {
             visit::visit_trait_item(self, trait_item);
         }
