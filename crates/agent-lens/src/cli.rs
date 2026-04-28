@@ -263,28 +263,7 @@ enum AnalyzeCommand {
     /// each file extension (`.rs` / `.ts` / `.py`). The JSON format is the
     /// default machine-readable output; `--format md` emits a compact
     /// summary tuned for LLM context.
-    Cohesion {
-        /// Path to a source file or a directory to analyze.
-        path: PathBuf,
-        /// Output format. Defaults to JSON.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-        format: OutputFormat,
-        /// Restrict the report to `impl` blocks touching unstaged
-        /// changed lines in `git diff -U0`.
-        #[arg(long)]
-        diff_only: bool,
-        /// Cap the markdown ranking to the top-N units. JSON output
-        /// always carries the full list.
-        #[arg(long)]
-        top: Option<usize>,
-        /// Minimum LCOM4 score included in the markdown ranking. The
-        /// markdown default is 2, which hides cohesive LCOM4=1 units;
-        /// pass `--min-score 1` to include them.
-        #[arg(long)]
-        min_score: Option<usize>,
-        #[command(flatten)]
-        path_filter: AnalyzePathArgs,
-    },
+    Cohesion(AnalyzeCohesionArgs),
     /// Report per-function complexity metrics (Cyclomatic, Cognitive,
     /// Max Nesting, Halstead Volume, Maintainability Index).
     ///
@@ -295,27 +274,7 @@ enum AnalyzeCommand {
     /// file extension (`.rs` / `.ts` / `.py`). The JSON format is the
     /// default machine-readable output; `--format md` emits a compact
     /// summary tuned for LLM context.
-    Complexity {
-        /// Path to a source file or a directory to analyze.
-        path: PathBuf,
-        /// Output format. Defaults to JSON.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-        format: OutputFormat,
-        /// Restrict the report to functions touching unstaged changed
-        /// lines in `git diff -U0`.
-        #[arg(long)]
-        diff_only: bool,
-        /// Cap the markdown ranking to the top-N functions. JSON output
-        /// always carries the full list.
-        #[arg(long)]
-        top: Option<usize>,
-        /// Minimum cognitive complexity score included in the markdown
-        /// ranking. JSON output always carries the full list.
-        #[arg(long)]
-        min_score: Option<u32>,
-        #[command(flatten)]
-        path_filter: AnalyzePathArgs,
-    },
+    Complexity(AnalyzeComplexityArgs),
     /// Report module-level coupling metrics for a Rust crate.
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
@@ -324,16 +283,7 @@ enum AnalyzeCommand {
     /// connected components of the dependency graph (cycles). `path`
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one.
-    Coupling {
-        /// Path to a `.rs` crate root or a directory containing
-        /// `src/lib.rs` or `src/main.rs`.
-        path: PathBuf,
-        /// Output format. Defaults to JSON.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-        format: OutputFormat,
-        #[command(flatten)]
-        path_filter: AnalyzePathArgs,
-    },
+    Coupling(AnalyzeCommonArgs),
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
     ///
@@ -344,16 +294,7 @@ enum AnalyzeCommand {
     /// an agent must open to reason about a given module. `path` may
     /// be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one.
-    ContextSpan {
-        /// Path to a `.rs` crate root or a directory containing
-        /// `src/lib.rs` or `src/main.rs`.
-        path: PathBuf,
-        /// Output format. Defaults to JSON.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-        format: OutputFormat,
-        #[command(flatten)]
-        path_filter: AnalyzePathArgs,
-    },
+    ContextSpan(AnalyzeCommonArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for supported source files (`.rs` / `.ts` / `.py`),
@@ -363,24 +304,7 @@ enum AnalyzeCommand {
     /// "frequently changed *and* complex" code — where bugs concentrate
     /// and where a refactor is most likely to pay off. `path` must be
     /// inside a git working tree.
-    Hotspot {
-        /// File or directory to score. Must lie inside a git repo.
-        path: PathBuf,
-        /// Output format. Defaults to JSON.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-        format: OutputFormat,
-        /// Restrict churn to commits in this `--since=` window. Accepts
-        /// anything git's approxidate parser does (e.g. `90.days.ago`,
-        /// `2024-01-01`).
-        #[arg(long)]
-        since: Option<String>,
-        /// Cap the markdown table to the top-N entries (JSON always
-        /// carries the full list).
-        #[arg(long)]
-        top: Option<usize>,
-        #[command(flatten)]
-        path_filter: AnalyzePathArgs,
-    },
+    Hotspot(AnalyzeHotspotArgs),
     /// Report clusters of near-duplicate functions.
     ///
     /// Accepts either a single source file or a directory; in directory
@@ -393,38 +317,7 @@ enum AnalyzeCommand {
     /// (`.rs` / `.ts` / `.py`). The JSON format is the default
     /// machine-readable output; `--format md` emits a compact summary
     /// tuned for LLM context.
-    Similarity {
-        /// Path to a source file or a directory to analyze.
-        path: PathBuf,
-        /// Output format. Defaults to JSON.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-        format: OutputFormat,
-        /// Restrict the report to functions touching unstaged changed
-        /// lines in `git diff -U0`.
-        #[arg(long)]
-        diff_only: bool,
-        /// Shared path filters. `--exclude-tests` also drops
-        /// language-level test functions for similarity.
-        #[command(flatten)]
-        path_filter: AnalyzePathArgs,
-        /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
-        /// this value are eligible for clustering, and the same threshold
-        /// is the complete-link cut so every pair inside a reported cluster
-        /// stays at or above it. Defaults to the same cutoff used by the
-        /// PostToolUse `similarity` hook.
-        #[arg(long, visible_alias = "min-score", default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
-        threshold: f64,
-        /// Minimum source line count for a function to be considered.
-        /// Functions shorter than this are dropped before pairwise
-        /// comparison; mirrors `similarity-ts`'s `--min-lines` knob and
-        /// keeps trivial getters / one-liners out of the report.
-        #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
-        min_lines: usize,
-        /// Cap the markdown report to the top-N similar clusters. JSON
-        /// output always carries the full list.
-        #[arg(long)]
-        top: Option<usize>,
-    },
+    Similarity(AnalyzeSimilarityArgs),
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
@@ -434,19 +327,113 @@ enum AnalyzeCommand {
     /// each file extension (`.rs` / `.ts` / `.py`). The JSON format is the
     /// default machine-readable output; `--format md` emits a compact
     /// summary tuned for LLM context.
-    Wrapper {
-        /// Path to a source file or a directory to analyze.
-        path: PathBuf,
-        /// Output format. Defaults to JSON.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-        format: OutputFormat,
-        /// Restrict the report to wrappers touching unstaged changed
-        /// lines in `git diff -U0`.
-        #[arg(long)]
-        diff_only: bool,
-        #[command(flatten)]
-        path_filter: AnalyzePathArgs,
-    },
+    Wrapper(AnalyzeWrapperArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeCommonArgs {
+    /// Path to a source file, crate root, or directory to analyze.
+    path: PathBuf,
+    /// Output format. Defaults to JSON.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    format: OutputFormat,
+    #[command(flatten)]
+    path_filter: AnalyzePathArgs,
+}
+
+impl AnalyzeCommonArgs {
+    fn into_parts(self) -> (PathBuf, OutputFormat, AnalyzePathArgs) {
+        (self.path, self.format, self.path_filter)
+    }
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct AnalyzeDiffArgs {
+    /// Restrict the report to units touching unstaged changed lines in
+    /// `git diff -U0`.
+    #[arg(long)]
+    diff_only: bool,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct AnalyzeRankingArgs {
+    /// Cap the markdown ranking to the top-N entries. JSON output
+    /// always carries the full list.
+    #[arg(long)]
+    top: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeCohesionArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    diff: AnalyzeDiffArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    /// Minimum LCOM4 score included in the markdown ranking. The
+    /// markdown default is 2, which hides cohesive LCOM4=1 units;
+    /// pass `--min-score 1` to include them.
+    #[arg(long)]
+    min_score: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeComplexityArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    diff: AnalyzeDiffArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    /// Minimum cognitive complexity score included in the markdown
+    /// ranking. JSON output always carries the full list.
+    #[arg(long)]
+    min_score: Option<u32>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeHotspotArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    /// Restrict churn to commits in this `--since=` window. Accepts
+    /// anything git's approxidate parser does (e.g. `90.days.ago`,
+    /// `2024-01-01`).
+    #[arg(long)]
+    since: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeSimilarityArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    diff: AnalyzeDiffArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
+    /// this value are eligible for clustering, and the same threshold
+    /// is the complete-link cut so every pair inside a reported cluster
+    /// stays at or above it. Defaults to the same cutoff used by the
+    /// PostToolUse `similarity` hook.
+    #[arg(long, visible_alias = "min-score", default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
+    threshold: f64,
+    /// Minimum source line count for a function to be considered.
+    /// Functions shorter than this are dropped before pairwise
+    /// comparison; mirrors `similarity-ts`'s `--min-lines` knob and
+    /// keeps trivial getters / one-liners out of the report.
+    #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
+    min_lines: usize,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeWrapperArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    diff: AnalyzeDiffArgs,
 }
 
 #[derive(Debug, Clone, Args, Default)]
@@ -507,102 +494,95 @@ fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
     write_stdout_line(&cmd.run()?)
 }
 
+trait WithAnalyzePathArgs: Sized {
+    fn with_analyze_path_args(self, args: AnalyzePathArgs) -> Self;
+}
+
+macro_rules! impl_with_analyze_path_args {
+    ($($analyzer:ty),+ $(,)?) => {
+        $(
+            impl WithAnalyzePathArgs for $analyzer {
+                fn with_analyze_path_args(self, args: AnalyzePathArgs) -> Self {
+                    self.with_only_tests(args.only_tests)
+                        .with_exclude_tests(args.exclude_tests)
+                        .with_exclude_patterns(args.exclude)
+                }
+            }
+        )+
+    };
+}
+
+impl_with_analyze_path_args!(
+    CohesionAnalyzer,
+    ComplexityAnalyzer,
+    CouplingAnalyzer,
+    ContextSpanAnalyzer,
+    HotspotAnalyzer,
+    SimilarityAnalyzer,
+    WrapperAnalyzer,
+);
+
 impl AnalyzeCommand {
     /// Pick the right analyzer for this CLI variant and produce its
-    /// report. Each arm constructs the analyzer inline; per-handler
-    /// helper functions used to live here but were 100% similar to
-    /// each other and added cyclomatic surface without insight.
+    /// report. Shared CLI concepts are flattened into the command args
+    /// structs above; each arm only applies analyzer-specific options.
     fn run(self) -> Result<String, Box<dyn std::error::Error>> {
         Ok(match self {
-            Self::Cohesion {
-                path,
-                format,
-                diff_only,
-                top,
-                min_score,
-                path_filter,
-            } => CohesionAnalyzer::new()
-                .with_diff_only(diff_only)
-                .with_top(top)
-                .with_min_score(min_score)
-                .with_only_tests(path_filter.only_tests)
-                .with_exclude_tests(path_filter.exclude_tests)
-                .with_exclude_patterns(path_filter.exclude)
-                .analyze(&path, format)?,
-            Self::Complexity {
-                path,
-                format,
-                diff_only,
-                top,
-                min_score,
-                path_filter,
-            } => ComplexityAnalyzer::new()
-                .with_diff_only(diff_only)
-                .with_top(top)
-                .with_min_score(min_score)
-                .with_only_tests(path_filter.only_tests)
-                .with_exclude_tests(path_filter.exclude_tests)
-                .with_exclude_patterns(path_filter.exclude)
-                .analyze(&path, format)?,
-            Self::Coupling {
-                path,
-                format,
-                path_filter,
-            } => CouplingAnalyzer::new()
-                .with_only_tests(path_filter.only_tests)
-                .with_exclude_tests(path_filter.exclude_tests)
-                .with_exclude_patterns(path_filter.exclude)
-                .analyze(&path, format)?,
-            Self::ContextSpan {
-                path,
-                format,
-                path_filter,
-            } => ContextSpanAnalyzer::new()
-                .with_only_tests(path_filter.only_tests)
-                .with_exclude_tests(path_filter.exclude_tests)
-                .with_exclude_patterns(path_filter.exclude)
-                .analyze(&path, format)?,
-            Self::Hotspot {
-                path,
-                format,
-                since,
-                top,
-                path_filter,
-            } => HotspotAnalyzer::new()
-                .with_top(top)
-                .with_since_opt(since)
-                .with_only_tests(path_filter.only_tests)
-                .with_exclude_tests(path_filter.exclude_tests)
-                .with_exclude_patterns(path_filter.exclude)
-                .analyze(&path, format)?,
-            Self::Similarity {
-                path,
-                format,
-                diff_only,
-                path_filter,
-                threshold,
-                min_lines,
-                top,
-            } => SimilarityAnalyzer::new()
-                .with_threshold(threshold)
-                .with_diff_only(diff_only)
-                .with_only_tests(path_filter.only_tests)
-                .with_exclude_tests(path_filter.exclude_tests)
-                .with_exclude_patterns(path_filter.exclude)
-                .with_min_lines(min_lines)
-                .with_top(top)
-                .analyze(&path, format)?,
-            Self::Wrapper {
-                path,
-                format,
-                diff_only,
-                path_filter,
-            } => WrapperAnalyzer::new()
-                .with_diff_only(diff_only)
-                .with_only_tests(path_filter.only_tests)
-                .with_exclude_tests(path_filter.exclude_tests)
-                .with_exclude_patterns(path_filter.exclude)
-                .analyze(&path, format)?,
+            Self::Cohesion(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                CohesionAnalyzer::new()
+                    .with_diff_only(args.diff.diff_only)
+                    .with_top(args.ranking.top)
+                    .with_min_score(args.min_score)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Complexity(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                ComplexityAnalyzer::new()
+                    .with_diff_only(args.diff.diff_only)
+                    .with_top(args.ranking.top)
+                    .with_min_score(args.min_score)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Coupling(args) => {
+                let (path, format, path_filter) = args.into_parts();
+                CouplingAnalyzer::new()
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::ContextSpan(args) => {
+                let (path, format, path_filter) = args.into_parts();
+                ContextSpanAnalyzer::new()
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Hotspot(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                HotspotAnalyzer::new()
+                    .with_top(args.ranking.top)
+                    .with_since_opt(args.since)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Similarity(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                SimilarityAnalyzer::new()
+                    .with_threshold(args.threshold)
+                    .with_diff_only(args.diff.diff_only)
+                    .with_min_lines(args.min_lines)
+                    .with_top(args.ranking.top)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Wrapper(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                WrapperAnalyzer::new()
+                    .with_diff_only(args.diff.diff_only)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
         })
     }
 }
@@ -978,26 +958,17 @@ mod tests {
             "3",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Similarity {
-            path,
-            format,
-            diff_only,
-            path_filter,
-            threshold,
-            min_lines,
-            top,
-        }) = cli.command
-        else {
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(path, PathBuf::from("src/lib.rs"));
-        assert_eq!(format, OutputFormat::Md);
-        assert!(diff_only);
-        assert!(path_filter.exclude_tests);
-        assert_eq!(path_filter.exclude, ["generated/**"]);
-        assert!((threshold - 0.85).abs() < f64::EPSILON);
-        assert_eq!(min_lines, 8);
-        assert_eq!(top, Some(3));
+        assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert!(args.diff.diff_only);
+        assert!(args.common.path_filter.exclude_tests);
+        assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
+        assert!((args.threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(args.min_lines, 8);
+        assert_eq!(args.ranking.top, Some(3));
     }
 
     #[test]
@@ -1011,10 +982,10 @@ mod tests {
             "0.91",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Similarity { threshold, .. }) = cli.command else {
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert!((threshold - 0.91).abs() < f64::EPSILON);
+        assert!((args.threshold - 0.91).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1030,12 +1001,11 @@ mod tests {
             "8",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Complexity { top, min_score, .. }) = cli.command
-        else {
+        let Command::Analyze(AnalyzeCommand::Complexity(args)) = cli.command else {
             panic!("expected analyze complexity");
         };
-        assert_eq!(top, Some(12));
-        assert_eq!(min_score, Some(8));
+        assert_eq!(args.ranking.top, Some(12));
+        assert_eq!(args.min_score, Some(8));
     }
 
     #[test]
@@ -1051,11 +1021,11 @@ mod tests {
             "2",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Cohesion { top, min_score, .. }) = cli.command else {
+        let Command::Analyze(AnalyzeCommand::Cohesion(args)) = cli.command else {
             panic!("expected analyze cohesion");
         };
-        assert_eq!(top, Some(7));
-        assert_eq!(min_score, Some(2));
+        assert_eq!(args.ranking.top, Some(7));
+        assert_eq!(args.min_score, Some(2));
     }
 
     #[test]
@@ -1107,26 +1077,23 @@ fn dispatch(n: i32) -> i32 {
             "5",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Hotspot {
-            since, top, format, ..
-        }) = cli.command
-        else {
+        let Command::Analyze(AnalyzeCommand::Hotspot(args)) = cli.command else {
             panic!("expected analyze hotspot");
         };
-        assert_eq!(since.as_deref(), Some("90.days.ago"));
-        assert_eq!(top, Some(5));
-        assert_eq!(format, OutputFormat::Json);
+        assert_eq!(args.since.as_deref(), Some("90.days.ago"));
+        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.common.format, OutputFormat::Json);
     }
 
     #[test]
     fn parses_analyze_coupling_default_format_is_json() {
         let cli =
             Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Coupling { path, format, .. }) = cli.command else {
+        let Command::Analyze(AnalyzeCommand::Coupling(args)) = cli.command else {
             panic!("expected analyze coupling");
         };
-        assert_eq!(path, PathBuf::from("."));
-        assert_eq!(format, OutputFormat::Json);
+        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.format, OutputFormat::Json);
     }
 
     #[test]
@@ -1140,11 +1107,11 @@ fn dispatch(n: i32) -> i32 {
             "md",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::ContextSpan { path, format, .. }) = cli.command else {
+        let Command::Analyze(AnalyzeCommand::ContextSpan(args)) = cli.command else {
             panic!("expected analyze context-span");
         };
-        assert_eq!(path, PathBuf::from("src/lib.rs"));
-        assert_eq!(format, OutputFormat::Md);
+        assert_eq!(args.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.format, OutputFormat::Md);
     }
 
     #[test]
