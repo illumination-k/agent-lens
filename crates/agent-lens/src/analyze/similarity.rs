@@ -452,10 +452,10 @@ impl Default for SimilarityAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{run_git, write_file};
     use proptest::collection::vec;
     use proptest::prelude::*;
     use rstest::rstest;
-    use std::io::Write;
     use std::path::PathBuf;
 
     /// Two near-identical function bodies — guaranteed to score above any
@@ -510,16 +510,6 @@ fn delta(xs: &[i32]) -> i32 {
     total
 }
 "#;
-
-    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        path
-    }
 
     fn arb_tree() -> impl Strategy<Value = lens_domain::TreeNode> {
         let leaf = prop_oneof![
@@ -1314,24 +1304,6 @@ fn beta(x: i32) -> i32 {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["cluster_count"], 1);
         assert_eq!(parsed["clusters"][0]["size"], 2);
-    }
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        // Mirror the hardened helper in `hotspot.rs`: disable commit /
-        // tag signing so the test never asks the host's signing setup
-        // to participate. Without this, sandboxes that have a global
-        // `commit.gpgsign=true` (and a signing helper that talks to a
-        // service which can fail) make the test brittle.
-        let status = std::process::Command::new("git")
-            .arg("-c")
-            .arg("commit.gpgsign=false")
-            .arg("-c")
-            .arg("tag.gpgsign=false")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 
     fn setup_unsupported_extension(dir: &Path) -> PathBuf {

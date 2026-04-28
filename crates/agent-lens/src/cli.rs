@@ -785,70 +785,71 @@ fn write_stdout_json<T: serde::Serialize>(value: &T) -> Result<(), Box<dyn std::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_lens::test_support::write_file;
     use clap::CommandFactory;
-
-    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, contents).unwrap();
-        path
-    }
+    use rstest::rstest;
 
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
     }
 
-    #[test]
-    fn parses_hook_session_start_summary() {
-        let cli = Cli::try_parse_from(["agent-lens", "hook", "session-start", "summary"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::Hook(HookCommand::SessionStart(SessionStartCommand::Summary)),
-        ));
-    }
-
-    #[test]
-    fn parses_hook_pre_tool_use_complexity() {
-        let cli = Cli::try_parse_from(["agent-lens", "hook", "pre-tool-use", "complexity"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Complexity)),
-        ));
-    }
-
-    #[test]
-    fn parses_hook_pre_tool_use_cohesion() {
-        let cli = Cli::try_parse_from(["agent-lens", "hook", "pre-tool-use", "cohesion"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Cohesion)),
-        ));
-    }
-
-    #[test]
-    fn parses_hook_post_tool_use_similarity() {
-        let cli = Cli::try_parse_from(["agent-lens", "hook", "post-tool-use", "similarity"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Similarity)),
-        ));
-    }
-
-    #[test]
-    fn parses_hook_post_tool_use_wrapper() {
-        let cli = Cli::try_parse_from(["agent-lens", "hook", "post-tool-use", "wrapper"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Wrapper)),
-        ));
+    #[rstest]
+    #[case::hook_session_start_summary(
+        &["agent-lens", "hook", "session-start", "summary"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::SessionStart(SessionStartCommand::Summary))),
+    )]
+    #[case::hook_pre_tool_use_complexity(
+        &["agent-lens", "hook", "pre-tool-use", "complexity"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Complexity))),
+    )]
+    #[case::hook_pre_tool_use_cohesion(
+        &["agent-lens", "hook", "pre-tool-use", "cohesion"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Cohesion))),
+    )]
+    #[case::hook_post_tool_use_similarity(
+        &["agent-lens", "hook", "post-tool-use", "similarity"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Similarity))),
+    )]
+    #[case::hook_post_tool_use_wrapper(
+        &["agent-lens", "hook", "post-tool-use", "wrapper"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Wrapper))),
+    )]
+    #[case::codex_hook_post_tool_use_similarity(
+        &["agent-lens", "codex-hook", "post-tool-use", "similarity"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::PostToolUse(CodexPostToolUseCommand::Similarity)),
+        ),
+    )]
+    #[case::codex_hook_pre_tool_use_complexity(
+        &["agent-lens", "codex-hook", "pre-tool-use", "complexity"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::PreToolUse(CodexPreToolUseCommand::Complexity)),
+        ),
+    )]
+    #[case::codex_hook_pre_tool_use_cohesion(
+        &["agent-lens", "codex-hook", "pre-tool-use", "cohesion"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::PreToolUse(CodexPreToolUseCommand::Cohesion)),
+        ),
+    )]
+    #[case::codex_hook_session_start_summary(
+        &["agent-lens", "codex-hook", "session-start", "summary"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::SessionStart(CodexSessionStartCommand::Summary)),
+        ),
+    )]
+    fn parses_hook_subcommand(#[case] argv: &[&str], #[case] expected: fn(&Command) -> bool) {
+        let cli = Cli::try_parse_from(argv).expect("clean parse");
+        assert!(
+            expected(&cli.command),
+            "unexpected command: {:?}",
+            cli.command
+        );
     }
 
     #[test]
@@ -877,54 +878,6 @@ mod tests {
         };
         assert!(matches!(args.scope, SetupScope::User));
         assert!(args.dry_run);
-    }
-
-    #[test]
-    fn parses_codex_hook_post_tool_use_similarity() {
-        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "post-tool-use", "similarity"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::CodexHook(CodexHookCommand::PostToolUse(
-                CodexPostToolUseCommand::Similarity,
-            )),
-        ));
-    }
-
-    #[test]
-    fn parses_codex_hook_pre_tool_use_complexity() {
-        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "pre-tool-use", "complexity"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::CodexHook(CodexHookCommand::PreToolUse(
-                CodexPreToolUseCommand::Complexity,
-            )),
-        ));
-    }
-
-    #[test]
-    fn parses_codex_hook_pre_tool_use_cohesion() {
-        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "pre-tool-use", "cohesion"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::CodexHook(CodexHookCommand::PreToolUse(
-                CodexPreToolUseCommand::Cohesion
-            )),
-        ));
-    }
-
-    #[test]
-    fn parses_codex_hook_session_start_summary() {
-        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "session-start", "summary"])
-            .expect("clean parse");
-        assert!(matches!(
-            cli.command,
-            Command::CodexHook(CodexHookCommand::SessionStart(
-                CodexSessionStartCommand::Summary,
-            )),
-        ));
     }
 
     #[test]

@@ -15,3 +15,6 @@
 
 pub mod analyze;
 pub mod hooks;
+
+#[doc(hidden)]
+pub mod test_support;

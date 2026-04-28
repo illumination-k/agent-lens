@@ -408,18 +408,7 @@ fn render_top_functions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::path::PathBuf;
-
-    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        path
-    }
+    use crate::test_support::{run_git, write_file};
 
     #[test]
     fn json_report_includes_function_metrics_and_summary() {
@@ -753,24 +742,6 @@ fn b(n: i32) -> i32 {
             .map(|f| f["file"].as_str().unwrap())
             .collect();
         assert!(!files.contains(&"src/generated.rs"));
-    }
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        // Mirror the hardened helper in `hotspot.rs`: disable commit /
-        // tag signing so the test never asks the host's signing setup
-        // to participate. Without this, sandboxes that have a global
-        // `commit.gpgsign=true` (and a signing helper that talks to a
-        // service which can fail) make the test brittle.
-        let status = std::process::Command::new("git")
-            .arg("-c")
-            .arg("commit.gpgsign=false")
-            .arg("-c")
-            .arg("tag.gpgsign=false")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 
     #[test]

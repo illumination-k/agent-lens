@@ -6,9 +6,6 @@
 //! `*** Add File:` markers, and reads each touched file off disk so the
 //! engine-agnostic [`crate::hooks::core`] runners can analyse them.
 
-#[cfg(test)]
-use std::path::Path;
-
 use agent_hooks::codex::{PostToolUseHookSpecificOutput, PostToolUseInput, PostToolUseOutput};
 
 use crate::hooks::core::{
@@ -109,10 +106,10 @@ fn parse_patched_paths(command: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_file;
     use agent_hooks::Hook;
     use agent_hooks::codex::HookContext;
     use serde_json::json;
-    use std::io::Write;
     use std::path::PathBuf;
 
     fn ctx(cwd: PathBuf) -> HookContext {
@@ -122,13 +119,6 @@ mod tests {
             cwd,
             model: "gpt-5".into(),
         }
-    }
-
-    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        let path = dir.join(name);
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        path
     }
 
     fn input(cwd: PathBuf, tool_name: &str, command: &str) -> PostToolUseInput {

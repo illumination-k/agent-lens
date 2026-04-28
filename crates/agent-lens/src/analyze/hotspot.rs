@@ -407,36 +407,7 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        path
-    }
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-c")
-            .arg("commit.gpgsign=false")
-            .arg("-c")
-            .arg("tag.gpgsign=false")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            // Suppress global config interference in CI sandboxes.
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed in {}", dir.display());
-    }
+    use crate::test_support::{run_git, write_file};
 
     fn init_repo_with_two_files(dir: &Path) {
         run_git(dir, &["init", "-q", "-b", "main"]);
