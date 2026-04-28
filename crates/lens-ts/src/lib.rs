@@ -14,6 +14,7 @@
 mod attrs;
 mod cohesion;
 mod complexity;
+mod coupling;
 mod line_index;
 mod parser;
 mod tree;
@@ -22,5 +23,6 @@ mod wrapper;
 
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
+pub use coupling::{CouplingError, TsModule, build_module_tree, extract_edges};
 pub use parser::{Dialect, TsParseError, TypeScriptParser, extract_functions_excluding_tests};
 pub use wrapper::find_wrappers;
