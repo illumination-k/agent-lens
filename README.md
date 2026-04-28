@@ -2,6 +2,7 @@
 
 [![CI Rust](https://github.com/illumination-k/agent-lens/actions/workflows/ci_rust.yml/badge.svg)](https://github.com/illumination-k/agent-lens/actions/workflows/ci_rust.yml)
 [![Lint Base](https://github.com/illumination-k/agent-lens/actions/workflows/lint_base.yml/badge.svg)](https://github.com/illumination-k/agent-lens/actions/workflows/lint_base.yml)
+[![Lint GHA](https://github.com/illumination-k/agent-lens/actions/workflows/lint_gha.yml/badge.svg)](https://github.com/illumination-k/agent-lens/actions/workflows/lint_gha.yml)
 [![Mutation Tests](https://github.com/illumination-k/agent-lens/actions/workflows/mutants.yml/badge.svg)](https://github.com/illumination-k/agent-lens/actions/workflows/mutants.yml)
 [![codecov](https://codecov.io/gh/illumination-k/agent-lens/branch/main/graph/badge.svg)](https://codecov.io/gh/illumination-k/agent-lens)
 
@@ -394,7 +395,9 @@ mise install      # one-shot setup
 
 mise run fmt      # format everything (cargo fmt, dprint, shfmt)
 mise run lint     # clippy, rustfmt --check, cargo-deny, cargo-audit,
-                  # actionlint, zizmor, ghalint, pinact, shellcheck
+                  # dprint/shfmt/shellcheck, actionlint/zizmor/ghalint/pinact
+mise run lint:base # base repo lint (dprint, shfmt, shellcheck, pre-commit hooks)
+mise run lint:gha  # GitHub Actions lint (actionlint, zizmor, ghalint, pinact)
 mise run test     # cargo nextest run --locked --all-features
 mise run ci       # the full lint + test pipeline CI runs
 mise run mutants  # cargo-mutants (slow; not in CI by default)
@@ -412,8 +415,8 @@ Criterion benchmarks, report whether benchmark regression was checked and what
 the result was.
 
 CI (`.github/workflows/`) runs Rust lint/test (`ci_rust.yml`), the base
-toolchain lints (`lint_base.yml`), CodeQL, dependency review, Trivy,
-TruffleHog, SBOM generation, and PR-diff mutation testing
+toolchain lints (`lint_base.yml`), GitHub Actions lint (`lint_gha.yml`),
+CodeQL, dependency review, Trivy, TruffleHog, SBOM generation, and PR-diff mutation testing
 (`mutants.yml` — full runs are available via `workflow_dispatch`).
 
 ## Design principles
