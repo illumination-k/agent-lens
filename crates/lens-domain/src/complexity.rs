@@ -260,4 +260,102 @@ mod tests {
         let mi = f.maintainability_index().unwrap();
         assert!(mi > 80.0, "expected high MI for trivial function, got {mi}");
     }
+
+    use proptest::prelude::*;
+
+    /// Random Halstead counts. Distinct counts are kept small (`0..8`) so
+    /// that the `n < 2` boundary fires often enough for the iff-property
+    /// to exercise both branches; totals are larger so `len == 0` still
+    /// only triggers when both totals happen to be zero.
+    fn arb_halstead() -> impl Strategy<Value = HalsteadCounts> {
+        (0usize..8, 0usize..8, 0usize..32, 0usize..32).prop_map(|(n1, n2, big_n1, big_n2)| {
+            HalsteadCounts {
+                distinct_operators: n1,
+                distinct_operands: n2,
+                total_operators: big_n1,
+                total_operands: big_n2,
+            }
+        })
+    }
+
+    proptest! {
+        /// `volume()` is `None` exactly when vocabulary is below 2 or
+        /// length is zero — both inputs to `log2` would be undefined or
+        /// collapse the metric.
+        #[test]
+        fn halstead_volume_is_none_iff_vocabulary_below_two_or_length_zero(
+            h in arb_halstead(),
+        ) {
+            let undefined = h.vocabulary() < 2 || h.length() == 0;
+            prop_assert_eq!(h.volume().is_none(), undefined);
+        }
+
+        /// When defined, Halstead Volume is non-negative: `len * log2(n)`
+        /// with `n >= 2` and `len >= 1` cannot produce a negative number.
+        #[test]
+        fn halstead_volume_is_non_negative_when_defined(h in arb_halstead()) {
+            if let Some(v) = h.volume() {
+                prop_assert!(v >= 0.0, "expected non-negative volume, got {}", v);
+            }
+        }
+
+        /// `loc()` is at least 1 regardless of how `start_line` and
+        /// `end_line` relate — `saturating_sub` collapses the inverted
+        /// case rather than underflowing.
+        #[test]
+        fn loc_is_always_at_least_one(
+            start in 0usize..10_000,
+            end in 0usize..10_000,
+        ) {
+            let f = fc(1, 0, 0, HalsteadCounts::default(), (start, end));
+            prop_assert!(f.loc() >= 1);
+        }
+
+        /// When `end_line >= start_line`, `loc()` is exactly the
+        /// inclusive 1-based span `end - start + 1`.
+        #[test]
+        fn loc_equals_end_minus_start_plus_one_when_well_ordered(
+            start in 0usize..10_000,
+            delta in 0usize..10_000,
+        ) {
+            let end = start + delta;
+            let f = fc(1, 0, 0, HalsteadCounts::default(), (start, end));
+            prop_assert_eq!(f.loc(), delta + 1);
+        }
+
+        /// When defined, MI is clamped into `[0, 100]` for any combination
+        /// of Halstead counts, cyclomatic complexity, and LOC.
+        #[test]
+        fn maintainability_index_stays_in_zero_to_one_hundred(
+            h in arb_halstead(),
+            cc in 0u32..512,
+            start in 1usize..10_000,
+            delta in 0usize..10_000,
+        ) {
+            let f = fc(cc, 0, 0, h, (start, start + delta));
+            if let Some(mi) = f.maintainability_index() {
+                prop_assert!(
+                    (0.0..=100.0).contains(&mi),
+                    "MI out of range: {}",
+                    mi,
+                );
+            }
+        }
+
+        /// MI is `None` exactly when Halstead Volume is `None` or LOC is
+        /// zero — the two `ln` inputs in the Coleman-Oman formula. `loc()`
+        /// is always >= 1 so in practice the disjunction reduces to the
+        /// volume guard, and the property pins both halves of that link.
+        #[test]
+        fn maintainability_index_is_none_iff_volume_none_or_loc_zero(
+            h in arb_halstead(),
+            cc in 0u32..512,
+            start in 1usize..10_000,
+            delta in 0usize..10_000,
+        ) {
+            let f = fc(cc, 0, 0, h, (start, start + delta));
+            let undefined = f.halstead_volume().is_none() || f.loc() == 0;
+            prop_assert_eq!(f.maintainability_index().is_none(), undefined);
+        }
+    }
 }
