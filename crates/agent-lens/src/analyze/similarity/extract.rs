@@ -21,9 +21,11 @@ type ExtractError = Box<dyn std::error::Error + Send + Sync>;
 
 fn extract_rust(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        extract_functions_excluding_tests(source).map_err(box_err)
+        extract_functions_excluding_tests(source).map_err(Into::into)
     } else {
-        RustParser::new().extract_functions(source).map_err(box_err)
+        RustParser::new()
+            .extract_functions(source)
+            .map_err(Into::into)
     }
 }
 
@@ -33,36 +35,32 @@ fn extract_typescript(
     exclude_tests: bool,
 ) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        lens_ts::extract_functions_excluding_tests(source, dialect).map_err(box_err)
+        lens_ts::extract_functions_excluding_tests(source, dialect).map_err(Into::into)
     } else {
         <lens_ts::TypeScriptParser as LanguageParser>::extract_functions(
             &mut lens_ts::TypeScriptParser::with_dialect(dialect),
             source,
         )
-        .map_err(box_err)
+        .map_err(Into::into)
     }
 }
 
 fn extract_python(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        lens_py::extract_functions_excluding_tests(source).map_err(box_err)
+        lens_py::extract_functions_excluding_tests(source).map_err(Into::into)
     } else {
         lens_py::PythonParser::new()
             .extract_functions(source)
-            .map_err(box_err)
+            .map_err(Into::into)
     }
 }
 
 fn extract_go(source: &str, exclude_tests: bool) -> Result<Vec<FunctionDef>, ExtractError> {
     if exclude_tests {
-        lens_golang::extract_functions_excluding_tests(source).map_err(box_err)
+        lens_golang::extract_functions_excluding_tests(source).map_err(Into::into)
     } else {
         lens_golang::GoParser::new()
             .extract_functions(source)
-            .map_err(box_err)
+            .map_err(Into::into)
     }
-}
-
-fn box_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> ExtractError {
-    Box::new(e)
 }
