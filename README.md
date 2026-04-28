@@ -131,10 +131,10 @@ agent-lens analyze hotspot . --exclude 'target/**' --exclude '**/generated/**'
 # Analyze only functions touching unstaged diff hunks for this file
 agent-lens analyze similarity src/foo.rs --diff-only
 
-# Cohesion (LCOM4) per impl block (Rust) / class (TS, Python)
+# Cohesion (LCOM4) per impl block / class / module unit
 agent-lens analyze cohesion src/foo.rs --format md --top 20 --min-score 2
 
-# Cohesion only for impl blocks overlapping `git diff -U0` hunks
+# Cohesion only for units overlapping `git diff -U0` hunks
 agent-lens analyze cohesion src/foo.rs --diff-only
 
 # Cyclomatic / Cognitive / Nesting / Halstead / Maintainability Index
@@ -160,6 +160,38 @@ agent-lens analyze wrapper src/foo.rs
 # Wrapper findings limited to functions overlapping `git diff -U0` hunks
 agent-lens analyze wrapper src/foo.rs --diff-only
 ```
+
+### Current command surface
+
+The current binary exposes three top-level command trees:
+
+| Command tree | Commands                                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper` |
+| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper` |
+| `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `coupling`, `context-span`, `hotspot`                                                  |
+
+Analyzer commands share `PATH`, `--format json|md`, `--only-tests`,
+`--exclude-tests`, and repeatable `--exclude GLOB`. Directory analyzers walk
+recursively with `.gitignore` semantics.
+
+Analyzer-specific options today:
+
+| Analyzer       | Extra options                                                                         |
+| -------------- | ------------------------------------------------------------------------------------- |
+| `similarity`   | `--threshold FLOAT` (alias: `--min-score`), `--min-lines N`, `--diff-only`, `--top N` |
+| `complexity`   | `--diff-only`, `--top N`, `--min-score N`                                             |
+| `cohesion`     | `--diff-only`, `--top N`, `--min-score N`                                             |
+| `wrapper`      | `--diff-only`                                                                         |
+| `hotspot`      | `--since VALUE`, `--top N`                                                            |
+| `coupling`     | shared analyzer options only                                                          |
+| `context-span` | shared analyzer options only                                                          |
+
+Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
+`.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`, and
+`hotspot` cover all four language families. `wrapper` and `cohesion` cover
+Rust, TypeScript / JavaScript, and Python. `coupling` and `context-span` are
+Rust-only.
 
 ### As a Claude Code hook
 
@@ -323,7 +355,7 @@ new handlers to plug into the same plumbing.
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | `similarity`   | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                       | Rust, TS / JS, Python, Go |
 | `wrapper`      | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                    | Rust, TS / JS, Python     |
-| `cohesion`     | LCOM4 per `impl` block / class (number of connected components in the field-sharing graph).                                                                                                                                       | Rust, TS / JS, Python     |
+| `cohesion`     | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                        | Rust, TS / JS, Python     |
 | `complexity`   | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                | Rust, TS / JS, Python, Go |
 | `coupling`     | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles). | Rust                      |
 | `context-span` | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                         | Rust                      |
@@ -331,10 +363,10 @@ new handlers to plug into the same plumbing.
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
-For `complexity`, `cohesion`, and `similarity`, `--top` caps the Markdown
-ranking while JSON stays complete. `--min-score` filters the Markdown ranking
-for `complexity` (cognitive score) and `cohesion` (LCOM4); for `similarity` it
-is an alias of `--threshold`.
+For `complexity`, `cohesion`, `similarity`, and `hotspot`, `--top` caps the
+Markdown ranking while JSON stays complete. `--min-score` filters the Markdown
+ranking for `complexity` (cognitive score) and `cohesion` (LCOM4); for
+`similarity` it is an alias of `--threshold`.
 
 ### Output discipline
 
@@ -358,9 +390,10 @@ Adding a language means writing one adapter crate and wiring it into the
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
 `similarity`, `complexity`, and `hotspot` are wired through the Rust,
-TypeScript, Python, and Go adapters. `wrapper` and `cohesion` currently cover
-Rust, TypeScript, and Python. `coupling` and `context-span` are Rust-only today
-because they reach into Rust `mod` resolution.
+TypeScript / JavaScript, Python, and Go adapters. `wrapper` and `cohesion`
+currently cover Rust, TypeScript / JavaScript, and Python. `coupling` and
+`context-span` are Rust-only today because they reach into Rust `mod`
+resolution.
 
 ## Workspace layout
 
