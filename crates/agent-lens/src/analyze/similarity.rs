@@ -14,25 +14,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{
-    FunctionDef, TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_similar_pairs,
-};
+use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_similar_pairs};
 use rayon::prelude::*;
 use tracing::debug;
 
-use super::{
-    AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat, SourceFile, changed_line_ranges,
-    collect_source_files, read_source,
-};
+use super::{AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
 
 mod candidates;
+mod corpus;
 mod extract;
 mod report;
 
 #[cfg(test)]
 use candidates::{CheapFilter, tsed_upper_bound_filter};
 use candidates::{TreeProfile, candidate_pairs, eligible_function_count, similarity_uses_lsh};
-use extract::extract_functions;
+use corpus::{OwnedFunction, collect_corpus};
 use report::{ClusterView, Report, format_markdown};
 
 /// Default similarity threshold. Picked to match the cutoff used by the
@@ -127,7 +123,7 @@ impl SimilarityAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
-        let corpus = self.collect_corpus(path)?;
+        let corpus = collect_corpus(path, &self.path_filter, self.exclude_tests)?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus);
         let report = Report::new(
@@ -151,57 +147,6 @@ impl SimilarityAnalyzer {
             }
             OutputFormat::Md => Ok(format_markdown(&report)),
         }
-    }
-
-    /// Collect every function under `path` into a flat corpus, tagging each
-    /// with the file it came from. Single-file inputs return a 1-element
-    /// per-file slice; directory inputs walk recursively, honouring
-    /// `.gitignore`.
-    fn collect_corpus(&self, path: &Path) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-        let filter = self.path_filter.compile(path)?;
-        let started = Instant::now();
-        let files = collect_source_files(path, &filter)?;
-
-        let parsed: Vec<Vec<OwnedFunction>> = files
-            .par_iter()
-            .map(|source_file| self.collect_file(source_file))
-            .collect::<Result<_, _>>()?;
-
-        let out: Vec<_> = parsed.into_iter().flatten().collect();
-        let file_count = files.len();
-        debug!(
-            target: PROFILE_TARGET,
-            root = %path.display(),
-            file_count,
-            function_count = out.len(),
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "similarity corpus directory collected"
-        );
-        Ok(out)
-    }
-
-    fn collect_file(&self, file: &SourceFile) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-        let started = Instant::now();
-        let (lang, source) = read_source(&file.path)?;
-        let funcs = extract_functions(lang, &source, self.exclude_tests)?;
-        let out: Vec<_> = funcs
-            .into_iter()
-            .map(|def| OwnedFunction {
-                file: file.path.clone(),
-                rel_path: file.display_path.clone(),
-                def,
-            })
-            .collect();
-        debug!(
-            target: PROFILE_TARGET,
-            path = %file.path.display(),
-            language = ?lang,
-            bytes = source.len(),
-            function_count = out.len(),
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "similarity source parsed"
-        );
-        Ok(out)
     }
 
     /// Pairwise TSED over the corpus, then complete-link clustering. Inlined
@@ -451,18 +396,6 @@ impl Default for SimilarityAnalyzer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// A single function plus the file it originated from. The corpus that
-/// drives pairwise similarity is a flat `Vec<OwnedFunction>` so cross-file
-/// pairs are just regular pairs with different `file`s.
-#[derive(Debug)]
-struct OwnedFunction {
-    /// Filesystem path used for `git diff` lookups.
-    file: PathBuf,
-    /// Display path (relative to the walk root for directory mode).
-    rel_path: String,
-    def: FunctionDef,
 }
 
 #[cfg(test)]
