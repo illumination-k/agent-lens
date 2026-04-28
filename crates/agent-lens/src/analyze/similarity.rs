@@ -54,6 +54,7 @@ pub struct SimilarityAnalyzer {
     exclude_tests: bool,
     path_filter: AnalyzePathFilter,
     min_lines: usize,
+    top: Option<usize>,
 }
 
 /// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
@@ -78,6 +79,7 @@ impl SimilarityAnalyzer {
             exclude_tests: false,
             path_filter: AnalyzePathFilter::new(),
             min_lines: DEFAULT_MIN_LINES,
+            top: None,
         }
     }
 
@@ -120,6 +122,12 @@ impl SimilarityAnalyzer {
         fn with_min_lines, min_lines: usize
     }
 
+    with_setter! {
+        /// Cap the markdown report to the top-N clusters. JSON output
+        /// always carries the full list.
+        fn with_top, top: Option<usize>
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
@@ -145,7 +153,7 @@ impl SimilarityAnalyzer {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
-            OutputFormat::Md => Ok(format_markdown(&report)),
+            OutputFormat::Md => Ok(format_markdown(&report, self.top)),
         }
     }
 
@@ -429,6 +437,37 @@ fn beta(x: i32) -> i32 {
 }
 "#;
 
+    const TWO_CLUSTER_FUNCTIONS: &str = r#"
+fn alpha(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn gamma(xs: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in xs {
+        total += x;
+    }
+    total
+}
+fn delta(xs: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in xs {
+        total += x;
+    }
+    total
+}
+"#;
+
     fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
@@ -630,6 +669,42 @@ fn beta(x: i32) -> i32 {
             .analyze(&file, format)
             .unwrap();
         assert_report(&out);
+    }
+
+    #[test]
+    fn markdown_top_caps_clusters_without_truncating_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", TWO_CLUSTER_FUNCTIONS);
+
+        let full_md = SimilarityAnalyzer::new()
+            .with_threshold(1.0)
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert_eq!(
+            full_md.matches("\n- 2 functions").count(),
+            2,
+            "got: {full_md}",
+        );
+
+        let top_md = SimilarityAnalyzer::new()
+            .with_threshold(1.0)
+            .with_top(Some(1))
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(top_md.contains("Top 1 similar cluster(s) of 2 total"));
+        assert_eq!(
+            top_md.matches("\n- 2 functions").count(),
+            1,
+            "got: {top_md}",
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(1.0)
+            .with_top(Some(1))
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cluster_count"], 2);
     }
 
     #[test]

@@ -79,7 +79,7 @@ impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
     }
 }
 
-pub(super) fn format_markdown(report: &Report<'_>) -> String {
+pub(super) fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
     let mut out = format!(
         "# Similarity report: {} ({} function(s), threshold {:.2}, min lines {})\n",
         report.root, report.function_count, report.threshold, report.min_lines,
@@ -88,8 +88,20 @@ pub(super) fn format_markdown(report: &Report<'_>) -> String {
         out.push_str("\n_No similar function clusters at or above threshold._\n");
         return out;
     }
-    let _ = writeln!(out, "\n## {} similar cluster(s)", report.cluster_count);
-    for cluster in report.clusters {
+    let clusters = top.map_or(report.clusters, |limit| {
+        &report.clusters[..report.clusters.len().min(limit)]
+    });
+    if let Some(limit) = top {
+        let _ = writeln!(
+            out,
+            "\n## Top {} similar cluster(s) of {} total",
+            limit.min(report.cluster_count),
+            report.cluster_count
+        );
+    } else {
+        let _ = writeln!(out, "\n## {} similar cluster(s)", report.cluster_count);
+    }
+    for cluster in clusters {
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.

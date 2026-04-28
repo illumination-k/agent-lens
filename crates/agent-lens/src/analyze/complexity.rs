@@ -27,6 +27,8 @@ use super::{
 #[derive(Debug, Default, Clone)]
 pub struct ComplexityAnalyzer {
     diff_only: bool,
+    top: Option<usize>,
+    min_score: Option<u32>,
     path_filter: AnalyzePathFilter,
 }
 
@@ -34,6 +36,8 @@ impl ComplexityAnalyzer {
     pub fn new() -> Self {
         Self {
             diff_only: false,
+            top: None,
+            min_score: None,
             path_filter: AnalyzePathFilter::new(),
         }
     }
@@ -42,6 +46,21 @@ impl ComplexityAnalyzer {
     /// line in `git diff -U0`.
     pub fn with_diff_only(mut self, diff_only: bool) -> Self {
         self.diff_only = diff_only;
+        self
+    }
+
+    /// Cap the markdown report's function ranking to the top-N entries.
+    /// JSON output always carries the full list.
+    pub fn with_top(mut self, top: Option<usize>) -> Self {
+        self.top = top;
+        self
+    }
+
+    /// Only include functions whose cognitive complexity is at least this
+    /// score in the markdown ranking. JSON output always carries the full
+    /// list.
+    pub fn with_min_score(mut self, min_score: Option<u32>) -> Self {
+        self.min_score = min_score;
         self
     }
 
@@ -68,7 +87,7 @@ impl ComplexityAnalyzer {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
-            OutputFormat::Md => Ok(format_markdown(&report)),
+            OutputFormat::Md => Ok(format_markdown(&report, self.top, self.min_score)),
         }
     }
 
@@ -278,9 +297,9 @@ impl<'a> From<&'a FunctionComplexity> for FunctionView<'a> {
     }
 }
 
-const TOP_N: usize = 5;
+const DEFAULT_TOP: usize = 5;
 
-fn format_markdown(report: &Report<'_>) -> String {
+fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<u32>) -> String {
     let mut out = format!(
         "# Complexity report: {} ({} file(s), {} function(s))\n",
         report.root, report.file_count, report.function_count,
@@ -290,7 +309,7 @@ fn format_markdown(report: &Report<'_>) -> String {
         return out;
     }
     render_summary(&mut out, &report.summary);
-    render_top_functions(&mut out, &report.files);
+    render_top_functions(&mut out, &report.files, top, min_score);
     out
 }
 
@@ -326,7 +345,12 @@ struct TopRow<'a> {
     func: &'a FunctionView<'a>,
 }
 
-fn render_top_functions(out: &mut String, files: &[FileView<'_>]) {
+fn render_top_functions(
+    out: &mut String,
+    files: &[FileView<'_>],
+    top: Option<usize>,
+    min_score: Option<u32>,
+) {
     // Rank by cognitive first, then cyclomatic, then earliest line.
     //
     // Cyclomatic is dominated by `match` arms, so an exhaustive enum
@@ -345,6 +369,9 @@ fn render_top_functions(out: &mut String, files: &[FileView<'_>]) {
             })
         })
         .collect();
+    if let Some(min_score) = min_score {
+        rows.retain(|row| row.func.cognitive >= min_score);
+    }
     rows.sort_by(|a, b| {
         b.func
             .cognitive
@@ -354,11 +381,17 @@ fn render_top_functions(out: &mut String, files: &[FileView<'_>]) {
             .then_with(|| a.file.cmp(b.file))
     });
 
+    let limit = top.unwrap_or(DEFAULT_TOP);
+    let suffix = min_score.map_or_else(String::new, |s| format!(", cognitive >= {s}"));
     let _ = writeln!(
         out,
-        "\n## Top {TOP_N} by complexity (cognitive, then cyclomatic)"
+        "\n## Top {limit} by complexity (cognitive, then cyclomatic{suffix})"
     );
-    for row in rows.iter().take(TOP_N) {
+    if rows.is_empty() {
+        out.push_str("\n_No functions matched the complexity score filter._\n");
+        return;
+    }
+    for row in rows.iter().take(limit) {
         let f = row.func;
         let _ = writeln!(
             out,
@@ -444,6 +477,29 @@ fn dispatch(n: i32) -> i32 {
             pos_branchy < pos_dispatch,
             "expected highest-cognitive function listed first",
         );
+    }
+
+    #[test]
+    fn markdown_top_and_min_score_filter_the_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+fn quiet() {}
+fn branchy(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }
+fn dispatch(n: i32) -> i32 {
+    match n { 0 => 0, 1 => 1, 2 => 2, _ => 3 }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let md = ComplexityAnalyzer::new()
+            .with_top(Some(1))
+            .with_min_score(Some(2))
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("Top 1 by complexity"));
+        assert!(md.contains("cognitive >= 2"));
+        assert!(md.contains("`branchy`"));
+        assert!(!md.contains("`dispatch`"), "got: {md}");
+        assert!(!md.contains("`quiet`"), "got: {md}");
     }
 
     #[test]
