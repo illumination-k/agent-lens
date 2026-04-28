@@ -81,6 +81,7 @@ fn parse_unified_zero_hunks(diff: &str) -> Vec<LineRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::run_git;
     use std::io::Write;
 
     #[test]
@@ -143,18 +144,5 @@ mod tests {
             ranges.iter().any(|r| r.overlaps(1, 1)),
             "expected changed range to include line 1, got {ranges:?}",
         );
-    }
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .arg("-c")
-            .arg("commit.gpgsign=false")
-            .arg("-c")
-            .arg("tag.gpgsign=false")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 }

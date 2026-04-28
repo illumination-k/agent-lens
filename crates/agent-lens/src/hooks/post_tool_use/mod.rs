@@ -6,9 +6,6 @@
 //! adapter (input shape → `EditedSource` list, output string →
 //! `systemMessage`).
 
-#[cfg(test)]
-use std::path::Path;
-
 use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
 
 use crate::hooks::core::{
@@ -83,10 +80,10 @@ fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_file;
     use agent_hooks::Hook;
     use agent_hooks::claude_code::HookContext;
     use serde_json::json;
-    use std::io::Write;
     use std::path::PathBuf;
 
     fn ctx(cwd: PathBuf) -> HookContext {
@@ -96,13 +93,6 @@ mod tests {
             cwd,
             permission_mode: None,
         }
-    }
-
-    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        let path = dir.join(name);
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        path
     }
 
     /// Build a Claude Code PostToolUse payload with the given fields.

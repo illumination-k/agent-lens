@@ -219,18 +219,8 @@ fn reachable_preview(reachable: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use crate::test_support::write_file;
     use std::path::PathBuf;
-
-    fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        path
-    }
 
     /// Build a small crate with a clear chain a → b → c so the
     /// closure has something interesting to walk:
