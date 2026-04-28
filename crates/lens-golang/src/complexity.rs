@@ -124,9 +124,7 @@ impl<'a> ComplexityVisitor<'a> {
 
     fn enter_nest(&mut self) {
         self.nesting += 1;
-        if self.nesting > self.max_nesting {
-            self.max_nesting = self.nesting;
-        }
+        self.max_nesting = self.max_nesting.max(self.nesting);
     }
 
     fn exit_nest(&mut self) {
@@ -164,7 +162,7 @@ impl<'a> ComplexityVisitor<'a> {
         self.halstead.op("if");
         let mut saw_else = false;
         for_each_child(node, |child| {
-            if !child.is_named() && child.kind() == "else" {
+            if child.kind() == "else" {
                 saw_else = true;
                 self.visit_node(child);
                 return;
@@ -210,8 +208,7 @@ impl<'a> ComplexityVisitor<'a> {
 
     fn visit_control_children(&mut self, node: Node<'_>, nest_blocks: bool) {
         for_each_child(node, |child| {
-            let should_nest = is_case_node(child) || (nest_blocks && child.kind() == "block");
-            if should_nest {
+            if should_nest_control_child(child, nest_blocks) {
                 self.enter_nest();
                 self.visit_node(child);
                 self.exit_nest();
@@ -275,19 +272,25 @@ fn for_each_child(node: Node<'_>, mut f: impl FnMut(Node<'_>)) {
 fn count_decision_case_nodes(node: Node<'_>) -> usize {
     let mut count = 0;
     for_each_child(node, |child| {
-        if is_case_node(child) && child.kind() != "default_case" {
+        if is_non_default_case_node(child) {
             count += 1;
-        } else if child.is_named() {
-            count += count_decision_case_nodes(child);
         }
     });
     count
 }
 
-fn is_case_node(node: Node<'_>) -> bool {
+fn should_nest_control_child(node: Node<'_>, nest_blocks: bool) -> bool {
+    match node.kind() {
+        "expression_case" | "type_case" | "communication_case" | "default_case" => true,
+        "block" => nest_blocks,
+        _ => false,
+    }
+}
+
+fn is_non_default_case_node(node: Node<'_>) -> bool {
     matches!(
         node.kind(),
-        "expression_case" | "type_case" | "communication_case" | "default_case"
+        "expression_case" | "type_case" | "communication_case"
     )
 }
 
@@ -379,6 +382,7 @@ fn is_keyword_token(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lens_domain::HalsteadCounts;
     use rstest::rstest;
 
     fn extract(src: &str) -> Vec<FunctionComplexity> {
@@ -446,6 +450,41 @@ func f(n int) int {
         1,
         1
     )]
+    #[case::select_cases(
+        r#"
+package p
+func f(ch chan int, out chan<- int) {
+    select {
+    case x := <-ch:
+        out <- x
+    case out <- 1:
+    default:
+    }
+}
+"#,
+        2,
+        1,
+        1
+    )]
+    #[case::switch_inside_if_adds_nesting_penalty(
+        r#"
+package p
+func f(n int) int {
+    if n > 0 {
+        switch n {
+        case 1:
+            return 1
+        default:
+            return 0
+        }
+    }
+    return 0
+}
+"#,
+        2,
+        3,
+        2
+    )]
     fn complexity_metrics_match(
         #[case] src: &str,
         #[case] cyclomatic: u32,
@@ -483,6 +522,110 @@ func f(n int) int {
         assert!(f.halstead.total_operators > 0);
         assert!(f.halstead.total_operands > 0);
         assert!(f.maintainability_index().is_some());
+    }
+
+    #[test]
+    fn halstead_counts_include_go_named_node_categories() {
+        let f = one(r#"
+package p
+
+import "fmt"
+
+func f(ch chan int, svc Service, any interface{}) int {
+    type local int
+    const c = 1.5
+    var total local = 0
+    total = local(c)
+    fmt.Println(total, true, false, nil, 1i, 'x', `raw`, "str")
+    go svc.Start()
+    defer svc.Stop()
+    switch total {
+    case 0:
+        fallthrough
+    default:
+    }
+loop:
+    for total < 10 {
+        total += 1
+        break loop
+        continue
+    }
+    return int(total)
+}
+"#);
+
+        assert_eq!(
+            f.halstead,
+            HalsteadCounts {
+                distinct_operators: 20,
+                distinct_operands: 21,
+                total_operators: 49,
+                total_operands: 34,
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::plus("+", true)]
+    #[case::logical_and("&&", true)]
+    #[case::left_paren("(", false)]
+    #[case::identifier("identifier", false)]
+    fn operator_token_classification_is_precise(#[case] kind: &str, #[case] expected: bool) {
+        assert_eq!(is_operator_token(kind), expected);
+    }
+
+    #[rstest]
+    #[case::func("func", true)]
+    #[case::select("select", true)]
+    #[case::left_paren("(", false)]
+    #[case::identifier("identifier", false)]
+    fn keyword_token_classification_is_precise(#[case] kind: &str, #[case] expected: bool) {
+        assert_eq!(is_keyword_token(kind), expected);
+    }
+
+    #[test]
+    fn control_child_nesting_is_limited_to_blocks_and_cases() {
+        let tree = parse_tree(
+            r#"
+package p
+func f() {
+    for i := 0; i < 10; i++ {
+        switch i {
+        case 1:
+        default:
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let for_stmt = first_descendant(tree.root_node(), "for_statement").unwrap();
+        let for_clause = first_child_of_kind(for_stmt, "for_clause").unwrap();
+        let block = first_child_of_kind(for_stmt, "block").unwrap();
+        let case = first_descendant(for_stmt, "expression_case").unwrap();
+        let default_case = first_descendant(for_stmt, "default_case").unwrap();
+
+        assert!(!should_nest_control_child(for_clause, true));
+        assert!(should_nest_control_child(block, true));
+        assert!(!should_nest_control_child(block, false));
+        assert!(should_nest_control_child(case, false));
+        assert!(should_nest_control_child(default_case, false));
+    }
+
+    fn first_descendant<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+
+        let mut cursor = node.walk();
+        node.children(&mut cursor)
+            .find_map(|child| first_descendant(child, kind))
+    }
+
+    fn first_child_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+        let mut cursor = node.walk();
+        node.children(&mut cursor)
+            .find(|child| child.kind() == kind)
     }
 
     #[test]
