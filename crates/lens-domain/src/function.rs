@@ -365,7 +365,7 @@ fn enumerate_candidate_pairs(n: usize) -> impl Iterator<Item = (usize, usize)> {
 }
 
 fn sorted_key(a: usize, b: usize) -> (usize, usize) {
-    if a < b { (a, b) } else { (b, a) }
+    (a.min(b), a.max(b))
 }
 
 fn complete_pair_count(n: usize) -> usize {
@@ -373,17 +373,11 @@ fn complete_pair_count(n: usize) -> usize {
 }
 
 fn sim_minmax(values: impl IntoIterator<Item = f64>) -> (f64, f64) {
-    let mut min_s = f64::INFINITY;
-    let mut max_s = f64::NEG_INFINITY;
-    for s in values {
-        if s < min_s {
-            min_s = s;
-        }
-        if s > max_s {
-            max_s = s;
-        }
-    }
-    (min_s, max_s)
+    values
+        .into_iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min_s, max_s), s| {
+            (min_s.min(s), max_s.max(s))
+        })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -433,20 +427,28 @@ fn pop_best_merge(
         if candidate.score < threshold {
             return None;
         }
-        if slots.get(candidate.ci).is_none_or(Option::is_none)
-            || slots.get(candidate.cj).is_none_or(Option::is_none)
-        {
+        if !has_live_slot(slots, candidate.ci) || !has_live_slot(slots, candidate.cj) {
             continue;
         }
-        let Some(&current) = cluster_sim.get(&sorted_key(candidate.ci, candidate.cj)) else {
-            continue;
-        };
-        if current.total_cmp(&candidate.score) != Ordering::Equal {
+        if !candidate_score_matches(candidate, cluster_sim) {
             continue;
         }
         return Some((candidate.ci, candidate.cj));
     }
     None
+}
+
+fn has_live_slot(slots: &[Option<Vec<usize>>], index: usize) -> bool {
+    slots.get(index).is_some_and(Option::is_some)
+}
+
+fn candidate_score_matches(
+    candidate: MergeCandidate,
+    cluster_sim: &HashMap<(usize, usize), f64>,
+) -> bool {
+    cluster_sim
+        .get(&sorted_key(candidate.ci, candidate.cj))
+        .is_some_and(|current| current.total_cmp(&candidate.score) == Ordering::Equal)
 }
 
 fn update_cluster_similarities(
@@ -464,15 +466,9 @@ fn update_cluster_similarities(
         }
         let kept_key = sorted_key(kept, other);
         let removed_key = sorted_key(removed, other);
-        let next = match (
-            cluster_sim.get(&kept_key).copied(),
-            cluster_sim.remove(&removed_key),
-        ) {
-            (Some(a), Some(b)) => a.min(b),
-            _ => {
-                cluster_sim.remove(&kept_key);
-                continue;
-            }
+        let Some(next) = next_merged_similarity(cluster_sim, kept_key, removed_key) else {
+            cluster_sim.remove(&kept_key);
+            continue;
         };
         if next >= threshold {
             cluster_sim.insert(kept_key, next);
@@ -487,22 +483,29 @@ fn update_cluster_similarities(
     }
 }
 
+fn next_merged_similarity(
+    cluster_sim: &mut HashMap<(usize, usize), f64>,
+    kept_key: (usize, usize),
+    removed_key: (usize, usize),
+) -> Option<f64> {
+    let kept_sim = cluster_sim.get(&kept_key).copied()?;
+    let removed_sim = cluster_sim.remove(&removed_key)?;
+    Some(kept_sim.min(removed_sim))
+}
+
+fn pairwise_similarities<'a>(
+    members: &'a [usize],
+    sim: &'a HashMap<(usize, usize), f64>,
+) -> impl Iterator<Item = f64> + 'a {
+    members.iter().enumerate().flat_map(move |(i, &x)| {
+        members[i + 1..]
+            .iter()
+            .filter_map(move |&y| sim.get(&sorted_key(x, y)).copied())
+    })
+}
+
 fn internal_minmax(members: &[usize], sim: &HashMap<(usize, usize), f64>) -> (f64, f64) {
-    let mut min_s = f64::INFINITY;
-    let mut max_s = f64::NEG_INFINITY;
-    for (i, &x) in members.iter().enumerate() {
-        for &y in &members[i + 1..] {
-            if let Some(&s) = sim.get(&sorted_key(x, y)) {
-                if s < min_s {
-                    min_s = s;
-                }
-                if s > max_s {
-                    max_s = s;
-                }
-            }
-        }
-    }
-    (min_s, max_s)
+    sim_minmax(pairwise_similarities(members, sim))
 }
 
 #[cfg(test)]
