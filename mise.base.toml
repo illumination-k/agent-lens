@@ -20,11 +20,16 @@ run = [
 ]
 
 [tasks."lint:base"]
-description = "Lint with dprint, shfmt, shellcheck, actionlint, zizmor, ghalint, pinact"
+description = "Lint with dprint, shfmt, shellcheck"
 run = [
   "dprint check",
   "shfmt -d .",
   "find . -name '*.sh' -exec shellcheck {} +",
+]
+
+[tasks."lint:gha"]
+description = "Lint GitHub Actions workflows and policies"
+run = [
   "actionlint",
   "zizmor .",
   "ghalint run",
