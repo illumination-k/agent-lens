@@ -6,13 +6,16 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/mutants.toml"
+      - ".mise.toml"
       - "mise.rust.toml"
       - "mise.base.toml"
       - ".github/workflows/mutants.yml"
   workflow_dispatch:
 
 jobs:
-  mutants:
+  pr-diff:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -29,26 +32,83 @@ jobs:
 
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
-      - name: Build baseline
-        run: cargo build --locked --workspace --all-features --tests
+      - name: Run baseline tests
+        run: mise run test:rust
 
       - name: Run cargo-mutants on PR diff
-        if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           git fetch origin "${BASE_REF}"
-          git diff "origin/${BASE_REF}"...HEAD > pr.diff
-          cargo mutants --workspace --no-shuffle --in-diff pr.diff
-
-      - name: Run cargo-mutants on full workspace
-        if: github.event_name == 'workflow_dispatch'
-        run: cargo mutants --workspace --no-shuffle
+          mkdir -p target
+          git diff "origin/${BASE_REF}"...HEAD -- '*.rs' > target/mutants-pr.diff
+          if [ ! -s target/mutants-pr.diff ]; then
+            echo "No Rust diff for cargo-mutants"
+            exit 0
+          fi
+          cargo mutants --workspace --no-shuffle -vV --baseline=skip --in-place --in-diff target/mutants-pr.diff
 
       - name: Upload mutants report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutants-report
+          name: mutants-pr-report
+          path: mutants.out
+          if-no-files-found: ignore
+
+  full-baseline:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      MISE_ENV: rust
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
+      - name: Run baseline tests
+        run: mise run test:rust
+
+  full-shard:
+    if: github.event_name == 'workflow_dispatch'
+    needs: full-baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      MISE_ENV: rust
+    strategy:
+      fail-fast: false
+      # cargo-mutants' GitHub Actions sharding example uses 8 shards. Keep the
+      # same denominator for the manual full run so each shard stays comfortably
+      # below the job timeout while avoiding more runner fan-out than the docs'
+      # baseline example.
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
+      - name: Run cargo-mutants full shard
+        run: cargo mutants --workspace --no-shuffle -vV --baseline=skip --in-place --shard "${{ matrix.shard }}/8"
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-full-shard-${{ matrix.shard }}-of-8
           path: mutants.out
           if-no-files-found: ignore

@@ -43,17 +43,20 @@ run = "cargo nextest run --locked --all-features"
 description = "Run Rust doctests (cargo-nextest does not run them)"
 run = "cargo test --doc --locked --all-features --workspace"
 
-[tasks."mutants:rust"]
-description = "Run mutation tests with cargo-mutants (slow; use --in-diff origin/main for PRs)"
-run = "cargo mutants --workspace --no-shuffle"
-
 [tasks."mutants:rust:diff"]
-description = "Run cargo-mutants only on lines changed vs a base git ref (default: main)"
+description = "Run cargo-mutants only on Rust lines changed vs a base git ref (default: main)"
+usage = '''
+arg "[base]" help="Base git ref or revspec for git diff" default="main"
+'''
 run = '''
 set -euo pipefail
-base="${1:-main}"
+base="${usage_base?}"
 mkdir -p target
 git diff "$base" -- '*.rs' > target/mutants-diff.patch
+if [ ! -s target/mutants-diff.patch ]; then
+  echo "No Rust diff for cargo-mutants"
+  exit 0
+fi
 cargo mutants --workspace --no-shuffle --in-diff target/mutants-diff.patch
 '''
 

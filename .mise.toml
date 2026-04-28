@@ -14,6 +14,3 @@ depends = "test:*"
 description = "Run all ci:* tasks"
 depends = "ci:*"
 
-[tasks.mutants]
-description = "Run all mutants:* tasks"
-depends = "mutants:*"

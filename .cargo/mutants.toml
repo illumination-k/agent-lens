@@ -4,6 +4,10 @@
 # Use cargo-nextest, matching the project's standard test runner.
 test_tool = "nextest"
 
+# Match the normal Rust verification surface.
+all_features = true
+additional_cargo_args = ["--locked"]
+
 # Allow generous slack over the baseline test runtime; mutations sometimes
 # trigger pathological loops in similarity / edit-distance code.
 timeout_multiplier = 2.0
