@@ -11,14 +11,13 @@
 //!
 //! * Only files whose extension is recognised by [`SourceLang`] (`.rs`,
 //!   `.ts`, `.py` today) are analyzed.
-//! * Git renames are followed via `git log --follow` per file when the
-//!   path is a single file; for directory roots we use a single
-//!   path-scoped `git log` invocation, which counts a renamed file
-//!   under each of its names. This is good enough for ranking.
-//! * `target/`, `node_modules/`, `__pycache__/`, and dotfile-prefixed
-//!   directories (e.g. `.git`) are skipped during the walk.
-//! * Files that fail to parse are reported on stderr and excluded from
-//!   the complexity side; their churn entry (if any) still appears.
+//! * Directory walks use the shared source-file collector, so `.gitignore`
+//!   and hidden-file filtering match the other analyzers.
+//! * For directory roots we use a single path-scoped `git log` invocation,
+//!   which counts a renamed file under each of its names. This is good
+//!   enough for ranking.
+//! * Files that fail to parse are reported on stderr and retained with
+//!   zero complexity so the report still reflects current source files.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -29,7 +28,10 @@ use lens_domain::{FileChurn, FileComplexity, FunctionComplexity, HotspotEntry, c
 use serde::Serialize;
 use tracing::warn;
 
-use super::{AnalyzePathFilter, CompiledPathFilter, OutputFormat, PathFilterError, SourceLang};
+use super::{
+    AnalyzePathFilter, AnalyzerError, CompiledPathFilter, OutputFormat, PathFilterError,
+    SourceLang, collect_source_files,
+};
 
 /// Errors raised while running the hotspot analyzer.
 #[derive(Debug, thiserror::Error)]
@@ -213,11 +215,15 @@ fn collect_complexity(
     repo_root: &Path,
     filter: &CompiledPathFilter,
 ) -> Result<Vec<FileComplexity>, HotspotError> {
-    let mut files = Vec::new();
-    walk_source_files(target, filter, &mut files)?;
+    let files = collect_source_files(target, filter)
+        .map_err(|error| source_collection_error(target, error))?;
 
     let mut out = Vec::with_capacity(files.len());
-    for file in files {
+    for source_file in files {
+        let file = source_file.path;
+        if SourceLang::from_path(&file).is_none() {
+            continue;
+        }
         let source = match std::fs::read_to_string(&file) {
             Ok(s) => s,
             Err(source) => {
@@ -225,9 +231,7 @@ fn collect_complexity(
                 continue;
             }
         };
-        let Some(units) = extract_units(&file, &source) else {
-            continue;
-        };
+        let units = extract_units(&file, &source).unwrap_or_default();
         let key = relative_to(&file, repo_root).unwrap_or_else(|| file.display().to_string());
         let function_count = units.len();
         let loc = units.iter().map(|f| f.loc()).sum();
@@ -242,6 +246,17 @@ fn collect_complexity(
         });
     }
     Ok(out)
+}
+
+fn source_collection_error(path: &Path, error: AnalyzerError) -> HotspotError {
+    match error {
+        AnalyzerError::Io { path, source } => HotspotError::Io { path, source },
+        AnalyzerError::PathFilter(source) => HotspotError::PathFilter(source),
+        other => HotspotError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(other),
+        },
+    }
 }
 
 /// Dispatch to the per-language complexity extractor based on `file`'s
@@ -270,71 +285,6 @@ fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
             warn!(path = %file.display(), error = %err, "skipping file: parse failed");
             None
         }
-    }
-}
-
-const SKIP_DIRS: &[&str] = &["target", "node_modules", "__pycache__"];
-
-fn walk_source_files(
-    path: &Path,
-    filter: &CompiledPathFilter,
-    out: &mut Vec<PathBuf>,
-) -> Result<(), HotspotError> {
-    let meta = std::fs::metadata(path).map_err(|source| io_err(path, source))?;
-    if meta.is_file() {
-        push_if_supported(path, filter, out);
-        return Ok(());
-    }
-    walk_dir(path, filter, out)
-}
-
-fn walk_dir(
-    dir: &Path,
-    filter: &CompiledPathFilter,
-    out: &mut Vec<PathBuf>,
-) -> Result<(), HotspotError> {
-    let entries = std::fs::read_dir(dir).map_err(|source| io_err(dir, source))?;
-    for entry in entries {
-        let entry = entry.map_err(|source| io_err(dir, source))?;
-        process_entry(&entry, filter, out)?;
-    }
-    Ok(())
-}
-
-fn process_entry(
-    entry: &std::fs::DirEntry,
-    filter: &CompiledPathFilter,
-    out: &mut Vec<PathBuf>,
-) -> Result<(), HotspotError> {
-    let name = entry.file_name();
-    let name_str = name.to_string_lossy();
-    if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
-        return Ok(());
-    }
-    let entry_path = entry.path();
-    let file_type = entry
-        .file_type()
-        .map_err(|source| io_err(&entry_path, source))?;
-    if file_type.is_dir() {
-        walk_source_files(&entry_path, filter, out)
-    } else if file_type.is_file() {
-        push_if_supported(&entry_path, filter, out);
-        Ok(())
-    } else {
-        Ok(())
-    }
-}
-
-fn push_if_supported(path: &Path, filter: &CompiledPathFilter, out: &mut Vec<PathBuf>) {
-    if filter.includes_path(path) && SourceLang::from_path(path).is_some() {
-        out.push(path.to_path_buf());
-    }
-}
-
-fn io_err(path: &Path, source: std::io::Error) -> HotspotError {
-    HotspotError::Io {
-        path: path.to_path_buf(),
-        source,
     }
 }
 
@@ -606,7 +556,7 @@ mod tests {
         let files = parsed["files"].as_array().unwrap();
         let a = files.iter().find(|f| f["path"] == "src/a.rs").unwrap();
         // a.rs has nested ifs, so cognitive_max must be > 0. This guards
-        // against `collect_complexity` or `walk_source_files` short-circuiting.
+        // against `collect_complexity` or source collection short-circuiting.
         assert!(
             a["cognitive_max"].as_u64().unwrap() > 0,
             "expected non-zero cognitive complexity, got {a:?}",
@@ -708,10 +658,11 @@ mod tests {
     fn pycache_directories_are_not_descended() {
         let dir = tempfile::tempdir().unwrap();
         init_repo_with_python_file(dir.path());
-        // A `.py` file under __pycache__ would be unusual but we still
-        // want the walker to skip the directory entirely as a cache
-        // optimisation. Use a parseable body so a leak would actually
-        // contribute to the report.
+        write_file(dir.path(), ".gitignore", "__pycache__/\n");
+        // A `.py` file under __pycache__ would be unusual, but when the
+        // project ignores it the shared walker must skip it just like the
+        // other analyzers do. Use a parseable body so a leak would
+        // actually contribute to the report.
         write_file(
             dir.path(),
             "src/__pycache__/extra.py",
@@ -754,8 +705,10 @@ mod tests {
     fn skip_dirs_are_not_descended() {
         let dir = tempfile::tempdir().unwrap();
         init_repo_with_two_files(dir.path());
-        // Drop a Rust file under target/ — it should be ignored by the
-        // walker even though it has the right extension.
+        write_file(dir.path(), ".gitignore", "target/\n");
+        // Drop a Rust file under an ignored target/ directory. It should
+        // be skipped by the shared ignore-aware walker even though it has
+        // the right extension.
         write_file(
             dir.path(),
             "target/generated.rs",
@@ -770,6 +723,58 @@ mod tests {
             files.iter().all(|f| f["path"] != "target/generated.rs"),
             "target/ file leaked into report: {files:?}",
         );
+    }
+
+    #[test]
+    fn gitignored_generated_source_is_not_analyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        write_file(dir.path(), ".gitignore", "dist/\n");
+        write_file(
+            dir.path(),
+            "dist/assets/index.js",
+            "export function generated(n) {\n  if (n > 0) {\n    if (n > 10) {\n      if (n > 20) { return 1; }\n    }\n  }\n  return 0;\n}\n",
+        );
+
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert!(
+            files.iter().all(|f| f["path"] != "dist/assets/index.js"),
+            "ignored generated source leaked into report: {files:?}",
+        );
+    }
+
+    #[test]
+    fn churn_only_deleted_files_are_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(dir.path(), "src/live.rs", "pub fn live() -> i32 { 1 }\n");
+        write_file(
+            dir.path(),
+            "src/deleted.rs",
+            "pub fn gone() -> i32 { if 1 > 0 { 1 } else { 0 } }\n",
+        );
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        std::fs::remove_file(dir.path().join("src/deleted.rs")).unwrap();
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "delete old file"]);
+
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        assert!(
+            files.iter().all(|f| f["path"] != "src/deleted.rs"),
+            "deleted churn-only file leaked into report: {files:?}",
+        );
+        assert!(files.iter().any(|f| f["path"] == "src/live.rs"));
     }
 
     #[test]
