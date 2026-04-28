@@ -1,8 +1,11 @@
-//! `analyze context-span` — for each module in a Rust crate, the size
-//! of its transitive outgoing dependency closure.
+//! `analyze context-span` — for each module in a source graph, the
+//! size of its transitive outgoing dependency closure.
 //!
-//! Walks a single crate from a `.rs` root, builds the module tree
-//! (reusing the coupling extractor), then for every module reports:
+//! Rust walks a single crate from a `.rs` root and reuses the coupling
+//! extractor. TypeScript / JavaScript starts at an entry file and
+//! follows relative imports/re-exports. Python accepts either a `.py`
+//! file or a directory and models discovered files as modules. For
+//! every module, the report includes:
 //!
 //! * `direct` — modules it directly depends on (= `fan_out`).
 //! * `transitive` — modules reachable through one or more outgoing
@@ -15,22 +18,110 @@
 //! Cycles are handled — a module never counts itself in its own
 //! transitive set, even when the graph loops back.
 //!
-//! Limitations are inherited from the coupling extractor: `#[path = ".."]`
-//! attributes are not honoured, cross-crate references are dropped,
-//! macro-generated items are invisible, and non-standard crate roots
-//! must be passed as the `.rs` file directly.
+//! Rust limitations are inherited from the coupling extractor:
+//! `#[path = ".."]` attributes are not honoured, cross-crate references
+//! are dropped, macro-generated items are invisible, and non-standard
+//! crate roots must be passed as the `.rs` file directly. TS / JS only
+//! follows relative module specifiers reachable from the entry file.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lens_domain::{
-    ContextSpanReport, ModuleContextSpan, ModulePath, compute_context_spans, compute_report,
+    ContextSpanReport, CouplingEdge, ModuleContextSpan, ModulePath, compute_context_spans,
+    compute_report,
 };
-use lens_rust::{CrateModule, build_module_tree, extract_edges};
 use serde::Serialize;
 
-use super::{AnalyzePathFilter, ContextSpanAnalyzerError, OutputFormat, resolve_crate_root};
+use super::{AnalyzePathFilter, OutputFormat, SourceLang, resolve_crate_root};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ContextSpanAnalyzerError {
+    #[error("failed to read {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse {path:?}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error(
+        "unsupported context-span root {path:?}; pass a Rust crate root, a TS/JS entry file, or a Python file/directory"
+    )]
+    UnsupportedRoot { path: PathBuf },
+    #[error(
+        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
+    )]
+    MissingMod {
+        parent: String,
+        name: String,
+        near: PathBuf,
+    },
+    #[error("failed to serialize report: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathFilter(#[from] super::PathFilterError),
+}
+
+impl From<lens_rust::CouplingError> for ContextSpanAnalyzerError {
+    fn from(value: lens_rust::CouplingError) -> Self {
+        match value {
+            lens_rust::CouplingError::Io { path, source } => Self::Io { path, source },
+            lens_rust::CouplingError::Parse { path, source } => Self::Parse {
+                path,
+                source: Box::new(source),
+            },
+            lens_rust::CouplingError::MissingMod { parent, name, near } => {
+                Self::MissingMod { parent, name, near }
+            }
+        }
+    }
+}
+
+impl From<super::CrateAnalyzerError> for ContextSpanAnalyzerError {
+    fn from(value: super::CrateAnalyzerError) -> Self {
+        match value {
+            super::CrateAnalyzerError::Io { path, source } => Self::Io { path, source },
+            super::CrateAnalyzerError::Parse { path, source } => Self::Parse { path, source },
+            super::CrateAnalyzerError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
+            super::CrateAnalyzerError::MissingMod { parent, name, near } => {
+                Self::MissingMod { parent, name, near }
+            }
+            super::CrateAnalyzerError::Serialize(source) => Self::Serialize(source),
+            super::CrateAnalyzerError::PathFilter(source) => Self::PathFilter(source),
+        }
+    }
+}
+
+impl From<lens_ts::CouplingError> for ContextSpanAnalyzerError {
+    fn from(value: lens_ts::CouplingError) -> Self {
+        match value {
+            lens_ts::CouplingError::Io { path, source } => Self::Io { path, source },
+            lens_ts::CouplingError::Parse { path, source } => Self::Parse {
+                path,
+                source: Box::new(source),
+            },
+        }
+    }
+}
+
+impl From<lens_py::CouplingError> for ContextSpanAnalyzerError {
+    fn from(value: lens_py::CouplingError) -> Self {
+        match value {
+            lens_py::CouplingError::Io { path, source } => Self::Io { path, source },
+            lens_py::CouplingError::Parse { path, source } => Self::Parse {
+                path,
+                source: Box::new(source),
+            },
+            lens_py::CouplingError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
+        }
+    }
+}
 
 /// Stateless analyzer entry point. Kept as a struct so per-run
 /// configuration (e.g. a `--top` cap) can be added later without
@@ -62,24 +153,22 @@ impl ContextSpanAnalyzer {
         self
     }
 
-    /// Resolve `path`, build the crate's module tree, and produce a
-    /// report in `format`.
+    /// Resolve `path`, build the language-specific module graph, and
+    /// produce a report in `format`.
     pub fn analyze(
         &self,
         path: &Path,
         format: OutputFormat,
     ) -> Result<String, ContextSpanAnalyzerError> {
-        let root = resolve_crate_root(path)?;
-        let filter = self.path_filter.compile(&root)?;
-        let mut modules = build_module_tree(&root)?;
-        modules.retain(|m| filter.includes_path(&m.file));
-        let edges = extract_edges(&modules);
+        let mut graph = build_graph(path)?;
+        let filter = self.path_filter.compile(&graph.root)?;
+        graph.modules.retain(|m| filter.includes_path(&m.file));
         // `compute_report` deduplicates and drops self-loops; reuse its
         // cleaned edge list so the closure walk doesn't re-do that work.
-        let module_paths: Vec<ModulePath> = modules.iter().map(|m| m.path.clone()).collect();
-        let report = compute_report(&module_paths, edges);
+        let module_paths: Vec<ModulePath> = graph.modules.iter().map(|m| m.path.clone()).collect();
+        let report = compute_report(&module_paths, graph.edges);
         let spans = compute_context_spans(&module_paths, &report.edges);
-        let view = ReportView::new(&root, &spans, &modules);
+        let view = ReportView::new(&graph.root, &spans, &graph.modules);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(ContextSpanAnalyzerError::Serialize)
@@ -87,6 +176,97 @@ impl ContextSpanAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&view)),
         }
     }
+}
+
+#[derive(Debug)]
+struct ModuleFile {
+    path: ModulePath,
+    file: PathBuf,
+}
+
+#[derive(Debug)]
+struct ModuleGraph {
+    root: PathBuf,
+    modules: Vec<ModuleFile>,
+    edges: Vec<CouplingEdge>,
+}
+
+fn build_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
+    if let Some(lang) = SourceLang::from_path(path) {
+        return match lang {
+            SourceLang::Rust => build_rust_graph(path),
+            SourceLang::TypeScript(_) => build_ts_graph(path),
+            SourceLang::Python => build_python_graph(path),
+            SourceLang::Go => Err(ContextSpanAnalyzerError::UnsupportedRoot {
+                path: path.to_path_buf(),
+            }),
+        };
+    }
+
+    if path.is_dir() {
+        if let Ok(root) = resolve_crate_root(path) {
+            return build_rust_graph(&root);
+        }
+        return build_python_graph(path);
+    }
+
+    Err(ContextSpanAnalyzerError::UnsupportedRoot {
+        path: path.to_path_buf(),
+    })
+}
+
+fn build_rust_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
+    let root = resolve_crate_root(path)?;
+    let modules = lens_rust::build_module_tree(&root)?;
+    let edges = lens_rust::extract_edges(&modules);
+    Ok(ModuleGraph {
+        root,
+        modules: modules
+            .into_iter()
+            .map(|m| ModuleFile {
+                path: m.path,
+                file: m.file,
+            })
+            .collect(),
+        edges,
+    })
+}
+
+fn build_ts_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
+    let modules = lens_ts::build_module_tree(path)?;
+    let edges = lens_ts::extract_edges(&modules);
+    Ok(ModuleGraph {
+        root: path.to_path_buf(),
+        modules: modules
+            .into_iter()
+            .map(|m| ModuleFile {
+                path: m.path,
+                file: m.file,
+            })
+            .collect(),
+        edges,
+    })
+}
+
+fn build_python_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
+    let modules = lens_py::build_module_tree(path)?;
+    if modules.is_empty() {
+        return Err(ContextSpanAnalyzerError::UnsupportedRoot {
+            path: path.to_path_buf(),
+        });
+    }
+    let edges = lens_py::extract_edges(&modules);
+    Ok(ModuleGraph {
+        root: path.to_path_buf(),
+        modules: modules
+            .into_iter()
+            .map(|m| ModuleFile {
+                path: m.path,
+                file: m.file,
+            })
+            .collect(),
+        edges,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -97,7 +277,7 @@ struct ReportView<'a> {
 }
 
 impl<'a> ReportView<'a> {
-    fn new(root: &Path, spans: &'a ContextSpanReport, modules: &[CrateModule]) -> Self {
+    fn new(root: &Path, spans: &'a ContextSpanReport, modules: &[ModuleFile]) -> Self {
         let module_views = spans
             .modules
             .iter()
@@ -124,7 +304,7 @@ struct ModuleSpanView<'a> {
 }
 
 impl<'a> ModuleSpanView<'a> {
-    fn new(span: &'a ModuleContextSpan, modules: &[CrateModule]) -> Self {
+    fn new(span: &'a ModuleContextSpan, modules: &[ModuleFile]) -> Self {
         let files = transitive_file_count(&span.path, &span.reachable, modules);
         Self {
             path: span.path.as_str(),
@@ -146,7 +326,7 @@ impl<'a> ModuleSpanView<'a> {
 fn transitive_file_count(
     home: &ModulePath,
     reachable: &[ModulePath],
-    modules: &[CrateModule],
+    modules: &[ModuleFile],
 ) -> usize {
     let home_file = modules
         .iter()
@@ -283,6 +463,68 @@ mod tests {
         assert_eq!(c["direct"].as_u64().unwrap(), 0);
         assert_eq!(c["transitive"].as_u64().unwrap(), 0);
         assert_eq!(c["files"].as_u64().unwrap(), 0);
+    }
+
+    #[test]
+    fn typescript_entry_file_reports_import_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let main = write_file(
+            &src,
+            "main.ts",
+            "import { f } from './a'; export const n = f();\n",
+        );
+        write_file(
+            &src,
+            "a.ts",
+            "import { g } from './b'; export const f = () => g();\n",
+        );
+        write_file(&src, "b.ts", "export const g = () => 1;\n");
+
+        let json = ContextSpanAnalyzer::new()
+            .analyze(&main, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules = parsed["modules"].as_array().unwrap();
+        let main = modules.iter().find(|m| m["path"] == "crate::main").unwrap();
+        assert_eq!(main["direct"].as_u64().unwrap(), 1);
+        assert_eq!(main["transitive"].as_u64().unwrap(), 2);
+        assert_eq!(main["files"].as_u64().unwrap(), 2);
+        let reachable: Vec<&str> = main["reachable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(reachable.contains(&"crate::a"));
+        assert!(reachable.contains(&"crate::b"));
+    }
+
+    #[test]
+    fn python_directory_reports_import_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.py", "");
+        write_file(dir.path(), "b.py", "import a\n");
+        write_file(dir.path(), "c.py", "import b\n");
+
+        let json = ContextSpanAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules = parsed["modules"].as_array().unwrap();
+        let c = modules.iter().find(|m| m["path"] == "crate::c").unwrap();
+        assert_eq!(c["direct"].as_u64().unwrap(), 1);
+        assert_eq!(c["transitive"].as_u64().unwrap(), 2);
+        assert_eq!(c["files"].as_u64().unwrap(), 2);
+        let reachable: Vec<&str> = c["reachable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(reachable.contains(&"crate::a"));
+        assert!(reachable.contains(&"crate::b"));
     }
 
     #[test]

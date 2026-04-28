@@ -276,6 +276,34 @@ impl Thing {
     }
 
     #[test]
+    fn cohesion_reports_split_go_receiver_via_system_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"
+package p
+
+type Thing struct {
+    a int
+    b int
+}
+
+func (t *Thing) A() int { return t.a }
+func (t *Thing) B() int { return t.b }
+"#;
+        let file = write_file(dir.path(), "lib.go", source);
+
+        let hook = CohesionHook::new();
+        let input = payload(
+            dir.path().to_path_buf(),
+            "Edit",
+            json!({"file_path": file.file_name().unwrap().to_str().unwrap()}),
+        );
+        let out = hook.handle(input).unwrap();
+        let msg = out.common.system_message.expect("expected a report");
+        assert!(msg.contains("impl Thing"), "should label receiver: {msg}");
+        assert!(msg.contains("LCOM4=2"), "should report lcom4: {msg}");
+    }
+
+    #[test]
     fn cohesion_silent_when_impl_is_cohesive() {
         let dir = tempfile::tempdir().unwrap();
         let source = r#"

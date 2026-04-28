@@ -376,6 +376,41 @@ def meaningful(x):
     }
 
     #[test]
+    fn wrapper_go_extension_triggers_wrapper_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"
+package p
+
+func Render(x int) int { return internalRender(x) }
+
+func Meaningful(x int) int {
+    y := x + 1
+    return y * 2
+}
+"#;
+        let file = write_file(dir.path(), "lib.go", source);
+
+        let hook = WrapperHook::new();
+        let input = payload(
+            dir.path().to_path_buf(),
+            "Write",
+            json!({"file_path": file.file_name().unwrap().to_str().unwrap()}),
+        );
+        let out = hook.handle(input).unwrap();
+        let msg = out.common.system_message.expect("expected a report");
+        assert!(msg.contains("Render"), "should mention Render: {msg}");
+        assert!(
+            msg.contains("internalRender"),
+            "should mention forwarding target: {msg}",
+        );
+        assert!(
+            !msg.contains("Meaningful"),
+            "should not flag the function with real logic: {msg}",
+        );
+        assert!(out.decision.is_none());
+    }
+
+    #[test]
     fn wrapper_report_includes_adapter_chain() {
         let dir = tempfile::tempdir().unwrap();
         let source = "fn shim(x: i32) -> u64 { compute(x).unwrap().into() }\n";

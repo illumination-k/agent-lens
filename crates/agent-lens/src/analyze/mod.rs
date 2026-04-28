@@ -23,14 +23,12 @@ use std::path::{Path, PathBuf};
 
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
-pub use context_span::ContextSpanAnalyzer;
+pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
 pub type CouplingAnalyzerError = CrateAnalyzerError;
-/// Backward-compatible alias for the unified [`CrateAnalyzerError`].
-pub type ContextSpanAnalyzerError = CrateAnalyzerError;
 pub use similarity::{
     DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
     DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer,

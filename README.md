@@ -188,10 +188,10 @@ Analyzer-specific options today:
 | `context-span` | shared analyzer options only                                                          |
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
-`.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`, and
-`hotspot` cover all four language families. `wrapper` and `cohesion` cover
-Rust, TypeScript / JavaScript, and Python. `coupling` and `context-span` are
-Rust-only.
+`.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
+`wrapper`, `cohesion`, and `hotspot` cover all four language families.
+`context-span` covers Rust, TypeScript / JavaScript, and Python. `coupling`
+is Rust-only.
 
 ### As a Claude Code hook
 
@@ -336,7 +336,7 @@ command = "agent-lens codex-hook post-tool-use wrapper"
 | ----------- | -------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
 | Claude Code | `SessionStart` | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                                    |
 | Claude Code | `PreToolUse`   | `complexity` | Flags functions in the file about to be edited whose Cyclomatic / Cognitive / Nesting cross a threshold. |
-| Claude Code | `PreToolUse`   | `cohesion`   | Flags `impl` blocks in the file about to be edited whose LCOM4 is greater than 1 (split-personality).    |
+| Claude Code | `PreToolUse`   | `cohesion`   | Flags cohesion units in the file about to be edited whose LCOM4 is greater than 1.                       |
 | Claude Code | `PostToolUse`  | `similarity` | Reports near-duplicate function pairs in the file just edited.                                           |
 | Claude Code | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                                               |
 | Codex       | `SessionStart` | `summary`    | Same hotspot + coupling thumbnail at session start.                                                      |
@@ -354,11 +354,11 @@ new handlers to plug into the same plumbing.
 | Subcommand     | What it surfaces                                                                                                                                                                                                                  | Languages                 |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | `similarity`   | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                       | Rust, TS / JS, Python, Go |
-| `wrapper`      | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                    | Rust, TS / JS, Python     |
-| `cohesion`     | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                        | Rust, TS / JS, Python     |
+| `wrapper`      | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                    | Rust, TS / JS, Python, Go |
+| `cohesion`     | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                        | Rust, TS / JS, Python, Go |
 | `complexity`   | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                | Rust, TS / JS, Python, Go |
 | `coupling`     | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles). | Rust                      |
-| `context-span` | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                         | Rust                      |
+| `context-span` | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                         | Rust, TS / JS, Python     |
 | `hotspot`      | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                  | Rust, TS / JS, Python, Go |
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
@@ -389,11 +389,10 @@ Adding a language means writing one adapter crate and wiring it into the
 | Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser)    | `lens-py`     |
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
-`similarity`, `complexity`, and `hotspot` are wired through the Rust,
-TypeScript / JavaScript, Python, and Go adapters. `wrapper` and `cohesion`
-currently cover Rust, TypeScript / JavaScript, and Python. `coupling` and
-`context-span` are Rust-only today because they reach into Rust `mod`
-resolution.
+`similarity`, `complexity`, `wrapper`, `cohesion`, and `hotspot` are wired
+through the Rust, TypeScript / JavaScript, Python, and Go adapters.
+`context-span` is wired through Rust, TypeScript / JavaScript, and Python.
+`coupling` is Rust-only today because it reaches into Rust `mod` resolution.
 
 ## Workspace layout
 
