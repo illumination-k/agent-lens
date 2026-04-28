@@ -25,9 +25,11 @@ mod corpus;
 mod extract;
 mod report;
 
+use candidates::{
+    CandidatePairs, TreeProfile, candidate_pairs, eligible_function_count, similarity_uses_lsh,
+};
 #[cfg(test)]
 use candidates::{CheapFilter, tsed_upper_bound_filter};
-use candidates::{TreeProfile, candidate_pairs, eligible_function_count, similarity_uses_lsh};
 use corpus::{OwnedFunction, collect_corpus};
 use report::{ClusterView, Report, format_markdown};
 
@@ -179,31 +181,8 @@ impl SimilarityAnalyzer {
         corpus: &'a [OwnedFunction],
     ) -> Result<Vec<ClusterView<'a>>, AnalyzerError> {
         let started = Instant::now();
-        let changed_by_file = if self.diff_only {
-            let diff_started = Instant::now();
-            let changed = collect_changed_ranges(corpus);
-            debug!(
-                target: PROFILE_TARGET,
-                file_count = changed.len(),
-                elapsed_ms = diff_started.elapsed().as_secs_f64() * 1000.0,
-                "similarity changed ranges collected"
-            );
-            changed
-        } else {
-            HashMap::new()
-        };
-        let use_lsh_profiles = similarity_uses_lsh(eligible_function_count(corpus, self.min_lines));
-        let profiles: Vec<TreeProfile> = if use_lsh_profiles {
-            corpus
-                .par_iter()
-                .map(|f| TreeProfile::from_tree_for_scoring(&f.def.tree))
-                .collect()
-        } else {
-            corpus
-                .iter()
-                .map(|f| TreeProfile::from_tree(&f.def.tree))
-                .collect()
-        };
+        let changed_by_file = self.changed_ranges_for_run(corpus);
+        let profiles = build_tree_profiles(corpus, self.min_lines);
         let candidate_started = Instant::now();
         let candidates = candidate_pairs(
             corpus,
@@ -212,43 +191,9 @@ impl SimilarityAnalyzer {
             self.threshold,
             &self.opts,
         );
-        debug!(
-            target: PROFILE_TARGET,
-            function_count = corpus.len(),
-            eligible_function_count = candidates.eligible_function_count,
-            min_lines = self.min_lines,
-            strategy = candidates.strategy.as_str(),
-            candidate_count = candidates.total_len(),
-            retained_candidate_count = candidates.len(),
-            size_filtered_count = candidates.size_filtered_count,
-            label_filtered_count = candidates.label_filtered_count,
-            arity_filtered_count = candidates.arity_filtered_count,
-            shingle_filtered_count = candidates.shingle_filtered_count,
-            elapsed_ms = candidate_started.elapsed().as_secs_f64() * 1000.0,
-            "similarity candidates enumerated"
-        );
-        let (pairs_to_score, diff_prefiltered_count): (Cow<'_, [(usize, usize)]>, usize) =
-            if self.diff_only {
-                let mut filtered = 0usize;
-                let pairs: Vec<_> = candidates
-                    .pairs
-                    .iter()
-                    .copied()
-                    .filter(|&(i, j)| {
-                        let keep = corpus
-                            .get(i)
-                            .zip(corpus.get(j))
-                            .is_some_and(|(a, b)| pair_touches_changes(a, b, &changed_by_file));
-                        if !keep {
-                            filtered += 1;
-                        }
-                        keep
-                    })
-                    .collect();
-                (Cow::Owned(pairs), filtered)
-            } else {
-                (Cow::Borrowed(candidates.pairs.as_slice()), 0)
-            };
+        log_candidate_stats(corpus.len(), self.min_lines, &candidates, candidate_started);
+        let (pairs_to_score, diff_prefiltered_count) =
+            self.pairs_to_score(corpus, &candidates, &changed_by_file);
         enforce_candidate_pair_limit(
             candidates.eligible_function_count,
             pairs_to_score.len(),
@@ -258,76 +203,15 @@ impl SimilarityAnalyzer {
         )?;
 
         let score_started = Instant::now();
-        let mut score_stats = pairs_to_score
-            .par_iter()
-            .fold(ScoreStats::default, |mut stats, &(i, j)| {
-                let Some(a) = corpus.get(i) else {
-                    return stats;
-                };
-                let Some(b) = corpus.get(j) else {
-                    return stats;
-                };
-                let Some(profile_a) = profiles.get(i) else {
-                    return stats;
-                };
-                let Some(profile_b) = profiles.get(j) else {
-                    return stats;
-                };
-                let compare_values = self.opts.apted.compare_values;
-                let similarity = if is_exact_match_without_distance(
-                    profile_a,
-                    profile_b,
-                    &a.def.tree,
-                    &b.def.tree,
-                    compare_values,
-                ) {
-                    stats.exact_match_count += 1;
-                    1.0
-                } else {
-                    let sizes_a = profile_a.subtree_sizes(&a.def.tree);
-                    let sizes_b = profile_b.subtree_sizes(&b.def.tree);
-                    calculate_tsed_with_subtree_sizes(
-                        &a.def.tree,
-                        &b.def.tree,
-                        profile_a.size,
-                        profile_b.size,
-                        sizes_a,
-                        sizes_b,
-                        &self.opts,
-                    )
-                };
-                if similarity < self.threshold {
-                    stats.below_threshold_count += 1;
-                    return stats;
-                }
-                stats.pairs.push((i, j, similarity));
-                stats
-            })
-            .reduce(ScoreStats::default, |mut a, mut b| {
-                a.below_threshold_count += b.below_threshold_count;
-                a.diff_filtered_count += b.diff_filtered_count;
-                a.exact_match_count += b.exact_match_count;
-                a.pairs.append(&mut b.pairs);
-                a
-            })
-            .sorted();
-        score_stats.diff_filtered_count += diff_prefiltered_count;
-        debug!(
-            target: PROFILE_TARGET,
-            candidate_count = candidates.total_len(),
-            retained_candidate_count = candidates.len(),
-            scored_pair_count = score_stats.scored_pair_count(),
-            matched_pair_count = score_stats.pairs.len(),
-            exact_match_count = score_stats.exact_match_count,
-            size_filtered_count = candidates.size_filtered_count,
-            label_filtered_count = candidates.label_filtered_count,
-            arity_filtered_count = candidates.arity_filtered_count,
-            shingle_filtered_count = candidates.shingle_filtered_count,
-            below_threshold_count = score_stats.below_threshold_count,
-            diff_filtered_count = score_stats.diff_filtered_count,
-            elapsed_ms = score_started.elapsed().as_secs_f64() * 1000.0,
-            "similarity TSED scoring finished"
+        let mut score_stats = score_candidate_pairs(
+            corpus,
+            &profiles,
+            &pairs_to_score,
+            self.threshold,
+            &self.opts,
         );
+        score_stats.diff_filtered_count = diff_prefiltered_count;
+        log_score_stats(&candidates, &score_stats, score_started);
 
         let cluster_started = Instant::now();
         let clusters: Vec<_> = cluster_similar_pairs(&score_stats.pairs, self.threshold)
@@ -344,6 +228,114 @@ impl SimilarityAnalyzer {
         );
         Ok(clusters)
     }
+
+    fn changed_ranges_for_run(&self, corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
+        if !self.diff_only {
+            return HashMap::new();
+        }
+        let diff_started = Instant::now();
+        let changed = collect_changed_ranges(corpus);
+        debug!(
+            target: PROFILE_TARGET,
+            file_count = changed.len(),
+            elapsed_ms = diff_started.elapsed().as_secs_f64() * 1000.0,
+            "similarity changed ranges collected"
+        );
+        changed
+    }
+
+    fn pairs_to_score<'a>(
+        &self,
+        corpus: &[OwnedFunction],
+        candidates: &'a CandidatePairs,
+        changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
+    ) -> (Cow<'a, [(usize, usize)]>, usize) {
+        if !self.diff_only {
+            return (Cow::Borrowed(candidates.pairs.as_slice()), 0);
+        }
+        filter_pairs_touching_changes(corpus, candidates, changed_by_file)
+    }
+}
+
+fn build_tree_profiles(corpus: &[OwnedFunction], min_lines: usize) -> Vec<TreeProfile> {
+    let use_lsh_profiles = similarity_uses_lsh(eligible_function_count(corpus, min_lines));
+    if use_lsh_profiles {
+        corpus
+            .par_iter()
+            .map(|f| TreeProfile::from_tree_for_scoring(&f.def.tree))
+            .collect()
+    } else {
+        corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(&f.def.tree))
+            .collect()
+    }
+}
+
+fn filter_pairs_touching_changes<'a>(
+    corpus: &[OwnedFunction],
+    candidates: &'a CandidatePairs,
+    changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
+) -> (Cow<'a, [(usize, usize)]>, usize) {
+    let mut filtered = 0usize;
+    let pairs: Vec<_> = candidates
+        .pairs
+        .iter()
+        .copied()
+        .filter(|&(i, j)| {
+            let keep = corpus
+                .get(i)
+                .zip(corpus.get(j))
+                .is_some_and(|(a, b)| pair_touches_changes(a, b, changed_by_file));
+            if !keep {
+                filtered += 1;
+            }
+            keep
+        })
+        .collect();
+    (Cow::Owned(pairs), filtered)
+}
+
+fn log_candidate_stats(
+    function_count: usize,
+    min_lines: usize,
+    candidates: &CandidatePairs,
+    started: Instant,
+) {
+    debug!(
+        target: PROFILE_TARGET,
+        function_count,
+        eligible_function_count = candidates.eligible_function_count,
+        min_lines,
+        strategy = candidates.strategy.as_str(),
+        candidate_count = candidates.total_len(),
+        retained_candidate_count = candidates.len(),
+        size_filtered_count = candidates.size_filtered_count,
+        label_filtered_count = candidates.label_filtered_count,
+        arity_filtered_count = candidates.arity_filtered_count,
+        shingle_filtered_count = candidates.shingle_filtered_count,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "similarity candidates enumerated"
+    );
+}
+
+fn log_score_stats(candidates: &CandidatePairs, score_stats: &ScoreStats, started: Instant) {
+    debug!(
+        target: PROFILE_TARGET,
+        candidate_count = candidates.total_len(),
+        retained_candidate_count = candidates.len(),
+        scored_pair_count = score_stats.scored_pair_count(),
+        matched_pair_count = score_stats.pairs.len(),
+        exact_match_count = score_stats.exact_match_count,
+        size_filtered_count = candidates.size_filtered_count,
+        label_filtered_count = candidates.label_filtered_count,
+        arity_filtered_count = candidates.arity_filtered_count,
+        shingle_filtered_count = candidates.shingle_filtered_count,
+        below_threshold_count = score_stats.below_threshold_count,
+        diff_filtered_count = score_stats.diff_filtered_count,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "similarity TSED scoring finished"
+    );
 }
 
 fn enforce_candidate_pair_limit(
@@ -384,6 +376,75 @@ fn is_exact_match_without_distance(
     trees_match_without_distance(a, b, compare_values)
 }
 
+fn score_candidate_pairs(
+    corpus: &[OwnedFunction],
+    profiles: &[TreeProfile],
+    pairs: &[(usize, usize)],
+    threshold: f64,
+    opts: &TSEDOptions,
+) -> ScoreStats {
+    pairs
+        .par_iter()
+        .fold(ScoreStats::default, |mut stats, &(i, j)| {
+            if let Some(score) = score_candidate_pair(corpus, profiles, i, j, opts) {
+                stats.record(score, threshold);
+            }
+            stats
+        })
+        .reduce(ScoreStats::default, ScoreStats::merge)
+        .sorted()
+}
+
+fn score_candidate_pair(
+    corpus: &[OwnedFunction],
+    profiles: &[TreeProfile],
+    i: usize,
+    j: usize,
+    opts: &TSEDOptions,
+) -> Option<PairScore> {
+    let a = corpus.get(i)?;
+    let b = corpus.get(j)?;
+    let profile_a = profiles.get(i)?;
+    let profile_b = profiles.get(j)?;
+    let compare_values = opts.apted.compare_values;
+    let exact_match = is_exact_match_without_distance(
+        profile_a,
+        profile_b,
+        &a.def.tree,
+        &b.def.tree,
+        compare_values,
+    );
+    let similarity = if exact_match {
+        1.0
+    } else {
+        let sizes_a = profile_a.subtree_sizes(&a.def.tree);
+        let sizes_b = profile_b.subtree_sizes(&b.def.tree);
+        calculate_tsed_with_subtree_sizes(
+            &a.def.tree,
+            &b.def.tree,
+            profile_a.size,
+            profile_b.size,
+            sizes_a,
+            sizes_b,
+            opts,
+        )
+    };
+    Some(PairScore {
+        i,
+        j,
+        similarity,
+        exact_match,
+    })
+}
+
+#[derive(Debug)]
+struct PairScore {
+    i: usize,
+    j: usize,
+    similarity: f64,
+    exact_match: bool,
+}
+
 #[derive(Debug, Default)]
 struct ScoreStats {
     pairs: Vec<(usize, usize, f64)>,
@@ -393,6 +454,25 @@ struct ScoreStats {
 }
 
 impl ScoreStats {
+    fn record(&mut self, score: PairScore, threshold: f64) {
+        if score.exact_match {
+            self.exact_match_count += 1;
+        }
+        if score.similarity < threshold {
+            self.below_threshold_count += 1;
+            return;
+        }
+        self.pairs.push((score.i, score.j, score.similarity));
+    }
+
+    fn merge(mut a: Self, mut b: Self) -> Self {
+        a.below_threshold_count += b.below_threshold_count;
+        a.diff_filtered_count += b.diff_filtered_count;
+        a.exact_match_count += b.exact_match_count;
+        a.pairs.append(&mut b.pairs);
+        a
+    }
+
     fn sorted(mut self) -> Self {
         self.pairs.sort_by_key(|(i, j, _)| (*i, *j));
         self
@@ -652,6 +732,85 @@ fn delta(xs: &[i32]) -> i32 {
             &right,
             true,
         ));
+    }
+
+    fn owned_function(name: &str, start_line: usize, end_line: usize) -> OwnedFunction {
+        OwnedFunction {
+            file: PathBuf::from("lib.rs"),
+            rel_path: "lib.rs".to_owned(),
+            def: lens_domain::FunctionDef {
+                name: name.to_owned(),
+                start_line,
+                end_line,
+                tree: lens_domain::TreeNode::leaf("Block"),
+            },
+        }
+    }
+
+    #[test]
+    fn diff_prefilter_keeps_only_pairs_touching_changed_lines() {
+        let corpus = vec![
+            owned_function("alpha", 1, 5),
+            owned_function("beta", 10, 14),
+            owned_function("gamma", 20, 24),
+        ];
+        let candidates = CandidatePairs {
+            pairs: vec![(0, 1), (0, 2), (1, 2)],
+            eligible_function_count: 3,
+            size_filtered_count: 0,
+            label_filtered_count: 0,
+            arity_filtered_count: 0,
+            shingle_filtered_count: 0,
+            strategy: candidates::CandidatePairStrategy::Cartesian,
+        };
+        let changed_by_file = HashMap::from([(
+            PathBuf::from("lib.rs"),
+            vec![LineRange { start: 20, end: 20 }],
+        )]);
+
+        let (pairs, filtered) =
+            filter_pairs_touching_changes(&corpus, &candidates, &changed_by_file);
+
+        assert_eq!(pairs.as_ref(), &[(0, 2), (1, 2)]);
+        assert_eq!(filtered, 1);
+    }
+
+    #[test]
+    fn score_stats_record_and_merge_preserve_counts() {
+        let mut stats = ScoreStats::default();
+        stats.record(
+            PairScore {
+                i: 0,
+                j: 1,
+                similarity: 1.0,
+                exact_match: true,
+            },
+            0.85,
+        );
+        stats.record(
+            PairScore {
+                i: 0,
+                j: 2,
+                similarity: 0.25,
+                exact_match: false,
+            },
+            0.85,
+        );
+
+        let merged = ScoreStats::merge(
+            stats,
+            ScoreStats {
+                pairs: vec![(2, 3, 0.9)],
+                exact_match_count: 2,
+                below_threshold_count: 3,
+                diff_filtered_count: 4,
+            },
+        );
+
+        assert_eq!(merged.pairs, vec![(0, 1, 1.0), (2, 3, 0.9)]);
+        assert_eq!(merged.exact_match_count, 3);
+        assert_eq!(merged.below_threshold_count, 4);
+        assert_eq!(merged.diff_filtered_count, 4);
     }
 
     fn assert_json_pair_report(out: &str) {
