@@ -138,12 +138,8 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<FunctionComplexit
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as BoxedError)
         }
-        // Complexity for Go is not implemented yet; the language is only
-        // wired up for similarity. Returning an empty unit list keeps
-        // directory walks running across mixed-language repos.
         SourceLang::Go => {
-            let _ = source;
-            Ok(Vec::new())
+            lens_golang::extract_complexity_units(source).map_err(|e| Box::new(e) as BoxedError)
         }
     }
 }
@@ -435,6 +431,35 @@ fn branchy(n: i32) -> i32 {
         assert_eq!(cc_max, 3);
         let funcs = parsed["files"][0]["functions"].as_array().unwrap();
         assert_eq!(funcs.len(), 2);
+    }
+
+    #[test]
+    fn go_files_are_analyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+package p
+
+func branchy(n int) int {
+    if n > 0 {
+        if n > 10 {
+            return 1
+        }
+    }
+    return 0
+}
+"#;
+        let file = write_file(dir.path(), "main.go", src);
+        let json = ComplexityAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 1);
+        let func = &parsed["files"][0]["functions"][0];
+        assert_eq!(func["name"], "branchy");
+        assert!(
+            func["cognitive"].as_u64().unwrap() > 0,
+            "expected Go cognitive complexity, got {func:?}",
+        );
     }
 
     #[test]

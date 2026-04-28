@@ -1,7 +1,7 @@
 //! `analyze hotspot` — rank files by `commits × cognitive_max`.
 //!
 //! Walks a path on disk, parses every supported source file (Rust,
-//! TypeScript, Python) for per-function complexity, asks `git` how often
+//! TypeScript, Python, Go) for per-function complexity, asks `git` how often
 //! each file has been touched, and emits the joined ranking. The point
 //! is to point an agent at "frequently changed *and* complex" code:
 //! high churn alone is just noise, high complexity alone is static
@@ -10,7 +10,7 @@
 //! Limitations:
 //!
 //! * Only files whose extension is recognised by [`SourceLang`] (`.rs`,
-//!   `.ts`, `.py` today) are analyzed.
+//!   `.ts`, `.py`, `.go` today) are analyzed.
 //! * Directory walks use the shared source-file collector, so `.gitignore`
 //!   and hidden-file filtering match the other analyzers.
 //! * For directory roots we use a single path-scoped `git log` invocation,
@@ -274,10 +274,9 @@ fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
         }
-        // Hotspot scoring needs per-function complexity; Go isn't
-        // wired up to a complexity extractor yet. Returning an empty
-        // unit list keeps the walker on mixed-language repos.
-        SourceLang::Go => Ok(Vec::new()),
+        SourceLang::Go => {
+            lens_golang::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
+        }
     };
     match result {
         Ok(u) => Some(u),
@@ -562,6 +561,19 @@ mod tests {
         run_git(dir, &["commit", "-q", "-m", "initial"]);
     }
 
+    fn init_repo_with_go_file(dir: &Path) {
+        run_git(dir, &["init", "-q", "-b", "main"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+        write_file(
+            dir,
+            "src/a.go",
+            "package p\n\nfunc nest(n int) int {\n    if n > 0 {\n        if n > 10 { return 1 }\n    }\n    return 0\n}\n",
+        );
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "initial"]);
+    }
+
     #[test]
     fn typescript_files_are_analyzed() {
         let dir = tempfile::tempdir().unwrap();
@@ -599,6 +611,24 @@ mod tests {
     }
 
     #[test]
+    fn go_files_are_analyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_go_file(dir.path());
+        let json = HotspotAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let files = parsed["files"].as_array().unwrap();
+        let a = files.iter().find(|f| f["path"] == "src/a.go").unwrap();
+        assert!(
+            a["cognitive_max"].as_u64().unwrap() > 0,
+            "expected non-zero cognitive complexity for Go file, got {a:?}",
+        );
+        assert!(a["function_count"].as_u64().unwrap() >= 1);
+        assert!(a["commits"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
     fn mixed_language_files_appear_together() {
         let dir = tempfile::tempdir().unwrap();
         run_git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -611,6 +641,11 @@ mod tests {
             "export function t(): number { return 0; }\n",
         );
         write_file(dir.path(), "src/c.py", "def p():\n    return 0\n");
+        write_file(
+            dir.path(),
+            "src/d.go",
+            "package p\n\nfunc g() int { return 0 }\n",
+        );
         run_git(dir.path(), &["add", "."]);
         run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
 
@@ -623,6 +658,7 @@ mod tests {
         assert!(paths.contains(&"src/a.rs"), "missing rs in {paths:?}");
         assert!(paths.contains(&"src/b.ts"), "missing ts in {paths:?}");
         assert!(paths.contains(&"src/c.py"), "missing py in {paths:?}");
+        assert!(paths.contains(&"src/d.go"), "missing go in {paths:?}");
     }
 
     #[test]

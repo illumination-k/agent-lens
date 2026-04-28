@@ -1,4 +1,4 @@
-//! Go-language adapter for `agent-lens` similarity analysis.
+//! Go-language adapter for `agent-lens` similarity and complexity analysis.
 //!
 //! Implements [`lens_domain::LanguageParser`] on top of
 //! [`tree-sitter-go`](https://crates.io/crates/tree-sitter-go), pulling
@@ -17,6 +17,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod attrs;
+mod complexity;
 mod parser;
 
+pub use complexity::extract_complexity_units;
 pub use parser::{GoParseError, GoParser, extract_functions_excluding_tests};

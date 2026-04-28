@@ -129,7 +129,7 @@ fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, 
     Ok(out)
 }
 
-fn parse_tree(source: &str) -> Result<tree_sitter::Tree, GoParseError> {
+pub(crate) fn parse_tree(source: &str) -> Result<tree_sitter::Tree, GoParseError> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_go::LANGUAGE.into())
@@ -171,7 +171,7 @@ fn function_def_from(
 /// Resolve the user-visible name of a `function_declaration` or
 /// `method_declaration`. Free functions use the `name: identifier`
 /// field; methods use `name: field_identifier`.
-fn function_name_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+pub(crate) fn function_name_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
     node.child_by_field_name("name")
         .and_then(|n| n.utf8_text(source).ok())
 }
@@ -186,7 +186,7 @@ fn function_name_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
 /// recognisable type identifier (e.g. partial parses); the caller falls
 /// back to an unqualified name in that case rather than dropping the
 /// method.
-fn method_receiver_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+pub(crate) fn method_receiver_type(node: Node<'_>, source: &[u8]) -> Option<String> {
     let receiver = node.child_by_field_name("receiver")?;
     let mut cursor = receiver.walk();
     for child in receiver.named_children(&mut cursor) {

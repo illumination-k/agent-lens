@@ -128,7 +128,7 @@ enum PreToolUseCommand {
     /// file the agent is about to edit.
     ///
     /// The parser is chosen from the file extension (`.rs` / `.ts` /
-    /// `.py`). Files with an unsupported extension are ignored
+    /// `.py` / `.go`). Files with an unsupported extension are ignored
     /// silently. `Write` against a brand-new path is a silent no-op
     /// (no current state to read).
     Complexity,
@@ -147,7 +147,7 @@ enum PostToolUseCommand {
     /// Report clusters of similar functions in the file that was just edited.
     ///
     /// The parser is chosen from the file extension (`.rs` / `.ts` /
-    /// `.py`). Files with an unsupported extension are ignored silently.
+    /// `.py` / `.go`). Files with an unsupported extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
@@ -213,7 +213,7 @@ enum CodexPostToolUseCommand {
     /// `apply_patch` just touched.
     ///
     /// The parser is chosen from each file's extension (`.rs` / `.ts` /
-    /// `.py`). Files with an unsupported extension are ignored silently.
+    /// `.py` / `.go`). Files with an unsupported extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
@@ -271,7 +271,7 @@ enum AnalyzeCommand {
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep), groups findings per file, and aggregates the top-level
     /// summary across the whole corpus. The parser is chosen from each
-    /// file extension (`.rs` / `.ts` / `.py`). The JSON format is the
+    /// file extension (`.rs` / `.ts` / `.py` / `.go`). The JSON format is the
     /// default machine-readable output; `--format md` emits a compact
     /// summary tuned for LLM context.
     Complexity(AnalyzeComplexityArgs),
@@ -297,7 +297,7 @@ enum AnalyzeCommand {
     ContextSpan(AnalyzeCommonArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
-    /// Walks `path` for supported source files (`.rs` / `.ts` / `.py`),
+    /// Walks `path` for supported source files (`.rs` / `.ts` / `.py` / `.go`),
     /// asks `git` how many commits each file has been touched in
     /// (optionally scoped by `--since`), and joins the two with
     /// cognitive complexity. The resulting ranking points at
@@ -314,7 +314,7 @@ enum AnalyzeCommand {
     /// pairs scoring at or above `--threshold` are folded into complete-link
     /// clusters where every member is similar to every other (no chaining
     /// through weaker links). The parser is chosen from each file extension
-    /// (`.rs` / `.ts` / `.py`). The JSON format is the default
+    /// (`.rs` / `.ts` / `.py` / `.go`). The JSON format is the default
     /// machine-readable output; `--format md` emits a compact summary
     /// tuned for LLM context.
     Similarity(AnalyzeSimilarityArgs),

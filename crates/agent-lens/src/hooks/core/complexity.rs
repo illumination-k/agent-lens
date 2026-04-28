@@ -72,11 +72,8 @@ fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionCompl
         SourceLang::Python => {
             lens_py::extract_complexity_units(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
-        // Complexity for Go is not implemented yet; the hook returns no
-        // units rather than failing on a `.go` save.
         SourceLang::Go => {
-            let _ = source;
-            Ok(Vec::new())
+            lens_golang::extract_complexity_units(source).map_err(|e| HookError::Parse(Box::new(e)))
         }
     }
 }
@@ -126,6 +123,14 @@ mod tests {
         EditedSource {
             rel_path: rel.to_owned(),
             lang: SourceLang::Rust,
+            source: source.to_owned(),
+        }
+    }
+
+    fn go_src(rel: &str, source: &str) -> EditedSource {
+        EditedSource {
+            rel_path: rel.to_owned(),
+            lang: SourceLang::Go,
             source: source.to_owned(),
         }
     }
@@ -210,6 +215,35 @@ fn nested(n: i32) -> i32 {
             .expect("expected a report");
         assert!(out.contains("a.rs"));
         assert!(out.contains("b.rs"));
+    }
+
+    #[test]
+    fn reports_go_function_above_cognitive_floor() {
+        let src = go_src(
+            "main.go",
+            r#"
+package p
+
+func nested(n int) int {
+    if n > 0 {
+        if n > 1 {
+            if n > 2 {
+                if n > 3 {
+                    return n
+                }
+            }
+        }
+    }
+    return 0
+}
+"#,
+        );
+        let out = ComplexityCore::new()
+            .run(&[src])
+            .unwrap()
+            .expect("expected a report");
+        assert!(out.contains("main.go"), "should mention file: {out}");
+        assert!(out.contains("nested"), "should mention function: {out}");
     }
 
     #[test]
