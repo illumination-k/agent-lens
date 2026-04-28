@@ -61,23 +61,65 @@ impl LshTree for FunctionDef {
     }
 }
 
-/// Abstraction over a language's source-to-tree pipeline.
+/// Selection policy for function extractors that can identify test
+/// scaffolding.
+///
+/// Extractors should compute the language-specific `is_test` label once per
+/// function-shaped item, then pass it through [`TestFilter::includes`].
+/// `All` is intentionally the default so existing callers get no filtering.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TestFilter {
+    #[default]
+    All,
+    Exclude,
+    Only,
+}
+
+impl TestFilter {
+    pub fn includes(self, is_test: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::Exclude => !is_test,
+            Self::Only => is_test,
+        }
+    }
+}
+
+/// Abstraction over a language's source-to-tree/function-extraction pipeline.
 ///
 /// Implementors are expected to be cheap to reuse across files (e.g. storing
 /// a tree-sitter or syn parser by value) but they don't need to be thread
 /// safe — `agent-lens` drives comparison sequentially per parser instance.
 pub trait LanguageParser {
-    type Error: std::error::Error + 'static;
-
     /// Short identifier for the language (e.g. `"rust"`).
     fn language(&self) -> &'static str;
 
     /// Parse the whole source into a single tree. Mostly useful for whole-
     /// file comparisons; most callers will reach for [`Self::extract_functions`].
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error>;
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError>;
 
     /// Extract every function-like definition in `source`.
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error>;
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("failed to parse {language} source: {source}")]
+pub struct LanguageParseError {
+    language: &'static str,
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl LanguageParseError {
+    pub fn new(
+        language: &'static str,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            language,
+            source: Box::new(source),
+        }
+    }
 }
 
 /// A pair of functions that exceed the similarity threshold.
@@ -512,6 +554,18 @@ fn internal_minmax(members: &[usize], sim: &HashMap<(usize, usize), f64>) -> (f6
 mod tests {
     use super::*;
     use crate::tree::TreeNode;
+
+    #[test]
+    fn test_filter_includes_matches_truth_table() {
+        assert!(TestFilter::All.includes(false));
+        assert!(TestFilter::All.includes(true));
+
+        assert!(TestFilter::Exclude.includes(false));
+        assert!(!TestFilter::Exclude.includes(true));
+
+        assert!(!TestFilter::Only.includes(false));
+        assert!(TestFilter::Only.includes(true));
+    }
 
     fn def(name: &str, tree: TreeNode) -> FunctionDef {
         FunctionDef {

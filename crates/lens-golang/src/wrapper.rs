@@ -46,7 +46,7 @@ fn analyze_function(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Optio
     let (callee, args) = core_call(expr, source)?;
     let params = collect_param_names(node, source);
 
-    if !args_pass_through_by(&args, &params, |n| ident_arg(*n, source).map(str::to_owned)) {
+    if !args_pass_through_by(&args, &params, |n| passthrough_arg_name(*n, source)) {
         return None;
     }
 
@@ -141,12 +141,30 @@ fn collect_param_decl_names(node: Node<'_>, source: &[u8], out: &mut Vec<String>
     }
 }
 
-fn ident_arg<'a>(node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
-    if node.kind() == "identifier" {
-        node.utf8_text(source).ok()
-    } else {
-        None
+fn passthrough_arg_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => node.utf8_text(source).ok().map(str::to_owned),
+        "composite_literal" => {
+            let body = node.child_by_field_name("body")?;
+            single_literal_value_name(body, source)
+        }
+        "literal_value" | "literal_element" => single_literal_value_name(node, source),
+        "keyed_element" => {
+            let value = node.child_by_field_name("value")?;
+            passthrough_arg_name(value, source)
+        }
+        _ => None,
     }
+}
+
+fn single_literal_value_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut children = node.named_children(&mut cursor);
+    let only = children.next()?;
+    if children.next().is_some() {
+        return None;
+    }
+    passthrough_arg_name(only, source)
 }
 
 fn is_thin_callee(node: Node<'_>) -> bool {
@@ -219,6 +237,53 @@ mod tests {
         let src = "package p\nfunc Wrap(a int, b int) int { return target(b, a) }\n";
         let got = find_wrappers(src).unwrap();
         assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn detects_single_field_options_literal_passthrough() {
+        let src = r#"
+package p
+
+type Options struct{ flag bool }
+
+func Wrap(source string, flag bool) int {
+    return target(source, Options{flag})
+}
+"#;
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "Wrap");
+        assert_eq!(got[0].callee, "target");
+    }
+
+    #[test]
+    fn detects_keyed_single_field_options_literal_passthrough() {
+        let src = r#"
+package p
+
+type Options struct{ flag bool }
+
+func Wrap(source string, flag bool) int {
+    return target(source, Options{flag: flag})
+}
+"#;
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn rejects_options_literal_with_extra_values() {
+        let src = r#"
+package p
+
+type Options struct{ flag bool; mode string }
+
+func Wrap(source string, flag bool) int {
+    return target(source, Options{flag, "strict"})
+}
+"#;
+        let got = find_wrappers(src).unwrap();
+        assert!(got.is_empty());
     }
 
     #[test]

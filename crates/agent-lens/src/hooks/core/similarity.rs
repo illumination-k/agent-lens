@@ -9,10 +9,9 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use lens_domain::{
-    FunctionDef, LanguageParser, SimilarCluster, TSEDOptions, cluster_similar_pairs,
+    FunctionDef, SimilarCluster, TSEDOptions, TestFilter, cluster_similar_pairs,
     find_similar_pair_indices,
 };
-use lens_rust::RustParser;
 
 use crate::analyze::SourceLang;
 use crate::hooks::core::{EditedSource, HookError};
@@ -117,34 +116,10 @@ impl SimilarityCore {
 }
 
 fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>, HookError> {
-    match lang {
-        SourceLang::Rust => {
-            let mut parser = RustParser::new();
-            parser
-                .extract_functions(source)
-                .map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::TypeScript(dialect) => {
-            let mut parser = lens_ts::TypeScriptParser::with_dialect(dialect);
-            <lens_ts::TypeScriptParser as lens_domain::LanguageParser>::extract_functions(
-                &mut parser,
-                source,
-            )
-            .map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::Python => {
-            let mut parser = lens_py::PythonParser::new();
-            parser
-                .extract_functions(source)
-                .map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::Go => {
-            let mut parser = lens_golang::GoParser::new();
-            parser
-                .extract_functions(source)
-                .map_err(|e| HookError::Parse(Box::new(e)))
-        }
-    }
+    let mut parser = lang.create_language_parser(TestFilter::All);
+    parser
+        .extract_functions(source)
+        .map_err(|e| HookError::Parse(Box::new(e)))
 }
 
 fn append_section(

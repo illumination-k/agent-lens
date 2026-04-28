@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_similar_pairs};
+use lens_domain::{
+    TSEDOptions, TestFilter, calculate_tsed_with_subtree_sizes, cluster_similar_pairs,
+};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -66,6 +68,7 @@ pub struct SimilarityAnalyzer {
     opts: TSEDOptions,
     diff_only: bool,
     exclude_tests: bool,
+    only_tests: bool,
     path_filter: AnalyzePathFilter,
     min_lines: usize,
     top: Option<usize>,
@@ -91,6 +94,7 @@ impl SimilarityAnalyzer {
             opts: TSEDOptions::default(),
             diff_only: false,
             exclude_tests: false,
+            only_tests: false,
             path_filter: AnalyzePathFilter::new(),
             min_lines: DEFAULT_MIN_LINES,
             top: None,
@@ -120,6 +124,7 @@ impl SimilarityAnalyzer {
     }
 
     pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+        self.only_tests = only_tests;
         self.path_filter = self.path_filter.with_only_tests(only_tests);
         self
     }
@@ -145,7 +150,7 @@ impl SimilarityAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
-        let corpus = collect_corpus(path, &self.path_filter, self.exclude_tests)?;
+        let corpus = collect_corpus(path, &self.path_filter, self.function_selection())?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
@@ -168,6 +173,16 @@ impl SimilarityAnalyzer {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&report, self.top)),
+        }
+    }
+
+    fn function_selection(&self) -> TestFilter {
+        if self.only_tests {
+            TestFilter::Only
+        } else if self.exclude_tests {
+            TestFilter::Exclude
+        } else {
+            TestFilter::All
         }
     }
 
@@ -1021,6 +1036,54 @@ mod tests {
     }
 
     #[test]
+    fn only_tests_keeps_test_functions_inside_non_test_rust_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+fn production(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+
+#[cfg(test)]
+mod tests {
+    fn alpha() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
+    fn beta() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_only_tests(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 2, "got {parsed}");
+        let names: Vec<&str> = parsed["clusters"][0]["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["alpha", "beta"]);
+    }
+
+    #[test]
     fn report_renders_paired_python_functions() {
         // Two structurally identical Python functions — guaranteed to
         // score above the 0.5 threshold and exercise the lens-py
@@ -1061,7 +1124,7 @@ def beta(ys):
     fn exclude_tests_drops_python_test_functions_from_report() {
         // pytest-style `test_*` functions form a parallel pair next to
         // a single production function; `--exclude-tests` should drop
-        // them via `lens_py::extract_functions_excluding_tests`.
+        // them via `lens_py::PythonParser::with_test_filter`.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 def production(xs):
@@ -1148,7 +1211,7 @@ func beta(ys []int) int {
     fn exclude_tests_drops_go_test_functions_from_report() {
         // `go test`-style `Test*` functions form a parallel pair next
         // to a single production function; `--exclude-tests` should
-        // drop them via `lens_golang::extract_functions_excluding_tests`.
+        // drop them via `lens_golang::GoParser::with_test_filter`.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 package p
@@ -1204,7 +1267,7 @@ func TestBeta(t *testing.T) {
     fn exclude_tests_drops_typescript_test_functions_from_report() {
         // xUnit-style `test_*` functions form a parallel pair next to
         // a single production function; `--exclude-tests` should drop
-        // them via `lens_ts::extract_functions_excluding_tests`.
+        // them via `lens_ts::TypeScriptParser::with_test_filter`.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 function production(xs: number[]): number {

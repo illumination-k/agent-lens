@@ -1,6 +1,8 @@
 //! syn-based implementation of [`lens_domain::LanguageParser`] for Rust.
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode, qualify as qualify_name};
+use lens_domain::{
+    FunctionDef, LanguageParseError, LanguageParser, TestFilter, TreeNode, qualify as qualify_name,
+};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -14,11 +16,18 @@ use crate::common::{WalkOptions, walk_fn_items};
 /// callers can swap in a tree-sitter backend later without changing
 /// downstream code.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct RustParser;
+pub struct RustParser {
+    test_filter: TestFilter,
+}
 
 impl RustParser {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_test_filter(mut self, test_filter: TestFilter) -> Self {
+        self.test_filter = test_filter;
+        self
     }
 }
 
@@ -30,39 +39,28 @@ pub enum RustParseError {
 }
 
 impl LanguageParser for RustParser {
-    type Error = RustParseError;
-
     fn language(&self) -> &'static str {
         "rust"
     }
 
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error> {
-        let file = syn::parse_file(source)?;
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
+        let file = syn::parse_file(source)
+            .map_err(RustParseError::from)
+            .map_err(|err| LanguageParseError::new(self.language(), err))?;
         Ok(token_stream_to_tree("File", file.to_token_stream()))
     }
 
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        extract_with(source, WalkOptions::default())
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError> {
+        extract_with(source, walk_options_for(self.test_filter))
+            .map_err(|err| LanguageParseError::new(self.language(), err))
     }
 }
 
-/// Like [`RustParser::extract_functions`] but drops anything tagged as a
-/// unit test: free functions with `#[test]` / `#[rstest]` /
-/// `#[<runner>::test]` attributes, and items inside `#[cfg(test)] mod`
-/// blocks.
-///
-/// Used by analysers (similarity, future cohesion / complexity reports)
-/// that want to look at production code only — table-driven tests
-/// otherwise dominate the noise floor with parallel-but-distinct
-/// fixtures that aren't refactor candidates.
-pub fn extract_functions_excluding_tests(source: &str) -> Result<Vec<FunctionDef>, RustParseError> {
-    extract_with(
-        source,
-        WalkOptions {
-            skip_cfg_test_blocks: true,
-            skip_test_fns: true,
-        },
-    )
+fn walk_options_for(test_filter: TestFilter) -> WalkOptions {
+    WalkOptions {
+        skip_cfg_test_blocks: test_filter == TestFilter::Exclude,
+        test_filter,
+    }
 }
 
 fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, RustParseError> {
@@ -319,7 +317,10 @@ impl Bag {
     fn fixture() -> Self { Self }
 }
 "#;
-        let funcs = extract_functions_excluding_tests(src).unwrap();
+        let funcs = RustParser::new()
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions(src)
+            .unwrap();
         let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["production"]);
     }
@@ -330,7 +331,10 @@ impl Bag {
         // the public surface still reports every production function.
         let src = "fn a() {}\nfn b() {}\n";
         let baseline = parse_functions(src);
-        let filtered = extract_functions_excluding_tests(src).unwrap();
+        let filtered = RustParser::new()
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions(src)
+            .unwrap();
         assert_eq!(
             baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
             filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),

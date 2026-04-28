@@ -26,5 +26,5 @@ pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::{ContextSpanError, extract_context_spans};
 pub use coupling::{CouplingError, TsModule, build_module_tree, extract_edges};
-pub use parser::{Dialect, TsParseError, TypeScriptParser, extract_functions_excluding_tests};
+pub use parser::{Dialect, TsParseError, TypeScriptParser};
 pub use wrapper::find_wrappers;

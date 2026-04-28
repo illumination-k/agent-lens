@@ -21,7 +21,7 @@
 //! the enclosing function's score (matches how a reader experiences the
 //! code) but are not surfaced as separate units. This mirrors how the
 //! similarity extractor treats `def` bodies as atomic — see
-//! [`crate::parser::extract_functions_excluding_tests`].
+//! [`crate::parser::PythonParser::with_test_filter`].
 
 use std::collections::HashMap;
 

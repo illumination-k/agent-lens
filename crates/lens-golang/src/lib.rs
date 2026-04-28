@@ -24,5 +24,5 @@ mod wrapper;
 
 pub use cohesion::extract_cohesion_units;
 pub use complexity::extract_complexity_units;
-pub use parser::{GoParseError, GoParser, extract_functions_excluding_tests};
+pub use parser::{GoParseError, GoParser};
 pub use wrapper::find_wrappers;

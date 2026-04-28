@@ -12,7 +12,7 @@
 //! in shape and intent. The adapter list differs because Python uses
 //! `await` and stringification methods rather than `?` / `.unwrap()`.
 //!
-//! Tests are filtered the same way [`crate::extract_functions_excluding_tests`]
+//! Tests are filtered the same way [`crate::PythonParser::with_test_filter`]
 //! filters them: pytest-flavoured functions and `unittest.TestCase`
 //! methods are forwarding by design and would only add noise.
 

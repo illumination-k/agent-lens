@@ -14,7 +14,9 @@
 //! Interface method elements have no body and are therefore not
 //! function-shaped at all.
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode, qualify as qualify_name};
+use lens_domain::{
+    FunctionDef, LanguageParseError, LanguageParser, TestFilter, TreeNode, qualify as qualify_name,
+};
 use tree_sitter::{Node, Parser};
 
 use crate::attrs::name_looks_like_test_function;
@@ -27,11 +29,18 @@ use crate::attrs::name_looks_like_test_function;
 /// Sync` trivially and matches how the other language adapters expose
 /// their parsers.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct GoParser;
+pub struct GoParser {
+    test_filter: TestFilter,
+}
 
 impl GoParser {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_test_filter(mut self, test_filter: TestFilter) -> Self {
+        self.test_filter = test_filter;
+        self
     }
 }
 
@@ -57,44 +66,32 @@ pub enum GoParseError {
 }
 
 impl LanguageParser for GoParser {
-    type Error = GoParseError;
-
     fn language(&self) -> &'static str {
         "go"
     }
 
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error> {
-        let tree = parse_tree(source)?;
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
+        let tree =
+            parse_tree(source).map_err(|err| LanguageParseError::new(self.language(), err))?;
         let root = tree.root_node();
         let bytes = source.as_bytes();
         Ok(build_tree(root, bytes, /* is_root = */ true))
     }
 
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        extract_with(source, ExtractOptions::default())
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError> {
+        extract_with(
+            source,
+            ExtractOptions {
+                test_filter: self.test_filter,
+            },
+        )
+        .map_err(|err| LanguageParseError::new(self.language(), err))
     }
-}
-
-/// Like [`GoParser::extract_functions`] but drops items that look like
-/// `go test` scaffolding: free functions whose names start with
-/// `Test`, `Benchmark`, `Example`, or `Fuzz` (followed by `_`,
-/// upper-case, or end-of-name).
-///
-/// Methods are kept regardless — `(*S).TestSomething` is unusual but
-/// not test scaffolding, and the path-level filter at the analyzer
-/// layer already excludes `*_test.go` files for the common case.
-pub fn extract_functions_excluding_tests(source: &str) -> Result<Vec<FunctionDef>, GoParseError> {
-    extract_with(
-        source,
-        ExtractOptions {
-            exclude_tests: true,
-        },
-    )
 }
 
 #[derive(Default, Clone, Copy)]
 struct ExtractOptions {
-    exclude_tests: bool,
+    test_filter: TestFilter,
 }
 
 fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, GoParseError> {
@@ -113,11 +110,10 @@ fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, 
                 let owner = method_receiver_type(child, bytes);
                 // Methods can't be filtered by Go's test-name convention:
                 // `Test*` discovery only applies to free functions. Pass
-                // a synthetic `ExtractOptions` so the name filter is a
-                // no-op for receivers — a method called `TestX` on a
-                // production type is still production code.
+                // the same options so `Only` still excludes methods while
+                // `Exclude` treats them as production code.
                 let method_opts = ExtractOptions {
-                    exclude_tests: false,
+                    test_filter: opts.test_filter,
                 };
                 if let Some(def) = function_def_from(child, bytes, owner.as_deref(), method_opts) {
                     out.push(def);
@@ -153,7 +149,8 @@ fn function_def_from(
 ) -> Option<FunctionDef> {
     let body = node.child_by_field_name("body")?;
     let raw_name = function_name_text(node, source)?;
-    if opts.exclude_tests && owner.is_none() && name_looks_like_test_function(raw_name) {
+    let is_test = owner.is_none() && name_looks_like_test_function(raw_name);
+    if !opts.test_filter.includes(is_test) {
         return None;
     }
     let qualified = qualify_name(owner, raw_name);
@@ -643,7 +640,10 @@ func (s *Service) Compute(x int) int {
     return production(x)
 }
 "#;
-        let funcs = extract_functions_excluding_tests(src).unwrap();
+        let funcs = GoParser::new()
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions(src)
+            .unwrap();
         let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["production", "Service::Compute"]);
     }
@@ -654,7 +654,10 @@ func (s *Service) Compute(x int) int {
         // public surface still reports every production function.
         let src = "package p\nfunc a() int { return 0 }\nfunc b() int { return 1 }\n";
         let baseline = parse_functions(src);
-        let filtered = extract_functions_excluding_tests(src).unwrap();
+        let filtered = GoParser::new()
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions(src)
+            .unwrap();
         assert_eq!(
             baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
             filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
@@ -663,7 +666,10 @@ func (s *Service) Compute(x int) int {
 
     #[test]
     fn excluding_tests_surfaces_parse_errors() {
-        let err = extract_functions_excluding_tests("package p\nfunc !!! {").unwrap_err();
+        let err = GoParser::new()
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions("package p\nfunc !!! {")
+            .unwrap_err();
         assert!(format!("{err}").contains("parse"));
     }
 }

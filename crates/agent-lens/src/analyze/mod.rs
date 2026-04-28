@@ -21,6 +21,8 @@ pub mod wrapper;
 
 use std::path::{Path, PathBuf};
 
+use lens_domain::{LanguageParser, TestFilter};
+
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
@@ -87,6 +89,20 @@ impl SourceLang {
         path.extension()
             .and_then(|e| e.to_str())
             .and_then(Self::from_extension)
+    }
+
+    pub(crate) fn create_language_parser(
+        &self,
+        test_filter: TestFilter,
+    ) -> Box<dyn LanguageParser> {
+        match self {
+            Self::Rust => Box::new(lens_rust::RustParser::new().with_test_filter(test_filter)),
+            Self::TypeScript(dialect) => Box::new(
+                lens_ts::TypeScriptParser::with_dialect(*dialect).with_test_filter(test_filter),
+            ),
+            Self::Python => Box::new(lens_py::PythonParser::new().with_test_filter(test_filter)),
+            Self::Go => Box::new(lens_golang::GoParser::new().with_test_filter(test_filter)),
+        }
     }
 }
 

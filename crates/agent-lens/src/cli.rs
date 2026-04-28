@@ -454,7 +454,9 @@ struct AnalyzeWrapperArgs {
 #[derive(Debug, Clone, Args, Default)]
 struct AnalyzePathArgs {
     /// Analyze only files that look like tests (`tests/`, `*_test.*`,
-    /// `*.test.*`, `test_*`, etc.).
+    /// `*.test.*`, `test_*`, etc.). For similarity reports, this also
+    /// keeps language-level test functions inside non-test files, such
+    /// as Rust `#[cfg(test)]` modules.
     #[arg(long, conflicts_with = "exclude_tests")]
     only_tests: bool,
     /// Exclude files that look like tests. For similarity reports, this

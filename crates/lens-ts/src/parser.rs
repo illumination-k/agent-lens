@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode};
+use lens_domain::{FunctionDef, LanguageParseError, LanguageParser, TestFilter, TreeNode};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
@@ -113,6 +113,7 @@ impl Dialect {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TypeScriptParser {
     dialect: Dialect,
+    test_filter: TestFilter,
 }
 
 impl TypeScriptParser {
@@ -121,7 +122,15 @@ impl TypeScriptParser {
     }
 
     pub fn with_dialect(dialect: Dialect) -> Self {
-        Self { dialect }
+        Self {
+            dialect,
+            test_filter: TestFilter::All,
+        }
+    }
+
+    pub fn with_test_filter(mut self, test_filter: TestFilter) -> Self {
+        self.test_filter = test_filter;
+        self
     }
 
     pub fn dialect(&self) -> Dialect {
@@ -162,19 +171,18 @@ impl TsParseError {
 }
 
 impl LanguageParser for TypeScriptParser {
-    type Error = TsParseError;
-
     fn language(&self) -> &'static str {
         "typescript"
     }
 
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error> {
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
         let alloc = Allocator::default();
         let ret = Parser::new(&alloc, source, self.dialect.source_type()).parse();
         if !ret.errors.is_empty() {
-            return Err(TsParseError::from_diagnostics(
+            let err = TsParseError::from_diagnostics(
                 ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
-            ));
+            );
+            return Err(LanguageParseError::new(self.language(), err));
         }
         let mut root = TreeNode::new("Program", "");
         for stmt in &ret.program.body {
@@ -183,37 +191,21 @@ impl LanguageParser for TypeScriptParser {
         Ok(root)
     }
 
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        extract_with(source, self.dialect, ExtractOptions::default())
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError> {
+        extract_with(
+            source,
+            self.dialect,
+            ExtractOptions {
+                test_filter: self.test_filter,
+            },
+        )
+        .map_err(|err| LanguageParseError::new(self.language(), err))
     }
-}
-
-/// Like [`TypeScriptParser::extract_functions`] but drops items that
-/// look like xUnit-style test scaffolding: declaration-level functions
-/// whose name matches the `test` / `test_*` convention, and methods of
-/// classes whose name starts with `Test`.
-///
-/// Anonymous arrow callbacks passed to `describe()` / `it()` / `test()`
-/// are already invisible to the walker (they aren't bound to a name),
-/// so this filter only catches the named, declaration-level shapes
-/// that slip through. Used by analysers (similarity, future cohesion /
-/// complexity reports) that want to look at production code only.
-pub fn extract_functions_excluding_tests(
-    source: &str,
-    dialect: Dialect,
-) -> Result<Vec<FunctionDef>, TsParseError> {
-    extract_with(
-        source,
-        dialect,
-        ExtractOptions {
-            exclude_tests: true,
-        },
-    )
 }
 
 #[derive(Default, Clone, Copy)]
 struct ExtractOptions {
-    exclude_tests: bool,
+    test_filter: TestFilter,
 }
 
 fn extract_with(
@@ -244,7 +236,7 @@ struct FunctionDefCollector {
 
 impl FunctionVisitor for FunctionDefCollector {
     fn on_function(&mut self, item: FunctionItem<'_>) {
-        if self.opts.exclude_tests && is_test_item(&item.name) {
+        if !self.opts.test_filter.includes(is_test_item(&item.name)) {
             return;
         }
         self.out.push(FunctionDef {
@@ -483,7 +475,10 @@ class TestThing {
     }
 }
 "#;
-        let funcs = extract_functions_excluding_tests(src, Dialect::Ts).unwrap();
+        let funcs = TypeScriptParser::with_dialect(Dialect::Ts)
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions(src)
+            .unwrap();
         let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["production", "Service::compute"]);
     }
@@ -494,7 +489,10 @@ class TestThing {
         // public surface still reports every production function.
         let src = "function a(): void {}\nfunction b(): void {}\n";
         let baseline = parse_functions(src);
-        let filtered = extract_functions_excluding_tests(src, Dialect::Ts).unwrap();
+        let filtered = TypeScriptParser::with_dialect(Dialect::Ts)
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions(src)
+            .unwrap();
         assert_eq!(
             baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
             filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
@@ -503,7 +501,10 @@ class TestThing {
 
     #[test]
     fn excluding_tests_surfaces_parse_errors() {
-        let err = extract_functions_excluding_tests("function ??? {", Dialect::Ts).unwrap_err();
+        let err = TypeScriptParser::with_dialect(Dialect::Ts)
+            .with_test_filter(TestFilter::Exclude)
+            .extract_functions("function ??? {")
+            .unwrap_err();
         assert!(format!("{err}").contains("failed to parse TypeScript source"));
     }
 

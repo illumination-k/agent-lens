@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::FunctionDef;
+use lens_domain::{FunctionDef, TestFilter};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -29,15 +29,28 @@ pub(super) struct OwnedFunction {
 pub(super) fn collect_corpus(
     path: &Path,
     path_filter: &AnalyzePathFilter,
-    exclude_tests: bool,
+    test_filter: TestFilter,
 ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-    let filter = path_filter.compile(path)?;
+    let collection_filter = if test_filter == TestFilter::Only {
+        path_filter.clone().with_only_tests(false)
+    } else {
+        path_filter.clone()
+    };
+    let filter = collection_filter.compile(path)?;
     let started = Instant::now();
     let files = collect_source_files(path, &filter)?;
 
     let parsed: Vec<Vec<OwnedFunction>> = files
         .par_iter()
-        .map(|source_file| collect_file(source_file, exclude_tests))
+        .map(|source_file| {
+            let file_filter =
+                if test_filter == TestFilter::Only && filter.is_test_path(&source_file.path) {
+                    TestFilter::All
+                } else {
+                    test_filter
+                };
+            collect_file(source_file, file_filter)
+        })
         .collect::<Result<_, _>>()?;
 
     let out: Vec<_> = parsed.into_iter().flatten().collect();
@@ -55,11 +68,11 @@ pub(super) fn collect_corpus(
 
 fn collect_file(
     file: &SourceFile,
-    exclude_tests: bool,
+    test_filter: TestFilter,
 ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
     let started = Instant::now();
     let (lang, source) = read_source(&file.path)?;
-    let funcs = extract_functions(lang, &source, exclude_tests)?;
+    let funcs = extract_functions(lang, &source, test_filter)?;
     let out: Vec<_> = funcs
         .into_iter()
         .map(|def| OwnedFunction {
