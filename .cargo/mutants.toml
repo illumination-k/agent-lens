@@ -35,4 +35,7 @@ exclude_re = [
   # complexity: pure label-mapping helpers
   "cmp_op_str",
   "number_literal_repr",
+  # similarity: tracing-only telemetry helpers
+  "log_candidate_stats",
+  "log_score_stats",
 ]
