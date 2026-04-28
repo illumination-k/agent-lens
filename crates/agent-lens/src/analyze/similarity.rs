@@ -42,6 +42,18 @@ pub const DEFAULT_THRESHOLD: f64 = 0.85;
 pub const DEFAULT_MIN_LINES: usize = 5;
 
 const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
+/// Hard cap for pairs scored by `analyze similarity`.
+///
+/// Even with LSH enabled, very large corpora can still produce a huge
+/// candidate set. Keep a guardrail so runs fail fast with an actionable
+/// error instead of spending minutes in pairwise scoring.
+///
+/// The cap is calibrated from a real benchmark run:
+/// `similarity_directory_lsh_1024_functions` measured ~370–384 ms
+/// (2026-04-28, local `cargo bench` in this repo). A 1024-function
+/// full pair set is 523,776 pairs; scaling that to a practical upper
+/// budget around 10 seconds gives a limit around 13M pairs.
+const MAX_CANDIDATE_PAIRS: usize = 13_000_000;
 
 /// Analyzer entry point. Holds the threshold and TSED options so per-run
 /// configuration can be threaded through `analyze` without changing the
@@ -133,7 +145,7 @@ impl SimilarityAnalyzer {
         let started = Instant::now();
         let corpus = collect_corpus(path, &self.path_filter, self.exclude_tests)?;
         let function_count = corpus.len();
-        let clusters = self.find_clusters(&corpus);
+        let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
             path,
             self.threshold,
@@ -162,7 +174,10 @@ impl SimilarityAnalyzer {
     /// [`lens_domain::cluster_similar_pairs`] in two passes so the per-pair
     /// `--diff-only` filter sees the file/line metadata that domain doesn't
     /// know about.
-    fn find_clusters<'a>(&self, corpus: &'a [OwnedFunction]) -> Vec<ClusterView<'a>> {
+    fn find_clusters<'a>(
+        &self,
+        corpus: &'a [OwnedFunction],
+    ) -> Result<Vec<ClusterView<'a>>, AnalyzerError> {
         let started = Instant::now();
         let changed_by_file = if self.diff_only {
             let diff_started = Instant::now();
@@ -212,7 +227,6 @@ impl SimilarityAnalyzer {
             elapsed_ms = candidate_started.elapsed().as_secs_f64() * 1000.0,
             "similarity candidates enumerated"
         );
-
         let (pairs_to_score, diff_prefiltered_count): (Cow<'_, [(usize, usize)]>, usize) =
             if self.diff_only {
                 let mut filtered = 0usize;
@@ -235,6 +249,13 @@ impl SimilarityAnalyzer {
             } else {
                 (Cow::Borrowed(candidates.pairs.as_slice()), 0)
             };
+        enforce_candidate_pair_limit(
+            candidates.eligible_function_count,
+            pairs_to_score.len(),
+            MAX_CANDIDATE_PAIRS,
+            self.min_lines,
+            candidates.strategy.as_str(),
+        )?;
 
         let score_started = Instant::now();
         let mut score_stats = pairs_to_score
@@ -321,8 +342,30 @@ impl SimilarityAnalyzer {
             total_ms = started.elapsed().as_secs_f64() * 1000.0,
             "similarity clusters found"
         );
-        clusters
+        Ok(clusters)
     }
+}
+
+fn enforce_candidate_pair_limit(
+    eligible_function_count: usize,
+    candidate_pair_count: usize,
+    max_candidate_pairs: usize,
+    min_lines: usize,
+    strategy: &'static str,
+) -> Result<(), AnalyzerError> {
+    if candidate_pair_count <= max_candidate_pairs {
+        return Ok(());
+    }
+    let n = eligible_function_count as u128;
+    let theoretical_pair_count = n.saturating_mul(n.saturating_sub(1)) / 2;
+    Err(AnalyzerError::SimilarityScopeTooBroad {
+        eligible_function_count,
+        theoretical_pair_count,
+        candidate_pair_count,
+        max_candidate_pairs,
+        min_lines,
+        strategy,
+    })
 }
 
 fn is_exact_match_without_distance(
@@ -1330,5 +1373,24 @@ fn beta(x: i32) -> i32 {
             .analyze(&path, OutputFormat::Json)
             .unwrap_err();
         assert!(matches_expected(&err), "unexpected error variant: {err}");
+    }
+
+    #[test]
+    fn enforce_candidate_pair_limit_surfaces_concrete_numbers() {
+        let err = enforce_candidate_pair_limit(20_000, 13_000_001, 13_000_000, 5, "lsh")
+            .expect_err("candidate overage should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("13_000_001") || msg.contains("13000001"),
+            "error should include candidate pair count: {msg}"
+        );
+        assert!(
+            msg.contains("199990000"),
+            "error should include theoretical pair count: {msg}"
+        );
+        assert!(
+            matches!(err, AnalyzerError::SimilarityScopeTooBroad { .. }),
+            "unexpected error variant: {err}"
+        );
     }
 }

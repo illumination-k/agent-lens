@@ -118,6 +118,17 @@ pub enum AnalyzerError {
     Parse(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("failed to serialize report: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error(
+        "similarity scope is too broad: {candidate_pair_count} candidate pairs (eligible functions: {eligible_function_count}, theoretical max pairs: {theoretical_pair_count}, strategy: {strategy}, min_lines: {min_lines}) exceeds limit {max_candidate_pairs}; narrow the scope (path, --exclude, --diff-only, or raise --min-lines)"
+    )]
+    SimilarityScopeTooBroad {
+        eligible_function_count: usize,
+        theoretical_pair_count: u128,
+        candidate_pair_count: usize,
+        max_candidate_pairs: usize,
+        min_lines: usize,
+        strategy: &'static str,
+    },
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
 }
