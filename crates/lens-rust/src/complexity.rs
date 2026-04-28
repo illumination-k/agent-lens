@@ -26,14 +26,13 @@ use std::collections::HashMap;
 
 use lens_domain::{FunctionComplexity, HalsteadCounts, qualify};
 
-use crate::common::type_path_last_ident;
+use crate::common::{WalkOptions, walk_fn_items};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     BinOp, Block, Expr, ExprBinary, ExprForLoop, ExprIf, ExprLoop, ExprMatch, ExprTry, ExprWhile,
-    ImplItem, Item, ItemImpl, ItemTrait, TraitItem,
 };
 
 /// Failures produced while extracting complexity units.
@@ -47,55 +46,11 @@ pub enum ComplexityError {
 pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, ComplexityError> {
     let file = syn::parse_file(source)?;
     let mut out = Vec::new();
-    for item in &file.items {
-        collect_item(item, &mut out);
-    }
+    walk_fn_items(&file.items, WalkOptions::default(), &mut |site| {
+        let name = qualify(site.owner, &site.sig.ident.to_string());
+        out.push(analyze_fn(name, site.sig, site.block));
+    });
     Ok(out)
-}
-
-fn collect_item(item: &Item, out: &mut Vec<FunctionComplexity>) {
-    match item {
-        Item::Fn(item_fn) => {
-            out.push(analyze_fn(
-                item_fn.sig.ident.to_string(),
-                &item_fn.sig,
-                &item_fn.block,
-            ));
-        }
-        Item::Impl(item_impl) => collect_impl(item_impl, out),
-        Item::Trait(item_trait) => collect_trait(item_trait, out),
-        Item::Mod(item_mod) => {
-            if let Some((_, items)) = &item_mod.content {
-                for nested in items {
-                    collect_item(nested, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_impl(item_impl: &ItemImpl, out: &mut Vec<FunctionComplexity>) {
-    let owner = type_path_last_ident(&item_impl.self_ty);
-    for impl_item in &item_impl.items {
-        if let ImplItem::Fn(method) = impl_item {
-            let name = qualify(owner.as_deref(), &method.sig.ident.to_string());
-            out.push(analyze_fn(name, &method.sig, &method.block));
-        }
-    }
-}
-
-fn collect_trait(item_trait: &ItemTrait, out: &mut Vec<FunctionComplexity>) {
-    let owner = item_trait.ident.to_string();
-    for trait_item in &item_trait.items {
-        if let TraitItem::Fn(method) = trait_item {
-            let Some(block) = &method.default else {
-                continue;
-            };
-            let name = qualify(Some(&owner), &method.sig.ident.to_string());
-            out.push(analyze_fn(name, &method.sig, block));
-        }
-    }
 }
 
 fn analyze_fn(name: String, sig: &syn::Signature, block: &Block) -> FunctionComplexity {
@@ -142,6 +97,24 @@ impl ComplexityVisitor {
         // a future visitor change introduces an imbalance.
         self.nesting = self.nesting.saturating_sub(1);
     }
+
+    /// Score one loop: `+1` McCabe branch, `+(1 + nesting)` cognitive,
+    /// then walk an optional header (the `while` condition or `for`
+    /// iterator expression) and the body inside `enter_nest`.
+    ///
+    /// Shared by `visit_expr_while`, `visit_expr_for_loop`, and
+    /// `visit_expr_loop` — those three used to spell this out
+    /// individually with TSED 1.0 between each pair.
+    fn visit_loop<'ast>(&mut self, header: Option<&'ast Expr>, body: &'ast Block) {
+        self.cyclomatic_branches += 1;
+        self.cognitive += 1 + self.nesting;
+        if let Some(header) = header {
+            self.visit_expr(header);
+        }
+        self.enter_nest();
+        self.visit_block(body);
+        self.exit_nest();
+    }
 }
 
 impl<'ast> Visit<'ast> for ComplexityVisitor {
@@ -170,29 +143,15 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
     }
 
     fn visit_expr_while(&mut self, e: &'ast ExprWhile) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
-        self.visit_expr(&e.cond);
-        self.enter_nest();
-        self.visit_block(&e.body);
-        self.exit_nest();
+        self.visit_loop(Some(&e.cond), &e.body);
     }
 
     fn visit_expr_for_loop(&mut self, e: &'ast ExprForLoop) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
-        self.visit_expr(&e.expr);
-        self.enter_nest();
-        self.visit_block(&e.body);
-        self.exit_nest();
+        self.visit_loop(Some(&e.expr), &e.body);
     }
 
     fn visit_expr_loop(&mut self, e: &'ast ExprLoop) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
-        self.enter_nest();
-        self.visit_block(&e.body);
-        self.exit_nest();
+        self.visit_loop(None, &e.body);
     }
 
     fn visit_expr_match(&mut self, e: &'ast ExprMatch) {
