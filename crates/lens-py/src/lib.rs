@@ -12,11 +12,13 @@
 mod attrs;
 mod cohesion;
 mod complexity;
+mod coupling;
 mod line_index;
 mod parser;
 mod wrapper;
 
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
+pub use coupling::{CouplingError, PythonModule, build_module_tree, extract_edges};
 pub use parser::{PythonParseError, PythonParser, extract_functions_excluding_tests};
 pub use wrapper::{WrapperError, find_wrappers};
