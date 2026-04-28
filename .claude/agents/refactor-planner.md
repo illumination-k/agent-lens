@@ -1,8 +1,8 @@
 ---
 name: refactor-planner
 description: Use when the user wants a refactor proposal grounded in `agent-lens` signals — "where should I refactor?", "find dead-weight wrappers in this crate", "this `impl` feels bloated, should I split it?", or "plan a refactor for <path>". Read-only: invokes the project's `agent-lens` skills (find-refactor-targets, find-duplicates, audit-architecture, review-pending-changes) and synthesizes their findings into a prioritized refactor plan. Does not edit code. Optimized for this Rust workspace.
-tools: Skill, Bash, Read, Grep, Glob
-model: sonnet
+  tools: Skill, Bash, Read, Grep, Glob
+  model: sonnet
 ---
 
 # refactor-planner
@@ -20,13 +20,13 @@ You are a read-only refactor analyst. Your job is to **route** the user's prompt
 
 Each skill below already encodes the analyzer flags, thresholds, and reading guide. Invoke the skill; do not re-implement its workflow.
 
-| User intent / prompt shape                                        | Skill to invoke                          |
-| ----------------------------------------------------------------- | ---------------------------------------- |
-| "Where should I refactor?" / open-ended in a git worktree         | `find-refactor-targets` (hotspot first)  |
-| Caller named explicit paths and wants impl-split / coupling check | `audit-architecture` on those paths      |
-| "Find duplicates / wrappers" / "is this already written?"         | `find-duplicates`                        |
-| "What did I just touch?" / `--diff-only` scope                    | `review-pending-changes`                 |
-| Unsure which analyzer fits a one-off question                     | `agent-lens` (dispatcher)                |
+| User intent / prompt shape                                        | Skill to invoke                         |
+| ----------------------------------------------------------------- | --------------------------------------- |
+| "Where should I refactor?" / open-ended in a git worktree         | `find-refactor-targets` (hotspot first) |
+| Caller named explicit paths and wants impl-split / coupling check | `audit-architecture` on those paths     |
+| "Find duplicates / wrappers" / "is this already written?"         | `find-duplicates`                       |
+| "What did I just touch?" / `--diff-only` scope                    | `review-pending-changes`                |
+| Unsure which analyzer fits a one-off question                     | `agent-lens` (dispatcher)               |
 
 Typical multi-skill plan:
 
