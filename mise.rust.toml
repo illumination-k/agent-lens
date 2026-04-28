@@ -49,14 +49,25 @@ usage = '''
 arg "[base]" help="Base git ref or revspec for git diff" default="main"
 '''
 run = '''
-set -euo pipefail
-base="${usage_base?}"
+set -eu
+base="${usage_base:-main}"
+if ! git rev-parse --verify "$base" >/dev/null 2>&1; then
+  if git rev-parse --verify "origin/$base" >/dev/null 2>&1; then
+    base="origin/$base"
+  elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+    base="HEAD~1"
+  else
+    echo "Could not resolve base ref '$base' (or origin/$base) and no HEAD~1 exists."
+    exit 1
+  fi
+fi
 mkdir -p target
 git diff "$base" -- '*.rs' > target/mutants-diff.patch
 if [ ! -s target/mutants-diff.patch ]; then
-  echo "No Rust diff for cargo-mutants"
+  echo "No Rust diff for cargo-mutants (base: $base)"
   exit 0
 fi
+echo "Running cargo-mutants against diff base: $base"
 cargo mutants --workspace --no-shuffle --in-diff target/mutants-diff.patch
 '''
 
