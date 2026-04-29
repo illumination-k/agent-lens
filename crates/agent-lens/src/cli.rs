@@ -18,8 +18,8 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
-    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, HotspotAnalyzer, OutputFormat,
-    SimilarityAnalyzer, WrapperAnalyzer,
+    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
+    HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
@@ -298,6 +298,13 @@ enum AnalyzeCommand {
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one.
     Coupling(AnalyzeCommonArgs),
+    /// Emit a Rust static function call graph as visualization-ready data.
+    ///
+    /// The graph is heuristic and current-source only: nodes are Rust
+    /// functions, edges are syntactic call sites, and callee resolution is
+    /// limited to exact extracted names or unique last-segment matches. JSON
+    /// is the default; `--format md` emits a compact sanity summary.
+    FunctionGraph(AnalyzeCommonArgs),
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
     ///
@@ -533,6 +540,7 @@ impl_with_analyze_path_args!(
     CohesionAnalyzer,
     ComplexityAnalyzer,
     CouplingAnalyzer,
+    FunctionGraphAnalyzer,
     ContextSpanAnalyzer,
     HotspotAnalyzer,
     SimilarityAnalyzer,
@@ -566,6 +574,12 @@ impl AnalyzeCommand {
             Self::Coupling(args) => {
                 let (path, format, path_filter) = args.into_parts();
                 CouplingAnalyzer::new()
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::FunctionGraph(args) => {
+                let (path, format, path_filter) = args.into_parts();
+                FunctionGraphAnalyzer::new()
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
@@ -1098,6 +1112,35 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.path, PathBuf::from("."));
         assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_function_graph_default_format_is_json() {
+        let cli = Cli::try_parse_from(["agent-lens", "analyze", "function-graph", "."])
+            .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
+            panic!("expected analyze function-graph");
+        };
+        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_function_graph_with_md_format() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "function-graph",
+            "src/lib.rs",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
+            panic!("expected analyze function-graph");
+        };
+        assert_eq!(args.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.format, OutputFormat::Md);
     }
 
     #[test]

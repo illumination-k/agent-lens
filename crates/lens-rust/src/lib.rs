@@ -18,7 +18,9 @@ mod coupling;
 mod parser;
 mod wrapper;
 
-pub use call_index::{CallSite, extract_call_sites};
+pub use call_index::{
+    CallIndexOptions, CallSite, extract_call_sites, extract_call_sites_with_options,
+};
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use coupling::{CouplingError, CrateModule, build_module_tree, extract_edges};

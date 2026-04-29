@@ -23,6 +23,8 @@
 //! Treat the result as guidance for an LLM, not as a precise call graph.
 
 use lens_domain::qualify;
+use proc_macro2::TokenStream;
+use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{Block, Expr, ExprCall, ExprMethodCall, Ident, ImplItem, Item, TraitItem};
@@ -39,6 +41,11 @@ pub struct CallSite {
     /// a plain path (e.g. `(closures())()`); such sites are still
     /// counted because they are calls, just not attributable to a name.
     pub callee_name: Option<String>,
+    /// Rendered callee path when the syntax exposes one. For free calls
+    /// this can be a qualified Rust path such as `crate::a::foo`; for
+    /// method calls it includes the receiver expression, e.g.
+    /// `self.inner.handle`.
+    pub callee_path: Option<String>,
     /// Qualified name of the function this call is written inside,
     /// e.g. `Service::handle`. `None` for calls at module scope (a
     /// `const` initialiser, a top-level `let` in a binary's `main`-less
@@ -48,19 +55,37 @@ pub struct CallSite {
     pub line: usize,
 }
 
+/// Filtering knobs for [`extract_call_sites_with_options`].
+///
+/// The default preserves [`extract_call_sites`]'s historical wrapper
+/// behaviour: skip `#[cfg(test)]` blocks so test scaffolding does not
+/// inflate reuse counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallIndexOptions {
+    pub include_cfg_test_blocks: bool,
+}
+
 /// Walk `source` and return every function/method call expression. See
 /// the module docstring for the heuristics this applies.
 pub fn extract_call_sites(source: &str) -> Result<Vec<CallSite>, RustParseError> {
+    extract_call_sites_with_options(source, CallIndexOptions::default())
+}
+
+/// [`extract_call_sites`] with explicit filtering options.
+pub fn extract_call_sites_with_options(
+    source: &str,
+    opts: CallIndexOptions,
+) -> Result<Vec<CallSite>, RustParseError> {
     let file = syn::parse_file(source)?;
-    let mut visitor = CallVisitor::default();
+    let mut visitor = CallVisitor::new(opts);
     for item in &file.items {
         visitor.visit_item_filtered(item);
     }
     Ok(visitor.into_sites())
 }
 
-#[derive(Default)]
 struct CallVisitor {
+    opts: CallIndexOptions,
     /// Stack of qualified caller names. The top of the stack is the
     /// nearest enclosing function — closures and nested `fn` items
     /// inherit their parent's name (refining that would require
@@ -75,6 +100,15 @@ struct CallVisitor {
 }
 
 impl CallVisitor {
+    fn new(opts: CallIndexOptions) -> Self {
+        Self {
+            opts,
+            callers: Vec::new(),
+            impl_owners: Vec::new(),
+            sites: Vec::new(),
+        }
+    }
+
     fn into_sites(self) -> Vec<CallSite> {
         self.sites
     }
@@ -86,7 +120,7 @@ impl CallVisitor {
     fn visit_item_filtered(&mut self, item: &Item) {
         match item {
             Item::Mod(item_mod) => {
-                if has_cfg_test(&item_mod.attrs) {
+                if !self.opts.include_cfg_test_blocks && has_cfg_test(&item_mod.attrs) {
                     return;
                 }
                 if let Some((_, items)) = &item_mod.content {
@@ -134,9 +168,10 @@ impl CallVisitor {
         self.callers.last().cloned()
     }
 
-    fn record(&mut self, callee_name: Option<String>, line: usize) {
+    fn record(&mut self, callee_name: Option<String>, callee_path: Option<String>, line: usize) {
         self.sites.push(CallSite {
             callee_name,
+            callee_path,
             caller_name: self.current_caller(),
             line,
         });
@@ -169,7 +204,8 @@ impl<'ast> Visit<'ast> for CallVisitor {
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
         let line = call.span().start().line;
         let callee_name = path_call_name(&call.func);
-        self.record(callee_name, line);
+        let callee_path = path_call_path(&call.func);
+        self.record(callee_name, callee_path, line);
         // Recurse into arguments and the callee expression so nested
         // calls get their own sites (e.g. `outer(inner())` records both).
         visit::visit_expr_call(self, call);
@@ -178,7 +214,9 @@ impl<'ast> Visit<'ast> for CallVisitor {
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
         let line = call.span().start().line;
         let callee_name = Some(call.method.to_string());
-        self.record(callee_name, line);
+        let receiver = render_tokens(call.receiver.as_ref());
+        let callee_path = Some(format!("{receiver}.{}", call.method));
+        self.record(callee_name, callee_path, line);
         visit::visit_expr_method_call(self, call);
     }
 }
@@ -195,6 +233,26 @@ fn path_call_name(expr: &Expr) -> Option<String> {
         Expr::Group(g) => path_call_name(&g.expr),
         _ => None,
     }
+}
+
+fn path_call_path(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Path(_) => Some(render_tokens(expr)),
+        Expr::Reference(r) => path_call_path(&r.expr),
+        Expr::Paren(p) => path_call_path(&p.expr),
+        Expr::Group(g) => path_call_path(&g.expr),
+        _ => None,
+    }
+}
+
+fn render_tokens<T: ToTokens>(node: &T) -> String {
+    let mut stream = TokenStream::new();
+    node.to_tokens(&mut stream);
+    let raw = stream.to_string();
+    raw.replace(" :: ", "::")
+        .replace(" . ", ".")
+        .replace(" ;", ";")
+        .replace("& ", "&")
 }
 
 #[cfg(test)]
@@ -294,6 +352,31 @@ mod tests {
         // `#[cfg(test)] mod tests` would otherwise inflate reuse
         // counts of helpers used only in tests.
         assert_eq!(names(&run(src)), [(Some("b"), Some("a"))]);
+    }
+
+    #[test]
+    fn options_can_include_cfg_test_modules() {
+        let src = "
+#[cfg(test)]
+mod tests {
+    fn helper() { target() }
+}
+";
+        let sites = extract_call_sites_with_options(
+            src,
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(names(&sites), [(Some("target"), Some("helper"))]);
+    }
+
+    #[test]
+    fn records_rendered_callee_path() {
+        let sites = run("fn a(x: T) { crate::other::foo(); x.bar(); }\n");
+        let paths: Vec<_> = sites.iter().map(|s| s.callee_path.as_deref()).collect();
+        assert_eq!(paths, [Some("crate::other::foo"), Some("x.bar")]);
     }
 
     #[test]
