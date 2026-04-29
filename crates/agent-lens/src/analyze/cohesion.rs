@@ -232,7 +232,7 @@ impl<'a> From<&'a CohesionUnit> for UnitView<'a> {
             start_line: unit.start_line,
             end_line: unit.end_line,
             method_count: unit.methods.len(),
-            lcom4: unit.lcom4(),
+            lcom4: unit.components.len(),
             lcom96: unit.lcom96,
             components,
             methods,

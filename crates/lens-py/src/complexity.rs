@@ -755,7 +755,7 @@ def add(a, b):
     s = a + b
     return s
 ");
-        let v = f.halstead_volume();
+        let v = f.halstead.volume();
         assert!(v.is_some());
         let mi = f.maintainability_index().unwrap();
         assert!((0.0..=100.0).contains(&mi));

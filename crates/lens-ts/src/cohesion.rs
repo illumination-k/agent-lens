@@ -801,7 +801,7 @@ class Counter {
 "#;
         let u = unit(src);
         assert_eq!(u.type_name, "Counter");
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         assert_eq!(u.methods.len(), 2);
     }
 
@@ -818,7 +818,7 @@ class Thing {
 }
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
     }
 
@@ -831,7 +831,7 @@ class Foo {
 }
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert_eq!(outer.calls, vec!["helper"]);
     }
@@ -848,7 +848,7 @@ class Foo {
 "#;
         let u = unit(src);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         for m in &u.methods {
             assert_ne!(m.name, "make", "static methods should be filtered");
         }
@@ -870,7 +870,7 @@ class Foo {
 "#;
         let u = unit(src);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -884,7 +884,7 @@ function other(): void {}
 function another(): void {}
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -897,7 +897,7 @@ class Foo {
 }
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         for m in &u.methods {
             assert_eq!(m.fields, vec!["#n"]);
         }
@@ -912,7 +912,7 @@ class Foo {
 }
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert_eq!(outer.calls, vec!["#helper"]);
     }
@@ -928,7 +928,7 @@ class Foo {
 "#;
         let u = unit(src);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -1015,7 +1015,7 @@ class Foo {
         let local = u.methods.iter().find(|m| m.name == "local").unwrap();
         assert!(external.fields.is_empty());
         assert_eq!(local.fields, vec!["tag"]);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -1053,7 +1053,7 @@ function get(): number { return counter; }
         assert!(matches!(u.kind, CohesionUnitKind::Module));
         assert_eq!(u.type_name, "<module>");
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -1068,7 +1068,7 @@ function record(s: string): void { log.push(s); }
 function dump(): string[] { return log; }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
     }
 
@@ -1085,7 +1085,7 @@ const get = (): number => counter;
 "#;
         let u = module_unit(src);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -1095,7 +1095,7 @@ function outer(): number { return helper(); }
 function helper(): number { return 1; }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert_eq!(outer.calls, vec!["helper"]);
     }
@@ -1116,7 +1116,7 @@ function shadowed(): number {
 }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -1130,7 +1130,7 @@ function reader(): string[] { return log; }
 function shadowed(log: string[]): string[] { return log; }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -1142,7 +1142,7 @@ function a(): void { console.log(1); }
 function b(): void { console.log(2); }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -1179,7 +1179,7 @@ namespace inner {
             .collect();
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "inner");
-        assert_eq!(module_units[0].lcom4(), 1);
+        assert_eq!(module_units[0].components.len(), 1);
     }
 
     #[test]
@@ -1194,7 +1194,7 @@ export function get(): number { return counter; }
 "#;
         let u = module_unit(src);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -1209,7 +1209,7 @@ function destructured(o: { tag: number }): number {
 }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     /// Regression for issue #66: a wrapper component that renders a
@@ -1225,7 +1225,7 @@ function Icon(): JSX.Element { return <svg />; }
 "#;
         let u = module_unit_for(src, Dialect::Tsx);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let wrapper = u.methods.iter().find(|m| m.name == "Wrapper").unwrap();
         assert_eq!(wrapper.calls, vec!["Icon"]);
     }
@@ -1241,7 +1241,7 @@ function Wrapper(): JSX.Element { return <Helper.Item />; }
 function Helper(): JSX.Element { return <span />; }
 "#;
         let u = module_unit_for(src, Dialect::Tsx);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let wrapper = u.methods.iter().find(|m| m.name == "Wrapper").unwrap();
         assert_eq!(wrapper.calls, vec!["Helper"]);
     }
@@ -1256,7 +1256,7 @@ function outer(xs: number[]): number[] { return xs.map(helper); }
 function helper(x: number): number { return x + 1; }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert_eq!(outer.calls, vec!["helper"]);
     }
@@ -1271,7 +1271,7 @@ function bundle() { return { helper }; }
 function helper(x: number): number { return x + 1; }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let bundle = u.methods.iter().find(|m| m.name == "bundle").unwrap();
         assert_eq!(bundle.calls, vec!["helper"]);
     }
@@ -1293,7 +1293,7 @@ function caller(): number { return helper(); }
         let u = module_unit(src);
         // `outer` only sees its local `helper`, so it must remain its
         // own component; `caller` and `helper` connect via the call.
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert!(outer.calls.is_empty());
     }
@@ -1311,7 +1311,7 @@ function div(): number { return 0; }
         let u = module_unit_for(src, Dialect::Tsx);
         // `Wrapper` and `div` should stay disconnected — `<div />`
         // here is the HTML element, not a reference to the sibling.
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         let wrapper = u.methods.iter().find(|m| m.name == "Wrapper").unwrap();
         assert!(wrapper.calls.is_empty());
     }

@@ -107,11 +107,6 @@ impl FunctionComplexity {
         self.end_line.saturating_sub(self.start_line) + 1
     }
 
-    /// Halstead Volume convenience accessor. See [`HalsteadCounts::volume`].
-    pub fn halstead_volume(&self) -> Option<f64> {
-        self.halstead.volume()
-    }
-
     /// Maintainability Index, normalised to `[0, 100]`.
     ///
     /// Computes the original Coleman-Oman formula
@@ -354,7 +349,7 @@ mod tests {
             delta in 0usize..10_000,
         ) {
             let f = fc(cc, 0, 0, h, (start, start + delta));
-            let undefined = f.halstead_volume().is_none() || f.loc() == 0;
+            let undefined = f.halstead.volume().is_none() || f.loc() == 0;
             prop_assert_eq!(f.maintainability_index().is_none(), undefined);
         }
     }

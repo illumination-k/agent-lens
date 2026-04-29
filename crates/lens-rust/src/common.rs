@@ -30,10 +30,9 @@ pub(crate) struct FnSite<'a> {
     /// `Self` type for `impl Foo` methods, or the trait name for trait
     /// default methods. `None` for free fns at module scope.
     pub(crate) owner: Option<&'a str>,
-    /// Trait being implemented for `impl Trait for Type` methods, and
-    /// the trait name itself for trait default methods. `None` for
-    /// inherent impls and free fns.
-    pub(crate) trait_name: Option<&'a str>,
+    /// True only for methods inside `impl Trait for Type` blocks. Trait
+    /// default methods are not trait impl methods.
+    pub(crate) is_trait_impl: bool,
     pub(crate) is_test: bool,
     pub(crate) sig: &'a Signature,
     pub(crate) block: &'a Block,
@@ -79,7 +78,7 @@ where
             let is_test = in_test_context || is_test_function(&item_fn.attrs);
             visit(FnSite {
                 owner: None,
-                trait_name: None,
+                is_trait_impl: false,
                 is_test,
                 sig: &item_fn.sig,
                 block: &item_fn.block,
@@ -120,16 +119,13 @@ where
     F: FnMut(FnSite<'_>),
 {
     let owner = type_path_last_ident(&item_impl.self_ty);
-    let trait_name = item_impl
-        .trait_
-        .as_ref()
-        .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
+    let is_trait_impl = item_impl.trait_.is_some();
     for impl_item in &item_impl.items {
         if let ImplItem::Fn(method) = impl_item {
             let is_test = in_test_context || is_test_function(&method.attrs);
             visit(FnSite {
                 owner: owner.as_deref(),
-                trait_name: trait_name.as_deref(),
+                is_trait_impl,
                 is_test,
                 sig: &method.sig,
                 block: &method.block,
@@ -151,7 +147,7 @@ where
             let is_test = in_test_context || is_test_function(&method.attrs);
             visit(FnSite {
                 owner: Some(&owner),
-                trait_name: Some(&owner),
+                is_trait_impl: false,
                 is_test,
                 sig: &method.sig,
                 block,

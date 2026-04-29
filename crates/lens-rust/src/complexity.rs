@@ -568,7 +568,7 @@ fn add(a: i32, b: i32) -> i32 {
     s
 }
 "#);
-        let v = f.halstead_volume();
+        let v = f.halstead.volume();
         assert!(v.is_some(), "expected Volume to be defined");
         // MI also defined and within range.
         let mi = f.maintainability_index().unwrap();

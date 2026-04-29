@@ -226,10 +226,6 @@ impl HashFamily {
         let b = self.b.get(idx).copied().unwrap_or(0);
         a.wrapping_mul(x).wrapping_add(b)
     }
-
-    fn len(&self) -> usize {
-        self.a.len()
-    }
 }
 
 fn next_lcg(s: u64) -> u64 {
@@ -241,7 +237,7 @@ fn next_lcg(s: u64) -> u64 {
 }
 
 fn minhash_signature(features: &HashSet<u64>, family: &HashFamily) -> Vec<u64> {
-    let mut sig = vec![u64::MAX; family.len()];
+    let mut sig = vec![u64::MAX; family.a.len()];
     for &f in features {
         for (i, slot) in sig.iter_mut().enumerate() {
             let h = family.hash_at(i, f);

@@ -758,7 +758,7 @@ function add(a: number, b: number): number {
     return s;
 }
 "#);
-        let v = f.halstead_volume();
+        let v = f.halstead.volume();
         assert!(v.is_some(), "expected Volume to be defined");
         let mi = f.maintainability_index().unwrap();
         assert!((0.0..=100.0).contains(&mi), "MI out of bounds: {mi}");

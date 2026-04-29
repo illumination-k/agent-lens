@@ -740,7 +740,7 @@ class Counter:
 ";
         let u = unit(src);
         assert_eq!(u.type_name, "Counter");
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         assert_eq!(u.methods.len(), 2);
     }
 
@@ -758,7 +758,7 @@ class Thing:
         return self.log
 ";
         let u = unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
     }
 
@@ -775,7 +775,7 @@ class Foo:
         return 1
 ";
         let u = unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert_eq!(outer.calls, vec!["helper"]);
     }
@@ -794,7 +794,7 @@ class Foo:
 ";
         let u = unit(src);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         for m in &u.methods {
             assert_ne!(m.name, "make", "static methods should be filtered");
         }
@@ -882,7 +882,7 @@ class Foo:
 ";
         let u = unit(src);
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -895,7 +895,7 @@ class Foo:
         another()
 ";
         let u = unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -912,7 +912,7 @@ class Foo:
         let local = u.methods.iter().find(|m| m.name == "local").unwrap();
         assert!(external.fields.is_empty());
         assert_eq!(local.fields, vec!["tag"]);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[rstest]
@@ -986,7 +986,7 @@ class Service:
         let u = unit(src);
         let names: Vec<&str> = u.methods.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, ["concrete", "also_concrete"]);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -1040,7 +1040,7 @@ class Foo:
         pass
 ";
         let u = unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     // ---------- Module-level cohesion ----------
@@ -1061,7 +1061,7 @@ def get():
         assert!(matches!(u.kind, CohesionUnitKind::Module));
         assert_eq!(u.type_name, "<module>");
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -1084,7 +1084,7 @@ def dump():
     return log
 ";
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
     }
 
@@ -1098,7 +1098,7 @@ def helper():
     return 1
 ";
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert_eq!(outer.calls, vec!["helper"]);
     }
@@ -1120,7 +1120,7 @@ def shadowed():
     return counter
 ";
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -1140,7 +1140,7 @@ def writes():
     counter = 1
 ";
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -1191,7 +1191,7 @@ def b():
     print(2)
 ";
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
