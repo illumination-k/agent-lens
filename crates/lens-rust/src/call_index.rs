@@ -22,12 +22,16 @@
 //!
 //! Treat the result as guidance for an LLM, not as a precise call graph.
 
+use std::collections::BTreeMap;
+
 use lens_domain::qualify;
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, Expr, ExprCall, ExprMethodCall, Ident, ImplItem, Item, TraitItem};
+use syn::{
+    Block, Expr, ExprCall, ExprMethodCall, Ident, ImplItem, Item, ItemUse, TraitItem, UseTree,
+};
 
 use crate::attrs::has_cfg_test;
 use crate::common::type_path_last_ident;
@@ -51,8 +55,35 @@ pub struct CallSite {
     /// `const` initialiser, a top-level `let` in a binary's `main`-less
     /// stub, etc.).
     pub caller_name: Option<String>,
+    /// Absolute lexical module containing this call site.
+    pub module: String,
+    /// Absolute lexical name of the enclosing function, rooted at `crate`.
+    pub caller_qualified_name: Option<String>,
+    /// `impl` self-type or trait name of the enclosing function, when known.
+    pub caller_impl_owner: Option<String>,
+    /// Whether this was a free/path call or a receiver method call.
+    pub call_kind: CallKind,
+    /// Lexically visible `use` aliases at this call site.
+    pub visible_aliases: Vec<UseAlias>,
     /// 1-based line number of the call expression.
     pub line: usize,
+}
+
+/// Syntactic shape of a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    /// `foo()`, `crate::a::foo()`, `Self::foo()`, etc.
+    Path,
+    /// `receiver.foo()`. The receiver type is unknown without semantic
+    /// analysis, so function-graph resolution keeps these unresolved.
+    ReceiverMethod,
+}
+
+/// One imported local name visible at a call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseAlias {
+    pub alias: String,
+    pub target: String,
 }
 
 /// Filtering knobs for [`extract_call_sites_with_options`].
@@ -76,12 +107,27 @@ pub fn extract_call_sites_with_options(
     source: &str,
     opts: CallIndexOptions,
 ) -> Result<Vec<CallSite>, RustParseError> {
+    extract_call_sites_with_options_and_base_module(source, opts, "crate")
+}
+
+/// [`extract_call_sites_with_options`] with an explicit lexical module
+/// assigned to the file body. Inline modules below it extend that path.
+pub fn extract_call_sites_with_options_and_base_module(
+    source: &str,
+    opts: CallIndexOptions,
+    base_module: &str,
+) -> Result<Vec<CallSite>, RustParseError> {
     let file = syn::parse_file(source)?;
-    let mut visitor = CallVisitor::new(opts);
-    for item in &file.items {
-        visitor.visit_item_filtered(item);
-    }
+    let mut visitor = CallVisitor::new(opts, base_module);
+    visitor.visit_items(&file.items);
     Ok(visitor.into_sites())
+}
+
+#[derive(Debug, Clone)]
+struct CallerContext {
+    name: String,
+    qualified_name: String,
+    impl_owner: Option<String>,
 }
 
 struct CallVisitor {
@@ -91,20 +137,25 @@ struct CallVisitor {
     /// inherit their parent's name (refining that would require
     /// minting synthetic names like `outer::{closure#1}`, which buys
     /// no agent signal today).
-    callers: Vec<String>,
+    callers: Vec<CallerContext>,
+    /// Lexical module stack. The top is the module currently being walked.
+    modules: Vec<String>,
     /// Stack of `impl` self-type names so methods inside `impl Foo`
     /// can be qualified as `Foo::method`. Pushed on entry to
     /// `Item::Impl` and popped on exit.
     impl_owners: Vec<Option<String>>,
+    alias_scopes: Vec<BTreeMap<String, String>>,
     sites: Vec<CallSite>,
 }
 
 impl CallVisitor {
-    fn new(opts: CallIndexOptions) -> Self {
+    fn new(opts: CallIndexOptions, base_module: &str) -> Self {
         Self {
             opts,
             callers: Vec::new(),
+            modules: vec![base_module.to_owned()],
             impl_owners: Vec::new(),
+            alias_scopes: Vec::new(),
             sites: Vec::new(),
         }
     }
@@ -117,6 +168,21 @@ impl CallVisitor {
     /// Free items are dispatched via the standard visitor; the early
     /// check is needed because `syn::visit::Visit` does not expose a
     /// "skip this subtree" hook.
+    fn visit_items(&mut self, items: &[Item]) {
+        self.alias_scopes.push(BTreeMap::new());
+        for item in items {
+            if let Item::Use(item_use) = item {
+                self.add_aliases_from_use(item_use);
+            }
+        }
+        for item in items {
+            if !matches!(item, Item::Use(_)) {
+                self.visit_item_filtered(item);
+            }
+        }
+        self.alias_scopes.pop();
+    }
+
     fn visit_item_filtered(&mut self, item: &Item) {
         match item {
             Item::Mod(item_mod) => {
@@ -124,9 +190,14 @@ impl CallVisitor {
                     return;
                 }
                 if let Some((_, items)) = &item_mod.content {
-                    for nested in items {
-                        self.visit_item_filtered(nested);
-                    }
+                    let outer_alias_scopes = std::mem::take(&mut self.alias_scopes);
+                    self.modules.push(qualify_module(
+                        self.current_module(),
+                        &item_mod.ident.to_string(),
+                    ));
+                    self.visit_items(items);
+                    self.modules.pop();
+                    self.alias_scopes = outer_alias_scopes;
                 }
             }
             Item::Impl(item_impl) => {
@@ -146,6 +217,7 @@ impl CallVisitor {
                 self.impl_owners.pop();
             }
             Item::Fn(item_fn) => self.visit_block_in_fn_scope(&item_fn.sig.ident, &item_fn.block),
+            Item::Use(item_use) => self.add_aliases_from_use(item_use),
             other => visit::visit_item(self, other),
         }
     }
@@ -155,7 +227,15 @@ impl CallVisitor {
     /// arms — both used to spell this loop out themselves.
     fn visit_block_in_fn_scope(&mut self, ident: &Ident, block: &Block) {
         let name = qualify(self.current_owner(), &ident.to_string());
-        self.callers.push(name);
+        let qualified_name = self.current_owner().map_or_else(
+            || qualify_module(self.current_module(), &ident.to_string()),
+            |owner| qualify_module(self.current_module(), &format!("{owner}::{ident}")),
+        );
+        self.callers.push(CallerContext {
+            name,
+            qualified_name,
+            impl_owner: self.current_owner().map(ToOwned::to_owned),
+        });
         visit::visit_block(self, block);
         self.callers.pop();
     }
@@ -164,21 +244,66 @@ impl CallVisitor {
         self.impl_owners.last().and_then(|o| o.as_deref())
     }
 
-    fn current_caller(&self) -> Option<String> {
+    fn current_module(&self) -> &str {
+        self.modules.last().map(String::as_str).unwrap_or("crate")
+    }
+
+    fn current_caller(&self) -> Option<CallerContext> {
         self.callers.last().cloned()
     }
 
-    fn record(&mut self, callee_name: Option<String>, callee_path: Option<String>, line: usize) {
+    fn current_aliases(&self) -> Vec<UseAlias> {
+        let mut aliases = BTreeMap::new();
+        for scope in &self.alias_scopes {
+            for (alias, target) in scope {
+                aliases.insert(alias.clone(), target.clone());
+            }
+        }
+        aliases
+            .into_iter()
+            .map(|(alias, target)| UseAlias { alias, target })
+            .collect()
+    }
+
+    fn add_aliases_from_use(&mut self, item_use: &ItemUse) {
+        let aliases = use_aliases_for(self.current_module(), &item_use.tree);
+        let Some(scope) = self.alias_scopes.last_mut() else {
+            return;
+        };
+        for alias in aliases {
+            scope.insert(alias.alias, alias.target);
+        }
+    }
+
+    fn record(
+        &mut self,
+        callee_name: Option<String>,
+        callee_path: Option<String>,
+        call_kind: CallKind,
+        line: usize,
+    ) {
+        let caller = self.current_caller();
         self.sites.push(CallSite {
             callee_name,
             callee_path,
-            caller_name: self.current_caller(),
+            caller_name: caller.as_ref().map(|c| c.name.clone()),
+            module: self.current_module().to_owned(),
+            caller_qualified_name: caller.as_ref().map(|c| c.qualified_name.clone()),
+            caller_impl_owner: caller.and_then(|c| c.impl_owner),
+            call_kind,
+            visible_aliases: self.current_aliases(),
             line,
         });
     }
 }
 
 impl<'ast> Visit<'ast> for CallVisitor {
+    fn visit_block(&mut self, block: &'ast Block) {
+        self.alias_scopes.push(BTreeMap::new());
+        visit::visit_block(self, block);
+        self.alias_scopes.pop();
+    }
+
     fn visit_item(&mut self, item: &'ast Item) {
         self.visit_item_filtered(item);
     }
@@ -205,7 +330,7 @@ impl<'ast> Visit<'ast> for CallVisitor {
         let line = call.span().start().line;
         let callee_name = path_call_name(&call.func);
         let callee_path = path_call_path(&call.func);
-        self.record(callee_name, callee_path, line);
+        self.record(callee_name, callee_path, CallKind::Path, line);
         // Recurse into arguments and the callee expression so nested
         // calls get their own sites (e.g. `outer(inner())` records both).
         visit::visit_expr_call(self, call);
@@ -216,8 +341,126 @@ impl<'ast> Visit<'ast> for CallVisitor {
         let callee_name = Some(call.method.to_string());
         let receiver = render_tokens(call.receiver.as_ref());
         let callee_path = Some(format!("{receiver}.{}", call.method));
-        self.record(callee_name, callee_path, line);
+        self.record(callee_name, callee_path, CallKind::ReceiverMethod, line);
         visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn use_aliases_for(current_module: &str, tree: &UseTree) -> Vec<UseAlias> {
+    let mut aliases = Vec::new();
+    let mut prefix = Vec::new();
+    walk_use_tree(current_module, tree, &mut prefix, &mut aliases);
+    aliases
+}
+
+fn walk_use_tree(
+    current_module: &str,
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    aliases: &mut Vec<UseAlias>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            walk_use_tree(current_module, &path.tree, prefix, aliases);
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            record_use_leaf(
+                current_module,
+                prefix,
+                &name.ident.to_string(),
+                None,
+                aliases,
+            );
+        }
+        UseTree::Rename(rename) => {
+            record_use_leaf(
+                current_module,
+                prefix,
+                &rename.ident.to_string(),
+                Some(rename.rename.to_string()),
+                aliases,
+            );
+        }
+        UseTree::Glob(_) => {
+            if let Some(target) = absolutize_use_segments(current_module, prefix) {
+                aliases.push(UseAlias {
+                    alias: "*".to_owned(),
+                    target,
+                });
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                walk_use_tree(current_module, item, prefix, aliases);
+            }
+        }
+    }
+}
+
+fn record_use_leaf(
+    current_module: &str,
+    prefix: &[String],
+    tail: &str,
+    rename: Option<String>,
+    aliases: &mut Vec<UseAlias>,
+) {
+    let mut target_segments = prefix.to_vec();
+    let alias = if tail == "self" {
+        let Some(alias) = prefix.last().cloned() else {
+            return;
+        };
+        alias
+    } else {
+        target_segments.push(tail.to_owned());
+        rename.unwrap_or_else(|| tail.to_owned())
+    };
+    if let Some(target) = absolutize_use_segments(current_module, &target_segments) {
+        aliases.push(UseAlias { alias, target });
+    }
+}
+
+fn absolutize_use_segments(current_module: &str, segments: &[String]) -> Option<String> {
+    let first = segments.first()?;
+    match first.as_str() {
+        "crate" => Some(segments.join("::")),
+        "self" => {
+            if segments.len() == 1 {
+                Some(current_module.to_owned())
+            } else {
+                let mut absolute = module_segments(current_module);
+                absolute.extend(segments.iter().skip(1).cloned());
+                Some(absolute.join("::"))
+            }
+        }
+        "super" => {
+            let mut absolute = module_segments(current_module);
+            for segment in segments {
+                if segment == "super" {
+                    if absolute.len() <= 1 {
+                        return None;
+                    }
+                    absolute.pop();
+                } else {
+                    absolute.push(segment.clone());
+                }
+            }
+            Some(absolute.join("::"))
+        }
+        _ => None,
+    }
+}
+
+fn module_segments(module: &str) -> Vec<String> {
+    module.split("::").map(ToOwned::to_owned).collect()
+}
+
+fn qualify_module(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{module}::{name}")
     }
 }
 
@@ -377,6 +620,114 @@ mod tests {
         let sites = run("fn a(x: T) { crate::other::foo(); x.bar(); }\n");
         let paths: Vec<_> = sites.iter().map(|s| s.callee_path.as_deref()).collect();
         assert_eq!(paths, [Some("crate::other::foo"), Some("x.bar")]);
+    }
+
+    #[test]
+    fn records_module_caller_and_visible_aliases() {
+        let src = r#"
+mod b {
+    use crate::a::parse;
+    fn caller() { parse(); }
+}
+"#;
+        let sites = extract_call_sites_with_options_and_base_module(
+            src,
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+            "crate::root",
+        )
+        .unwrap();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].module, "crate::root::b");
+        assert_eq!(
+            sites[0].caller_qualified_name.as_deref(),
+            Some("crate::root::b::caller"),
+        );
+        assert_eq!(
+            sites[0].visible_aliases,
+            [UseAlias {
+                alias: "parse".to_owned(),
+                target: "crate::a::parse".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn nested_inline_modules_do_not_inherit_parent_use_aliases() {
+        let src = r#"
+use crate::a::parse;
+mod b {
+    fn caller() { parse(); }
+}
+"#;
+        let sites = extract_call_sites_with_options_and_base_module(
+            src,
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+            "crate",
+        )
+        .unwrap();
+        assert_eq!(sites.len(), 1);
+        assert!(sites[0].visible_aliases.is_empty());
+    }
+
+    #[test]
+    fn block_scoped_use_aliases_are_visible_only_inside_that_block() {
+        let src = r#"
+fn caller() {
+    {
+        use crate::a::parse;
+        parse();
+    }
+    parse();
+}
+"#;
+        let sites = extract_call_sites_with_options_and_base_module(
+            src,
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+            "crate",
+        )
+        .unwrap();
+        assert_eq!(sites.len(), 2);
+        assert_eq!(
+            sites[0].visible_aliases,
+            [UseAlias {
+                alias: "parse".to_owned(),
+                target: "crate::a::parse".to_owned(),
+            }]
+        );
+        assert!(sites[1].visible_aliases.is_empty());
+    }
+
+    #[test]
+    fn use_absolutization_handles_self_super_and_root_boundaries() {
+        assert_eq!(
+            absolutize_use_segments("crate::m", &["self".to_owned(), "parse".to_owned()])
+                .as_deref(),
+            Some("crate::m::parse"),
+        );
+        assert_eq!(
+            absolutize_use_segments("crate::a::b", &["super".to_owned(), "parse".to_owned()])
+                .as_deref(),
+            Some("crate::a::parse"),
+        );
+        assert_eq!(
+            absolutize_use_segments(
+                "crate::a::b",
+                &["super".to_owned(), "super".to_owned(), "parse".to_owned()],
+            )
+            .as_deref(),
+            Some("crate::parse"),
+        );
+        assert_eq!(
+            absolutize_use_segments("crate", &["super".to_owned(), "parse".to_owned()]),
+            None,
+        );
+        assert_eq!(module_segments("crate::a"), ["crate", "a"]);
     }
 
     #[test]

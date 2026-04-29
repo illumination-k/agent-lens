@@ -19,11 +19,12 @@ mod parser;
 mod wrapper;
 
 pub use call_index::{
-    CallIndexOptions, CallSite, extract_call_sites, extract_call_sites_with_options,
+    CallIndexOptions, CallKind, CallSite, UseAlias, extract_call_sites,
+    extract_call_sites_with_options, extract_call_sites_with_options_and_base_module,
 };
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use coupling::{CouplingError, CrateModule, build_module_tree, extract_edges};
 pub use lens_domain::WrapperFinding;
-pub use parser::{RustParseError, RustParser};
+pub use parser::{RustFunctionDef, RustParseError, RustParser, extract_functions_with_modules};
 pub use wrapper::find_wrappers;

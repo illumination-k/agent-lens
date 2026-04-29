@@ -24,11 +24,39 @@ impl RustParser {
     }
 }
 
+/// A Rust function annotated with its lexical module context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustFunctionDef {
+    /// The language-agnostic function payload used by existing analyzers.
+    pub function: FunctionDef,
+    /// Bare function or method name as written in the signature.
+    pub name: String,
+    /// Absolute lexical name rooted at `crate`, e.g. `crate::a::parse`
+    /// or `crate::a::Service::handle`.
+    pub qualified_name: String,
+    /// Absolute lexical module path rooted at `crate`.
+    pub module: String,
+    /// `impl` self-type or trait name for methods, `None` for free functions.
+    pub impl_owner: Option<String>,
+}
+
 /// Parse failures surfaced by [`RustParser`].
 #[derive(Debug, thiserror::Error)]
 pub enum RustParseError {
     #[error("failed to parse Rust source: {0}")]
     Syn(#[from] syn::Error),
+}
+
+/// Extract functions while preserving the caller-provided file module as
+/// the base for inline modules.
+pub fn extract_functions_with_modules(
+    source: &str,
+    base_module: &str,
+) -> Result<Vec<RustFunctionDef>, RustParseError> {
+    let file = syn::parse_file(source)?;
+    let mut out = Vec::new();
+    extract_module_functions(&file.items, base_module, false, &mut out);
+    Ok(out)
 }
 
 impl LanguageParser for RustParser {
@@ -62,6 +90,139 @@ fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, Rus
         });
     });
     Ok(out)
+}
+
+fn extract_module_functions(
+    items: &[syn::Item],
+    module: &str,
+    in_test_context: bool,
+    out: &mut Vec<RustFunctionDef>,
+) {
+    for item in items {
+        extract_item_functions(item, module, in_test_context, out);
+    }
+}
+
+fn extract_item_functions(
+    item: &syn::Item,
+    module: &str,
+    in_test_context: bool,
+    out: &mut Vec<RustFunctionDef>,
+) {
+    match item {
+        syn::Item::Fn(item_fn) => {
+            let name = item_fn.sig.ident.to_string();
+            let function = FunctionDef {
+                name: name.clone(),
+                start_line: item_fn.sig.span().start().line,
+                end_line: item_fn.block.span().end().line,
+                is_test: in_test_context || crate::attrs::is_test_function(&item_fn.attrs),
+                tree: token_stream_to_tree("Block", item_fn.block.to_token_stream()),
+            };
+            out.push(RustFunctionDef {
+                function,
+                qualified_name: qualify_module(module, &name),
+                module: module.to_owned(),
+                impl_owner: None,
+                name,
+            });
+        }
+        syn::Item::Impl(item_impl) => {
+            let item_is_test = crate::attrs::has_cfg_test(&item_impl.attrs);
+            extract_impl_functions(item_impl, module, in_test_context || item_is_test, out);
+        }
+        syn::Item::Trait(item_trait) => {
+            let item_is_test = crate::attrs::has_cfg_test(&item_trait.attrs);
+            extract_trait_functions(item_trait, module, in_test_context || item_is_test, out);
+        }
+        syn::Item::Mod(item_mod) => {
+            if let Some((_, nested_items)) = &item_mod.content {
+                let nested_module = qualify_module(module, &item_mod.ident.to_string());
+                let item_is_test = crate::attrs::has_cfg_test(&item_mod.attrs);
+                extract_module_functions(
+                    nested_items,
+                    &nested_module,
+                    in_test_context || item_is_test,
+                    out,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_impl_functions(
+    item_impl: &syn::ItemImpl,
+    module: &str,
+    in_test_context: bool,
+    out: &mut Vec<RustFunctionDef>,
+) {
+    let owner = crate::common::type_path_last_ident(&item_impl.self_ty);
+    for impl_item in &item_impl.items {
+        let syn::ImplItem::Fn(method) = impl_item else {
+            continue;
+        };
+        let name = method.sig.ident.to_string();
+        let function_name = qualify_name(owner.as_deref(), &name);
+        let qualified_name = owner.as_ref().map_or_else(
+            || qualify_module(module, &name),
+            |owner| qualify_module(module, &format!("{owner}::{name}")),
+        );
+        let function = FunctionDef {
+            name: function_name,
+            start_line: method.sig.span().start().line,
+            end_line: method.block.span().end().line,
+            is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
+            tree: token_stream_to_tree("Block", method.block.to_token_stream()),
+        };
+        out.push(RustFunctionDef {
+            function,
+            qualified_name,
+            module: module.to_owned(),
+            impl_owner: owner.clone(),
+            name,
+        });
+    }
+}
+
+fn extract_trait_functions(
+    item_trait: &syn::ItemTrait,
+    module: &str,
+    in_test_context: bool,
+    out: &mut Vec<RustFunctionDef>,
+) {
+    let owner = item_trait.ident.to_string();
+    for trait_item in &item_trait.items {
+        let syn::TraitItem::Fn(method) = trait_item else {
+            continue;
+        };
+        let Some(block) = &method.default else {
+            continue;
+        };
+        let name = method.sig.ident.to_string();
+        let function = FunctionDef {
+            name: qualify_name(Some(&owner), &name),
+            start_line: method.sig.span().start().line,
+            end_line: block.span().end().line,
+            is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
+            tree: token_stream_to_tree("Block", block.to_token_stream()),
+        };
+        out.push(RustFunctionDef {
+            function,
+            qualified_name: qualify_module(module, &format!("{owner}::{name}")),
+            module: module.to_owned(),
+            impl_owner: Some(owner.clone()),
+            name,
+        });
+    }
+}
+
+fn qualify_module(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{module}::{name}")
+    }
 }
 
 fn token_stream_to_tree(label: &str, stream: TokenStream) -> TreeNode {
@@ -175,6 +336,82 @@ mod inner {
         let funcs = parse_functions(src);
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name, "hidden");
+    }
+
+    #[test]
+    fn module_aware_extraction_preserves_lexical_qualified_names() {
+        let src = r#"
+mod inner {
+    fn parse() {}
+    struct S;
+    impl S {
+        fn call(&self) {}
+    }
+}
+"#;
+        let funcs = extract_functions_with_modules(src, "crate::outer").unwrap();
+        let names: Vec<_> = funcs
+            .iter()
+            .map(|f| {
+                (
+                    f.name.as_str(),
+                    f.qualified_name.as_str(),
+                    f.module.as_str(),
+                    f.impl_owner.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (
+                    "parse",
+                    "crate::outer::inner::parse",
+                    "crate::outer::inner",
+                    None
+                ),
+                (
+                    "call",
+                    "crate::outer::inner::S::call",
+                    "crate::outer::inner",
+                    Some("S"),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn module_aware_extraction_propagates_test_contexts() {
+        let src = r#"
+#[test]
+fn direct_test() {}
+
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+    struct Bag;
+    impl Bag {
+        fn fixture() {}
+    }
+    trait Harness {
+        fn default_helper() {}
+    }
+}
+"#;
+        let funcs = extract_functions_with_modules(src, "crate").unwrap();
+        let flags: Vec<_> = funcs
+            .iter()
+            .map(|f| (f.qualified_name.as_str(), f.function.is_test))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("crate::direct_test", true),
+                ("crate::tests::helper", true),
+                ("crate::tests::Bag::fixture", true),
+                ("crate::tests::Harness::default_helper", true),
+            ]
+        );
     }
 
     #[test]
