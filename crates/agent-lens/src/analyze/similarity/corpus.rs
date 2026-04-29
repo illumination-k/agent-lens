@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{FunctionDef, TestFilter};
+use lens_domain::FunctionDef;
 use rayon::prelude::*;
 use tracing::debug;
 
+use super::FunctionSelection;
 use super::PROFILE_TARGET;
 use super::extract::extract_functions;
 use crate::analyze::{
@@ -20,6 +21,7 @@ pub(super) struct OwnedFunction {
     pub(super) file: PathBuf,
     /// Display path (relative to the walk root for directory mode).
     pub(super) rel_path: String,
+    pub(super) is_test: bool,
     pub(super) def: FunctionDef,
 }
 
@@ -29,9 +31,9 @@ pub(super) struct OwnedFunction {
 pub(super) fn collect_corpus(
     path: &Path,
     path_filter: &AnalyzePathFilter,
-    test_filter: TestFilter,
+    selection: FunctionSelection,
 ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
-    let collection_filter = if test_filter == TestFilter::Only {
+    let collection_filter = if selection == FunctionSelection::OnlyTests {
         path_filter.clone().with_only_tests(false)
     } else {
         path_filter.clone()
@@ -43,13 +45,8 @@ pub(super) fn collect_corpus(
     let parsed: Vec<Vec<OwnedFunction>> = files
         .par_iter()
         .map(|source_file| {
-            let file_filter =
-                if test_filter == TestFilter::Only && filter.is_test_path(&source_file.path) {
-                    TestFilter::All
-                } else {
-                    test_filter
-                };
-            collect_file(source_file, file_filter)
+            let path_is_test = filter.is_test_path(&source_file.path);
+            collect_file(source_file, selection, path_is_test)
         })
         .collect::<Result<_, _>>()?;
 
@@ -68,17 +65,22 @@ pub(super) fn collect_corpus(
 
 fn collect_file(
     file: &SourceFile,
-    test_filter: TestFilter,
+    selection: FunctionSelection,
+    path_is_test: bool,
 ) -> Result<Vec<OwnedFunction>, AnalyzerError> {
     let started = Instant::now();
     let (lang, source) = read_source(&file.path)?;
-    let funcs = extract_functions(lang, &source, test_filter)?;
+    let funcs = extract_functions(lang, &source)?;
     let out: Vec<_> = funcs
         .into_iter()
-        .map(|def| OwnedFunction {
-            file: file.path.clone(),
-            rel_path: file.display_path.clone(),
-            def,
+        .filter_map(|def| {
+            let is_test = def.is_test || path_is_test;
+            selection.includes(is_test).then(|| OwnedFunction {
+                file: file.path.clone(),
+                rel_path: file.display_path.clone(),
+                is_test,
+                def,
+            })
         })
         .collect();
     debug!(

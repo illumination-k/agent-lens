@@ -31,6 +31,9 @@ pub struct FunctionDef {
     pub start_line: usize,
     /// 1-based inclusive end line.
     pub end_line: usize,
+    /// Whether the language adapter classified this function-shaped item as
+    /// test code from source-level syntax or naming conventions.
+    pub is_test: bool,
     pub tree: TreeNode,
 }
 
@@ -46,6 +49,7 @@ impl FunctionDef {
     ///     name: "f".into(),
     ///     start_line: 5,
     ///     end_line: 10,
+    ///     is_test: false,
     ///     tree: TreeNode::leaf("Block"),
     /// };
     /// assert_eq!(f.line_count(), 6);
@@ -58,30 +62,6 @@ impl FunctionDef {
 impl LshTree for FunctionDef {
     fn tree(&self) -> &TreeNode {
         &self.tree
-    }
-}
-
-/// Selection policy for function extractors that can identify test
-/// scaffolding.
-///
-/// Extractors should compute the language-specific `is_test` label once per
-/// function-shaped item, then pass it through [`TestFilter::includes`].
-/// `All` is intentionally the default so existing callers get no filtering.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum TestFilter {
-    #[default]
-    All,
-    Exclude,
-    Only,
-}
-
-impl TestFilter {
-    pub fn includes(self, is_test: bool) -> bool {
-        match self {
-            Self::All => true,
-            Self::Exclude => !is_test,
-            Self::Only => is_test,
-        }
     }
 }
 
@@ -555,23 +535,12 @@ mod tests {
     use super::*;
     use crate::tree::TreeNode;
 
-    #[test]
-    fn test_filter_includes_matches_truth_table() {
-        assert!(TestFilter::All.includes(false));
-        assert!(TestFilter::All.includes(true));
-
-        assert!(TestFilter::Exclude.includes(false));
-        assert!(!TestFilter::Exclude.includes(true));
-
-        assert!(!TestFilter::Only.includes(false));
-        assert!(TestFilter::Only.includes(true));
-    }
-
     fn def(name: &str, tree: TreeNode) -> FunctionDef {
         FunctionDef {
             name: name.to_owned(),
             start_line: 1,
             end_line: 10,
+            is_test: false,
             tree,
         }
     }
@@ -613,6 +582,7 @@ mod tests {
             name: "f".into(),
             start_line: 5,
             end_line: 10,
+            is_test: false,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 6);
@@ -624,6 +594,7 @@ mod tests {
             name: "f".into(),
             start_line: 7,
             end_line: 7,
+            is_test: false,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);
@@ -635,6 +606,7 @@ mod tests {
             name: "f".into(),
             start_line: 10,
             end_line: 5,
+            is_test: false,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);

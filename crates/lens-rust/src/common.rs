@@ -5,7 +5,6 @@
 //! ladder; consolidating them here cuts the structural duplication and
 //! means a future fix lands in one place.
 
-use lens_domain::TestFilter;
 use syn::{Block, ImplItem, Item, ItemImpl, ItemTrait, Signature, TraitItem, Type};
 
 use crate::attrs::{has_cfg_test, is_test_function};
@@ -35,6 +34,7 @@ pub(crate) struct FnSite<'a> {
     /// the trait name itself for trait default methods. `None` for
     /// inherent impls and free fns.
     pub(crate) trait_name: Option<&'a str>,
+    pub(crate) is_test: bool,
     pub(crate) sig: &'a Signature,
     pub(crate) block: &'a Block,
 }
@@ -51,10 +51,6 @@ pub(crate) struct WalkOptions {
     /// Some analyzers, such as wrappers, historically ignore test modules
     /// but do not classify individual `#[test]` functions.
     pub(crate) skip_cfg_test_blocks: bool,
-    /// Decide whether test-shaped functions are included, excluded, or
-    /// selected exclusively. The same `is_test` predicate feeds both
-    /// `--exclude-tests` and `--only-tests`.
-    pub(crate) test_filter: TestFilter,
 }
 
 /// Walk every function-shaped node reachable from `items`, yielding one
@@ -81,12 +77,10 @@ where
     match item {
         Item::Fn(item_fn) => {
             let is_test = in_test_context || is_test_function(&item_fn.attrs);
-            if !opts.test_filter.includes(is_test) {
-                return;
-            }
             visit(FnSite {
                 owner: None,
                 trait_name: None,
+                is_test,
                 sig: &item_fn.sig,
                 block: &item_fn.block,
             });
@@ -96,14 +90,14 @@ where
             if opts.skip_cfg_test_blocks && item_is_test {
                 return;
             }
-            walk_impl(item_impl, opts, in_test_context || item_is_test, visit);
+            walk_impl(item_impl, in_test_context || item_is_test, visit);
         }
         Item::Trait(item_trait) => {
             let item_is_test = has_cfg_test(&item_trait.attrs);
             if opts.skip_cfg_test_blocks && item_is_test {
                 return;
             }
-            walk_trait(item_trait, opts, in_test_context || item_is_test, visit);
+            walk_trait(item_trait, in_test_context || item_is_test, visit);
         }
         Item::Mod(item_mod) => {
             let item_is_test = has_cfg_test(&item_mod.attrs);
@@ -121,7 +115,7 @@ where
     }
 }
 
-fn walk_impl<F>(item_impl: &ItemImpl, opts: WalkOptions, in_test_context: bool, visit: &mut F)
+fn walk_impl<F>(item_impl: &ItemImpl, in_test_context: bool, visit: &mut F)
 where
     F: FnMut(FnSite<'_>),
 {
@@ -133,12 +127,10 @@ where
     for impl_item in &item_impl.items {
         if let ImplItem::Fn(method) = impl_item {
             let is_test = in_test_context || is_test_function(&method.attrs);
-            if !opts.test_filter.includes(is_test) {
-                continue;
-            }
             visit(FnSite {
                 owner: owner.as_deref(),
                 trait_name: trait_name.as_deref(),
+                is_test,
                 sig: &method.sig,
                 block: &method.block,
             });
@@ -146,7 +138,7 @@ where
     }
 }
 
-fn walk_trait<F>(item_trait: &ItemTrait, opts: WalkOptions, in_test_context: bool, visit: &mut F)
+fn walk_trait<F>(item_trait: &ItemTrait, in_test_context: bool, visit: &mut F)
 where
     F: FnMut(FnSite<'_>),
 {
@@ -157,12 +149,10 @@ where
                 continue;
             };
             let is_test = in_test_context || is_test_function(&method.attrs);
-            if !opts.test_filter.includes(is_test) {
-                continue;
-            }
             visit(FnSite {
                 owner: Some(&owner),
                 trait_name: Some(&owner),
+                is_test,
                 sig: &method.sig,
                 block,
             });
@@ -207,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_only_propagates_cfg_test_context_through_nested_items() {
+    fn cfg_test_context_propagates_through_nested_items() {
         let src = r#"
 #[cfg(test)]
 mod tests {
@@ -229,9 +219,13 @@ mod tests {
 "#;
         let opts = WalkOptions {
             skip_cfg_test_blocks: false,
-            test_filter: TestFilter::Only,
         };
 
+        let file = parse_file(src).unwrap();
+        let mut seen_test_flags = Vec::new();
+        walk_fn_items(&file.items, opts, &mut |site| {
+            seen_test_flags.push(site.is_test);
+        });
         assert_eq!(
             walked_names(src, opts),
             [
@@ -241,5 +235,6 @@ mod tests {
                 "Harness::default_helper"
             ]
         );
+        assert!(seen_test_flags.iter().all(|is_test| *is_test));
     }
 }

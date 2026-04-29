@@ -9,11 +9,9 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use lens_domain::{
-    FunctionDef, SimilarCluster, TSEDOptions, TestFilter, cluster_similar_pairs,
-    find_similar_pair_indices,
+    FunctionDef, SimilarCluster, TSEDOptions, cluster_similar_pairs, find_similar_pair_indices,
 };
 
-use crate::analyze::SourceLang;
 use crate::hooks::core::{EditedSource, HookError};
 
 /// Default similarity threshold. Picked to match the cutoff used in the
@@ -61,7 +59,10 @@ impl SimilarityCore {
 
         for src in sources {
             let source_started = Instant::now();
-            let funcs = extract_functions(src.lang, &src.source)?;
+            let mut parser = src.lang.create_language_parser();
+            let funcs = parser
+                .extract_functions(&src.source)
+                .map_err(|e| HookError::Parse(Box::new(e)))?;
             tracing::debug!(
                 target: PROFILE_TARGET,
                 path = %src.rel_path,
@@ -113,13 +114,6 @@ impl SimilarityCore {
         );
         Ok(Some(format!("{header}{body}")))
     }
-}
-
-fn extract_functions(lang: SourceLang, source: &str) -> Result<Vec<FunctionDef>, HookError> {
-    let mut parser = lang.create_language_parser(TestFilter::All);
-    parser
-        .extract_functions(source)
-        .map_err(|e| HookError::Parse(Box::new(e)))
 }
 
 fn append_section(

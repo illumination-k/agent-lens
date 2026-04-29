@@ -8,7 +8,7 @@
 //! transformations, literal arguments) keep the function out of the
 //! report.
 
-use lens_domain::{TestFilter, WrapperFinding, args_pass_through_by, qualify as qualify_name};
+use lens_domain::{WrapperFinding, args_pass_through_by, qualify as qualify_name};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -73,7 +73,6 @@ pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError
     let file = syn::parse_file(source)?;
     let opts = WalkOptions {
         skip_cfg_test_blocks: true,
-        test_filter: TestFilter::All,
     };
     let mut out = Vec::new();
     walk_fn_items(&file.items, opts, &mut |site| {
@@ -484,9 +483,8 @@ impl T {
 fn extract_functions(
     lang: SourceLang,
     source: &str,
-    test_filter: TestFilter,
 ) -> Result<Vec<FunctionDef>, AnalyzerError> {
-    let mut parser = lang.create_language_parser(test_filter);
+    let mut parser = lang.create_language_parser();
     parser
         .extract_functions(source)
         .map_err(|err| AnalyzerError::Parse(Box::new(err)))
@@ -503,18 +501,18 @@ fn extract_functions(
     fn detects_single_field_options_struct_passthrough() {
         let src = r#"
 struct ExtractOptions {
-    test_filter: TestFilter,
+    dialect: Dialect,
 }
 
-fn extract_functions_with_test_filter(
+fn extract_functions_with_dialect(
     source: &str,
-    test_filter: TestFilter,
+    dialect: Dialect,
 ) -> Result<Vec<FunctionDef>, GoParseError> {
-    extract_with(source, ExtractOptions { test_filter })
+    extract_with(source, ExtractOptions { dialect })
 }
 "#;
         let findings = run(src);
-        assert_eq!(names(&findings), ["extract_functions_with_test_filter"]);
+        assert_eq!(names(&findings), ["extract_functions_with_dialect"]);
         assert_eq!(findings[0].callee, "extract_with");
     }
 
@@ -522,18 +520,18 @@ fn extract_functions_with_test_filter(
     fn detects_keyed_single_field_options_struct_passthrough() {
         let src = r#"
 struct ExtractOptions {
-    test_filter: TestFilter,
+    dialect: Dialect,
 }
 
-fn extract_functions_with_test_filter(
+fn extract_functions_with_dialect(
     source: &str,
-    test_filter: TestFilter,
+    dialect: Dialect,
 ) -> Result<Vec<FunctionDef>, GoParseError> {
-    extract_with(source, ExtractOptions { test_filter: test_filter })
+    extract_with(source, ExtractOptions { dialect: dialect })
 }
 "#;
         let findings = run(src);
-        assert_eq!(names(&findings), ["extract_functions_with_test_filter"]);
+        assert_eq!(names(&findings), ["extract_functions_with_dialect"]);
     }
 
     /// Body shapes that disqualify a function from being a wrapper. The
@@ -558,15 +556,15 @@ fn extract_functions_with_test_filter(
     fn rejects_options_struct_with_extra_fields() {
         let src = r#"
 struct ExtractOptions {
-    test_filter: TestFilter,
+    dialect: Dialect,
     mode: Mode,
 }
 
-fn extract_functions_with_test_filter(
+fn extract_functions_with_dialect(
     source: &str,
-    test_filter: TestFilter,
+    dialect: Dialect,
 ) -> Result<Vec<FunctionDef>, GoParseError> {
-    extract_with(source, ExtractOptions { test_filter, mode: Mode::Strict })
+    extract_with(source, ExtractOptions { dialect, mode: Mode::Strict })
 }
 "#;
         assert!(run(src).is_empty());

@@ -1,7 +1,7 @@
 //! syn-based implementation of [`lens_domain::LanguageParser`] for Rust.
 
 use lens_domain::{
-    FunctionDef, LanguageParseError, LanguageParser, TestFilter, TreeNode, qualify as qualify_name,
+    FunctionDef, LanguageParseError, LanguageParser, TreeNode, qualify as qualify_name,
 };
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
@@ -16,18 +16,11 @@ use crate::common::{WalkOptions, walk_fn_items};
 /// callers can swap in a tree-sitter backend later without changing
 /// downstream code.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct RustParser {
-    test_filter: TestFilter,
-}
+pub struct RustParser;
 
 impl RustParser {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_test_filter(mut self, test_filter: TestFilter) -> Self {
-        self.test_filter = test_filter;
-        self
+        Self
     }
 }
 
@@ -51,15 +44,8 @@ impl LanguageParser for RustParser {
     }
 
     fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError> {
-        extract_with(source, walk_options_for(self.test_filter))
+        extract_with(source, WalkOptions::default())
             .map_err(|err| LanguageParseError::new(self.language(), err))
-    }
-}
-
-fn walk_options_for(test_filter: TestFilter) -> WalkOptions {
-    WalkOptions {
-        skip_cfg_test_blocks: test_filter == TestFilter::Exclude,
-        test_filter,
     }
 }
 
@@ -71,6 +57,7 @@ fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, Rus
             name: qualify_name(site.owner, &site.sig.ident.to_string()),
             start_line: site.sig.span().start().line,
             end_line: site.block.span().end().line,
+            is_test: site.is_test,
             tree: token_stream_to_tree("Block", site.block.to_token_stream()),
         });
     });
@@ -290,11 +277,10 @@ fn recursive(n: u32) -> u32 {
     }
 
     #[test]
-    fn excluding_tests_drops_cfg_test_modules_and_test_attributed_fns() {
-        // Production code surrounded by every shape `--exclude-tests`
-        // is supposed to filter: a `#[test]` free fn, a `#[rstest]` fn,
-        // a `mod tests` gated by `#[cfg(test)]`, and an `impl` block
-        // gated the same way. Only `production` should survive.
+    fn extraction_marks_cfg_test_modules_and_test_attributed_fns() {
+        // Production code surrounded by every shape the analyzer later
+        // filters: a `#[test]` free fn, a `#[rstest]` fn, a `mod tests`
+        // gated by `#[cfg(test)]`, and an `impl` block gated the same way.
         let src = r#"
 fn production(x: i32) -> i32 { x + 1 }
 
@@ -317,28 +303,27 @@ impl Bag {
     fn fixture() -> Self { Self }
 }
 "#;
-        let funcs = RustParser::new()
-            .with_test_filter(TestFilter::Exclude)
-            .extract_functions(src)
-            .unwrap();
-        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["production"]);
+        let mut parser = RustParser::new();
+        let funcs = parser.extract_functions(src).unwrap();
+        let flags: Vec<_> = funcs.iter().map(|f| (f.name.as_str(), f.is_test)).collect();
+        assert_eq!(
+            flags,
+            [
+                ("production", false),
+                ("unit_test", true),
+                ("parameterised_test", true),
+                ("helper", true),
+                ("other_helper", true),
+                ("Bag::fixture", true),
+            ]
+        );
     }
 
     #[test]
-    fn excluding_tests_keeps_default_extraction_behaviour_with_no_test_attrs() {
-        // No #[test], no `mod tests`. The filter should be a no-op so
-        // the public surface still reports every production function.
+    fn extraction_marks_functions_without_test_attrs_as_production() {
         let src = "fn a() {}\nfn b() {}\n";
-        let baseline = parse_functions(src);
-        let filtered = RustParser::new()
-            .with_test_filter(TestFilter::Exclude)
-            .extract_functions(src)
-            .unwrap();
-        assert_eq!(
-            baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-            filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-        );
+        let funcs = parse_functions(src);
+        assert!(funcs.iter().all(|f| !f.is_test));
     }
 
     #[test]
