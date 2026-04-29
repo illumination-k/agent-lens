@@ -13,6 +13,7 @@ pub mod coupling;
 mod crate_root;
 mod diff;
 mod format;
+pub mod function_graph;
 pub mod hotspot;
 mod path_filter;
 pub mod similarity;
@@ -27,6 +28,7 @@ pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
+pub use function_graph::FunctionGraphAnalyzer;
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
