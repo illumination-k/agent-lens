@@ -2,10 +2,10 @@
 //!
 //! Implements [`lens_domain::LanguageParser`] on top of [`syn`], extracting
 //! every free, `impl`-bound, and `trait`-default function into a
-//! [`lens_domain::FunctionDef`]. The body is lowered to a generic
-//! [`lens_domain::TreeNode`] by walking the function's token stream so that
-//! keywords (`if`, `while`, `match`, …) land in the tree as distinct nodes
-//! that the APTED algorithm can tell apart.
+//! [`lens_domain::FunctionDef`]. Each function is lowered to a generic
+//! [`lens_domain::TreeNode`] by projecting the `syn` signature and body into
+//! syntax categories such as parameters, type paths, calls, method calls, and
+//! control-flow nodes that the APTED algorithm can tell apart.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
