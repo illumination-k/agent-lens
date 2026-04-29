@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::{FunctionComplexity, FunctionDef, LanguageParser};
-use lens_rust::{CallIndexOptions, CallSite, RustParser};
+use lens_domain::{FunctionComplexity, FunctionDef};
+use lens_rust::{CallIndexOptions, CallKind, CallSite, RustFunctionDef};
 use serde::Serialize;
 
 use super::{
@@ -93,17 +93,17 @@ impl FunctionGraphAnalyzer {
             });
         }
 
-        let mut parser = RustParser::new();
-        let mut functions = parser
-            .extract_functions(&source)
+        let module = module_path_for(root, file);
+        let mut functions = lens_rust::extract_functions_with_modules(&source, &module)
             .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
         functions.retain(|f| self.includes_function(f, path_is_test));
 
-        let calls = lens_rust::extract_call_sites_with_options(
+        let calls = lens_rust::extract_call_sites_with_options_and_base_module(
             &source,
             CallIndexOptions {
                 include_cfg_test_blocks: !self.exclude_tests,
             },
+            &module,
         )
         .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
         let complexity = lens_rust::extract_complexity_units(&source)
@@ -111,7 +111,6 @@ impl FunctionGraphAnalyzer {
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
-            module: module_path_for(root, file),
             path_is_test,
             functions,
             calls,
@@ -119,8 +118,8 @@ impl FunctionGraphAnalyzer {
         })
     }
 
-    fn includes_function(&self, f: &FunctionDef, path_is_test: bool) -> bool {
-        let is_test = f.is_test || path_is_test;
+    fn includes_function(&self, f: &RustFunctionDef, path_is_test: bool) -> bool {
+        let is_test = f.function.is_test || path_is_test;
         if self.only_tests {
             return is_test;
         }
@@ -133,9 +132,8 @@ impl FunctionGraphAnalyzer {
 
 struct FileGraphInput {
     file: String,
-    module: String,
     path_is_test: bool,
-    functions: Vec<FunctionDef>,
+    functions: Vec<RustFunctionDef>,
     calls: Vec<CallSite>,
     complexity: Vec<FunctionComplexity>,
 }
@@ -182,8 +180,10 @@ impl Report {
 struct NodeView {
     id: String,
     name: String,
+    qualified_name: String,
     file: String,
     module: String,
+    impl_owner: Option<String>,
     start_line: usize,
     end_line: usize,
     is_test: bool,
@@ -272,17 +272,19 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<NodeView> {
     for file in files {
         let complexity = ComplexityIndex::new(&file.complexity);
         for f in &file.functions {
-            let metrics = complexity.get(f);
+            let metrics = complexity.get(&f.function);
             nodes.push(NodeView {
-                id: node_id(&file.file, f),
+                id: node_id(&file.file, &f.function),
                 name: f.name.clone(),
+                qualified_name: f.qualified_name.clone(),
                 file: file.file.clone(),
-                module: file.module.clone(),
-                start_line: f.start_line,
-                end_line: f.end_line,
-                is_test: f.is_test || file.path_is_test,
+                module: f.module.clone(),
+                impl_owner: f.impl_owner.clone(),
+                start_line: f.function.start_line,
+                end_line: f.function.end_line,
+                is_test: f.function.is_test || file.path_is_test,
                 weights: NodeWeights {
-                    loc: f.line_count(),
+                    loc: f.function.line_count(),
                     cyclomatic_complexity: metrics.map(|m| m.cyclomatic),
                     cognitive_complexity: metrics.map(|m| m.cognitive),
                     max_nesting: metrics.map(|m| m.max_nesting),
@@ -331,7 +333,7 @@ fn build_edges(files: &[FileGraphInput], nodes: &[NodeView]) -> Vec<EdgeView> {
     for file in files {
         for site in &file.calls {
             let from = site
-                .caller_name
+                .caller_qualified_name
                 .as_deref()
                 .and_then(|caller| caller_index.resolve_in_file(&file.file, caller));
             if site.caller_name.is_some() && from.is_none() {
@@ -378,25 +380,27 @@ struct EdgeKey {
 }
 
 struct CallerIndex {
-    by_file_and_name: HashMap<(String, String), Vec<String>>,
+    by_file_and_qualified_name: HashMap<(String, String), Vec<String>>,
 }
 
 impl CallerIndex {
     fn new(nodes: &[NodeView]) -> Self {
-        let mut by_file_and_name: HashMap<(String, String), Vec<String>> = HashMap::new();
+        let mut by_file_and_qualified_name: HashMap<(String, String), Vec<String>> = HashMap::new();
         for node in nodes {
-            by_file_and_name
-                .entry((node.file.clone(), node.name.clone()))
+            by_file_and_qualified_name
+                .entry((node.file.clone(), node.qualified_name.clone()))
                 .or_default()
                 .push(node.id.clone());
         }
-        Self { by_file_and_name }
+        Self {
+            by_file_and_qualified_name,
+        }
     }
 
-    fn resolve_in_file(&self, file: &str, caller: &str) -> Option<String> {
+    fn resolve_in_file(&self, file: &str, qualified_name: &str) -> Option<String> {
         let ids = self
-            .by_file_and_name
-            .get(&(file.to_owned(), caller.to_owned()))?;
+            .by_file_and_qualified_name
+            .get(&(file.to_owned(), qualified_name.to_owned()))?;
         if ids.len() == 1 {
             return ids.first().cloned();
         }
@@ -405,26 +409,26 @@ impl CallerIndex {
 }
 
 struct Resolver {
-    exact: HashMap<String, Vec<String>>,
+    qualified: HashMap<String, Vec<String>>,
     last_segment: HashMap<String, Vec<String>>,
 }
 
 impl Resolver {
     fn new(nodes: &[NodeView]) -> Self {
-        let mut exact: HashMap<String, Vec<String>> = HashMap::new();
+        let mut qualified: HashMap<String, Vec<String>> = HashMap::new();
         let mut last_segment: HashMap<String, Vec<String>> = HashMap::new();
         for node in nodes {
-            exact
-                .entry(node.name.clone())
+            qualified
+                .entry(node.qualified_name.clone())
                 .or_default()
                 .push(node.id.clone());
             last_segment
-                .entry(name_last_segment(&node.name).to_owned())
+                .entry(name_last_segment(&node.qualified_name).to_owned())
                 .or_default()
                 .push(node.id.clone());
         }
         Self {
-            exact,
+            qualified,
             last_segment,
         }
     }
@@ -433,16 +437,141 @@ impl Resolver {
         let Some(callee_name) = site.callee_name.as_deref() else {
             return (None, Resolution::Anonymous);
         };
-        if let Some(callee_path) = site.callee_path.as_deref()
-            && let Some(ids) = self.exact.get(callee_path)
-        {
-            return resolve_ids(ids);
+        if site.call_kind == CallKind::ReceiverMethod {
+            return (None, Resolution::Unresolved);
+        }
+        for candidate in lexical_candidates(site) {
+            if let Some(ids) = self.qualified.get(&candidate) {
+                return resolve_ids(ids);
+            }
         }
         let Some(ids) = self.last_segment.get(callee_name) else {
             return (None, Resolution::Unresolved);
         };
         resolve_ids(ids)
     }
+}
+
+fn lexical_candidates(site: &CallSite) -> Vec<String> {
+    let Some(callee_name) = site.callee_name.as_deref() else {
+        return Vec::new();
+    };
+    let Some(callee_path) = site.callee_path.as_deref() else {
+        return vec![qualify_module(&site.module, callee_name)];
+    };
+    let segments: Vec<&str> = callee_path.split("::").collect();
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    match segments[0] {
+        "crate" => candidates.push(callee_path.to_owned()),
+        "self" => {
+            if let Some(path) = prefix_with_tail(module_segments(&site.module), &segments, 1) {
+                candidates.push(path);
+            }
+        }
+        "super" => {
+            if let Some(path) = resolve_super_path(&site.module, &segments) {
+                candidates.push(path);
+            }
+        }
+        "Self" => {
+            if let Some(owner) = site.caller_impl_owner.as_deref()
+                && let Some(tail) = join_tail(&segments, 1)
+            {
+                candidates.push(qualify_module(&site.module, &format!("{owner}::{tail}")));
+            }
+        }
+        _ => {
+            if segments.len() == 1 {
+                candidates.push(qualify_module(&site.module, callee_name));
+            } else {
+                candidates.push(qualify_module(&site.module, callee_path));
+            }
+            if let Some(alias_target) = alias_target(site, segments[0])
+                && let Some(path) = prefix_with_tail(
+                    alias_target.split("::").map(ToOwned::to_owned).collect(),
+                    &segments,
+                    1,
+                )
+            {
+                candidates.push(path);
+            }
+        }
+    }
+    if segments.len() == 1
+        && let Some(alias_target) = alias_target(site, segments[0])
+    {
+        candidates.push(alias_target.to_owned());
+    }
+    dedupe_preserving_order(candidates)
+}
+
+fn alias_target<'a>(site: &'a CallSite, alias: &str) -> Option<&'a str> {
+    site.visible_aliases
+        .iter()
+        .rev()
+        .find(|entry| entry.alias == alias)
+        .map(|entry| entry.target.as_str())
+}
+
+fn module_segments(module: &str) -> Vec<String> {
+    module.split("::").map(ToOwned::to_owned).collect()
+}
+
+fn prefix_with_tail(
+    mut prefix: Vec<String>,
+    segments: &[&str],
+    tail_start: usize,
+) -> Option<String> {
+    if tail_start > segments.len() {
+        return None;
+    }
+    prefix.extend(segments.iter().skip(tail_start).map(|s| (*s).to_owned()));
+    Some(prefix.join("::"))
+}
+
+fn resolve_super_path(module: &str, segments: &[&str]) -> Option<String> {
+    let mut absolute = module_segments(module);
+    for segment in segments {
+        if *segment == "super" {
+            if absolute.len() <= 1 {
+                return None;
+            }
+            absolute.pop();
+        } else {
+            absolute.push((*segment).to_owned());
+        }
+    }
+    Some(absolute.join("::"))
+}
+
+fn join_tail(segments: &[&str], start: usize) -> Option<String> {
+    if start >= segments.len() {
+        None
+    } else {
+        Some(segments[start..].join("::"))
+    }
+}
+
+fn qualify_module(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{module}::{name}")
+    }
+}
+
+fn dedupe_preserving_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if seen.insert(item.clone()) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 fn resolve_ids(ids: &[String]) -> (Option<String>, Resolution) {
@@ -551,6 +680,7 @@ fn format_markdown(report: &Report) -> String {
 mod tests {
     use super::*;
     use crate::test_support::write_file;
+    use rstest::rstest;
     use serde_json::Value;
 
     fn analyze_json(path: &Path) -> Value {
@@ -558,6 +688,76 @@ mod tests {
             .analyze(path, OutputFormat::Json)
             .unwrap();
         serde_json::from_str(&json).unwrap()
+    }
+
+    fn target_qualified_name(report: &Value, edge: &Value) -> Option<String> {
+        let target = edge["to"].as_str()?;
+        report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == target)
+            .and_then(|node| node["qualified_name"].as_str())
+            .map(ToOwned::to_owned)
+    }
+
+    fn edge_by_callee<'a>(report: &'a Value, callee: &str) -> &'a Value {
+        report["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["callee_name"] == callee)
+            .unwrap()
+    }
+
+    fn site(path: &str) -> CallSite {
+        CallSite {
+            callee_name: path.rsplit("::").next().map(ToOwned::to_owned),
+            callee_path: Some(path.to_owned()),
+            caller_name: Some("caller".to_owned()),
+            module: "crate::m".to_owned(),
+            caller_qualified_name: Some("crate::m::caller".to_owned()),
+            caller_impl_owner: Some("S".to_owned()),
+            call_kind: CallKind::Path,
+            visible_aliases: vec![
+                lens_rust::UseAlias {
+                    alias: "parse".to_owned(),
+                    target: "crate::a::parse".to_owned(),
+                },
+                lens_rust::UseAlias {
+                    alias: "a".to_owned(),
+                    target: "crate::a".to_owned(),
+                },
+            ],
+            line: 1,
+        }
+    }
+
+    #[rstest]
+    #[case::absolute("crate::a::parse", &["crate::a::parse"])]
+    #[case::self_relative("self::parse", &["crate::m::parse"])]
+    #[case::super_relative("super::parse", &["crate::parse"])]
+    #[case::self_type("Self::helper", &["crate::m::S::helper"])]
+    #[case::local_type("S::helper", &["crate::m::S::helper"])]
+    #[case::imported_module_alias("a::parse", &["crate::m::a::parse", "crate::a::parse"])]
+    #[case::imported_function_alias("parse", &["crate::m::parse", "crate::a::parse"])]
+    fn lexical_candidate_generation_is_ordered(#[case] path: &str, #[case] expected: &[&str]) {
+        assert_eq!(lexical_candidates(&site(path)), expected);
+    }
+
+    #[test]
+    fn lexical_path_helpers_handle_boundaries() {
+        assert_eq!(
+            prefix_with_tail(vec!["crate".to_owned(), "m".to_owned()], &["self"], 1).as_deref(),
+            Some("crate::m"),
+        );
+        assert_eq!(resolve_super_path("crate", &["super", "parse"]), None);
+        assert_eq!(
+            resolve_super_path("crate::a::b", &["super", "super", "parse"]).as_deref(),
+            Some("crate::parse"),
+        );
+        assert_eq!(join_tail(&["Self"], 1), None);
+        assert_eq!(join_tail(&["Self", "parse"], 1).as_deref(), Some("parse"));
     }
 
     #[test]
@@ -574,7 +774,10 @@ mod tests {
         assert_eq!(report["schema_version"], 1);
         assert_eq!(report["language"], "rust");
         assert_eq!(nodes[0]["id"], "src/lib.rs:helper:1");
+        assert_eq!(nodes[0]["name"], "helper");
+        assert_eq!(nodes[0]["qualified_name"], "crate::helper");
         assert_eq!(nodes[0]["module"], "crate");
+        assert_eq!(nodes[0]["impl_owner"], Value::Null);
         assert_eq!(nodes[0]["weights"]["loc"], 1);
         assert_eq!(nodes[0]["weights"]["fan_in"], 1);
         assert_eq!(nodes[0]["weights"]["fan_out"], 0);
@@ -637,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_unique_method_edges_by_last_segment() {
+    fn receiver_method_calls_remain_unresolved() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -652,8 +855,31 @@ mod tests {
             .find(|e| e["callee_name"] == "helper")
             .expect("helper method call should be recorded");
         assert_eq!(edge["from"], "src/lib.rs:S::caller:4");
-        assert_eq!(edge["to"], "src/lib.rs:S::helper:3");
+        assert_eq!(edge["to"], Value::Null);
+        assert_eq!(edge["resolution"], "unresolved");
+    }
+
+    #[rstest]
+    #[case::self_type("Self::helper();")]
+    #[case::concrete_type("S::helper();")]
+    fn resolves_syntactic_static_method_paths(#[case] call: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "struct S;\nimpl S {{\n    fn helper() {{}}\n    fn caller() {{ {call} }}\n}}\n"
+            ),
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "helper");
+        assert_eq!(edge["from"], "src/lib.rs:S::caller:4");
         assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("crate::S::helper"),
+        );
     }
 
     #[test]
@@ -688,6 +914,69 @@ mod tests {
         let edge = &report["edges"].as_array().unwrap()[0];
         assert_eq!(edge["to"], Value::Null);
         assert_eq!(edge["resolution"], "ambiguous");
+    }
+
+    #[test]
+    fn same_module_bare_call_resolves_before_duplicate_name_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { fn parse() {} fn caller() { parse(); } }\nmod b { fn parse() {} }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "parse");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("crate::a::parse"),
+        );
+        assert_eq!(report["summary"]["ambiguous_edge_count"], 0);
+    }
+
+    #[rstest]
+    #[case::absolute(
+        "mod a { pub fn parse() {} }\nmod b { fn caller() { crate::a::parse(); } }\n",
+        "crate::a::parse"
+    )]
+    #[case::self_relative(
+        "mod a { fn parse() {} fn caller() { self::parse(); } }\nmod b { fn parse() {} }\n",
+        "crate::a::parse"
+    )]
+    #[case::super_relative(
+        "mod a { fn parse() {} mod inner { fn caller() { super::parse(); } } }\n",
+        "crate::a::parse"
+    )]
+    fn resolves_lexical_module_paths(#[case] source: &str, #[case] expected: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", source);
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "parse");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn imported_alias_resolves_bare_call() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub fn parse() {} }\nmod b { use crate::a::parse; fn caller() { parse(); } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "parse");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("crate::a::parse"),
+        );
     }
 
     #[test]
