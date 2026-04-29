@@ -558,7 +558,7 @@ impl Counter {
 "#;
         let u = unit(src);
         assert_eq!(u.type_name, "Counter");
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         assert_eq!(u.methods.len(), 2);
     }
 
@@ -577,7 +577,7 @@ impl Thing {
 }
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         // Components are sorted by smallest index, so the counter pair
         // (indices 0, 1) lands first.
         assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
@@ -593,7 +593,7 @@ impl Foo {
 }
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = &u.methods[0];
         assert_eq!(outer.calls, vec!["helper"]);
     }
@@ -608,7 +608,7 @@ impl Foo {
 }
 "#;
         let u = unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -625,7 +625,7 @@ impl Foo {
         // `new` has no self receiver and is dropped; only the two instance
         // methods participate, sharing the field `n`.
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -642,7 +642,7 @@ fn another() {}
         let u = unit(src);
         // No shared fields, no in-unit calls — the two methods stay
         // isolated.
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     #[test]
@@ -706,7 +706,7 @@ impl ModulePath {
         // collapse to one component instead of being mistakenly reported as
         // three disjoint responsibilities (the bug: `Member::Unnamed` was
         // ignored, so tuple-struct impls had `LCOM4 = method_count`).
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         assert_eq!(u.methods.len(), 3);
         for m in &u.methods {
             assert_eq!(
@@ -765,7 +765,7 @@ impl Foo {
         assert_eq!(local.fields, vec!["tag"]);
         // The two methods do not share any self field, so they form
         // separate components.
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
     }
 
     // ---------- Module-level cohesion ----------
@@ -789,7 +789,7 @@ fn get() -> usize {
         assert!(matches!(u.kind, CohesionUnitKind::Module));
         assert_eq!(u.type_name, "<module>");
         assert_eq!(u.methods.len(), 2);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]
@@ -804,7 +804,7 @@ fn check_log(n: usize) -> bool { n < MAX_LOG }
 fn at_log(n: usize) -> bool { n == MAX_LOG }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 2);
+        assert_eq!(u.components.len(), 2);
         assert_eq!(u.components, vec![vec![0, 1], vec![2, 3]]);
     }
 
@@ -815,7 +815,7 @@ fn outer() -> i32 { helper() }
 fn helper() -> i32 { 1 }
 "#;
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), 1);
+        assert_eq!(u.components.len(), 1);
         let outer = u.methods.iter().find(|m| m.name == "outer").unwrap();
         assert_eq!(outer.calls, vec!["helper"]);
     }
@@ -893,7 +893,7 @@ fn beta() -> i32 { X }
     )]
     fn module_unit_lcom4(#[case] src: &str, #[case] expected: usize) {
         let u = module_unit(src);
-        assert_eq!(u.lcom4(), expected);
+        assert_eq!(u.components.len(), expected);
     }
 
     #[test]
@@ -975,7 +975,7 @@ mod inner {
             .collect();
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "inner");
-        assert_eq!(module_units[0].lcom4(), 1);
+        assert_eq!(module_units[0].components.len(), 1);
     }
 
     #[test]

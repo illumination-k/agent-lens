@@ -339,7 +339,7 @@ fn log_candidate_stats(
         min_lines,
         strategy = candidates.strategy.as_str(),
         candidate_count = candidates.total_len(),
-        retained_candidate_count = candidates.len(),
+        retained_candidate_count = candidates.pairs.len(),
         size_filtered_count = candidates.size_filtered_count,
         label_filtered_count = candidates.label_filtered_count,
         arity_filtered_count = candidates.arity_filtered_count,
@@ -353,7 +353,7 @@ fn log_score_stats(candidates: &CandidatePairs, score_stats: &ScoreStats, starte
     debug!(
         target: PROFILE_TARGET,
         candidate_count = candidates.total_len(),
-        retained_candidate_count = candidates.len(),
+        retained_candidate_count = candidates.pairs.len(),
         scored_pair_count = score_stats.scored_pair_count(),
         matched_pair_count = score_stats.pairs.len(),
         exact_match_count = score_stats.exact_match_count,
@@ -877,17 +877,71 @@ fn delta(xs: &[i32]) -> i32 {
         assert!(out.contains("beta"));
     }
 
-    /// Both output formats must surface the matched function names; only the
-    /// shape of the rendered report differs.
+    /// Paired functions must surface matched names across formats and
+    /// language parsers; only the rendered report shape differs.
     #[rstest]
-    #[case::json(OutputFormat::Json, assert_json_pair_report)]
-    #[case::markdown(OutputFormat::Md, assert_markdown_pair_report)]
+    #[case::rust_json(
+        "lib.rs",
+        PAIRED_FUNCTIONS,
+        OutputFormat::Json,
+        assert_json_pair_report
+    )]
+    #[case::rust_markdown(
+        "lib.rs",
+        PAIRED_FUNCTIONS,
+        OutputFormat::Md,
+        assert_markdown_pair_report
+    )]
+    #[case::python_json(
+        "lib.py",
+        r#"
+def alpha(xs):
+    total = 0
+    for x in xs:
+        total += x
+    return total
+
+def beta(ys):
+    sum_ = 0
+    for y in ys:
+        sum_ += y
+    return sum_
+"#,
+        OutputFormat::Json,
+        assert_json_pair_report
+    )]
+    #[case::go_json(
+        "lib.go",
+        r#"
+package p
+
+func alpha(xs []int) int {
+    total := 0
+    for _, x := range xs {
+        total += x
+    }
+    return total
+}
+
+func beta(ys []int) int {
+    sum := 0
+    for _, y := range ys {
+        sum += y
+    }
+    return sum
+}
+"#,
+        OutputFormat::Json,
+        assert_json_pair_report
+    )]
     fn report_renders_paired_functions(
+        #[case] file_name: &str,
+        #[case] src: &str,
         #[case] format: OutputFormat,
         #[case] assert_report: fn(&str),
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
+        let file = write_file(dir.path(), file_name, src);
         let out = SimilarityAnalyzer::new()
             .with_threshold(0.5)
             .analyze(&file, format)
@@ -1000,59 +1054,6 @@ fn beta(x: i32)  -> i32 { x + 1 }
     }
 
     #[test]
-    fn exclude_tests_drops_test_module_pairs_from_report() {
-        // Two parallel `#[test]` fixtures alongside a single
-        // production function. Without `--exclude-tests` the two test
-        // bodies form a similar pair; with it they're filtered before
-        // similarity is computed and `cluster_count` falls to zero.
-        let dir = tempfile::tempdir().unwrap();
-        let src = r#"
-fn production(x: i32) -> i32 {
-    let a = x + 1;
-    let b = a * 2;
-    let c = b - 3;
-    let d = c + 4;
-    d
-}
-
-#[cfg(test)]
-mod tests {
-    fn alpha() -> i32 {
-        let a = 1;
-        let b = 2;
-        let c = 3;
-        let d = 4;
-        a + b + c + d
-    }
-    fn beta() -> i32 {
-        let a = 1;
-        let b = 2;
-        let c = 3;
-        let d = 4;
-        a + b + c + d
-    }
-}
-"#;
-        let file = write_file(dir.path(), "lib.rs", src);
-
-        let with_tests = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
-        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
-
-        let without_tests = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .with_exclude_tests(true)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
-        assert_eq!(parsed["cluster_count"], 0);
-        assert_eq!(parsed["function_count"], 1);
-    }
-
-    #[test]
     fn only_tests_keeps_test_functions_inside_non_test_rust_files() {
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
@@ -1139,50 +1140,40 @@ fn test_production(x: i32) -> i32 {
         assert_eq!(parsed["cluster_count"], 0, "got {parsed}");
     }
 
-    #[test]
-    fn report_renders_paired_python_functions() {
-        // Two structurally identical Python functions — guaranteed to
-        // score above the 0.5 threshold and exercise the lens-py
-        // dispatch added alongside the Rust / TS arms.
-        let dir = tempfile::tempdir().unwrap();
-        let src = r#"
-def alpha(xs):
-    total = 0
-    for x in xs:
-        total += x
-    return total
+    #[rstest]
+    #[case::rust_cfg_test_module(
+        "lib.rs",
+        r#"
+fn production(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
 
-def beta(ys):
-    sum_ = 0
-    for y in ys:
-        sum_ += y
-    return sum_
-"#;
-        let file = write_file(dir.path(), "lib.py", src);
-        let json = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["function_count"], 2);
-        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
-        let names: Vec<&str> = parsed["clusters"][0]["functions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| f["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"alpha"));
-        assert!(names.contains(&"beta"));
+#[cfg(test)]
+mod tests {
+    fn alpha() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
     }
-
-    #[test]
-    fn exclude_tests_drops_python_test_functions_from_report() {
-        // pytest-style `test_*` functions form a parallel pair next to
-        // a single production function; `--exclude-tests` should drop
-        // them via function-level test metadata.
-        let dir = tempfile::tempdir().unwrap();
-        let src = r#"
+    fn beta() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
+}
+"#
+    )]
+    #[case::python_pytest_functions(
+        "lib.py",
+        r#"
 def production(xs):
     total = 0
     for x in xs:
@@ -1200,76 +1191,11 @@ def test_beta():
     b = 2
     c = 3
     assert a + b + c == 6
-"#;
-        let file = write_file(dir.path(), "lib.py", src);
-
-        let with_tests = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
-        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
-
-        let without_tests = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .with_exclude_tests(true)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
-        assert_eq!(parsed["cluster_count"], 0);
-        assert_eq!(parsed["function_count"], 1);
-    }
-
-    #[test]
-    fn report_renders_paired_go_functions() {
-        // Two structurally identical Go functions — guaranteed to score
-        // above the 0.5 threshold and exercise the lens-golang dispatch
-        // added alongside the Rust / TS / Python arms.
-        let dir = tempfile::tempdir().unwrap();
-        let src = r#"
-package p
-
-func alpha(xs []int) int {
-    total := 0
-    for _, x := range xs {
-        total += x
-    }
-    return total
-}
-
-func beta(ys []int) int {
-    sum := 0
-    for _, y := range ys {
-        sum += y
-    }
-    return sum
-}
-"#;
-        let file = write_file(dir.path(), "lib.go", src);
-        let json = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["function_count"], 2);
-        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
-        let names: Vec<&str> = parsed["clusters"][0]["functions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| f["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"alpha"));
-        assert!(names.contains(&"beta"));
-    }
-
-    #[test]
-    fn exclude_tests_drops_go_test_functions_from_report() {
-        // `go test`-style `Test*` functions form a parallel pair next
-        // to a single production function; `--exclude-tests` should
-        // drop them via function-level test metadata.
-        let dir = tempfile::tempdir().unwrap();
-        let src = r#"
+"#
+    )]
+    #[case::go_test_functions(
+        "lib.go",
+        r#"
 package p
 
 import "testing"
@@ -1299,33 +1225,11 @@ func TestBeta(t *testing.T) {
         t.Fatal("bad")
     }
 }
-"#;
-        let file = write_file(dir.path(), "lib.go", src);
-
-        let with_tests = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&with_tests).unwrap();
-        assert!(parsed["cluster_count"].as_u64().unwrap() >= 1);
-
-        let without_tests = SimilarityAnalyzer::new()
-            .with_threshold(0.5)
-            .with_exclude_tests(true)
-            .analyze(&file, OutputFormat::Json)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();
-        assert_eq!(parsed["cluster_count"], 0);
-        assert_eq!(parsed["function_count"], 1);
-    }
-
-    #[test]
-    fn exclude_tests_drops_typescript_test_functions_from_report() {
-        // xUnit-style `test_*` functions form a parallel pair next to
-        // a single production function; `--exclude-tests` should drop
-        // them via function-level test metadata.
-        let dir = tempfile::tempdir().unwrap();
-        let src = r#"
+"#
+    )]
+    #[case::typescript_xunit_functions(
+        "lib.ts",
+        r#"
 function production(xs: number[]): number {
     let total = 0;
     for (const x of xs) {
@@ -1347,8 +1251,13 @@ function test_beta(): void {
     const c = 3;
     if (a + b + c !== 6) throw new Error("bad");
 }
-"#;
-        let file = write_file(dir.path(), "lib.ts", src);
+"#
+    )]
+    fn exclude_tests_drops_test_functions_from_report(#[case] file_name: &str, #[case] src: &str) {
+        // Each case has one production function plus two parallel tests.
+        // `--exclude-tests` should drop the test pair before similarity runs.
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), file_name, src);
 
         let with_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)

@@ -132,14 +132,6 @@ impl CohesionUnit {
             lcom96,
         }
     }
-
-    /// LCOM4 score: the number of connected components.
-    ///
-    /// `0` means the unit has no methods. `1` is the most cohesive case
-    /// (every method connects, directly or transitively, to every other).
-    pub fn lcom4(&self) -> usize {
-        self.components.len()
-    }
 }
 
 /// Compute the connected components of the cohesion graph for `methods`.
@@ -333,7 +325,7 @@ mod tests {
     fn build_records_lcom4_and_components() {
         let methods = vec![m("a", &["x"], &[]), m("b", &["x"], &[]), m("c", &[], &[])];
         let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "Foo", 1, 10, methods);
-        assert_eq!(unit.lcom4(), 2);
+        assert_eq!(unit.components.len(), 2);
         assert_eq!(unit.components, vec![vec![0, 1], vec![2]]);
     }
 
@@ -401,7 +393,7 @@ mod tests {
             m("dump", &["log"], &[]),
         ];
         let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "Thing", 1, 10, methods);
-        assert_eq!(unit.lcom4(), 2);
+        assert_eq!(unit.components.len(), 2);
         let lcom96 = unit.lcom96.unwrap();
         assert!(approx(lcom96, 2.0 / 3.0), "got {lcom96}");
     }

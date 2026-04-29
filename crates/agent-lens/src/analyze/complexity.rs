@@ -287,7 +287,7 @@ impl<'a> From<&'a FunctionComplexity> for FunctionView<'a> {
             cyclomatic: f.cyclomatic,
             cognitive: f.cognitive,
             max_nesting: f.max_nesting,
-            halstead_volume: f.halstead_volume(),
+            halstead_volume: f.halstead.volume(),
             maintainability_index: f.maintainability_index(),
         }
     }

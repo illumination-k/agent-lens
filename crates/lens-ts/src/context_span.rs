@@ -29,14 +29,19 @@ pub fn extract_context_spans(entry: &Path) -> Result<ContextSpanReport, ContextS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_PROJECT_ID: AtomicU64 = AtomicU64::new(0);
 
     fn mk_temp_project() -> std::path::PathBuf {
+        let id = TEMP_PROJECT_ID.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!(
-            "lens_ts_context_span_{}",
+            "lens_ts_context_span_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
-                .as_nanos()
+                .as_nanos(),
+            id
         ));
         std::fs::create_dir_all(&base).expect("create temp project");
         base

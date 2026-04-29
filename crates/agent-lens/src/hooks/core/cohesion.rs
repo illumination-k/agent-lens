@@ -38,8 +38,10 @@ impl CohesionCore {
 
         for src in sources {
             let units = extract_units(src.lang, &src.source)?;
-            let flagged: Vec<&CohesionUnit> =
-                units.iter().filter(|u| u.lcom4() >= LCOM4_FLOOR).collect();
+            let flagged: Vec<&CohesionUnit> = units
+                .iter()
+                .filter(|u| u.components.len() >= LCOM4_FLOOR)
+                .collect();
             if flagged.is_empty() {
                 continue;
             }
@@ -90,7 +92,7 @@ fn append_section(out: &mut String, file_path: &str, units: &[&CohesionUnit]) {
             "- {header} (L{}-{}): LCOM4={}, {} method(s)",
             unit.start_line,
             unit.end_line,
-            unit.lcom4(),
+            unit.components.len(),
             unit.methods.len(),
         );
     }

@@ -44,27 +44,14 @@ const TRIVIAL_LITERAL_ADAPTERS: &[&str] = &["expect"];
 /// signal is still useful, and the adapter label makes the conversion visible.
 const TRIVIAL_CLOSURE_ADAPTERS: &[&str] = &["map_err"];
 
-/// `(trait_name, method_name)` pairs whose forwarding bodies are
-/// idiomatic boilerplate, not refactoring opportunities. The trait spec
-/// itself dictates the signature, so the only reasonable implementation
-/// is to forward — flagging these would just add noise to the report.
-///
-/// Match is on the last segment of the trait path (e.g. `From` for
-/// `std::convert::From`), so users don't need to spell out the full
-/// import path.
-const BOILERPLATE_TRAIT_METHODS: &[(&str, &str)] = &[
-    ("From", "from"),
-    ("Default", "default"),
-    ("Deref", "deref"),
-    ("DerefMut", "deref_mut"),
-    ("Borrow", "borrow"),
-    ("BorrowMut", "borrow_mut"),
-    ("AsRef", "as_ref"),
-    ("AsMut", "as_mut"),
-];
-
 /// Walk the file and return every function whose body is just a
 /// forwarding call.
+///
+/// Methods inside `impl Trait for Type` blocks are skipped. A trait
+/// implementation has to satisfy a signature chosen elsewhere, so a
+/// forwarding body is often protocol glue rather than a local refactor
+/// opportunity. Trait default methods remain eligible because they are
+/// authored at the trait definition site.
 ///
 /// `#[cfg(test)]`-gated `mod`/`impl`/`trait` blocks are skipped: their
 /// methods are forwarding by design (test helpers shorten `assert_eq!`
@@ -76,23 +63,18 @@ pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError
     };
     let mut out = Vec::new();
     walk_fn_items(&file.items, opts, &mut |site| {
-        if let Some(finding) = analyze_fn(site.owner, site.trait_name, site.sig, site.block) {
+        if site.is_trait_impl {
+            return;
+        }
+        if let Some(finding) = analyze_fn(site.owner, site.sig, site.block) {
             out.push(finding);
         }
     });
     Ok(out)
 }
 
-fn analyze_fn(
-    owner: Option<&str>,
-    trait_name: Option<&str>,
-    sig: &Signature,
-    block: &Block,
-) -> Option<WrapperFinding> {
+fn analyze_fn(owner: Option<&str>, sig: &Signature, block: &Block) -> Option<WrapperFinding> {
     let method_name = sig.ident.to_string();
-    if is_boilerplate_trait_method(trait_name, &method_name) {
-        return None;
-    }
     let (tail, extra_passthroughs) = tail_expr_with_extra_passthroughs(block)?;
     let (core, adapters) = peel_adapters(tail);
     let (callee, call_args) = core_call(core)?;
@@ -131,15 +113,6 @@ fn is_constructor_default_shim(owner: Option<&str>, method: &str, callee: &str) 
         }
         _ => false,
     }
-}
-
-fn is_boilerplate_trait_method(trait_name: Option<&str>, method: &str) -> bool {
-    let Some(trait_name) = trait_name else {
-        return false;
-    };
-    BOILERPLATE_TRAIT_METHODS
-        .iter()
-        .any(|&(t, m)| t == trait_name && m == method)
 }
 
 /// Return the delegated tail expression plus any parameter-passthrough
@@ -599,11 +572,9 @@ mod tests {
         assert_eq!(names(&findings), ["shim"]);
     }
 
-    /// `impl <Trait> for T` bodies whose `(trait, method)` pair is on
-    /// the boilerplate skip list must drop out. Without that filter
-    /// each of these forwarding bodies would otherwise trip the wrapper
-    /// detector — there's no non-forwarding implementation that would
-    /// be idiomatic.
+    /// `impl <Trait> for T` methods are protocol glue: the signature is
+    /// dictated elsewhere, so forwarding bodies are usually not local
+    /// refactor opportunities.
     #[rstest]
     #[case::from_trait(
         r#"
@@ -633,50 +604,19 @@ impl AsRef<str> for W {
 }
 "#
     )]
-    fn skips_boilerplate_trait_methods(#[case] src: &str) {
-        assert!(
-            run(src).is_empty(),
-            "boilerplate trait method must be filtered, got: {:?}",
-            names(&run(src)),
-        );
-    }
-
-    #[test]
-    fn boilerplate_filter_requires_both_trait_and_method_match() {
-        // `From::other` shares the trait but not the method name; if the
-        // filter degenerated to "trait OR method matches" it would drop
-        // this finding. The forwarding shape qualifies as a wrapper, so
-        // it must surface.
-        let src = r#"
-struct T;
-impl From<i32> for T {
-    fn other(x: i32) -> Self { build(x) }
-}
-"#;
-        let findings = run(src);
-        assert_eq!(
-            names(&findings),
-            ["T::other"],
-            "From::other shares trait but not method, must still report",
-        );
-    }
-
-    #[test]
-    fn boilerplate_filter_requires_both_trait_and_method_match_other_side() {
-        // Symmetric case: trait `Other` shares the method name `from`
-        // with the boilerplate list but the trait doesn't. Must still
-        // report — only `(From, from)` is the boilerplate combo.
-        let src = r#"
+    #[case::non_boilerplate_trait_method(
+        r#"
 struct T;
 impl Other<i32> for T {
-    fn from(x: i32) -> Self { build(x) }
+    fn adapt(x: i32) -> Self { build(x) }
 }
-"#;
-        let findings = run(src);
-        assert_eq!(
-            names(&findings),
-            ["T::from"],
-            "Other::from shares method but not trait, must still report",
+"#
+    )]
+    fn skips_trait_impl_methods(#[case] src: &str) {
+        assert!(
+            run(src).is_empty(),
+            "trait impl method must be filtered, got: {:?}",
+            names(&run(src)),
         );
     }
 

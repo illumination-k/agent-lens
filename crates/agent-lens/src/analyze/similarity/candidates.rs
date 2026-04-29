@@ -185,10 +185,6 @@ pub(super) struct CandidatePairs {
 }
 
 impl CandidatePairs {
-    pub(super) fn len(&self) -> usize {
-        self.pairs.len()
-    }
-
     pub(super) fn total_len(&self) -> usize {
         self.pairs.len()
             + self.size_filtered_count
