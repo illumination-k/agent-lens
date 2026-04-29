@@ -380,6 +380,31 @@ mod tests {
     }
 
     #[test]
+    fn free_call_paths_peel_reference_paren_and_group_wrappers() {
+        let reference_sites = run("fn a() { (&crate::other::foo)(); }\n");
+        assert_eq!(
+            reference_sites[0].callee_path.as_deref(),
+            Some("crate::other::foo")
+        );
+
+        let paren_sites = run("fn a() { (crate::other::bar)(); }\n");
+        assert_eq!(
+            paren_sites[0].callee_path.as_deref(),
+            Some("crate::other::bar")
+        );
+
+        let grouped: syn::Expr = syn::Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: Default::default(),
+            expr: Box::new(syn::parse_quote!(crate::other::baz)),
+        });
+        assert_eq!(
+            path_call_path(&grouped).as_deref(),
+            Some("crate::other::baz")
+        );
+    }
+
+    #[test]
     fn module_scope_call_has_no_caller() {
         // A call written outside any function (`const X: i32 = f();`)
         // produces a site with `caller_name = None`. The visitor still

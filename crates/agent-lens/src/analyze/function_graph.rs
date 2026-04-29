@@ -5,11 +5,11 @@
 //! macro expansion, cross-crate resolution, runtime timing, or git history
 //! traversal is attempted here.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::{FunctionDef, LanguageParser};
+use lens_domain::{FunctionComplexity, FunctionDef, LanguageParser};
 use lens_rust::{CallIndexOptions, CallSite, RustParser};
 use serde::Serialize;
 
@@ -106,6 +106,8 @@ impl FunctionGraphAnalyzer {
             },
         )
         .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
+        let complexity = lens_rust::extract_complexity_units(&source)
+            .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -113,6 +115,7 @@ impl FunctionGraphAnalyzer {
             path_is_test,
             functions,
             calls,
+            complexity,
         })
     }
 
@@ -134,6 +137,7 @@ struct FileGraphInput {
     path_is_test: bool,
     functions: Vec<FunctionDef>,
     calls: Vec<CallSite>,
+    complexity: Vec<FunctionComplexity>,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,6 +194,14 @@ struct NodeView {
 struct NodeWeights {
     incoming_call_count: usize,
     outgoing_call_count: usize,
+    fan_in: usize,
+    fan_out: usize,
+    loc: usize,
+    cyclomatic_complexity: Option<u32>,
+    cognitive_complexity: Option<u32>,
+    max_nesting: Option<u32>,
+    maintainability_index: Option<f64>,
+    halstead_volume: Option<f64>,
     total_time_ms: Option<f64>,
     self_time_ms: Option<f64>,
     error_count: Option<u64>,
@@ -258,7 +270,9 @@ impl SummaryView {
 fn build_nodes(files: &[FileGraphInput]) -> Vec<NodeView> {
     let mut nodes = Vec::new();
     for file in files {
+        let complexity = ComplexityIndex::new(&file.complexity);
         for f in &file.functions {
+            let metrics = complexity.get(f);
             nodes.push(NodeView {
                 id: node_id(&file.file, f),
                 name: f.name.clone(),
@@ -267,7 +281,16 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<NodeView> {
                 start_line: f.start_line,
                 end_line: f.end_line,
                 is_test: f.is_test || file.path_is_test,
-                weights: NodeWeights::default(),
+                weights: NodeWeights {
+                    loc: f.line_count(),
+                    cyclomatic_complexity: metrics.map(|m| m.cyclomatic),
+                    cognitive_complexity: metrics.map(|m| m.cognitive),
+                    max_nesting: metrics.map(|m| m.max_nesting),
+                    maintainability_index: metrics
+                        .and_then(FunctionComplexity::maintainability_index),
+                    halstead_volume: metrics.and_then(|m| m.halstead.volume()),
+                    ..NodeWeights::default()
+                },
             });
         }
     }
@@ -278,6 +301,26 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<NodeView> {
             .then_with(|| a.name.cmp(&b.name))
     });
     nodes
+}
+
+struct ComplexityIndex<'a> {
+    by_exact: HashMap<(&'a str, usize, usize), &'a FunctionComplexity>,
+}
+
+impl<'a> ComplexityIndex<'a> {
+    fn new(metrics: &'a [FunctionComplexity]) -> Self {
+        let by_exact = metrics
+            .iter()
+            .map(|m| ((m.name.as_str(), m.start_line, m.end_line), m))
+            .collect();
+        Self { by_exact }
+    }
+
+    fn get(&self, f: &FunctionDef) -> Option<&'a FunctionComplexity> {
+        self.by_exact
+            .get(&(f.name.as_str(), f.start_line, f.end_line))
+            .copied()
+    }
 }
 
 fn build_edges(files: &[FileGraphInput], nodes: &[NodeView]) -> Vec<EdgeView> {
@@ -412,6 +455,8 @@ fn resolve_ids(ids: &[String]) -> (Option<String>, Resolution) {
 
 fn apply_static_degrees(nodes: &mut [NodeView], edges: &[EdgeView]) {
     let mut by_id: HashMap<String, usize> = HashMap::new();
+    let mut fan_in: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut fan_out: HashMap<String, HashSet<String>> = HashMap::new();
     for (idx, node) in nodes.iter().enumerate() {
         by_id.insert(node.id.clone(), idx);
     }
@@ -426,6 +471,22 @@ fn apply_static_degrees(nodes: &mut [NodeView], edges: &[EdgeView]) {
         {
             nodes[idx].weights.incoming_call_count += edge.call_count;
         }
+        if let (Some(from), Some(to), Resolution::Resolved) =
+            (edge.from.as_deref(), edge.to.as_deref(), edge.resolution)
+        {
+            fan_out
+                .entry(from.to_owned())
+                .or_default()
+                .insert(to.to_owned());
+            fan_in
+                .entry(to.to_owned())
+                .or_default()
+                .insert(from.to_owned());
+        }
+    }
+    for node in nodes {
+        node.weights.fan_in = fan_in.get(&node.id).map_or(0, HashSet::len);
+        node.weights.fan_out = fan_out.get(&node.id).map_or(0, HashSet::len);
     }
 }
 
@@ -514,9 +575,36 @@ mod tests {
         assert_eq!(report["language"], "rust");
         assert_eq!(nodes[0]["id"], "src/lib.rs:helper:1");
         assert_eq!(nodes[0]["module"], "crate");
+        assert_eq!(nodes[0]["weights"]["loc"], 1);
+        assert_eq!(nodes[0]["weights"]["fan_in"], 1);
+        assert_eq!(nodes[0]["weights"]["fan_out"], 0);
+        assert_eq!(nodes[0]["weights"]["cyclomatic_complexity"], 1);
+        assert_eq!(nodes[0]["weights"]["cognitive_complexity"], 0);
+        assert_eq!(nodes[0]["weights"]["max_nesting"], 0);
+        assert!(nodes[0]["weights"].get("maintainability_index").is_some());
+        assert!(nodes[0]["weights"].get("halstead_volume").is_some());
         assert_eq!(nodes[0]["weights"]["total_time_ms"], Value::Null);
         assert_eq!(nodes[0]["weights"]["self_time_ms"], Value::Null);
         assert_eq!(nodes[0]["weights"]["error_count"], Value::Null);
+    }
+
+    #[test]
+    fn includes_static_metrics_for_visualization_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn branchy(n: i32) -> i32 {\n    if n > 0 {\n        return n;\n    }\n    0\n}\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let node = &report["nodes"].as_array().unwrap()[0];
+        assert_eq!(node["weights"]["loc"], 6);
+        assert_eq!(node["weights"]["cyclomatic_complexity"], 2);
+        assert_eq!(node["weights"]["cognitive_complexity"], 1);
+        assert_eq!(node["weights"]["max_nesting"], 1);
+        assert!(node["weights"]["maintainability_index"].as_f64().is_some());
+        assert!(node["weights"]["halstead_volume"].as_f64().is_some());
     }
 
     #[test]
@@ -538,6 +626,53 @@ mod tests {
         assert_eq!(edges[0]["call_count"], 2);
         assert_eq!(edges[0]["weights"]["call_count"], 2);
         assert_eq!(edges[0]["weights"]["total_transition_time_ms"], Value::Null);
+
+        let nodes = report["nodes"].as_array().unwrap();
+        let caller = nodes.iter().find(|n| n["name"] == "caller").unwrap();
+        let helper = nodes.iter().find(|n| n["name"] == "helper").unwrap();
+        assert_eq!(caller["weights"]["outgoing_call_count"], 2);
+        assert_eq!(caller["weights"]["fan_out"], 1);
+        assert_eq!(helper["weights"]["incoming_call_count"], 2);
+        assert_eq!(helper["weights"]["fan_in"], 1);
+    }
+
+    #[test]
+    fn resolves_unique_method_edges_by_last_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "struct S;\nimpl S {\n    fn helper(&self) {}\n    fn caller(&self) { self.helper(); }\n}\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edges = report["edges"].as_array().unwrap();
+        let edge = edges
+            .iter()
+            .find(|e| e["callee_name"] == "helper")
+            .expect("helper method call should be recorded");
+        assert_eq!(edge["from"], "src/lib.rs:S::caller:4");
+        assert_eq!(edge["to"], "src/lib.rs:S::helper:3");
+        assert_eq!(edge["resolution"], "resolved");
+    }
+
+    #[test]
+    fn default_mode_includes_cfg_test_call_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn prod() {}\n#[cfg(test)]\nmod tests { fn helper() { prod(); } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edges = report["edges"].as_array().unwrap();
+        let edge = edges
+            .iter()
+            .find(|e| e["from"] == "src/lib.rs:helper:3")
+            .expect("cfg(test) helper call should be included by default");
+        assert_eq!(edge["to"], "src/lib.rs:prod:1");
+        assert_eq!(edge["resolution"], "resolved");
     }
 
     #[test]
@@ -604,6 +739,13 @@ mod tests {
             .map(|n| n["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, ["helper", "integration"]);
+        let integration = only["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "integration")
+            .unwrap();
+        assert_eq!(integration["is_test"], true);
     }
 
     #[test]
@@ -640,5 +782,31 @@ mod tests {
             .unwrap();
         assert!(md.contains("# Function graph:"));
         assert!(md.contains("resolved edges: 1"));
+    }
+
+    #[test]
+    fn module_paths_handle_crate_roots_nested_files_and_empty_relative_paths() {
+        assert_eq!(module_path_from_relative_file("lib.rs"), "crate");
+        assert_eq!(module_path_from_relative_file("main.rs"), "crate");
+        assert_eq!(
+            module_path_from_relative_file("src/analyze/function_graph.rs"),
+            "crate::analyze::function_graph"
+        );
+        assert_eq!(
+            module_path_from_relative_file("src/analyze/mod.rs"),
+            "crate::analyze"
+        );
+        assert_eq!(module_path_from_relative_file(""), "crate");
+    }
+
+    #[test]
+    fn single_file_input_uses_crate_module() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/nested/file.rs", "fn f() {}\n");
+        let file = dir.path().join("src/nested/file.rs");
+
+        let report = analyze_json(&file);
+        let node = &report["nodes"].as_array().unwrap()[0];
+        assert_eq!(node["module"], "crate");
     }
 }
