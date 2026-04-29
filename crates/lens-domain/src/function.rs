@@ -31,6 +31,9 @@ pub struct FunctionDef {
     pub start_line: usize,
     /// 1-based inclusive end line.
     pub end_line: usize,
+    /// Whether the language adapter classified this function-shaped item as
+    /// test code from source-level syntax or naming conventions.
+    pub is_test: bool,
     pub tree: TreeNode,
 }
 
@@ -46,6 +49,7 @@ impl FunctionDef {
     ///     name: "f".into(),
     ///     start_line: 5,
     ///     end_line: 10,
+    ///     is_test: false,
     ///     tree: TreeNode::leaf("Block"),
     /// };
     /// assert_eq!(f.line_count(), 6);
@@ -61,23 +65,41 @@ impl LshTree for FunctionDef {
     }
 }
 
-/// Abstraction over a language's source-to-tree pipeline.
+/// Abstraction over a language's source-to-tree/function-extraction pipeline.
 ///
 /// Implementors are expected to be cheap to reuse across files (e.g. storing
 /// a tree-sitter or syn parser by value) but they don't need to be thread
 /// safe — `agent-lens` drives comparison sequentially per parser instance.
 pub trait LanguageParser {
-    type Error: std::error::Error + 'static;
-
     /// Short identifier for the language (e.g. `"rust"`).
     fn language(&self) -> &'static str;
 
     /// Parse the whole source into a single tree. Mostly useful for whole-
     /// file comparisons; most callers will reach for [`Self::extract_functions`].
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error>;
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError>;
 
     /// Extract every function-like definition in `source`.
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error>;
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("failed to parse {language} source: {source}")]
+pub struct LanguageParseError {
+    language: &'static str,
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl LanguageParseError {
+    pub fn new(
+        language: &'static str,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            language,
+            source: Box::new(source),
+        }
+    }
 }
 
 /// A pair of functions that exceed the similarity threshold.
@@ -518,6 +540,7 @@ mod tests {
             name: name.to_owned(),
             start_line: 1,
             end_line: 10,
+            is_test: false,
             tree,
         }
     }
@@ -559,6 +582,7 @@ mod tests {
             name: "f".into(),
             start_line: 5,
             end_line: 10,
+            is_test: false,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 6);
@@ -570,6 +594,7 @@ mod tests {
             name: "f".into(),
             start_line: 7,
             end_line: 7,
+            is_test: false,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);
@@ -581,6 +606,7 @@ mod tests {
             name: "f".into(),
             start_line: 10,
             end_line: 5,
+            is_test: false,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);

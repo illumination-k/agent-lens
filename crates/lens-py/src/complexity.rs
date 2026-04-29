@@ -20,8 +20,7 @@
 //! Nested functions and classes inside a function body contribute to
 //! the enclosing function's score (matches how a reader experiences the
 //! code) but are not surfaced as separate units. This mirrors how the
-//! similarity extractor treats `def` bodies as atomic — see
-//! [`crate::parser::extract_functions_excluding_tests`].
+//! similarity extractor treats `def` bodies as atomic.
 
 use std::collections::HashMap;
 

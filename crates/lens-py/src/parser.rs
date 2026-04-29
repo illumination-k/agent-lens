@@ -1,6 +1,8 @@
 //! ruff-based implementation of [`lens_domain::LanguageParser`] for Python.
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode, qualify as qualify_name};
+use lens_domain::{
+    FunctionDef, LanguageParseError, LanguageParser, TreeNode, qualify as qualify_name,
+};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_parser::{ParseError, parse_module};
@@ -30,14 +32,15 @@ pub enum PythonParseError {
 }
 
 impl LanguageParser for PythonParser {
-    type Error = PythonParseError;
-
     fn language(&self) -> &'static str {
         "python"
     }
 
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error> {
-        let module = parse_module(source)?.into_syntax();
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
+        let module = parse_module(source)
+            .map_err(PythonParseError::from)
+            .map_err(|err| LanguageParseError::new(self.language(), err))?
+            .into_syntax();
         let mut builder = TreeBuilder::new("Module");
         for stmt in &module.body {
             builder.visit_stmt(stmt);
@@ -45,44 +48,17 @@ impl LanguageParser for PythonParser {
         Ok(builder.finish())
     }
 
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        extract_with(source, ExtractOptions::default())
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError> {
+        extract_with(source).map_err(|err| LanguageParseError::new(self.language(), err))
     }
 }
 
-/// Like [`PythonParser::extract_functions`] but drops anything tagged as a
-/// pytest / unittest test: functions whose name matches the pytest
-/// convention (`test_*`), pytest fixtures and `pytest.mark.*`-decorated
-/// callables, methods of `Test*` classes, methods of classes inheriting
-/// from `unittest.TestCase`, and `@unittest.skip*` / `@expectedFailure`
-/// methods.
-///
-/// Used by analysers (similarity, future cohesion / complexity reports)
-/// that want to look at production code only — table-driven tests
-/// otherwise dominate the noise floor with parallel-but-distinct
-/// fixtures that aren't refactor candidates.
-pub fn extract_functions_excluding_tests(
-    source: &str,
-) -> Result<Vec<FunctionDef>, PythonParseError> {
-    extract_with(
-        source,
-        ExtractOptions {
-            exclude_tests: true,
-        },
-    )
-}
-
-#[derive(Default, Clone, Copy)]
-struct ExtractOptions {
-    exclude_tests: bool,
-}
-
-fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, PythonParseError> {
+fn extract_with(source: &str) -> Result<Vec<FunctionDef>, PythonParseError> {
     let module = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
     for stmt in &module.body {
-        collect_stmt(stmt, None, &lines, &mut out, opts);
+        collect_stmt(stmt, None, false, &lines, &mut out);
     }
     Ok(out)
 }
@@ -90,9 +66,9 @@ fn extract_with(source: &str, opts: ExtractOptions) -> Result<Vec<FunctionDef>, 
 fn collect_stmt(
     stmt: &Stmt,
     owner: Option<&str>,
+    owner_is_test: bool,
     lines: &LineIndex,
     out: &mut Vec<FunctionDef>,
-    opts: ExtractOptions,
 ) {
     match stmt {
         Stmt::FunctionDef(func) => {
@@ -105,28 +81,21 @@ fn collect_stmt(
             if is_stub_function(func) {
                 return;
             }
-            if opts.exclude_tests && is_test_function(func) {
-                return;
-            }
+            let is_test = owner_is_test || is_test_function(func);
             let qualified = qualify_name(owner, func.name.as_str());
-            out.push(function_def_from(func, &qualified, lines));
+            out.push(function_def_from(func, &qualified, is_test, lines));
             // Function bodies are atomic units of analysis: nested `def`s
             // and inner classes contribute to the parent's tree but are
             // not surfaced as their own [`FunctionDef`] entries. Mirrors
             // `lens-rust` (closures stay inside their parent fn) and
             // `lens-ts` (inner functions are deliberately left out).
         }
-        Stmt::ClassDef(class) => collect_class(class, lines, out, opts),
+        Stmt::ClassDef(class) => collect_class(class, lines, out),
         _ => {}
     }
 }
 
-fn collect_class(
-    class: &StmtClassDef,
-    lines: &LineIndex,
-    out: &mut Vec<FunctionDef>,
-    opts: ExtractOptions,
-) {
+fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<FunctionDef>) {
     // PEP 544 `Protocol` classes describe a structural contract; their
     // methods are stubs by definition. Drop the whole subtree so a
     // generic Protocol with default `...` bodies doesn't pollute
@@ -135,16 +104,19 @@ fn collect_class(
     if inherits_protocol(class) {
         return;
     }
-    if opts.exclude_tests && is_test_class(class) {
-        return;
-    }
+    let class_is_test = is_test_class(class);
     let class_name = class.name.as_str();
     for inner in &class.body {
-        collect_stmt(inner, Some(class_name), lines, out, opts);
+        collect_stmt(inner, Some(class_name), class_is_test, lines, out);
     }
 }
 
-fn function_def_from(func: &StmtFunctionDef, name: &str, lines: &LineIndex) -> FunctionDef {
+fn function_def_from(
+    func: &StmtFunctionDef,
+    name: &str,
+    is_test: bool,
+    lines: &LineIndex,
+) -> FunctionDef {
     let start_line = lines.line_of(func.range.start().to_usize());
     // `range.end()` lands at the position just past the last byte of the
     // body; we want the line that byte sits on.
@@ -158,6 +130,7 @@ fn function_def_from(func: &StmtFunctionDef, name: &str, lines: &LineIndex) -> F
         name: name.to_owned(),
         start_line,
         end_line,
+        is_test,
         tree: builder.finish(),
     }
 }
@@ -428,21 +401,15 @@ mod tests {
     ) {
         let funcs = parse_functions(src);
         let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(
-            names, expected,
-            "default extraction must keep every item; only --exclude-tests should drop them",
-        );
+        assert_eq!(names, expected, "default extraction must keep every item");
+        assert!(funcs.iter().all(|f| f.is_test));
     }
 
     #[test]
-    fn excluding_tests_drops_pytest_and_unittest_scaffolding() {
-        // Production code surrounded by every shape `--exclude-tests`
-        // is supposed to filter: a pytest test fn, a pytest fixture,
-        // a `pytest.mark.*` test, a `Test*` class, and a `unittest.TestCase`
-        // subclass. `production` and `Service::compute` should survive —
-        // including the production class method covers `is_test_class`'s
-        // negative branch (a mutant that always returns `true` would drop
-        // the method and fail the assertion).
+    fn extraction_marks_pytest_and_unittest_scaffolding() {
+        // Production code surrounded by every shape the analyzer later
+        // filters: a pytest test fn, a pytest fixture, a `pytest.mark.*`
+        // test, a `Test*` class, and a `unittest.TestCase` subclass.
         let src = "
 import pytest
 import unittest
@@ -477,22 +444,30 @@ class Other(unittest.TestCase):
 def disabled():
     return 0
 ";
-        let funcs = extract_functions_excluding_tests(src).unwrap();
-        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["production", "Service::compute"]);
+        let mut parser = PythonParser::new();
+        let funcs = parser.extract_functions(src).unwrap();
+        let flags: Vec<_> = funcs.iter().map(|f| (f.name.as_str(), f.is_test)).collect();
+        assert_eq!(
+            flags,
+            [
+                ("production", false),
+                ("test_unit", true),
+                ("sample", true),
+                ("test_param", true),
+                ("Service::compute", false),
+                ("TestThing::helper", true),
+                ("Other::test_method", true),
+                ("disabled", true),
+            ]
+        );
     }
 
     #[test]
-    fn excluding_tests_keeps_default_extraction_behaviour_with_no_test_markers() {
-        // No test-shaped items — the filter should be a no-op so the
-        // public surface still reports every production function.
-        let src = "def a():\n    pass\ndef b():\n    pass\n";
-        let baseline = parse_functions(src);
-        let filtered = extract_functions_excluding_tests(src).unwrap();
-        assert_eq!(
-            baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-            filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-        );
+    fn extraction_marks_functions_without_test_markers_as_production() {
+        let src = "def a():\n    return 1\ndef b():\n    return 2\n";
+        let funcs = parse_functions(src);
+        assert_eq!(funcs.len(), 2);
+        assert!(funcs.iter().all(|f| !f.is_test));
     }
 
     #[test]

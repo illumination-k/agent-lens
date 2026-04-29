@@ -1,6 +1,8 @@
 //! syn-based implementation of [`lens_domain::LanguageParser`] for Rust.
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode, qualify as qualify_name};
+use lens_domain::{
+    FunctionDef, LanguageParseError, LanguageParser, TreeNode, qualify as qualify_name,
+};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -30,39 +32,21 @@ pub enum RustParseError {
 }
 
 impl LanguageParser for RustParser {
-    type Error = RustParseError;
-
     fn language(&self) -> &'static str {
         "rust"
     }
 
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error> {
-        let file = syn::parse_file(source)?;
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
+        let file = syn::parse_file(source)
+            .map_err(RustParseError::from)
+            .map_err(|err| LanguageParseError::new(self.language(), err))?;
         Ok(token_stream_to_tree("File", file.to_token_stream()))
     }
 
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError> {
         extract_with(source, WalkOptions::default())
+            .map_err(|err| LanguageParseError::new(self.language(), err))
     }
-}
-
-/// Like [`RustParser::extract_functions`] but drops anything tagged as a
-/// unit test: free functions with `#[test]` / `#[rstest]` /
-/// `#[<runner>::test]` attributes, and items inside `#[cfg(test)] mod`
-/// blocks.
-///
-/// Used by analysers (similarity, future cohesion / complexity reports)
-/// that want to look at production code only — table-driven tests
-/// otherwise dominate the noise floor with parallel-but-distinct
-/// fixtures that aren't refactor candidates.
-pub fn extract_functions_excluding_tests(source: &str) -> Result<Vec<FunctionDef>, RustParseError> {
-    extract_with(
-        source,
-        WalkOptions {
-            skip_cfg_test_blocks: true,
-            skip_test_fns: true,
-        },
-    )
 }
 
 fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, RustParseError> {
@@ -73,6 +57,7 @@ fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, Rus
             name: qualify_name(site.owner, &site.sig.ident.to_string()),
             start_line: site.sig.span().start().line,
             end_line: site.block.span().end().line,
+            is_test: site.is_test,
             tree: token_stream_to_tree("Block", site.block.to_token_stream()),
         });
     });
@@ -292,11 +277,10 @@ fn recursive(n: u32) -> u32 {
     }
 
     #[test]
-    fn excluding_tests_drops_cfg_test_modules_and_test_attributed_fns() {
-        // Production code surrounded by every shape `--exclude-tests`
-        // is supposed to filter: a `#[test]` free fn, a `#[rstest]` fn,
-        // a `mod tests` gated by `#[cfg(test)]`, and an `impl` block
-        // gated the same way. Only `production` should survive.
+    fn extraction_marks_cfg_test_modules_and_test_attributed_fns() {
+        // Production code surrounded by every shape the analyzer later
+        // filters: a `#[test]` free fn, a `#[rstest]` fn, a `mod tests`
+        // gated by `#[cfg(test)]`, and an `impl` block gated the same way.
         let src = r#"
 fn production(x: i32) -> i32 { x + 1 }
 
@@ -319,22 +303,27 @@ impl Bag {
     fn fixture() -> Self { Self }
 }
 "#;
-        let funcs = extract_functions_excluding_tests(src).unwrap();
-        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["production"]);
+        let mut parser = RustParser::new();
+        let funcs = parser.extract_functions(src).unwrap();
+        let flags: Vec<_> = funcs.iter().map(|f| (f.name.as_str(), f.is_test)).collect();
+        assert_eq!(
+            flags,
+            [
+                ("production", false),
+                ("unit_test", true),
+                ("parameterised_test", true),
+                ("helper", true),
+                ("other_helper", true),
+                ("Bag::fixture", true),
+            ]
+        );
     }
 
     #[test]
-    fn excluding_tests_keeps_default_extraction_behaviour_with_no_test_attrs() {
-        // No #[test], no `mod tests`. The filter should be a no-op so
-        // the public surface still reports every production function.
+    fn extraction_marks_functions_without_test_attrs_as_production() {
         let src = "fn a() {}\nfn b() {}\n";
-        let baseline = parse_functions(src);
-        let filtered = extract_functions_excluding_tests(src).unwrap();
-        assert_eq!(
-            baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-            filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-        );
+        let funcs = parse_functions(src);
+        assert!(funcs.iter().all(|f| !f.is_test));
     }
 
     #[test]

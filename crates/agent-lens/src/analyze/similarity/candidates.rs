@@ -256,7 +256,8 @@ pub(super) fn candidate_pairs(
                     let a = eligible_indices.get(i).copied()?;
                     let b = eligible_indices.get(j).copied()?;
                     Some((a, b))
-                }),
+                })
+                .filter(|(i, j)| same_test_class(corpus, *i, *j)),
             profiles,
             threshold,
             opts,
@@ -266,7 +267,8 @@ pub(super) fn candidate_pairs(
             eligible_indices
                 .iter()
                 .enumerate()
-                .flat_map(|(pos, &i)| eligible_indices[pos + 1..].iter().map(move |&j| (i, j))),
+                .flat_map(|(pos, &i)| eligible_indices[pos + 1..].iter().map(move |&j| (i, j)))
+                .filter(|(i, j)| same_test_class(corpus, *i, *j)),
             profiles,
             threshold,
             opts,
@@ -284,6 +286,13 @@ pub(super) fn candidate_pairs(
         } else {
             CandidatePairStrategy::Cartesian
         },
+    }
+}
+
+fn same_test_class(corpus: &[OwnedFunction], i: usize, j: usize) -> bool {
+    match (corpus.get(i), corpus.get(j)) {
+        (Some(a), Some(b)) => a.is_test == b.is_test,
+        _ => false,
     }
 }
 
@@ -501,6 +510,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned_function(name: &str, is_test: bool) -> OwnedFunction {
+        OwnedFunction {
+            file: std::path::PathBuf::from("lib.rs"),
+            rel_path: "lib.rs".to_owned(),
+            is_test,
+            def: lens_domain::FunctionDef {
+                name: name.to_owned(),
+                start_line: 1,
+                end_line: 5,
+                is_test,
+                tree: lens_domain::TreeNode::with_children(
+                    "Block",
+                    "",
+                    vec![
+                        lens_domain::TreeNode::leaf("Let"),
+                        lens_domain::TreeNode::leaf("Return"),
+                    ],
+                ),
+            },
+        }
+    }
+
+    #[test]
+    fn cartesian_candidates_never_include_self_pairs() {
+        let corpus = vec![
+            owned_function("a", false),
+            owned_function("b", false),
+            owned_function("c", false),
+        ];
+        let profiles: Vec<_> = corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(&f.def.tree))
+            .collect();
+        let candidates = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.0,
+            &lens_domain::TSEDOptions::default(),
+        );
+
+        assert_eq!(candidates.pairs, vec![(0, 1), (0, 2), (1, 2)]);
+    }
 
     #[test]
     fn scoring_profile_initializes_subtree_sizes_lazily() {

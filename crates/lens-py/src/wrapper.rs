@@ -12,9 +12,8 @@
 //! in shape and intent. The adapter list differs because Python uses
 //! `await` and stringification methods rather than `?` / `.unwrap()`.
 //!
-//! Tests are filtered the same way [`crate::extract_functions_excluding_tests`]
-//! filters them: pytest-flavoured functions and `unittest.TestCase`
-//! methods are forwarding by design and would only add noise.
+//! Pytest-flavoured functions and `unittest.TestCase` methods are
+//! forwarding by design and would only add noise.
 
 use lens_domain::{WrapperFinding, args_pass_through_by, qualify};
 use ruff_python_ast::{

@@ -34,6 +34,7 @@ pub(crate) struct FnSite<'a> {
     /// the trait name itself for trait default methods. `None` for
     /// inherent impls and free fns.
     pub(crate) trait_name: Option<&'a str>,
+    pub(crate) is_test: bool,
     pub(crate) sig: &'a Signature,
     pub(crate) block: &'a Block,
 }
@@ -47,10 +48,9 @@ pub(crate) struct FnSite<'a> {
 #[derive(Default, Clone, Copy)]
 pub(crate) struct WalkOptions {
     /// Skip `#[cfg(test)]`-gated `mod`/`impl`/`trait` blocks entirely.
+    /// Some analyzers, such as wrappers, historically ignore test modules
+    /// but do not classify individual `#[test]` functions.
     pub(crate) skip_cfg_test_blocks: bool,
-    /// Skip individual fns / methods carrying a test attribute
-    /// (`#[test]`, `#[rstest]`, `#[tokio::test]`, etc.).
-    pub(crate) skip_test_fns: bool,
 }
 
 /// Walk every function-shaped node reachable from `items`, yielding one
@@ -66,45 +66,48 @@ where
     F: FnMut(FnSite<'_>),
 {
     for item in items {
-        walk_item(item, opts, visit);
+        walk_item(item, opts, false, visit);
     }
 }
 
-fn walk_item<F>(item: &Item, opts: WalkOptions, visit: &mut F)
+fn walk_item<F>(item: &Item, opts: WalkOptions, in_test_context: bool, visit: &mut F)
 where
     F: FnMut(FnSite<'_>),
 {
     match item {
         Item::Fn(item_fn) => {
-            if opts.skip_test_fns && is_test_function(&item_fn.attrs) {
-                return;
-            }
+            let is_test = in_test_context || is_test_function(&item_fn.attrs);
             visit(FnSite {
                 owner: None,
                 trait_name: None,
+                is_test,
                 sig: &item_fn.sig,
                 block: &item_fn.block,
             });
         }
         Item::Impl(item_impl) => {
-            if opts.skip_cfg_test_blocks && has_cfg_test(&item_impl.attrs) {
+            let item_is_test = has_cfg_test(&item_impl.attrs);
+            if opts.skip_cfg_test_blocks && item_is_test {
                 return;
             }
-            walk_impl(item_impl, opts, visit);
+            walk_impl(item_impl, in_test_context || item_is_test, visit);
         }
         Item::Trait(item_trait) => {
-            if opts.skip_cfg_test_blocks && has_cfg_test(&item_trait.attrs) {
+            let item_is_test = has_cfg_test(&item_trait.attrs);
+            if opts.skip_cfg_test_blocks && item_is_test {
                 return;
             }
-            walk_trait(item_trait, opts, visit);
+            walk_trait(item_trait, in_test_context || item_is_test, visit);
         }
         Item::Mod(item_mod) => {
-            if opts.skip_cfg_test_blocks && has_cfg_test(&item_mod.attrs) {
+            let item_is_test = has_cfg_test(&item_mod.attrs);
+            if opts.skip_cfg_test_blocks && item_is_test {
                 return;
             }
             if let Some((_, items)) = &item_mod.content {
+                let nested_test_context = in_test_context || item_is_test;
                 for nested in items {
-                    walk_item(nested, opts, visit);
+                    walk_item(nested, opts, nested_test_context, visit);
                 }
             }
         }
@@ -112,7 +115,7 @@ where
     }
 }
 
-fn walk_impl<F>(item_impl: &ItemImpl, opts: WalkOptions, visit: &mut F)
+fn walk_impl<F>(item_impl: &ItemImpl, in_test_context: bool, visit: &mut F)
 where
     F: FnMut(FnSite<'_>),
 {
@@ -123,12 +126,11 @@ where
         .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
     for impl_item in &item_impl.items {
         if let ImplItem::Fn(method) = impl_item {
-            if opts.skip_test_fns && is_test_function(&method.attrs) {
-                continue;
-            }
+            let is_test = in_test_context || is_test_function(&method.attrs);
             visit(FnSite {
                 owner: owner.as_deref(),
                 trait_name: trait_name.as_deref(),
+                is_test,
                 sig: &method.sig,
                 block: &method.block,
             });
@@ -136,7 +138,7 @@ where
     }
 }
 
-fn walk_trait<F>(item_trait: &ItemTrait, opts: WalkOptions, visit: &mut F)
+fn walk_trait<F>(item_trait: &ItemTrait, in_test_context: bool, visit: &mut F)
 where
     F: FnMut(FnSite<'_>),
 {
@@ -146,12 +148,11 @@ where
             let Some(block) = &method.default else {
                 continue;
             };
-            if opts.skip_test_fns && is_test_function(&method.attrs) {
-                continue;
-            }
+            let is_test = in_test_context || is_test_function(&method.attrs);
             visit(FnSite {
                 owner: Some(&owner),
                 trait_name: Some(&owner),
+                is_test,
                 sig: &method.sig,
                 block,
             });
@@ -162,7 +163,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syn::parse_str;
+    use syn::{parse_file, parse_str};
+
+    fn walked_names(src: &str, opts: WalkOptions) -> Vec<String> {
+        let file = parse_file(src).unwrap();
+        let mut names = Vec::new();
+        walk_fn_items(&file.items, opts, &mut |site| {
+            if let Some(owner) = site.owner {
+                names.push(format!("{owner}::{}", site.sig.ident));
+            } else {
+                names.push(site.sig.ident.to_string());
+            }
+        });
+        names
+    }
 
     #[test]
     fn extracts_trailing_ident_from_qualified_path() {
@@ -180,5 +194,47 @@ mod tests {
     fn returns_none_for_tuple_type() {
         let ty: Type = parse_str("(Foo, Bar)").unwrap();
         assert_eq!(type_path_last_ident(&ty), None);
+    }
+
+    #[test]
+    fn cfg_test_context_propagates_through_nested_items() {
+        let src = r#"
+#[cfg(test)]
+mod tests {
+    fn module_helper() {}
+
+    mod inner {
+        fn nested_helper() {}
+    }
+
+    struct Bag;
+    impl Bag {
+        fn fixture(&self) {}
+    }
+
+    trait Harness {
+        fn default_helper(&self) {}
+    }
+}
+"#;
+        let opts = WalkOptions {
+            skip_cfg_test_blocks: false,
+        };
+
+        let file = parse_file(src).unwrap();
+        let mut seen_test_flags = Vec::new();
+        walk_fn_items(&file.items, opts, &mut |site| {
+            seen_test_flags.push(site.is_test);
+        });
+        assert_eq!(
+            walked_names(src, opts),
+            [
+                "module_helper",
+                "nested_helper",
+                "Bag::fixture",
+                "Harness::default_helper"
+            ]
+        );
+        assert!(seen_test_flags.iter().all(|is_test| *is_test));
     }
 }

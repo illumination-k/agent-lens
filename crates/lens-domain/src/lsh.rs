@@ -269,6 +269,7 @@ mod tests {
             name: "f".into(),
             start_line: 1,
             end_line: 10,
+            is_test: false,
             tree: TreeNode::with_children("Block", "", children),
         }
     }
@@ -364,12 +365,14 @@ mod tests {
                 name: "a".into(),
                 start_line: 1,
                 end_line: 1,
+                is_test: false,
                 tree: TreeNode::leaf("Lit"),
             },
             FunctionDef {
                 name: "b".into(),
                 start_line: 1,
                 end_line: 1,
+                is_test: false,
                 tree: TreeNode::leaf("Lit"),
             },
         ];
@@ -413,6 +416,7 @@ mod tests {
             name: name.into(),
             start_line: 1,
             end_line: label_kinds.len().max(1),
+            is_test: false,
             tree: TreeNode::with_children("Block", "", children),
         }
     }

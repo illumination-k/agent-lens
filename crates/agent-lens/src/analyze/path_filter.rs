@@ -83,6 +83,11 @@ impl CompiledPathFilter {
         self.includes_relative(&rel)
     }
 
+    pub(crate) fn is_test_path(&self, path: &Path) -> bool {
+        let rel = super::relative_display_path(path, &self.base);
+        self.root_is_test || path_looks_like_test(&rel)
+    }
+
     pub fn includes_relative(&self, rel: &str) -> bool {
         let is_test = self.root_is_test || path_looks_like_test(rel);
         if self.only_tests && !is_test {

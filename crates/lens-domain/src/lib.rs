@@ -68,8 +68,8 @@ pub use coupling::{
     PairCoupling, compute_report,
 };
 pub use function::{
-    CandidateStrategy, FunctionDef, LanguageParser, SimilarCluster, SimilarPair,
-    cluster_similar_pairs, find_similar_functions, find_similar_pair_indices,
+    CandidateStrategy, FunctionDef, LanguageParseError, LanguageParser, SimilarCluster,
+    SimilarPair, cluster_similar_pairs, find_similar_functions, find_similar_pair_indices,
     find_similar_pair_indices_with_strategy,
 };
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};

@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use lens_domain::{FunctionDef, LanguageParser, TreeNode};
+use lens_domain::{FunctionDef, LanguageParseError, LanguageParser, TreeNode};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
@@ -162,19 +162,18 @@ impl TsParseError {
 }
 
 impl LanguageParser for TypeScriptParser {
-    type Error = TsParseError;
-
     fn language(&self) -> &'static str {
         "typescript"
     }
 
-    fn parse(&mut self, source: &str) -> Result<TreeNode, Self::Error> {
+    fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
         let alloc = Allocator::default();
         let ret = Parser::new(&alloc, source, self.dialect.source_type()).parse();
         if !ret.errors.is_empty() {
-            return Err(TsParseError::from_diagnostics(
+            let err = TsParseError::from_diagnostics(
                 ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
-            ));
+            );
+            return Err(LanguageParseError::new(self.language(), err));
         }
         let mut root = TreeNode::new("Program", "");
         for stmt in &ret.program.body {
@@ -183,44 +182,13 @@ impl LanguageParser for TypeScriptParser {
         Ok(root)
     }
 
-    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, Self::Error> {
-        extract_with(source, self.dialect, ExtractOptions::default())
+    fn extract_functions(&mut self, source: &str) -> Result<Vec<FunctionDef>, LanguageParseError> {
+        extract_with(source, self.dialect)
+            .map_err(|err| LanguageParseError::new(self.language(), err))
     }
 }
 
-/// Like [`TypeScriptParser::extract_functions`] but drops items that
-/// look like xUnit-style test scaffolding: declaration-level functions
-/// whose name matches the `test` / `test_*` convention, and methods of
-/// classes whose name starts with `Test`.
-///
-/// Anonymous arrow callbacks passed to `describe()` / `it()` / `test()`
-/// are already invisible to the walker (they aren't bound to a name),
-/// so this filter only catches the named, declaration-level shapes
-/// that slip through. Used by analysers (similarity, future cohesion /
-/// complexity reports) that want to look at production code only.
-pub fn extract_functions_excluding_tests(
-    source: &str,
-    dialect: Dialect,
-) -> Result<Vec<FunctionDef>, TsParseError> {
-    extract_with(
-        source,
-        dialect,
-        ExtractOptions {
-            exclude_tests: true,
-        },
-    )
-}
-
-#[derive(Default, Clone, Copy)]
-struct ExtractOptions {
-    exclude_tests: bool,
-}
-
-fn extract_with(
-    source: &str,
-    dialect: Dialect,
-    opts: ExtractOptions,
-) -> Result<Vec<FunctionDef>, TsParseError> {
+fn extract_with(source: &str, dialect: Dialect) -> Result<Vec<FunctionDef>, TsParseError> {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.errors.is_empty() {
@@ -229,28 +197,23 @@ fn extract_with(
         ));
     }
     let line_index = LineIndex::new(source);
-    let mut visitor = FunctionDefCollector {
-        opts,
-        out: Vec::new(),
-    };
+    let mut visitor = FunctionDefCollector { out: Vec::new() };
     walk_program(&ret.program, &line_index, &mut visitor);
     Ok(visitor.out)
 }
 
 struct FunctionDefCollector {
-    opts: ExtractOptions,
     out: Vec<FunctionDef>,
 }
 
 impl FunctionVisitor for FunctionDefCollector {
     fn on_function(&mut self, item: FunctionItem<'_>) {
-        if self.opts.exclude_tests && is_test_item(&item.name) {
-            return;
-        }
+        let is_test = is_test_item(&item.name);
         self.out.push(FunctionDef {
             name: item.name,
             start_line: item.start_line,
             end_line: item.end_line,
+            is_test,
             tree: function_body_tree(item.body),
         });
     }
@@ -443,22 +406,16 @@ function cloned(ys: number[]): number {
     ) {
         let funcs = parse_functions(src);
         let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(
-            names, expected,
-            "default extraction must keep every item; only --exclude-tests should drop them",
-        );
+        assert_eq!(names, expected, "default extraction must keep every item");
+        assert!(funcs.iter().all(|f| f.is_test));
     }
 
     #[test]
-    fn excluding_tests_drops_xunit_named_scaffolding() {
-        // Production code surrounded by every shape `--exclude-tests`
-        // is supposed to filter for TypeScript: an xUnit-style
-        // `test_*` free function, a `Test*` class with helper
-        // methods, and a `test_*` method on a regular class. The
-        // production class method (`Service::compute`) should
-        // survive — covers the negative branch of the test-class
-        // check (a mutant that always returns `true` would drop it
-        // and fail the assertion).
+    fn extraction_marks_xunit_named_scaffolding() {
+        // Production code surrounded by every shape the analyzer later
+        // filters for TypeScript: an xUnit-style `test_*` free function,
+        // a `Test*` class with helper methods, and a `test_*` method on
+        // a regular class.
         let src = r#"
 function production(x: number): number {
     return x + 1;
@@ -483,27 +440,32 @@ class TestThing {
     }
 }
 "#;
-        let funcs = extract_functions_excluding_tests(src, Dialect::Ts).unwrap();
-        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["production", "Service::compute"]);
-    }
-
-    #[test]
-    fn excluding_tests_keeps_default_extraction_with_no_test_markers() {
-        // No test-shaped items — the filter should be a no-op so the
-        // public surface still reports every production function.
-        let src = "function a(): void {}\nfunction b(): void {}\n";
-        let baseline = parse_functions(src);
-        let filtered = extract_functions_excluding_tests(src, Dialect::Ts).unwrap();
+        let mut parser = TypeScriptParser::with_dialect(Dialect::Ts);
+        let funcs = parser.extract_functions(src).unwrap();
+        let flags: Vec<_> = funcs.iter().map(|f| (f.name.as_str(), f.is_test)).collect();
         assert_eq!(
-            baseline.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-            filtered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            flags,
+            [
+                ("production", false),
+                ("test_unit", true),
+                ("Service::compute", false),
+                ("Service::test_internal", true),
+                ("TestThing::helper", true),
+            ]
         );
     }
 
     #[test]
-    fn excluding_tests_surfaces_parse_errors() {
-        let err = extract_functions_excluding_tests("function ??? {", Dialect::Ts).unwrap_err();
+    fn extraction_marks_functions_without_test_markers_as_production() {
+        let src = "function a(): void {}\nfunction b(): void {}\n";
+        let funcs = parse_functions(src);
+        assert!(funcs.iter().all(|f| !f.is_test));
+    }
+
+    #[test]
+    fn extraction_surfaces_parse_errors() {
+        let mut parser = TypeScriptParser::with_dialect(Dialect::Ts);
+        let err = parser.extract_functions("function ??? {").unwrap_err();
         assert!(format!("{err}").contains("failed to parse TypeScript source"));
     }
 

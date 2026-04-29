@@ -57,6 +57,23 @@ const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
 /// budget around 10 seconds gives a limit around 13M pairs.
 const MAX_CANDIDATE_PAIRS: usize = 13_000_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FunctionSelection {
+    All,
+    ExcludeTests,
+    OnlyTests,
+}
+
+impl FunctionSelection {
+    pub(super) fn includes(self, is_test: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::ExcludeTests => !is_test,
+            Self::OnlyTests => is_test,
+        }
+    }
+}
+
 /// Analyzer entry point. Holds the threshold and TSED options so per-run
 /// configuration can be threaded through `analyze` without changing the
 /// CLI surface.
@@ -66,6 +83,7 @@ pub struct SimilarityAnalyzer {
     opts: TSEDOptions,
     diff_only: bool,
     exclude_tests: bool,
+    only_tests: bool,
     path_filter: AnalyzePathFilter,
     min_lines: usize,
     top: Option<usize>,
@@ -91,6 +109,7 @@ impl SimilarityAnalyzer {
             opts: TSEDOptions::default(),
             diff_only: false,
             exclude_tests: false,
+            only_tests: false,
             path_filter: AnalyzePathFilter::new(),
             min_lines: DEFAULT_MIN_LINES,
             top: None,
@@ -120,6 +139,7 @@ impl SimilarityAnalyzer {
     }
 
     pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+        self.only_tests = only_tests;
         self.path_filter = self.path_filter.with_only_tests(only_tests);
         self
     }
@@ -145,7 +165,7 @@ impl SimilarityAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
-        let corpus = collect_corpus(path, &self.path_filter, self.exclude_tests)?;
+        let corpus = collect_corpus(path, &self.path_filter, self.function_selection())?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
@@ -168,6 +188,16 @@ impl SimilarityAnalyzer {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&report, self.top)),
+        }
+    }
+
+    fn function_selection(&self) -> FunctionSelection {
+        if self.only_tests {
+            FunctionSelection::OnlyTests
+        } else if self.exclude_tests {
+            FunctionSelection::ExcludeTests
+        } else {
+            FunctionSelection::All
         }
     }
 
@@ -738,10 +768,12 @@ fn delta(xs: &[i32]) -> i32 {
         OwnedFunction {
             file: PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
+            is_test: false,
             def: lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line,
                 end_line,
+                is_test: false,
                 tree: lens_domain::TreeNode::leaf("Block"),
             },
         }
@@ -1021,6 +1053,93 @@ mod tests {
     }
 
     #[test]
+    fn only_tests_keeps_test_functions_inside_non_test_rust_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+fn production(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+
+#[cfg(test)]
+mod tests {
+    fn alpha() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
+    fn beta() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_only_tests(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 2, "got {parsed}");
+        let names: Vec<&str> = parsed["clusters"][0]["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["alpha", "beta"]);
+        assert!(
+            parsed["clusters"][0]["functions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["is_test"].as_bool() == Some(true))
+        );
+    }
+
+    #[test]
+    fn all_mode_does_not_compare_test_functions_to_production_functions() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+fn production(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+
+#[test]
+fn test_production(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], 2, "got {parsed}");
+        assert_eq!(parsed["cluster_count"], 0, "got {parsed}");
+    }
+
+    #[test]
     fn report_renders_paired_python_functions() {
         // Two structurally identical Python functions — guaranteed to
         // score above the 0.5 threshold and exercise the lens-py
@@ -1061,7 +1180,7 @@ def beta(ys):
     fn exclude_tests_drops_python_test_functions_from_report() {
         // pytest-style `test_*` functions form a parallel pair next to
         // a single production function; `--exclude-tests` should drop
-        // them via `lens_py::extract_functions_excluding_tests`.
+        // them via function-level test metadata.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 def production(xs):
@@ -1148,7 +1267,7 @@ func beta(ys []int) int {
     fn exclude_tests_drops_go_test_functions_from_report() {
         // `go test`-style `Test*` functions form a parallel pair next
         // to a single production function; `--exclude-tests` should
-        // drop them via `lens_golang::extract_functions_excluding_tests`.
+        // drop them via function-level test metadata.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 package p
@@ -1204,7 +1323,7 @@ func TestBeta(t *testing.T) {
     fn exclude_tests_drops_typescript_test_functions_from_report() {
         // xUnit-style `test_*` functions form a parallel pair next to
         // a single production function; `--exclude-tests` should drop
-        // them via `lens_ts::extract_functions_excluding_tests`.
+        // them via function-level test metadata.
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 function production(xs: number[]): number {
@@ -1373,6 +1492,13 @@ fn beta(x: i32) -> i32 {
             .map(|f| f["file"].as_str().unwrap())
             .collect();
         assert!(files.iter().all(|f| *f == "tests/lib_test.rs"));
+        assert!(
+            parsed["clusters"][0]["functions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["is_test"].as_bool() == Some(true))
+        );
 
         let exclude_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)

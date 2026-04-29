@@ -66,6 +66,7 @@ struct FunctionRef<'a> {
     name: &'a str,
     start_line: usize,
     end_line: usize,
+    is_test: bool,
 }
 
 impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
@@ -75,6 +76,7 @@ impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
             name: f.def.name.as_str(),
             start_line: f.def.start_line,
             end_line: f.def.end_line,
+            is_test: f.is_test,
         }
     }
 }

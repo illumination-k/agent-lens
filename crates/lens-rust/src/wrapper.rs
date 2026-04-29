@@ -12,7 +12,9 @@ use lens_domain::{WrapperFinding, args_pass_through_by, qualify as qualify_name}
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
-use syn::{Block, Expr, ExprCall, ExprMethodCall, FnArg, Pat, PatIdent, Signature, Stmt, UnOp};
+use syn::{
+    Block, Expr, ExprCall, ExprMethodCall, FnArg, Local, Pat, PatIdent, Signature, Stmt, UnOp,
+};
 
 use crate::common::{WalkOptions, walk_fn_items};
 use crate::parser::RustParseError;
@@ -36,6 +38,11 @@ const TRIVIAL_NULLARY_ADAPTERS: &[&str] = &[
 /// Method names whose only argument is a literal we treat as a no-op
 /// (e.g. `expect("msg")`).
 const TRIVIAL_LITERAL_ADAPTERS: &[&str] = &["expect"];
+
+/// Method names whose only argument is a closure that just adapts the
+/// delegated result shape. We do not inspect the closure body: the wrapper
+/// signal is still useful, and the adapter label makes the conversion visible.
+const TRIVIAL_CLOSURE_ADAPTERS: &[&str] = &["map_err"];
 
 /// `(trait_name, method_name)` pairs whose forwarding bodies are
 /// idiomatic boilerplate, not refactoring opportunities. The trait spec
@@ -66,7 +73,6 @@ pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError
     let file = syn::parse_file(source)?;
     let opts = WalkOptions {
         skip_cfg_test_blocks: true,
-        skip_test_fns: false,
     };
     let mut out = Vec::new();
     walk_fn_items(&file.items, opts, &mut |site| {
@@ -87,14 +93,14 @@ fn analyze_fn(
     if is_boilerplate_trait_method(trait_name, &method_name) {
         return None;
     }
-    let tail = single_tail_expr(block)?;
+    let (tail, extra_passthroughs) = tail_expr_with_extra_passthroughs(block)?;
     let (core, adapters) = peel_adapters(tail);
     let (callee, call_args) = core_call(core)?;
     if is_constructor_default_shim(owner, &method_name, &callee) {
         return None;
     }
     let params = collect_param_idents(sig);
-    if !args_pass_through(call_args, &params) {
+    if !all_args_pass_through(call_args, &extra_passthroughs, &params) {
         return None;
     }
     Some(WrapperFinding {
@@ -136,13 +142,23 @@ fn is_boilerplate_trait_method(trait_name: Option<&str>, method: &str) -> bool {
         .any(|&(t, m)| t == trait_name && m == method)
 }
 
-/// Return the single tail expression of a block, ignoring an optional
-/// `return ...;` wrapping. Anything more elaborate (let-bindings,
-/// multiple statements, macros, control flow) returns None.
-fn single_tail_expr(block: &Block) -> Option<&Expr> {
-    let [stmt] = block.stmts.as_slice() else {
-        return None;
-    };
+/// Return the delegated tail expression plus any parameter-passthrough
+/// expressions consumed by a one-line local factory.
+fn tail_expr_with_extra_passthroughs(block: &Block) -> Option<(&Expr, Vec<&Expr>)> {
+    match block.stmts.as_slice() {
+        [stmt] => tail_expr(stmt).map(|expr| (expr, Vec::new())),
+        [Stmt::Local(local), stmt] => {
+            let binding = local_binding_name(local)?;
+            let tail = tail_expr(stmt)?;
+            let (core, _) = peel_adapters(tail);
+            method_receiver_ident(core).filter(|receiver| receiver == &binding)?;
+            Some((tail, factory_passthroughs(local)?))
+        }
+        _ => None,
+    }
+}
+
+fn tail_expr(stmt: &Stmt) -> Option<&Expr> {
     match stmt {
         Stmt::Expr(expr, None) => Some(strip_return(expr)),
         Stmt::Expr(Expr::Return(ret), Some(_)) => ret.expr.as_deref(),
@@ -191,6 +207,12 @@ fn is_trivial_method_call(method: &ExprMethodCall) -> bool {
     if TRIVIAL_LITERAL_ADAPTERS.contains(&name.as_str())
         && method.args.len() == 1
         && matches!(method.args.first(), Some(Expr::Lit(_)))
+    {
+        return true;
+    }
+    if TRIVIAL_CLOSURE_ADAPTERS.contains(&name.as_str())
+        && method.args.len() == 1
+        && matches!(method.args.first(), Some(Expr::Closure(_)))
     {
         return true;
     }
@@ -270,6 +292,44 @@ fn collect_param_idents(sig: &Signature) -> Vec<String> {
     out
 }
 
+fn local_binding_name(local: &Local) -> Option<String> {
+    if let Pat::Ident(PatIdent { ident, .. }) = &local.pat {
+        Some(ident.to_string())
+    } else {
+        None
+    }
+}
+
+fn factory_passthroughs(local: &Local) -> Option<Vec<&Expr>> {
+    let init = local.init.as_ref()?;
+    passthroughs_from_factory_expr(&init.expr)
+}
+
+fn passthroughs_from_factory_expr(expr: &Expr) -> Option<Vec<&Expr>> {
+    match expr {
+        Expr::Call(ExprCall { func, args, .. }) if is_thin_path(func) => {
+            Some(args.iter().collect())
+        }
+        Expr::MethodCall(method) if is_thin_path(&method.receiver) => {
+            let mut out = Vec::with_capacity(method.args.len() + 1);
+            out.push(method.receiver.as_ref());
+            out.extend(method.args.iter());
+            Some(out)
+        }
+        Expr::Paren(paren) => passthroughs_from_factory_expr(&paren.expr),
+        Expr::Group(group) => passthroughs_from_factory_expr(&group.expr),
+        _ => None,
+    }
+}
+
+fn method_receiver_ident(expr: &Expr) -> Option<String> {
+    if let Expr::MethodCall(method) = expr {
+        passthrough_ident(&method.receiver)
+    } else {
+        None
+    }
+}
+
 /// True iff every call argument is a parameter passed through (with at
 /// most a wrapping `&`/`&mut`/`*`), every parameter is used exactly
 /// once, and the arity matches.
@@ -281,15 +341,37 @@ fn args_pass_through(
     args_pass_through_by(&args, params, |a| passthrough_ident(a))
 }
 
+fn all_args_pass_through(
+    args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>,
+    extra_passthroughs: &[&Expr],
+    params: &[String],
+) -> bool {
+    if extra_passthroughs.is_empty() {
+        return args_pass_through(args, params);
+    }
+    let mut all: Vec<&Expr> = extra_passthroughs.to_vec();
+    all.extend(args.iter());
+    args_pass_through_by(&all, params, |a| passthrough_ident(a))
+}
+
 fn passthrough_ident(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Path(path) => path.path.get_ident().map(|i| i.to_string()),
+        Expr::Struct(expr_struct) => struct_passthrough_ident(expr_struct),
         Expr::Reference(reference) => passthrough_ident(&reference.expr),
         Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => passthrough_ident(&unary.expr),
         Expr::Paren(paren) => passthrough_ident(&paren.expr),
         Expr::Group(group) => passthrough_ident(&group.expr),
         _ => None,
     }
+}
+
+fn struct_passthrough_ident(expr_struct: &syn::ExprStruct) -> Option<String> {
+    if expr_struct.rest.is_some() || expr_struct.fields.len() != 1 {
+        return None;
+    }
+    let field = expr_struct.fields.first()?;
+    passthrough_ident(&field.expr)
 }
 
 #[cfg(test)]
@@ -395,6 +477,63 @@ impl T {
         assert_eq!(names(&run(src)), ["a"]);
     }
 
+    #[test]
+    fn detects_parser_factory_delegation_with_result_adapter() {
+        let src = r#"
+fn extract_functions(
+    lang: SourceLang,
+    source: &str,
+) -> Result<Vec<FunctionDef>, AnalyzerError> {
+    let mut parser = lang.create_language_parser();
+    parser
+        .extract_functions(source)
+        .map_err(|err| AnalyzerError::Parse(Box::new(err)))
+}
+"#;
+        let findings = run(src);
+        assert_eq!(names(&findings), ["extract_functions"]);
+        assert_eq!(findings[0].callee, "parser.extract_functions");
+        assert_eq!(findings[0].adapters, [".map_err()"]);
+        assert_eq!(findings[0].statement_count, 2);
+    }
+
+    #[test]
+    fn detects_single_field_options_struct_passthrough() {
+        let src = r#"
+struct ExtractOptions {
+    dialect: Dialect,
+}
+
+fn extract_functions_with_dialect(
+    source: &str,
+    dialect: Dialect,
+) -> Result<Vec<FunctionDef>, GoParseError> {
+    extract_with(source, ExtractOptions { dialect })
+}
+"#;
+        let findings = run(src);
+        assert_eq!(names(&findings), ["extract_functions_with_dialect"]);
+        assert_eq!(findings[0].callee, "extract_with");
+    }
+
+    #[test]
+    fn detects_keyed_single_field_options_struct_passthrough() {
+        let src = r#"
+struct ExtractOptions {
+    dialect: Dialect,
+}
+
+fn extract_functions_with_dialect(
+    source: &str,
+    dialect: Dialect,
+) -> Result<Vec<FunctionDef>, GoParseError> {
+    extract_with(source, ExtractOptions { dialect: dialect })
+}
+"#;
+        let findings = run(src);
+        assert_eq!(names(&findings), ["extract_functions_with_dialect"]);
+    }
+
     /// Body shapes that disqualify a function from being a wrapper. The
     /// detector must return an empty report for each — the names label
     /// the rejection reason for at-a-glance failure attribution.
@@ -411,6 +550,24 @@ impl T {
     #[case::chain_receiver_call("fn a(x: i32) -> i32 { foo(x).bar(x) }\n")]
     fn rejects_non_wrapper_shape(#[case] src: &str) {
         assert!(run(src).is_empty(), "expected no wrapper for: {src}");
+    }
+
+    #[test]
+    fn rejects_options_struct_with_extra_fields() {
+        let src = r#"
+struct ExtractOptions {
+    dialect: Dialect,
+    mode: Mode,
+}
+
+fn extract_functions_with_dialect(
+    source: &str,
+    dialect: Dialect,
+) -> Result<Vec<FunctionDef>, GoParseError> {
+    extract_with(source, ExtractOptions { dialect, mode: Mode::Strict })
+}
+"#;
+        assert!(run(src).is_empty());
     }
 
     #[test]
