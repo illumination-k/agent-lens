@@ -68,7 +68,7 @@ if [ ! -s target/mutants-diff.patch ]; then
   exit 0
 fi
 echo "Running cargo-mutants against diff base: $base"
-cargo mutants --workspace --no-shuffle --in-diff target/mutants-diff.patch
+cargo mutants --workspace --no-shuffle --iterate --in-diff target/mutants-diff.patch
 '''
 
 [tasks."ci:rust"]
