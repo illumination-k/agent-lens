@@ -1,8 +1,9 @@
 //! syn-based implementation of [`lens_domain::LanguageParser`] for Rust.
 
 use lens_domain::{
-    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, ReceiverShape, TreeNode,
-    qualify as qualify_name,
+    BodyShape, FunctionDef, FunctionShape, FunctionSignature, LanguageParseError, LanguageParser,
+    OwnerKind, OwnerShape, ReceiverShape, SignatureShape, SourceSpan, SyntaxFact, TreeNode,
+    VisibilityShape, qualify as qualify_name,
 };
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -38,6 +39,10 @@ pub struct RustFunctionDef {
     pub module: String,
     /// `impl` self-type or trait name for methods, `None` for free functions.
     pub impl_owner: Option<String>,
+    /// Owner kind for `impl` and `trait` methods.
+    pub impl_owner_kind: Option<OwnerKind>,
+    /// Syntactic Rust visibility where it is available.
+    pub visibility: VisibilityShape,
 }
 
 /// Parse failures surfaced by [`RustParser`].
@@ -57,6 +62,44 @@ pub fn extract_functions_with_modules(
     let mut out = Vec::new();
     extract_module_functions(&file.items, base_module, false, &mut out);
     Ok(out)
+}
+
+/// Extract neutral function syntax facts while preserving module context.
+pub fn extract_function_shapes_with_modules(
+    source: &str,
+    base_module: &str,
+) -> Result<Vec<FunctionShape>, RustParseError> {
+    extract_functions_with_modules(source, base_module)
+        .map(|functions| functions.into_iter().map(FunctionShape::from).collect())
+}
+
+impl From<RustFunctionDef> for FunctionShape {
+    fn from(def: RustFunctionDef) -> Self {
+        let body_tree = def.function.body_tree().clone();
+        let signature = def
+            .function
+            .signature
+            .map(SignatureShape::from)
+            .map_or(SyntaxFact::Unknown, SyntaxFact::Known);
+        FunctionShape {
+            display_name: def.name,
+            qualified_name: SyntaxFact::Known(def.qualified_name),
+            module_path: SyntaxFact::Known(def.module),
+            owner: SyntaxFact::Known(
+                def.impl_owner
+                    .zip(def.impl_owner_kind)
+                    .map(|(display_name, kind)| OwnerShape { display_name, kind }),
+            ),
+            visibility: SyntaxFact::Known(def.visibility),
+            signature,
+            body: BodyShape { tree: body_tree },
+            span: SourceSpan {
+                start_line: def.function.start_line,
+                end_line: def.function.end_line,
+            },
+            is_test: def.function.is_test,
+        }
+    }
 }
 
 impl LanguageParser for RustParser {
@@ -126,6 +169,8 @@ fn extract_item_functions(
                 qualified_name: qualify_module(module, &name),
                 module: module.to_owned(),
                 impl_owner: None,
+                impl_owner_kind: None,
+                visibility: visibility_shape(&item_fn.vis),
                 name,
             });
         }
@@ -183,6 +228,8 @@ fn extract_impl_functions(
             qualified_name,
             module: module.to_owned(),
             impl_owner: owner.clone(),
+            impl_owner_kind: owner.as_ref().map(|_| OwnerKind::Impl),
+            visibility: visibility_shape(&method.vis),
             name,
         });
     }
@@ -216,8 +263,20 @@ fn extract_trait_functions(
             qualified_name: qualify_module(module, &format!("{owner}::{name}")),
             module: module.to_owned(),
             impl_owner: Some(owner.clone()),
+            impl_owner_kind: Some(OwnerKind::Trait),
+            visibility: visibility_shape(&item_trait.vis),
             name,
         });
+    }
+}
+
+fn visibility_shape(vis: &syn::Visibility) -> VisibilityShape {
+    match vis {
+        syn::Visibility::Public(_) => VisibilityShape::Public,
+        syn::Visibility::Restricted(restricted) => {
+            VisibilityShape::Restricted(restricted.to_token_stream().to_string())
+        }
+        syn::Visibility::Inherited => VisibilityShape::Private,
     }
 }
 
@@ -1233,6 +1292,39 @@ mod inner {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn neutral_function_shapes_preserve_module_owner_and_body() {
+        let src = r#"
+mod inner {
+    struct S;
+    impl S {
+        pub fn call(&self) { helper(); }
+    }
+}
+"#;
+        let shapes = extract_function_shapes_with_modules(src, "crate::outer").unwrap();
+
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].display_name, "call");
+        assert_eq!(
+            shapes[0].qualified_name.known_value().map(String::as_str),
+            Some("crate::outer::inner::S::call"),
+        );
+        assert_eq!(
+            shapes[0].module_path.known_value().map(String::as_str),
+            Some("crate::outer::inner"),
+        );
+        assert_eq!(
+            shapes[0]
+                .owner
+                .known_value()
+                .and_then(|owner| owner.as_ref())
+                .map(|owner| owner.display_name.as_str()),
+            Some("S"),
+        );
+        assert_eq!(shapes[0].body_tree().label, "Block");
     }
 
     #[test]

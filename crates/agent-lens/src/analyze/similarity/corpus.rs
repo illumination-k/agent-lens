@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::FunctionDef;
+use lens_domain::{FunctionShape, SignatureShape, TreeNode};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -22,7 +22,33 @@ pub(super) struct OwnedFunction {
     /// Display path (relative to the walk root for directory mode).
     pub(super) rel_path: String,
     pub(super) is_test: bool,
-    pub(super) def: FunctionDef,
+    pub(super) shape: FunctionShape,
+}
+
+impl OwnedFunction {
+    pub(super) fn name(&self) -> &str {
+        &self.shape.display_name
+    }
+
+    pub(super) fn start_line(&self) -> usize {
+        self.shape.span.start_line
+    }
+
+    pub(super) fn end_line(&self) -> usize {
+        self.shape.span.end_line
+    }
+
+    pub(super) fn line_count(&self) -> usize {
+        self.shape.line_count()
+    }
+
+    pub(super) fn body_tree(&self) -> &TreeNode {
+        self.shape.body_tree()
+    }
+
+    pub(super) fn signature(&self) -> Option<&SignatureShape> {
+        self.shape.signature_shape()
+    }
 }
 
 /// Collect every function under `path` into a flat corpus, tagging each
@@ -79,7 +105,7 @@ fn collect_file(
                 file: file.path.clone(),
                 rel_path: file.display_path.clone(),
                 is_test,
-                def,
+                shape: FunctionShape::from(def),
             })
         })
         .collect();

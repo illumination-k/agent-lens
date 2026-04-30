@@ -50,6 +50,7 @@ pub mod function;
 pub mod hotspot;
 pub mod lsh;
 pub mod naming;
+pub mod syntax;
 pub mod tree;
 pub mod tsed;
 pub mod wrapper;
@@ -75,6 +76,11 @@ pub use function::{
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use naming::qualify;
+pub use syntax::{
+    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
+    OwnerShape, ParameterShape, ReceiverExprKind, ReceiverKind, SignatureShape, SourceSpan,
+    SyntaxFact, VisibilityShape,
+};
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};
 pub use wrapper::{ReuseMetrics, WrapperFinding, args_pass_through_by};

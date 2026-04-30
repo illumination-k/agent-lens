@@ -24,7 +24,9 @@
 
 use std::collections::BTreeMap;
 
-use lens_domain::qualify;
+use lens_domain::{
+    CallShape, ImportShape, LexicalResolutionStatus, ReceiverExprKind, SyntaxFact, qualify,
+};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -121,6 +123,71 @@ pub fn extract_call_sites_with_options_and_base_module(
     let mut visitor = CallVisitor::new(opts, base_module);
     visitor.visit_items(&file.items);
     Ok(visitor.into_sites())
+}
+
+/// Extract neutral call syntax facts with an explicit lexical base module.
+pub fn extract_call_shapes_with_options_and_base_module(
+    source: &str,
+    opts: CallIndexOptions,
+    base_module: &str,
+) -> Result<Vec<CallShape>, RustParseError> {
+    extract_call_sites_with_options_and_base_module(source, opts, base_module)
+        .map(|sites| sites.into_iter().map(CallShape::from).collect())
+}
+
+impl From<CallSite> for CallShape {
+    fn from(site: CallSite) -> Self {
+        let receiver_expr_kind = match site.call_kind {
+            CallKind::Path => ReceiverExprKind::None,
+            CallKind::ReceiverMethod => {
+                if site
+                    .callee_path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("self."))
+                {
+                    ReceiverExprKind::SelfValue
+                } else {
+                    ReceiverExprKind::Expression
+                }
+            }
+        };
+        Self {
+            caller_qualified_name: SyntaxFact::Known(site.caller_qualified_name),
+            caller_module: SyntaxFact::Known(site.module),
+            caller_owner: SyntaxFact::Known(site.caller_impl_owner),
+            callee_display_name: SyntaxFact::Known(site.callee_name),
+            callee_path_segments: site
+                .callee_path
+                .map(path_segments)
+                .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
+            receiver_expr_kind: SyntaxFact::Known(receiver_expr_kind),
+            lexical_resolution: LexicalResolutionStatus::NotAttempted,
+            visible_imports: site
+                .visible_aliases
+                .into_iter()
+                .map(ImportShape::from)
+                .collect(),
+            line: site.line,
+        }
+    }
+}
+
+impl From<UseAlias> for ImportShape {
+    fn from(alias: UseAlias) -> Self {
+        Self {
+            imported_module: SyntaxFact::Known(alias.target),
+            local_alias: SyntaxFact::Known(Some(alias.alias)),
+            exported_symbol: SyntaxFact::Unknown,
+        }
+    }
+}
+
+fn path_segments(path: String) -> Vec<String> {
+    if path.contains("::") {
+        path.split("::").map(ToOwned::to_owned).collect()
+    } else {
+        vec![path]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -620,6 +687,32 @@ mod tests {
         let sites = run("fn a(x: T) { crate::other::foo(); x.bar(); }\n");
         let paths: Vec<_> = sites.iter().map(|s| s.callee_path.as_deref()).collect();
         assert_eq!(paths, [Some("crate::other::foo"), Some("x.bar")]);
+    }
+
+    #[test]
+    fn neutral_call_shapes_preserve_callee_path_segments() {
+        let shapes = extract_call_shapes_with_options_and_base_module(
+            "fn a(x: T) { crate::other::foo(); x.bar(); }\n",
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+            "crate",
+        )
+        .unwrap();
+
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(
+            shapes[0].callee_path_segments.known_value(),
+            Some(&vec![
+                "crate".to_owned(),
+                "other".to_owned(),
+                "foo".to_owned()
+            ]),
+        );
+        assert_eq!(
+            shapes[1].callee_path_segments.known_value(),
+            Some(&vec!["x.bar".to_owned()]),
+        );
     }
 
     #[test]
