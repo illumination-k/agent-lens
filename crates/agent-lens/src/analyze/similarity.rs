@@ -10,7 +10,7 @@
 //! ethos.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -44,6 +44,8 @@ pub const DEFAULT_THRESHOLD: f64 = 0.85;
 pub const DEFAULT_MIN_LINES: usize = 5;
 
 const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
+const BODY_SIMILARITY_WEIGHT: f64 = 0.8;
+const SIGNATURE_SIMILARITY_WEIGHT: f64 = 0.2;
 /// Hard cap for pairs scored by `analyze similarity`.
 ///
 /// Even with LSH enabled, very large corpora can still produce a huge
@@ -214,11 +216,12 @@ impl SimilarityAnalyzer {
         let changed_by_file = self.changed_ranges_for_run(corpus);
         let profiles = build_tree_profiles(corpus, self.min_lines);
         let candidate_started = Instant::now();
+        let candidate_threshold = body_candidate_threshold(self.threshold);
         let candidates = candidate_pairs(
             corpus,
             self.min_lines,
             &profiles,
-            self.threshold,
+            candidate_threshold,
             &self.opts,
         );
         log_candidate_stats(corpus.len(), self.min_lines, &candidates, candidate_started);
@@ -244,9 +247,19 @@ impl SimilarityAnalyzer {
         log_score_stats(&candidates, &score_stats, score_started);
 
         let cluster_started = Instant::now();
-        let clusters: Vec<_> = cluster_similar_pairs(&score_stats.pairs, self.threshold)
+        let domain_pairs: Vec<_> = score_stats
+            .pairs
+            .iter()
+            .map(|pair| (pair.i, pair.j, pair.components.similarity))
+            .collect();
+        let pair_scores: HashMap<_, _> = score_stats
+            .pairs
+            .iter()
+            .map(|pair| (sorted_pair_key(pair.i, pair.j), pair.components))
+            .collect();
+        let clusters: Vec<_> = cluster_similar_pairs(&domain_pairs, self.threshold)
             .into_iter()
-            .map(|c| ClusterView::from_domain(corpus, c))
+            .map(|c| ClusterView::from_domain(corpus, c, &pair_scores))
             .collect();
         debug!(
             target: PROFILE_TARGET,
@@ -292,14 +305,18 @@ fn build_tree_profiles(corpus: &[OwnedFunction], min_lines: usize) -> Vec<TreePr
     if use_lsh_profiles {
         corpus
             .par_iter()
-            .map(|f| TreeProfile::from_tree_for_scoring(&f.def.tree))
+            .map(|f| TreeProfile::from_tree_for_scoring(f.def.body_tree()))
             .collect()
     } else {
         corpus
             .iter()
-            .map(|f| TreeProfile::from_tree(&f.def.tree))
+            .map(|f| TreeProfile::from_tree(f.def.body_tree()))
             .collect()
     }
+}
+
+fn body_candidate_threshold(threshold: f64) -> f64 {
+    ((threshold - SIGNATURE_SIMILARITY_WEIGHT) / BODY_SIMILARITY_WEIGHT).clamp(0.0, 1.0)
 }
 
 fn filter_pairs_touching_changes<'a>(
@@ -437,21 +454,18 @@ fn score_candidate_pair(
     let profile_a = profiles.get(i)?;
     let profile_b = profiles.get(j)?;
     let compare_values = opts.apted.compare_values;
-    let exact_match = is_exact_match_without_distance(
-        profile_a,
-        profile_b,
-        &a.def.tree,
-        &b.def.tree,
-        compare_values,
-    );
-    let similarity = if exact_match {
+    let body_a = a.def.body_tree();
+    let body_b = b.def.body_tree();
+    let exact_match =
+        is_exact_match_without_distance(profile_a, profile_b, body_a, body_b, compare_values);
+    let body_similarity = if exact_match {
         1.0
     } else {
-        let sizes_a = profile_a.subtree_sizes(&a.def.tree);
-        let sizes_b = profile_b.subtree_sizes(&b.def.tree);
+        let sizes_a = profile_a.subtree_sizes(body_a);
+        let sizes_b = profile_b.subtree_sizes(body_b);
         calculate_tsed_with_subtree_sizes(
-            &a.def.tree,
-            &b.def.tree,
+            body_a,
+            body_b,
             profile_a.size,
             profile_b.size,
             sizes_a,
@@ -459,10 +473,20 @@ fn score_candidate_pair(
             opts,
         )
     };
+    let signature = signature_components(a.def.signature.as_ref(), b.def.signature.as_ref());
+    let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
+    let similarity = (BODY_SIMILARITY_WEIGHT * body_similarity)
+        + (SIGNATURE_SIMILARITY_WEIGHT * signature_similarity);
     Some(PairScore {
         i,
         j,
-        similarity,
+        components: SimilarityComponents {
+            similarity,
+            body_similarity,
+            signature_similarity: signature.signature_similarity,
+            type_overlap: signature.type_overlap,
+            identifier_overlap: signature.identifier_overlap,
+        },
         exact_match,
     })
 }
@@ -471,13 +495,112 @@ fn score_candidate_pair(
 struct PairScore {
     i: usize,
     j: usize,
-    similarity: f64,
+    components: SimilarityComponents,
     exact_match: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SimilarityComponents {
+    pub(super) similarity: f64,
+    pub(super) body_similarity: f64,
+    pub(super) signature_similarity: Option<f64>,
+    pub(super) type_overlap: Option<f64>,
+    pub(super) identifier_overlap: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SignatureComponents {
+    signature_similarity: Option<f64>,
+    type_overlap: Option<f64>,
+    identifier_overlap: Option<f64>,
+}
+
+fn signature_components(
+    a: Option<&lens_domain::FunctionSignature>,
+    b: Option<&lens_domain::FunctionSignature>,
+) -> SignatureComponents {
+    let (Some(a), Some(b)) = (a, b) else {
+        return SignatureComponents {
+            signature_similarity: None,
+            type_overlap: None,
+            identifier_overlap: None,
+        };
+    };
+
+    let identifier_overlap = token_overlap(
+        a.name_tokens
+            .iter()
+            .chain(a.parameter_names.iter())
+            .map(String::as_str),
+        b.name_tokens
+            .iter()
+            .chain(b.parameter_names.iter())
+            .map(String::as_str),
+    );
+    let type_overlap = token_overlap(
+        a.parameter_type_paths
+            .iter()
+            .chain(a.return_type_paths.iter())
+            .map(String::as_str),
+        b.parameter_type_paths
+            .iter()
+            .chain(b.return_type_paths.iter())
+            .map(String::as_str),
+    );
+    let parameter_name_overlap = token_overlap(
+        a.parameter_names.iter().map(String::as_str),
+        b.parameter_names.iter().map(String::as_str),
+    );
+    let generic_overlap = token_overlap(
+        a.generics.iter().map(String::as_str),
+        b.generics.iter().map(String::as_str),
+    );
+    let parameter_count = count_similarity(a.parameter_count, b.parameter_count);
+    let receiver = if a.receiver == b.receiver { 1.0 } else { 0.0 };
+    let signature_similarity = (0.25 * identifier_overlap)
+        + (0.10 * parameter_count)
+        + (0.05 * parameter_name_overlap)
+        + (0.45 * type_overlap)
+        + (0.10 * generic_overlap)
+        + (0.05 * receiver);
+
+    SignatureComponents {
+        signature_similarity: Some(signature_similarity),
+        type_overlap: Some(type_overlap),
+        identifier_overlap: Some(identifier_overlap),
+    }
+}
+
+fn token_overlap<'a>(a: impl Iterator<Item = &'a str>, b: impl Iterator<Item = &'a str>) -> f64 {
+    let a: HashSet<&str> = a.collect();
+    let b: HashSet<&str> = b.collect();
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let intersection = a.intersection(&b).count();
+    let union = a.union(&b).count();
+    if union == 0 {
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+fn count_similarity(a: usize, b: usize) -> f64 {
+    let max = a.max(b);
+    if max == 0 {
+        return 1.0;
+    }
+    1.0 - (a.abs_diff(b) as f64 / max as f64)
+}
+
+fn sorted_pair_key(i: usize, j: usize) -> (usize, usize) {
+    if i <= j { (i, j) } else { (j, i) }
 }
 
 #[derive(Debug, Default)]
 struct ScoreStats {
-    pairs: Vec<(usize, usize, f64)>,
+    pairs: Vec<ScoredPair>,
     exact_match_count: usize,
     below_threshold_count: usize,
     diff_filtered_count: usize,
@@ -488,11 +611,15 @@ impl ScoreStats {
         if score.exact_match {
             self.exact_match_count += 1;
         }
-        if score.similarity < threshold {
+        if score.components.similarity < threshold {
             self.below_threshold_count += 1;
             return;
         }
-        self.pairs.push((score.i, score.j, score.similarity));
+        self.pairs.push(ScoredPair {
+            i: score.i,
+            j: score.j,
+            components: score.components,
+        });
     }
 
     fn merge(mut a: Self, mut b: Self) -> Self {
@@ -504,13 +631,20 @@ impl ScoreStats {
     }
 
     fn sorted(mut self) -> Self {
-        self.pairs.sort_by_key(|(i, j, _)| (*i, *j));
+        self.pairs.sort_by_key(|pair| (pair.i, pair.j));
         self
     }
 
     fn scored_pair_count(&self) -> usize {
         self.pairs.len() + self.below_threshold_count
     }
+}
+
+#[derive(Debug, Clone)]
+struct ScoredPair {
+    i: usize,
+    j: usize,
+    components: SimilarityComponents,
 }
 
 fn trees_match_without_distance(
@@ -774,6 +908,7 @@ fn delta(xs: &[i32]) -> i32 {
                 start_line,
                 end_line,
                 is_test: false,
+                signature: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
             },
         }
@@ -809,12 +944,22 @@ fn delta(xs: &[i32]) -> i32 {
 
     #[test]
     fn score_stats_record_and_merge_preserve_counts() {
+        fn components(similarity: f64) -> SimilarityComponents {
+            SimilarityComponents {
+                similarity,
+                body_similarity: similarity,
+                signature_similarity: None,
+                type_overlap: None,
+                identifier_overlap: None,
+            }
+        }
+
         let mut stats = ScoreStats::default();
         stats.record(
             PairScore {
                 i: 0,
                 j: 1,
-                similarity: 1.0,
+                components: components(1.0),
                 exact_match: true,
             },
             0.85,
@@ -823,7 +968,7 @@ fn delta(xs: &[i32]) -> i32 {
             PairScore {
                 i: 0,
                 j: 2,
-                similarity: 0.25,
+                components: components(0.25),
                 exact_match: false,
             },
             0.85,
@@ -832,17 +977,72 @@ fn delta(xs: &[i32]) -> i32 {
         let merged = ScoreStats::merge(
             stats,
             ScoreStats {
-                pairs: vec![(2, 3, 0.9)],
+                pairs: vec![ScoredPair {
+                    i: 2,
+                    j: 3,
+                    components: components(0.9),
+                }],
                 exact_match_count: 2,
                 below_threshold_count: 3,
                 diff_filtered_count: 4,
             },
         );
 
-        assert_eq!(merged.pairs, vec![(0, 1, 1.0), (2, 3, 0.9)]);
+        let pairs: Vec<_> = merged
+            .pairs
+            .iter()
+            .map(|pair| (pair.i, pair.j, pair.components.similarity))
+            .collect();
+        assert_eq!(pairs, vec![(0, 1, 1.0), (2, 3, 0.9)]);
         assert_eq!(merged.exact_match_count, 3);
         assert_eq!(merged.below_threshold_count, 4);
         assert_eq!(merged.diff_filtered_count, 4);
+    }
+
+    fn rust_sig(
+        name_tokens: &[&str],
+        parameter_names: &[&str],
+        parameter_type_paths: &[&str],
+        return_type_paths: &[&str],
+    ) -> lens_domain::FunctionSignature {
+        lens_domain::FunctionSignature {
+            name_tokens: name_tokens.iter().map(|s| (*s).to_owned()).collect(),
+            parameter_count: parameter_names.len(),
+            parameter_names: parameter_names.iter().map(|s| (*s).to_owned()).collect(),
+            parameter_type_paths: parameter_type_paths
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            return_type_paths: return_type_paths.iter().map(|s| (*s).to_owned()).collect(),
+            generics: Vec::new(),
+            receiver: lens_domain::ReceiverShape::None,
+        }
+    }
+
+    #[test]
+    fn signature_score_rewards_same_domain_types_over_same_body_different_types() {
+        let same_domain_renamed = signature_components(
+            Some(&rust_sig(&["validate"], &["id"], &["UserId"], &["bool"])),
+            Some(&rust_sig(
+                &["validate"],
+                &["candidate"],
+                &["UserId"],
+                &["bool"],
+            )),
+        )
+        .signature_similarity
+        .unwrap();
+        let different_domain_type = signature_components(
+            Some(&rust_sig(&["validate"], &["id"], &["UserId"], &["bool"])),
+            Some(&rust_sig(&["validate"], &["id"], &["OrderId"], &["bool"])),
+        )
+        .signature_similarity
+        .unwrap();
+
+        assert!(
+            same_domain_renamed > different_domain_type,
+            "renamed={same_domain_renamed}, different_type={different_domain_type}",
+        );
     }
 
     fn assert_json_pair_report(out: &str) {
@@ -868,6 +1068,10 @@ fn delta(xs: &[i32]) -> i32 {
         // judge cohesion without re-deriving from pairs.
         assert!(cluster["min_similarity"].as_f64().is_some());
         assert!(cluster["max_similarity"].as_f64().is_some());
+        let pairs = cluster["pairs"].as_array().unwrap();
+        assert!(!pairs.is_empty());
+        assert!(pairs[0]["similarity"].as_f64().is_some());
+        assert!(pairs[0]["body_similarity"].as_f64().is_some());
     }
 
     fn assert_markdown_pair_report(out: &str) {
@@ -950,12 +1154,58 @@ func beta(ys []int) int {
     }
 
     #[test]
+    fn rust_json_pairs_emit_signature_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+struct UserId(u64);
+struct OrderId(u64);
+
+fn validate_user_id(id: UserId) -> bool {
+    let raw = id.0;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
+}
+
+fn validate_order_id(id: OrderId) -> bool {
+    let raw = id.0;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.8)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pair = &parsed["clusters"][0]["pairs"][0];
+        let similarity = pair["similarity"].as_f64().unwrap();
+        let body_similarity = pair["body_similarity"].as_f64().unwrap();
+        let signature_similarity = pair["signature_similarity"].as_f64().unwrap();
+
+        assert!(
+            similarity < body_similarity,
+            "signature-aware score should lower identical-body domain mismatch: {pair}",
+        );
+        assert!(signature_similarity < 1.0, "got {pair}");
+        assert!(pair["type_overlap"].as_f64().unwrap() < 1.0, "got {pair}");
+        assert!(pair["identifier_overlap"].as_f64().is_some());
+    }
+
+    #[test]
     fn markdown_top_caps_clusters_without_truncating_json() {
         let dir = tempfile::tempdir().unwrap();
         let file = write_file(dir.path(), "lib.rs", TWO_CLUSTER_FUNCTIONS);
 
         let full_md = SimilarityAnalyzer::new()
-            .with_threshold(1.0)
+            .with_threshold(0.95)
             .analyze(&file, OutputFormat::Md)
             .unwrap();
         assert_eq!(
@@ -965,7 +1215,7 @@ func beta(ys []int) int {
         );
 
         let top_md = SimilarityAnalyzer::new()
-            .with_threshold(1.0)
+            .with_threshold(0.95)
             .with_top(Some(1))
             .analyze(&file, OutputFormat::Md)
             .unwrap();
@@ -977,7 +1227,7 @@ func beta(ys []int) int {
         );
 
         let json = SimilarityAnalyzer::new()
-            .with_threshold(1.0)
+            .with_threshold(0.95)
             .with_top(Some(1))
             .analyze(&file, OutputFormat::Json)
             .unwrap();

@@ -34,6 +34,10 @@ pub struct FunctionDef {
     /// Whether the language adapter classified this function-shaped item as
     /// test code from source-level syntax or naming conventions.
     pub is_test: bool,
+    /// Lightweight syntactic signature metadata. Language adapters can leave
+    /// this as `None` until they have a signature projection; body-only
+    /// similarity remains available through [`Self::body_tree`].
+    pub signature: Option<FunctionSignature>,
     pub tree: TreeNode,
 }
 
@@ -50,6 +54,7 @@ impl FunctionDef {
     ///     start_line: 5,
     ///     end_line: 10,
     ///     is_test: false,
+    ///     signature: None,
     ///     tree: TreeNode::leaf("Block"),
     /// };
     /// assert_eq!(f.line_count(), 6);
@@ -57,6 +62,40 @@ impl FunctionDef {
     pub fn line_count(&self) -> usize {
         self.end_line.saturating_sub(self.start_line) + 1
     }
+
+    /// The structural body tree used for body-focused similarity.
+    ///
+    /// Rust functions are represented as `Function(FnSignature, Block)` so
+    /// this peels off the `Block` child. Other adapters already store the
+    /// body as the root tree, so they fall back to `self.tree`.
+    pub fn body_tree(&self) -> &TreeNode {
+        self.tree
+            .children
+            .iter()
+            .find(|child| child.label == "Block")
+            .unwrap_or(&self.tree)
+    }
+}
+
+/// Lightweight, syntax-only signature facts used by signature-aware scoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSignature {
+    pub name_tokens: Vec<String>,
+    pub parameter_count: usize,
+    pub parameter_names: Vec<String>,
+    pub parameter_type_paths: Vec<String>,
+    pub return_type_paths: Vec<String>,
+    pub generics: Vec<String>,
+    pub receiver: ReceiverShape,
+}
+
+/// Method receiver shape for languages that expose one syntactically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReceiverShape {
+    None,
+    Value,
+    Ref,
+    RefMut,
 }
 
 impl LshTree for FunctionDef {
@@ -541,6 +580,7 @@ mod tests {
             start_line: 1,
             end_line: 10,
             is_test: false,
+            signature: None,
             tree,
         }
     }
@@ -583,6 +623,7 @@ mod tests {
             start_line: 5,
             end_line: 10,
             is_test: false,
+            signature: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 6);
@@ -595,6 +636,7 @@ mod tests {
             start_line: 7,
             end_line: 7,
             is_test: false,
+            signature: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);
@@ -607,6 +649,7 @@ mod tests {
             start_line: 10,
             end_line: 5,
             is_test: false,
+            signature: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);

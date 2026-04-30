@@ -1,7 +1,8 @@
 //! syn-based implementation of [`lens_domain::LanguageParser`] for Rust.
 
 use lens_domain::{
-    FunctionDef, LanguageParseError, LanguageParser, TreeNode, qualify as qualify_name,
+    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, ReceiverShape, TreeNode,
+    qualify as qualify_name,
 };
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -85,6 +86,7 @@ fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, Rus
             start_line: site.sig.span().start().line,
             end_line: site.block.span().end().line,
             is_test: site.is_test,
+            signature: Some(signature_info(site.sig)),
             tree: function_tree(site.sig, site.block),
         });
     });
@@ -116,6 +118,7 @@ fn extract_item_functions(
                 start_line: item_fn.sig.span().start().line,
                 end_line: item_fn.block.span().end().line,
                 is_test: in_test_context || crate::attrs::is_test_function(&item_fn.attrs),
+                signature: Some(signature_info(&item_fn.sig)),
                 tree: function_tree(&item_fn.sig, &item_fn.block),
             };
             out.push(RustFunctionDef {
@@ -172,6 +175,7 @@ fn extract_impl_functions(
             start_line: method.sig.span().start().line,
             end_line: method.block.span().end().line,
             is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
+            signature: Some(signature_info(&method.sig)),
             tree: function_tree(&method.sig, &method.block),
         };
         out.push(RustFunctionDef {
@@ -204,6 +208,7 @@ fn extract_trait_functions(
             start_line: method.sig.span().start().line,
             end_line: block.span().end().line,
             is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
+            signature: Some(signature_info(&method.sig)),
             tree: function_tree(&method.sig, block),
         };
         out.push(RustFunctionDef {
@@ -294,6 +299,192 @@ fn signature_tree(sig: &syn::Signature) -> TreeNode {
     }
     children.push(return_type_tree(&sig.output));
     TreeNode::with_children("FnSignature", "", children)
+}
+
+fn signature_info(sig: &syn::Signature) -> FunctionSignature {
+    let mut parameter_names = Vec::new();
+    let mut parameter_type_paths = Vec::new();
+    let mut parameter_count = 0usize;
+    let mut receiver = ReceiverShape::None;
+
+    for input in &sig.inputs {
+        match input {
+            syn::FnArg::Receiver(recv) => {
+                receiver = receiver_shape(recv);
+            }
+            syn::FnArg::Typed(pat_type) => {
+                parameter_count += 1;
+                collect_pattern_names(&pat_type.pat, &mut parameter_names);
+                collect_type_paths(&pat_type.ty, &mut parameter_type_paths);
+            }
+        }
+    }
+
+    let mut return_type_paths = Vec::new();
+    if let syn::ReturnType::Type(_, ty) = &sig.output {
+        collect_type_paths(ty, &mut return_type_paths);
+    }
+
+    FunctionSignature {
+        name_tokens: identifier_tokens(&sig.ident.to_string()),
+        parameter_count,
+        parameter_names,
+        parameter_type_paths,
+        return_type_paths,
+        generics: generic_summaries(&sig.generics),
+        receiver,
+    }
+}
+
+fn receiver_shape(receiver: &syn::Receiver) -> ReceiverShape {
+    match (&receiver.reference, &receiver.mutability) {
+        (Some(_), Some(_)) => ReceiverShape::RefMut,
+        (Some(_), None) => ReceiverShape::Ref,
+        (None, _) => ReceiverShape::Value,
+    }
+}
+
+fn collect_pattern_names(pat: &syn::Pat, out: &mut Vec<String>) {
+    match pat {
+        syn::Pat::Ident(ident) => out.push(ident.ident.to_string()),
+        syn::Pat::Reference(reference) => collect_pattern_names(&reference.pat, out),
+        syn::Pat::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_pattern_names(elem, out);
+            }
+        }
+        syn::Pat::TupleStruct(tuple_struct) => {
+            for elem in &tuple_struct.elems {
+                collect_pattern_names(elem, out);
+            }
+        }
+        syn::Pat::Struct(pat_struct) => {
+            for field in &pat_struct.fields {
+                collect_pattern_names(&field.pat, out);
+            }
+        }
+        syn::Pat::Slice(slice) => {
+            for elem in &slice.elems {
+                collect_pattern_names(elem, out);
+            }
+        }
+        syn::Pat::Type(pat_type) => collect_pattern_names(&pat_type.pat, out),
+        _ => {}
+    }
+}
+
+fn collect_type_paths(ty: &syn::Type, out: &mut Vec<String>) {
+    match ty {
+        syn::Type::Array(array) => collect_type_paths(&array.elem, out),
+        syn::Type::BareFn(bare_fn) => {
+            for input in &bare_fn.inputs {
+                collect_type_paths(&input.ty, out);
+            }
+            if let syn::ReturnType::Type(_, ty) = &bare_fn.output {
+                collect_type_paths(ty, out);
+            }
+        }
+        syn::Type::Group(group) => collect_type_paths(&group.elem, out),
+        syn::Type::ImplTrait(impl_trait) => {
+            for bound in &impl_trait.bounds {
+                collect_bound_paths(bound, out);
+            }
+        }
+        syn::Type::Macro(mac) => out.push(path_to_string(&mac.mac.path)),
+        syn::Type::Paren(paren) => collect_type_paths(&paren.elem, out),
+        syn::Type::Path(type_path) => {
+            out.push(path_to_string(&type_path.path));
+            for segment in &type_path.path.segments {
+                collect_path_argument_type_paths(&segment.arguments, out);
+            }
+        }
+        syn::Type::Ptr(ptr) => collect_type_paths(&ptr.elem, out),
+        syn::Type::Reference(reference) => collect_type_paths(&reference.elem, out),
+        syn::Type::Slice(slice) => collect_type_paths(&slice.elem, out),
+        syn::Type::TraitObject(trait_object) => {
+            for bound in &trait_object.bounds {
+                collect_bound_paths(bound, out);
+            }
+        }
+        syn::Type::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_type_paths(elem, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_path_argument_type_paths(args: &syn::PathArguments, out: &mut Vec<String>) {
+    match args {
+        syn::PathArguments::None => {}
+        syn::PathArguments::AngleBracketed(args) => {
+            for arg in &args.args {
+                match arg {
+                    syn::GenericArgument::Type(ty) => collect_type_paths(ty, out),
+                    syn::GenericArgument::AssocType(assoc) => collect_type_paths(&assoc.ty, out),
+                    syn::GenericArgument::Constraint(constraint) => {
+                        for bound in &constraint.bounds {
+                            collect_bound_paths(bound, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        syn::PathArguments::Parenthesized(args) => {
+            for input in &args.inputs {
+                collect_type_paths(input, out);
+            }
+            if let syn::ReturnType::Type(_, ty) = &args.output {
+                collect_type_paths(ty, out);
+            }
+        }
+    }
+}
+
+fn collect_bound_paths(bound: &syn::TypeParamBound, out: &mut Vec<String>) {
+    if let syn::TypeParamBound::Trait(trait_bound) = bound {
+        out.push(path_to_string(&trait_bound.path));
+        for segment in &trait_bound.path.segments {
+            collect_path_argument_type_paths(&segment.arguments, out);
+        }
+    }
+}
+
+fn generic_summaries(generics: &syn::Generics) -> Vec<String> {
+    let mut out: Vec<String> = generics.params.iter().map(normalized_tokens).collect();
+    if let Some(where_clause) = &generics.where_clause {
+        out.extend(where_clause.predicates.iter().map(normalized_tokens));
+    }
+    out.retain(|item| !item.is_empty());
+    out
+}
+
+fn identifier_tokens(name: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut prev_is_lower_or_digit = false;
+    for ch in name.chars() {
+        if ch == '_' || !ch.is_alphanumeric() {
+            push_identifier_token(&mut tokens, &mut current);
+            prev_is_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_is_lower_or_digit {
+            push_identifier_token(&mut tokens, &mut current);
+        }
+        current.extend(ch.to_lowercase());
+        prev_is_lower_or_digit = ch.is_lowercase() || ch.is_ascii_digit();
+    }
+    push_identifier_token(&mut tokens, &mut current);
+    tokens
+}
+
+fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        tokens.push(std::mem::take(current));
+    }
 }
 
 fn param_tree(arg: &syn::FnArg) -> TreeNode {
