@@ -18,10 +18,11 @@ use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_simila
 use rayon::prelude::*;
 use tracing::debug;
 
-use super::{AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
+use super::{AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat};
 
 mod candidates;
 mod corpus;
+mod diff_filter;
 mod extract;
 mod report;
 
@@ -31,6 +32,7 @@ use candidates::{
 #[cfg(test)]
 use candidates::{CheapFilter, tsed_upper_bound_filter};
 use corpus::{OwnedFunction, collect_corpus};
+use diff_filter::{collect_changed_ranges, filter_pairs_touching_changes};
 use report::{ClusterView, Report, format_markdown};
 
 /// Default similarity threshold. Picked to match the cutoff used by the
@@ -302,30 +304,6 @@ fn build_tree_profiles(corpus: &[OwnedFunction], min_lines: usize) -> Vec<TreePr
     }
 }
 
-fn filter_pairs_touching_changes<'a>(
-    corpus: &[OwnedFunction],
-    candidates: &'a CandidatePairs,
-    changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
-) -> (Cow<'a, [(usize, usize)]>, usize) {
-    let mut filtered = 0usize;
-    let pairs: Vec<_> = candidates
-        .pairs
-        .iter()
-        .copied()
-        .filter(|&(i, j)| {
-            let keep = corpus
-                .get(i)
-                .zip(corpus.get(j))
-                .is_some_and(|(a, b)| pair_touches_changes(a, b, changed_by_file));
-            if !keep {
-                filtered += 1;
-            }
-            keep
-        })
-        .collect();
-    (Cow::Owned(pairs), filtered)
-}
-
 fn log_candidate_stats(
     function_count: usize,
     min_lines: usize,
@@ -525,32 +503,6 @@ fn trees_match_without_distance(
             .iter()
             .zip(&b.children)
             .all(|(a, b)| trees_match_without_distance(a, b, compare_values))
-}
-
-fn collect_changed_ranges(corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
-    let mut by_file: HashMap<PathBuf, Vec<LineRange>> = HashMap::new();
-    for f in corpus {
-        if !by_file.contains_key(&f.file) {
-            by_file.insert(f.file.clone(), changed_line_ranges(&f.file));
-        }
-    }
-    by_file
-}
-
-fn pair_touches_changes(
-    a: &OwnedFunction,
-    b: &OwnedFunction,
-    changed: &HashMap<PathBuf, Vec<LineRange>>,
-) -> bool {
-    function_touches_changes(a, changed) || function_touches_changes(b, changed)
-}
-
-fn function_touches_changes(f: &OwnedFunction, changed: &HashMap<PathBuf, Vec<LineRange>>) -> bool {
-    changed.get(&f.file).is_some_and(|ranges| {
-        ranges
-            .iter()
-            .any(|r| r.overlaps(f.def.start_line, f.def.end_line))
-    })
 }
 
 impl Default for SimilarityAnalyzer {
