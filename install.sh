@@ -3,10 +3,10 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash -s -- --tag latest --dir "$HOME/.local/bin"
+#   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash -s -- --tag main --dir "$HOME/.local/bin"
 #
 # Environment variables:
-#   AGENT_LENS_TAG    Release tag to install (default: latest).
+#   AGENT_LENS_TAG    Release tag to install (default: latest stable release).
 #   AGENT_LENS_DIR    Install directory (default: $HOME/.local/bin).
 #   AGENT_LENS_REPO   GitHub repo (default: illumination-k/agent-lens).
 
@@ -120,7 +120,11 @@ verify_sha256() {
 
 TARGET="$(detect_target)"
 ARCHIVE="agent-lens-${TARGET}.tar.gz"
-BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+if [ "${TAG}" = "latest" ]; then
+	BASE_URL="https://github.com/${REPO}/releases/latest/download"
+else
+	BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+fi
 
 log "repo:   ${REPO}"
 log "tag:    ${TAG}"
