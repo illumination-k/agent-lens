@@ -479,6 +479,20 @@ mod tests {
     }
 
     #[test]
+    fn since_option_filter_is_applied_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_two_files(dir.path());
+        let json = HotspotAnalyzer::new()
+            .with_since_opt(Some("2099-01-01".to_owned()))
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["since"], "2099-01-01");
+        let files = parsed["files"].as_array().unwrap();
+        assert!(files.iter().all(|f| f["commits"].as_u64().unwrap() == 0));
+    }
+
+    #[test]
     fn target_directory_outside_git_errors() {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "lone.rs", "fn x() {}\n");
