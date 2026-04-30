@@ -310,3 +310,133 @@ pub struct ImportShape {
     pub local_alias: SyntaxFact<Option<String>>,
     pub exported_symbol: SyntaxFact<Option<String>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FunctionDef, FunctionSignature};
+
+    #[test]
+    fn syntax_fact_known_value_distinguishes_known_from_unknown() {
+        let known = SyntaxFact::Known("value".to_owned());
+        let unknown: SyntaxFact<String> = SyntaxFact::Unknown;
+
+        assert_eq!(known.known_value().map(String::as_str), Some("value"));
+        assert_eq!(unknown.known_value(), None);
+    }
+
+    #[test]
+    fn source_span_and_function_shape_line_counts_are_inclusive() {
+        let span = SourceSpan {
+            start_line: 10,
+            end_line: 14,
+        };
+        let shape = FunctionShape {
+            display_name: "f".to_owned(),
+            qualified_name: SyntaxFact::Unknown,
+            module_path: SyntaxFact::Unknown,
+            owner: SyntaxFact::Known(None),
+            visibility: SyntaxFact::Unknown,
+            signature: SyntaxFact::Unknown,
+            body: BodyShape {
+                tree: TreeNode::leaf("Block"),
+            },
+            span,
+            is_test: false,
+        };
+
+        assert_eq!(span.line_count(), 5);
+        assert_eq!(shape.line_count(), 5);
+    }
+
+    #[test]
+    fn function_shape_from_function_def_preserves_body_and_signature() {
+        let def = FunctionDef {
+            name: "parse_user".to_owned(),
+            start_line: 3,
+            end_line: 8,
+            is_test: true,
+            signature: Some(signature()),
+            tree: TreeNode::with_children(
+                "Function",
+                "",
+                vec![TreeNode::leaf("FnSignature"), TreeNode::leaf("Block")],
+            ),
+        };
+
+        let shape = FunctionShape::from(def);
+
+        assert_eq!(shape.display_name, "parse_user");
+        assert_eq!(shape.span.line_count(), 6);
+        assert!(shape.is_test);
+        assert_eq!(shape.body_tree().label, "Block");
+        assert_eq!(
+            shape
+                .signature_shape()
+                .map(|sig| sig.name_tokens().collect::<Vec<_>>()),
+            Some(vec!["parse", "user"]),
+        );
+    }
+
+    #[test]
+    fn signature_shape_projects_comparable_signature_facts() {
+        let sig = SignatureShape::from(signature());
+
+        assert_eq!(sig.parameter_count(), 2);
+        assert_eq!(sig.name_tokens().collect::<Vec<_>>(), ["parse", "user"]);
+        assert_eq!(
+            sig.parameter_names().collect::<Vec<_>>(),
+            ["id", "fallback"]
+        );
+        assert_eq!(
+            sig.parameter_type_paths().collect::<Vec<_>>(),
+            ["UserId", "Option<User>"]
+        );
+        assert_eq!(sig.return_type_paths, ["Result<User>"]);
+        assert_eq!(sig.generics().collect::<Vec<_>>(), ["T: Clone"]);
+        assert_eq!(sig.receiver_kind(), Some(ReceiverKind::Ref));
+    }
+
+    #[test]
+    fn call_shape_accessors_return_known_call_facts() {
+        let call = CallShape {
+            caller_qualified_name: SyntaxFact::Known(Some("crate::m::S::caller".to_owned())),
+            caller_module: SyntaxFact::Known("crate::m".to_owned()),
+            caller_owner: SyntaxFact::Known(Some("S".to_owned())),
+            callee_display_name: SyntaxFact::Known(Some("parse".to_owned())),
+            callee_path_segments: SyntaxFact::Known(vec![
+                "crate".to_owned(),
+                "m".to_owned(),
+                "parse".to_owned(),
+            ]),
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::Expression),
+            lexical_resolution: LexicalResolutionStatus::NotAttempted,
+            visible_imports: Vec::new(),
+            line: 12,
+        };
+        let path_call = CallShape {
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            ..call.clone()
+        };
+
+        assert_eq!(call.callee_name(), Some("parse"));
+        assert_eq!(call.callee_path().as_deref(), Some("crate::m::parse"));
+        assert_eq!(call.caller_qualified_name(), Some("crate::m::S::caller"));
+        assert_eq!(call.caller_module(), Some("crate::m"));
+        assert_eq!(call.caller_owner(), Some("S"));
+        assert!(call.has_receiver_expression());
+        assert!(!path_call.has_receiver_expression());
+    }
+
+    fn signature() -> FunctionSignature {
+        FunctionSignature {
+            name_tokens: vec!["parse".to_owned(), "user".to_owned()],
+            parameter_count: 2,
+            parameter_names: vec!["id".to_owned(), "fallback".to_owned()],
+            parameter_type_paths: vec!["UserId".to_owned(), "Option<User>".to_owned()],
+            return_type_paths: vec!["Result<User>".to_owned()],
+            generics: vec!["T: Clone".to_owned()],
+            receiver: ReceiverShape::Ref,
+        }
+    }
+}

@@ -931,6 +931,22 @@ fn delta(xs: &[i32]) -> i32 {
     }
 
     #[test]
+    fn function_touches_changes_uses_actual_start_line() {
+        let function = owned_function("target", 10, 14);
+        let at_start = HashMap::from([(
+            PathBuf::from("lib.rs"),
+            vec![LineRange { start: 10, end: 10 }],
+        )]);
+        let before_start = HashMap::from([(
+            PathBuf::from("lib.rs"),
+            vec![LineRange { start: 9, end: 9 }],
+        )]);
+
+        assert!(function_touches_changes(&function, &at_start));
+        assert!(!function_touches_changes(&function, &before_start));
+    }
+
+    #[test]
     fn score_stats_record_and_merge_preserve_counts() {
         fn components(similarity: f64) -> SimilarityComponents {
             SimilarityComponents {

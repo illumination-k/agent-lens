@@ -690,6 +690,32 @@ mod tests {
     }
 
     #[test]
+    fn neutral_call_shapes_preserve_callee_path_segments() {
+        let shapes = extract_call_shapes_with_options_and_base_module(
+            "fn a(x: T) { crate::other::foo(); x.bar(); }\n",
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+            "crate",
+        )
+        .unwrap();
+
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(
+            shapes[0].callee_path_segments.known_value(),
+            Some(&vec![
+                "crate".to_owned(),
+                "other".to_owned(),
+                "foo".to_owned()
+            ]),
+        );
+        assert_eq!(
+            shapes[1].callee_path_segments.known_value(),
+            Some(&vec!["x.bar".to_owned()]),
+        );
+    }
+
+    #[test]
     fn records_module_caller_and_visible_aliases() {
         let src = r#"
 mod b {

@@ -553,6 +553,18 @@ mod tests {
     }
 
     #[test]
+    fn eligible_function_count_uses_min_lines_threshold() {
+        let corpus = vec![
+            owned_function("short", false),
+            owned_function("also_short", false),
+            owned_function("long_enough", false),
+        ];
+
+        assert_eq!(eligible_function_count(&corpus, 5), 3);
+        assert_eq!(eligible_function_count(&corpus, 6), 0);
+    }
+
+    #[test]
     fn scoring_profile_initializes_subtree_sizes_lazily() {
         let tree = lens_domain::TreeNode::with_children(
             "Block",

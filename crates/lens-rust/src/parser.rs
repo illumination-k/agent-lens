@@ -1295,6 +1295,39 @@ mod inner {
     }
 
     #[test]
+    fn neutral_function_shapes_preserve_module_owner_and_body() {
+        let src = r#"
+mod inner {
+    struct S;
+    impl S {
+        pub fn call(&self) { helper(); }
+    }
+}
+"#;
+        let shapes = extract_function_shapes_with_modules(src, "crate::outer").unwrap();
+
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].display_name, "call");
+        assert_eq!(
+            shapes[0].qualified_name.known_value().map(String::as_str),
+            Some("crate::outer::inner::S::call"),
+        );
+        assert_eq!(
+            shapes[0].module_path.known_value().map(String::as_str),
+            Some("crate::outer::inner"),
+        );
+        assert_eq!(
+            shapes[0]
+                .owner
+                .known_value()
+                .and_then(|owner| owner.as_ref())
+                .map(|owner| owner.display_name.as_str()),
+            Some("S"),
+        );
+        assert_eq!(shapes[0].body_tree().label, "Block");
+    }
+
+    #[test]
     fn module_aware_extraction_propagates_test_contexts() {
         let src = r#"
 #[test]
