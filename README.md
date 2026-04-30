@@ -83,7 +83,7 @@ mise use github:illumination-k/agent-lens
 mise use github:illumination-k/agent-lens@v0.1.0
 
 # opt into the rolling main prerelease
-mise use github:illumination-k/agent-lens@main
+mise use 'github:illumination-k/agent-lens@main[prerelease=true]'
 ```
 
 Or add it to `mise.toml` directly:
@@ -92,6 +92,17 @@ Or add it to `mise.toml` directly:
 [tools]
 "github:illumination-k/agent-lens" = "v0.1.0"
 ```
+
+To track the rolling prerelease built from `main`, opt into prereleases and pin
+`main` instead:
+
+```toml
+[tools]
+"github:illumination-k/agent-lens" = { version = "main", prerelease = true }
+```
+
+The `prerelease = true` option is required because mise's GitHub backend
+excludes GitHub prereleases by default.
 
 mise auto-detects the right asset for your OS / arch from the
 `agent-lens-<target>.tar.gz` artifacts published by the release workflow.
