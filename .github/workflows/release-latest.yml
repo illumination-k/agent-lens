@@ -1,8 +1,10 @@
-name: Release Latest
+name: Release
 
 on:
   push:
     branches: [main]
+    tags:
+      - "v*"
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"
@@ -19,8 +21,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-latest
-  cancel-in-progress: true
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 jobs:
   build:
@@ -53,10 +55,8 @@ jobs:
           persist-credentials: false
 
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: ${{ matrix.target }}
+          cache: false
 
       - name: Add rust target
         run: rustup target add ${{ matrix.target }}
@@ -104,7 +104,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish latest release
+    name: Publish release
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -120,17 +120,40 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Replace latest tag and release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -euo pipefail
-          gh release delete latest --cleanup-tag --yes || true
-          gh release create latest \
-            --target "${SHA}" \
-            --title "latest (${SHA})" \
-            --notes "Rolling release built from \`main\` at ${SHA}." \
-            --prerelease \
-            dist/*
+
+          if [ "${REF_TYPE}" = "branch" ]; then
+            if [ "${REF_NAME}" != "main" ]; then
+              echo "Rolling prereleases are only published from main; got ${REF_NAME}." >&2
+              exit 1
+            fi
+
+            short_sha="$(printf '%s' "${SHA}" | cut -c1-12)"
+            gh release delete main --cleanup-tag --yes || true
+            gh release create main \
+              --target "${SHA}" \
+              --title "main (${short_sha})" \
+              --notes "Rolling prerelease built from \`main\` at ${SHA}." \
+              --prerelease \
+              dist/*
+            exit 0
+          fi
+
+          if [ "${REF_TYPE}" = "tag" ]; then
+            gh release create "${REF_NAME}" \
+              --title "${REF_NAME}" \
+              --generate-notes \
+              dist/*
+            exit 0
+          fi
+
+          echo "Unsupported ref type: ${REF_TYPE}" >&2
+          exit 1

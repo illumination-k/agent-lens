@@ -53,17 +53,17 @@ protocol payloads and reports; everything else goes to stderr through
 curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
 ```
 
-This pulls the matching tarball from the rolling `latest` release, verifies its
-SHA-256, and drops the binary into `$HOME/.local/bin`. Override with flags or
-environment variables:
+This pulls the matching tarball from the latest stable GitHub Release, verifies
+its SHA-256, and drops the binary into `$HOME/.local/bin`. Override with flags
+or environment variables:
 
 ```bash
 # explicit destination
 curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh \
   | bash -s -- --dir /usr/local/bin
 
-# pin a specific release tag (default: latest)
-AGENT_LENS_TAG=latest AGENT_LENS_DIR="$HOME/.local/bin" \
+# pin a specific release tag, or use main for the rolling prerelease
+AGENT_LENS_TAG=v0.1.0 AGENT_LENS_DIR="$HOME/.local/bin" \
   bash <(curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh)
 ```
 
@@ -80,18 +80,21 @@ mise use -g github:illumination-k/agent-lens
 mise use github:illumination-k/agent-lens
 
 # pin a specific release tag
-mise use github:illumination-k/agent-lens@latest
+mise use github:illumination-k/agent-lens@v0.1.0
+
+# opt into the rolling main prerelease
+mise use github:illumination-k/agent-lens@main
 ```
 
 Or add it to `mise.toml` directly:
 
 ```toml
 [tools]
-"github:illumination-k/agent-lens" = "latest"
+"github:illumination-k/agent-lens" = "v0.1.0"
 ```
 
 mise auto-detects the right asset for your OS / arch from the
-`agent-lens-<target>.tar.gz` artifacts published by `release-latest.yml`.
+`agent-lens-<target>.tar.gz` artifacts published by the release workflow.
 
 ### From source
 
@@ -104,10 +107,11 @@ cargo install --path crates/agent-lens
 
 ### Manual download
 
-Pre-built binaries for `main` are published as a rolling release — grab a
-tarball or `.zip` directly from the
+Pre-built binaries are published for version tags as normal releases. The
+current `main` branch is also published as a rolling prerelease named `main`.
+Grab a tarball or `.zip` directly from the
 [GitHub Releases page](https://github.com/illumination-k/agent-lens/releases)
-(`release-latest.yml` keeps it current).
+or pin `main` when you explicitly want the prerelease build.
 
 ## Quick start
 
