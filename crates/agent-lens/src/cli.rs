@@ -1237,6 +1237,45 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn apply_setup_plan_reports_and_runs_only_when_changed() {
+        let path = Path::new("settings.json");
+        let context = || SetupApplyContext {
+            path,
+            added_commands: 1,
+            dry_run_message: "dry run",
+            wrote_message: "wrote",
+            unchanged_message: "unchanged",
+        };
+
+        let dry_run_applied = std::cell::Cell::new(false);
+        let wrote = apply_setup_plan(true, true, context(), || {
+            dry_run_applied.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!wrote);
+        assert!(!dry_run_applied.get());
+
+        let unchanged_applied = std::cell::Cell::new(false);
+        let wrote = apply_setup_plan(false, false, context(), || {
+            unchanged_applied.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!wrote);
+        assert!(!unchanged_applied.get());
+
+        let changed_applied = std::cell::Cell::new(false);
+        let wrote = apply_setup_plan(false, true, context(), || {
+            changed_applied.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(wrote);
+        assert!(changed_applied.get());
+    }
+
+    #[test]
     fn git_top_level_returns_none_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
         // tempdir() returns a fresh path; nothing inside it is git-tracked.

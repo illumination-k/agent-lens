@@ -593,6 +593,29 @@ export function gb(): number { return b; }
     }
 
     #[test]
+    fn markdown_renders_trait_impl_units_with_trait_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+trait Port {
+    fn ga(&self) -> i32;
+    fn gb(&self) -> i32;
+}
+
+struct Adapter { a: i32, b: i32 }
+impl Port for Adapter {
+    fn ga(&self) -> i32 { self.a }
+    fn gb(&self) -> i32 { self.b }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let md = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("impl Port for Adapter"), "got: {md}");
+        assert!(md.contains("LCOM4 = 2"), "got: {md}");
+    }
+
+    #[test]
     fn missing_file_surfaces_io_error() {
         let err = CohesionAnalyzer::new()
             .analyze(
