@@ -52,11 +52,12 @@ const SIGNATURE_SIMILARITY_WEIGHT: f64 = 0.2;
 /// candidate set. Keep a guardrail so runs fail fast with an actionable
 /// error instead of spending minutes in pairwise scoring.
 ///
-/// The cap is calibrated from a real benchmark run:
-/// `similarity_directory_lsh_1024_functions` measured ~370–384 ms
-/// (2026-04-28, local `cargo bench` in this repo). A 1024-function
-/// full pair set is 523,776 pairs; scaling that to a practical upper
-/// budget around 10 seconds gives a limit around 13M pairs.
+/// The cap is calibrated from a historical dense benchmark run before
+/// signature component reporting:
+/// `similarity_directory_lsh_dense_1024_functions` measured ~370–384 ms
+/// (2026-04-28, local `cargo bench` in this repo). A 1024-function full
+/// pair set is 523,776 pairs; scaling that to a practical upper budget
+/// around 10 seconds gives a limit around 13M pairs.
 const MAX_CANDIDATE_PAIRS: usize = 13_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

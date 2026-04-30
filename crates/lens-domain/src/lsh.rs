@@ -90,71 +90,125 @@ pub fn lsh_candidate_pairs_for_trees(
     trees: &[&TreeNode],
     opts: &LshOptions,
 ) -> Vec<(usize, usize)> {
-    if trees.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
+    let Some(rows_per_band) = rows_per_band_for_candidate_generation(trees, opts) else {
         return Vec::new();
-    }
-    let rows_per_band = opts.num_hashes / opts.num_bands;
-    if rows_per_band == 0 {
-        return Vec::new();
-    }
-    let family = HashFamily::new(opts.num_hashes, opts.seed);
-    let signatures: Vec<Vec<u64>> = if trees.len() >= PARALLEL_SIGNATURE_MIN_TREES {
-        trees
-            .par_iter()
-            .map(|tree| {
-                let features = extract_shingles(tree, opts.shingle_size);
-                minhash_signature(&features, &family)
-            })
-            .collect()
-    } else {
-        trees
-            .iter()
-            .map(|tree| {
-                let features = extract_shingles(tree, opts.shingle_size);
-                minhash_signature(&features, &family)
-            })
-            .collect()
     };
 
-    let mut buckets: HashMap<(usize, u64), Vec<usize>> =
-        HashMap::with_capacity(trees.len().saturating_mul(opts.num_bands));
-    for (idx, sig) in signatures.iter().enumerate() {
-        for b in 0..opts.num_bands {
-            let start = b * rows_per_band;
-            let end = start + rows_per_band;
-            let Some(band) = sig.get(start..end) else {
-                continue;
-            };
-            let key = hash_band(b, band);
-            buckets.entry((b, key)).or_default().push(idx);
-        }
+    let family = HashFamily::new(opts.num_hashes, opts.seed);
+    let signatures = minhash_signatures(trees, opts.shingle_size, &family);
+    let buckets = signature_buckets(&signatures, opts.num_bands, rows_per_band);
+
+    sorted_candidate_pairs(expand_bucket_pairs(buckets))
+}
+
+fn rows_per_band_for_candidate_generation(trees: &[&TreeNode], opts: &LshOptions) -> Option<usize> {
+    if trees.len() < 2 || opts.num_hashes == 0 || opts.num_bands == 0 {
+        return None;
     }
 
-    const DEDUP_BUCKET_MIN_SIZE: usize = 64;
+    let rows_per_band = opts.num_hashes / opts.num_bands;
+    (rows_per_band > 0).then_some(rows_per_band)
+}
 
-    let mut candidates: HashSet<(usize, usize)> = HashSet::new();
-    let mut expanded_buckets: HashSet<Vec<usize>> = HashSet::new();
-    for indices in buckets.into_values() {
-        if indices.len() < 2 {
-            continue;
-        }
-        if indices.len() >= DEDUP_BUCKET_MIN_SIZE && !expanded_buckets.insert(indices.clone()) {
-            continue;
-        }
-        for (pos, &i) in indices.iter().enumerate() {
-            for &j in &indices[pos + 1..] {
-                let key = if i < j { (i, j) } else { (j, i) };
-                candidates.insert(key);
+const PARALLEL_SIGNATURE_MIN_TREES: usize = 64;
+
+fn minhash_signatures(
+    trees: &[&TreeNode],
+    shingle_size: usize,
+    family: &HashFamily,
+) -> Vec<Vec<u64>> {
+    if should_parallelize_signatures(trees.len()) {
+        return trees
+            .par_iter()
+            .map(|tree| minhash_signature_for_tree(tree, shingle_size, family))
+            .collect();
+    }
+
+    trees
+        .iter()
+        .map(|tree| minhash_signature_for_tree(tree, shingle_size, family))
+        .collect()
+}
+
+fn should_parallelize_signatures(tree_count: usize) -> bool {
+    tree_count >= PARALLEL_SIGNATURE_MIN_TREES
+}
+
+fn minhash_signature_for_tree(
+    tree: &TreeNode,
+    shingle_size: usize,
+    family: &HashFamily,
+) -> Vec<u64> {
+    let features = extract_shingles(tree, shingle_size);
+    minhash_signature(&features, family)
+}
+
+fn signature_buckets(
+    signatures: &[Vec<u64>],
+    num_bands: usize,
+    rows_per_band: usize,
+) -> HashMap<(usize, u64), Vec<usize>> {
+    let mut buckets: HashMap<(usize, u64), Vec<usize>> =
+        HashMap::with_capacity(signatures.len().saturating_mul(num_bands));
+
+    for (idx, sig) in signatures.iter().enumerate() {
+        for band_index in 0..num_bands {
+            if let Some(band) = signature_band(sig, band_index, rows_per_band) {
+                let key = hash_band(band_index, band);
+                buckets.entry((band_index, key)).or_default().push(idx);
             }
         }
     }
 
+    buckets
+}
+
+fn signature_band(sig: &[u64], band_index: usize, rows_per_band: usize) -> Option<&[u64]> {
+    let start = band_index * rows_per_band;
+    let end = start + rows_per_band;
+    sig.get(start..end)
+}
+
+const DEDUP_BUCKET_MIN_SIZE: usize = 64;
+
+fn expand_bucket_pairs(buckets: HashMap<(usize, u64), Vec<usize>>) -> HashSet<(usize, usize)> {
+    let mut candidates: HashSet<(usize, usize)> = HashSet::new();
+    let mut expanded_buckets: HashSet<Vec<usize>> = HashSet::new();
+
+    for indices in buckets.into_values().filter(|indices| indices.len() >= 2) {
+        if should_skip_duplicate_large_bucket(&indices, &mut expanded_buckets) {
+            continue;
+        }
+        insert_bucket_pairs(&indices, &mut candidates);
+    }
+
+    candidates
+}
+
+fn should_skip_duplicate_large_bucket(
+    indices: &[usize],
+    expanded_buckets: &mut HashSet<Vec<usize>>,
+) -> bool {
+    indices.len() >= DEDUP_BUCKET_MIN_SIZE && !expanded_buckets.insert(indices.to_vec())
+}
+
+fn insert_bucket_pairs(indices: &[usize], candidates: &mut HashSet<(usize, usize)>) {
+    for (pos, &i) in indices.iter().enumerate() {
+        for &j in &indices[pos + 1..] {
+            candidates.insert(ordered_pair(i, j));
+        }
+    }
+}
+
+fn ordered_pair(i: usize, j: usize) -> (usize, usize) {
+    (i.min(j), i.max(j))
+}
+
+fn sorted_candidate_pairs(candidates: HashSet<(usize, usize)>) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = candidates.into_iter().collect();
     out.sort();
     out
 }
-
-const PARALLEL_SIGNATURE_MIN_TREES: usize = 64;
 
 /// K-shingle feature set: every k-window over preorder AST labels, hashed
 /// to u64. For trees smaller than `k`, fall back to a single feature
@@ -335,6 +389,74 @@ mod tests {
             lsh_candidate_pairs_for_trees(&trees, &opts),
             lsh_candidate_pairs(&funcs, &opts),
         );
+    }
+
+    #[test]
+    fn candidate_generation_requires_two_trees_and_valid_band_dimensions() {
+        let single = def(&["Let", "Call", "Return"]);
+        let two = [
+            def(&["Let", "Call", "Return"]),
+            def(&["Let", "Call", "Return"]),
+        ];
+        let single_tree = vec![&single.tree];
+        let two_trees = two.iter().map(|f| &f.tree).collect::<Vec<_>>();
+
+        assert_eq!(
+            rows_per_band_for_candidate_generation(&single_tree, &LshOptions::default()),
+            None,
+        );
+        assert_eq!(
+            rows_per_band_for_candidate_generation(&two_trees, &LshOptions::default()),
+            Some(4),
+        );
+    }
+
+    #[test]
+    fn signature_parallelization_starts_at_threshold() {
+        assert!(!should_parallelize_signatures(
+            PARALLEL_SIGNATURE_MIN_TREES - 1
+        ));
+        assert!(should_parallelize_signatures(PARALLEL_SIGNATURE_MIN_TREES));
+    }
+
+    #[test]
+    fn signature_band_returns_requested_rows_or_none_when_out_of_range() {
+        let sig = [10, 11, 12, 13, 14, 15];
+
+        assert_eq!(signature_band(&sig, 0, 2), Some(&sig[0..2]));
+        assert_eq!(signature_band(&sig, 2, 2), Some(&sig[4..6]));
+        assert_eq!(signature_band(&sig, 3, 2), None);
+    }
+
+    #[test]
+    fn large_bucket_dedup_skips_only_repeated_large_buckets() {
+        let small_bucket = [0, 1, 2];
+        let large_bucket = (0..DEDUP_BUCKET_MIN_SIZE).collect::<Vec<_>>();
+        let mut expanded = HashSet::new();
+
+        assert!(!should_skip_duplicate_large_bucket(
+            &small_bucket,
+            &mut expanded
+        ));
+        assert!(!should_skip_duplicate_large_bucket(
+            &large_bucket,
+            &mut expanded
+        ));
+        assert!(should_skip_duplicate_large_bucket(
+            &large_bucket,
+            &mut expanded
+        ));
+        assert!(!should_skip_duplicate_large_bucket(
+            &small_bucket,
+            &mut expanded
+        ));
+    }
+
+    #[test]
+    fn ordered_pair_normalizes_indices() {
+        assert_eq!(ordered_pair(1, 3), (1, 3));
+        assert_eq!(ordered_pair(3, 1), (1, 3));
+        assert_eq!(ordered_pair(2, 2), (2, 2));
     }
 
     #[test]
