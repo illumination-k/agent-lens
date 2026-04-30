@@ -47,10 +47,18 @@ run = "cargo test --doc --locked --all-features --workspace"
 description = "Run cargo-mutants only on Rust lines changed vs a base git ref (default: main)"
 usage = '''
 arg "[base]" help="Base git ref or revspec for git diff" default="main"
+flag "-j --jobs <jobs>" help="Number of cargo-mutants jobs to run in parallel" default="2"
 '''
 run = '''
 set -eu
 base="${usage_base:-main}"
+jobs="${usage_jobs:-2}"
+case "$jobs" in
+  ''|*[!0-9]*|0)
+    echo "--jobs must be a positive integer."
+    exit 1
+    ;;
+esac
 if ! git rev-parse --verify "$base" >/dev/null 2>&1; then
   if git rev-parse --verify "origin/$base" >/dev/null 2>&1; then
     base="origin/$base"
@@ -68,7 +76,7 @@ if [ ! -s target/mutants-diff.patch ]; then
   exit 0
 fi
 echo "Running cargo-mutants against diff base: $base"
-cargo mutants --workspace --no-shuffle --iterate --in-diff target/mutants-diff.patch
+cargo mutants --workspace --no-shuffle --iterate --jobs "$jobs" --in-diff target/mutants-diff.patch
 '''
 
 [tasks."ci:rust"]

@@ -999,6 +999,48 @@ fn delta(xs: &[i32]) -> i32 {
         assert_eq!(merged.diff_filtered_count, 4);
     }
 
+    #[test]
+    fn score_stats_keeps_scores_equal_to_threshold() {
+        let mut stats = ScoreStats::default();
+        stats.record(
+            PairScore {
+                i: 2,
+                j: 4,
+                components: SimilarityComponents {
+                    similarity: 0.85,
+                    body_similarity: 1.0,
+                    signature_similarity: Some(0.25),
+                    type_overlap: Some(0.0),
+                    identifier_overlap: Some(0.5),
+                },
+                exact_match: false,
+            },
+            0.85,
+        );
+
+        assert_eq!(stats.pairs.len(), 1);
+        assert_eq!(stats.below_threshold_count, 0);
+    }
+
+    #[test]
+    fn body_candidate_threshold_reverses_combined_score_formula_and_clamps() {
+        assert!((body_candidate_threshold(0.85) - 0.8125).abs() < 1e-9);
+        assert_eq!(body_candidate_threshold(0.10), 0.0);
+        assert_eq!(body_candidate_threshold(1.50), 1.0);
+    }
+
+    #[test]
+    fn token_overlap_count_similarity_and_pair_keys_cover_edge_cases() {
+        assert_eq!(token_overlap([].into_iter(), ["user"].into_iter()), 0.0);
+        assert_eq!(
+            token_overlap(["user", "id"].into_iter(), ["id", "order"].into_iter()),
+            1.0 / 3.0,
+        );
+        assert_eq!(count_similarity(0, 0), 1.0);
+        assert_eq!(count_similarity(2, 4), 0.5);
+        assert_eq!(sorted_pair_key(5, 3), (3, 5));
+    }
+
     fn rust_sig(
         name_tokens: &[&str],
         parameter_names: &[&str],
@@ -1017,6 +1059,25 @@ fn delta(xs: &[i32]) -> i32 {
             generics: Vec::new(),
             receiver: lens_domain::ReceiverShape::None,
         }
+    }
+
+    fn rust_sig_with_receiver(
+        name_tokens: &[&str],
+        parameter_names: &[&str],
+        parameter_type_paths: &[&str],
+        return_type_paths: &[&str],
+        generics: &[&str],
+        receiver: lens_domain::ReceiverShape,
+    ) -> lens_domain::FunctionSignature {
+        let mut sig = rust_sig(
+            name_tokens,
+            parameter_names,
+            parameter_type_paths,
+            return_type_paths,
+        );
+        sig.generics = generics.iter().map(|s| (*s).to_owned()).collect();
+        sig.receiver = receiver;
+        sig
     }
 
     #[test]
@@ -1042,6 +1103,118 @@ fn delta(xs: &[i32]) -> i32 {
         assert!(
             same_domain_renamed > different_domain_type,
             "renamed={same_domain_renamed}, different_type={different_domain_type}",
+        );
+    }
+
+    #[test]
+    fn signature_components_calculates_observable_subscores() {
+        let left = rust_sig_with_receiver(
+            &["get", "user"],
+            &["id"],
+            &["UserId"],
+            &["User"],
+            &["T: Clone"],
+            lens_domain::ReceiverShape::Ref,
+        );
+        let right = rust_sig_with_receiver(
+            &["get", "order"],
+            &["other"],
+            &["OrderId"],
+            &["Order"],
+            &["E: Clone"],
+            lens_domain::ReceiverShape::RefMut,
+        );
+
+        let score = signature_components(Some(&left), Some(&right));
+
+        assert_eq!(score.identifier_overlap, Some(0.2));
+        assert_eq!(score.type_overlap, Some(0.0));
+        assert!((score.signature_similarity.unwrap() - 0.15).abs() < 1e-9);
+
+        let same_receiver = rust_sig_with_receiver(
+            &["get", "order"],
+            &["other"],
+            &["OrderId"],
+            &["Order"],
+            &["E: Clone"],
+            lens_domain::ReceiverShape::Ref,
+        );
+        let with_receiver_match = signature_components(Some(&left), Some(&same_receiver));
+        assert!(
+            with_receiver_match.signature_similarity.unwrap() > score.signature_similarity.unwrap()
+        );
+
+        let different_parameter_count = signature_components(
+            Some(&rust_sig(&[], &["id"], &[], &[])),
+            Some(&rust_sig(&[], &["id", "fallback"], &[], &[])),
+        );
+        assert!((different_parameter_count.signature_similarity.unwrap() - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn score_candidate_pair_combines_body_and_signature_scores() {
+        let left_body = lens_domain::TreeNode::with_children(
+            "Function",
+            "",
+            vec![
+                lens_domain::TreeNode::leaf("FnSignature"),
+                lens_domain::TreeNode::leaf("Block"),
+            ],
+        );
+        let right_body = lens_domain::TreeNode::with_children(
+            "Function",
+            "",
+            vec![
+                lens_domain::TreeNode::leaf("FnSignature"),
+                lens_domain::TreeNode::with_children(
+                    "Block",
+                    "",
+                    vec![lens_domain::TreeNode::leaf("Return")],
+                ),
+            ],
+        );
+        let corpus = vec![
+            OwnedFunction {
+                file: PathBuf::from("lib.rs"),
+                rel_path: "lib.rs".to_owned(),
+                is_test: false,
+                def: lens_domain::FunctionDef {
+                    name: "left".to_owned(),
+                    start_line: 1,
+                    end_line: 5,
+                    is_test: false,
+                    signature: Some(rust_sig(&["left"], &["id"], &["UserId"], &["User"])),
+                    tree: left_body,
+                },
+            },
+            OwnedFunction {
+                file: PathBuf::from("lib.rs"),
+                rel_path: "lib.rs".to_owned(),
+                is_test: false,
+                def: lens_domain::FunctionDef {
+                    name: "right".to_owned(),
+                    start_line: 7,
+                    end_line: 11,
+                    is_test: false,
+                    signature: Some(rust_sig(&["right"], &["id"], &["OrderId"], &["Order"])),
+                    tree: right_body,
+                },
+            },
+        ];
+        let profiles = build_tree_profiles(&corpus, 1);
+
+        let score =
+            score_candidate_pair(&corpus, &profiles, 0, 1, &TSEDOptions::default()).unwrap();
+
+        assert!(score.components.body_similarity < 1.0);
+        assert!(score.components.signature_similarity.unwrap() < 0.5);
+        assert!(
+            (score.components.similarity
+                - (BODY_SIMILARITY_WEIGHT * score.components.body_similarity
+                    + SIGNATURE_SIMILARITY_WEIGHT
+                        * score.components.signature_similarity.unwrap()))
+            .abs()
+                < 1e-9
         );
     }
 

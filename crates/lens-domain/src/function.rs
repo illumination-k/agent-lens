@@ -656,6 +656,33 @@ mod tests {
     }
 
     #[test]
+    fn body_tree_prefers_function_block_child_and_falls_back_to_root() {
+        let with_signature = FunctionDef {
+            name: "f".into(),
+            start_line: 1,
+            end_line: 4,
+            is_test: false,
+            signature: None,
+            tree: TreeNode::with_children(
+                "Function",
+                "",
+                vec![TreeNode::leaf("FnSignature"), TreeNode::leaf("Block")],
+            ),
+        };
+        assert_eq!(with_signature.body_tree().label, "Block");
+
+        let body_only = FunctionDef {
+            name: "g".into(),
+            start_line: 1,
+            end_line: 4,
+            is_test: false,
+            signature: None,
+            tree: TreeNode::leaf("Body"),
+        };
+        assert_eq!(body_only.body_tree().label, "Body");
+    }
+
+    #[test]
     fn pairs_sorted_by_similarity_desc() {
         let funcs = vec![
             def("base", fn_tree(&["Let", "Call", "Return"])),

@@ -186,3 +186,69 @@ pub(super) fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn owned_function(name: &str) -> OwnedFunction {
+        OwnedFunction {
+            file: PathBuf::from("lib.rs"),
+            rel_path: "lib.rs".to_owned(),
+            is_test: false,
+            def: lens_domain::FunctionDef {
+                name: name.to_owned(),
+                start_line: 1,
+                end_line: 5,
+                is_test: false,
+                signature: None,
+                tree: lens_domain::TreeNode::leaf("Block"),
+            },
+        }
+    }
+
+    fn components(similarity: f64) -> SimilarityComponents {
+        SimilarityComponents {
+            similarity,
+            body_similarity: similarity,
+            signature_similarity: Some(similarity),
+            type_overlap: Some(similarity),
+            identifier_overlap: Some(similarity),
+        }
+    }
+
+    #[test]
+    fn cluster_pair_views_uses_all_unique_member_pairs_and_their_scores() {
+        let corpus = vec![
+            owned_function("alpha"),
+            owned_function("beta"),
+            owned_function("gamma"),
+        ];
+        let pair_scores = HashMap::from([
+            ((0, 0), components(1.0)),
+            ((0, 1), components(0.91)),
+            ((0, 2), components(0.92)),
+            ((1, 1), components(1.0)),
+            ((1, 2), components(0.93)),
+            ((2, 2), components(1.0)),
+        ]);
+
+        let pairs = cluster_pair_views(&corpus, &[0, 1, 2], &pair_scores);
+
+        assert_eq!(pairs.len(), 3);
+        assert!(pairs.iter().all(|pair| pair.a.name != pair.b.name));
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|pair| (pair.a.name, pair.b.name, pair.similarity))
+                .collect::<Vec<_>>(),
+            vec![
+                ("beta", "gamma", 0.93),
+                ("alpha", "gamma", 0.92),
+                ("alpha", "beta", 0.91),
+            ],
+        );
+        assert_eq!(sorted_pair_key(2, 0), (0, 2));
+    }
+}

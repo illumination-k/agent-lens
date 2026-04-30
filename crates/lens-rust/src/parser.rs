@@ -1095,6 +1095,27 @@ mod tests {
         }
     }
 
+    fn collect_names_from_pattern(src: &str) -> Vec<String> {
+        let pat = syn::Pat::parse_single
+            .parse_str(src)
+            .or_else(|_| syn::Pat::parse_multi.parse_str(src))
+            .unwrap_or_else(|err| {
+                panic!("failed to parse pattern fixture {src:?}: {err}");
+            });
+        let mut out = Vec::new();
+        collect_pattern_names(&pat, &mut out);
+        out
+    }
+
+    fn collect_paths_from_type(src: &str) -> Vec<String> {
+        let ty: syn::Type = syn::parse_str(src).unwrap_or_else(|err| {
+            panic!("failed to parse type fixture {src:?}: {err}");
+        });
+        let mut out = Vec::new();
+        collect_type_paths(&ty, &mut out);
+        out
+    }
+
     #[test]
     fn extracts_free_function_name_and_lines() {
         let src = "fn first() {}\nfn second() { let _x = 1; }\n";
@@ -1521,6 +1542,133 @@ extern crate alloc;
             let ty: syn::Type = syn::parse_str(src).unwrap();
             assert_eq!(type_summary(&ty), summary);
         }
+    }
+
+    #[test]
+    fn signature_metadata_collects_pattern_names_from_supported_rust_patterns() {
+        for (src, expected) in [
+            ("id", vec!["id"]),
+            ("&borrowed", vec!["borrowed"]),
+            ("(left, right)", vec!["left", "right"]),
+            ("Some(user)", vec!["user"]),
+            ("User { id, name: user_name }", vec!["id", "user_name"]),
+            ("[head, tail]", vec!["head", "tail"]),
+        ] {
+            assert_eq!(collect_names_from_pattern(src), expected);
+        }
+
+        let typed_pat = syn::Pat::Type(syn::PatType {
+            attrs: Vec::new(),
+            pat: Box::new(syn::Pat::parse_single.parse_str("typed").unwrap()),
+            colon_token: Default::default(),
+            ty: Box::new(syn::parse_str("UserId").unwrap()),
+        });
+        let mut out = Vec::new();
+        collect_pattern_names(&typed_pat, &mut out);
+        assert_eq!(out, vec!["typed"]);
+    }
+
+    #[test]
+    fn signature_metadata_collects_type_paths_from_supported_rust_types() {
+        for (src, expected) in [
+            ("[UserId; 2]", vec!["UserId"]),
+            ("fn(UserId) -> User", vec!["UserId", "User"]),
+            ("(User)", vec!["User"]),
+            ("impl Iterator<Item = User>", vec!["Iterator", "User"]),
+            ("ty_macro!()", vec!["ty_macro"]),
+            ("Box<Result<User, E>>", vec!["Box", "Result", "User", "E"]),
+            ("*const UserId", vec!["UserId"]),
+            ("&mut UserId", vec!["UserId"]),
+            ("[UserId]", vec!["UserId"]),
+            ("dyn Iterator<Item = User>", vec!["Iterator", "User"]),
+            ("(UserId, OrderId)", vec!["UserId", "OrderId"]),
+        ] {
+            assert_eq!(collect_paths_from_type(src), expected);
+        }
+
+        let constrained: syn::Type = syn::parse_str("Wrapper<Item: Into<User>>").unwrap();
+        let mut out = Vec::new();
+        collect_type_paths(&constrained, &mut out);
+        assert_eq!(out, vec!["Wrapper", "Into", "User"]);
+
+        let grouped = syn::Type::Group(syn::TypeGroup {
+            group_token: Default::default(),
+            elem: Box::new(syn::parse_str("GroupedUser").unwrap()),
+        });
+        let mut grouped_paths = Vec::new();
+        collect_type_paths(&grouped, &mut grouped_paths);
+        assert_eq!(grouped_paths, vec!["GroupedUser"]);
+    }
+
+    #[test]
+    fn signature_metadata_records_generics_identifiers_param_counts_and_receivers() {
+        let src = r#"
+struct UserId;
+struct User;
+trait IntoUser {}
+struct Service;
+
+fn parse_user_id<T: Clone>(id: UserId, fallback: Option<User>) -> User
+where
+    T: IntoUser,
+{
+    User
+}
+
+impl Service {
+    fn by_value(self) {}
+    fn by_ref(&self) {}
+    fn by_mut(&mut self) {}
+    fn associated(id: UserId) -> User { User }
+}
+"#;
+        let funcs = parse_functions(src);
+        let parse_sig = funcs
+            .iter()
+            .find(|f| f.name == "parse_user_id")
+            .and_then(|f| f.signature.as_ref())
+            .unwrap();
+        assert_eq!(parse_sig.name_tokens, vec!["parse", "user", "id"]);
+        assert_eq!(parse_sig.parameter_count, 2);
+        assert_eq!(parse_sig.parameter_names, vec!["id", "fallback"]);
+        assert_eq!(
+            parse_sig.parameter_type_paths,
+            vec!["UserId", "Option", "User"],
+        );
+        assert_eq!(parse_sig.return_type_paths, vec!["User"]);
+        assert!(parse_sig.generics.iter().any(|item| item == "T : Clone"));
+        assert!(parse_sig.generics.iter().any(|item| item == "T : IntoUser"));
+        assert_eq!(parse_sig.receiver, ReceiverShape::None);
+
+        let receiver = |name: &str| {
+            funcs
+                .iter()
+                .find(|f| f.name == name)
+                .and_then(|f| f.signature.as_ref())
+                .map(|sig| sig.receiver)
+                .unwrap()
+        };
+        assert_eq!(receiver("Service::by_value"), ReceiverShape::Value);
+        assert_eq!(receiver("Service::by_ref"), ReceiverShape::Ref);
+        assert_eq!(receiver("Service::by_mut"), ReceiverShape::RefMut);
+        assert_eq!(receiver("Service::associated"), ReceiverShape::None);
+    }
+
+    #[test]
+    fn identifier_tokens_split_snake_and_camel_case_boundaries() {
+        assert_eq!(
+            identifier_tokens("parse_user2_id"),
+            vec!["parse", "user2", "id"]
+        );
+        assert_eq!(identifier_tokens("loadUserId"), vec!["load", "user", "id"]);
+        assert_eq!(
+            identifier_tokens("load-user$id"),
+            vec!["load", "user", "id"]
+        );
+        assert_eq!(
+            identifier_tokens("_leading__trailing_"),
+            vec!["leading", "trailing"]
+        );
     }
 
     #[test]
