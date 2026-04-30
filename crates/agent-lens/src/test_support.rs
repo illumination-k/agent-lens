@@ -37,3 +37,72 @@ pub fn run_git(dir: &Path, args: &[&str]) {
         .unwrap();
     assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
+
+/// Create a tiny Rust crate inside an initialized git repo with two commits so
+/// hotspot analysis has churn signal to rank.
+pub fn init_repo_with_crate_for_session_summary(dir: &Path) {
+    run_git(dir, &["init", "-q", "-b", "main"]);
+    run_git(dir, &["config", "user.email", "test@example.com"]);
+    run_git(dir, &["config", "user.name", "Test"]);
+    write_file(
+        dir,
+        "src/lib.rs",
+        "pub mod a;
+pub mod b;
+",
+    );
+    write_file(
+        dir,
+        "src/a.rs",
+        "use crate::b::Bar;
+pub struct Foo;
+fn _x(_b: Bar) {}
+",
+    );
+    write_file(
+        dir,
+        "src/b.rs",
+        r#"
+pub struct Bar;
+pub fn nest(n: i32) -> i32 {
+    if n > 0 { if n > 1 { if n > 2 { if n > 3 { return n; } } } }
+    0
+}
+"#,
+    );
+    run_git(dir, &["add", "."]);
+    run_git(dir, &["commit", "-q", "-m", "initial"]);
+    write_file(
+        dir,
+        "src/b.rs",
+        r#"
+pub struct Bar;
+pub fn nest(n: i32) -> i32 {
+    if n > 0 { if n > 1 { if n > 2 { if n > 3 { return n; } if n > 4 { return n + 1; } } } }
+    0
+}
+"#,
+    );
+    run_git(dir, &["add", "src/b.rs"]);
+    run_git(dir, &["commit", "-q", "-m", "tweak b"]);
+}
+
+/// Initialize a git repo with a Rust file but no top-level crate root
+/// (`src/lib.rs` or `src/main.rs`).
+pub fn init_repo_with_loose_rust_file(dir: &Path) {
+    run_git(dir, &["init", "-q", "-b", "main"]);
+    run_git(dir, &["config", "user.email", "test@example.com"]);
+    run_git(dir, &["config", "user.name", "Test"]);
+    write_file(
+        dir,
+        "loose.rs",
+        r#"
+pub fn nest(n: i32) -> i32 {
+    if n > 0 { if n > 1 { if n > 2 { if n > 3 { return n; } } } }
+    0
+}
+"#,
+    );
+    run_git(dir, &["add", "."]);
+    run_git(dir, &["commit", "-q", "-m", "initial"]);
+}

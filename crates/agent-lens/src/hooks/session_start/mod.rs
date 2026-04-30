@@ -50,9 +50,11 @@ impl Hook for SummaryHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{run_git, write_file};
+    use crate::test_support::{
+        init_repo_with_crate_for_session_summary, init_repo_with_loose_rust_file, write_file,
+    };
     use agent_hooks::claude_code::{HookContext, SessionStartSource};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn ctx(cwd: PathBuf) -> HookContext {
         HookContext {
@@ -70,44 +72,6 @@ mod tests {
         }
     }
 
-    fn init_repo_with_crate(dir: &Path) {
-        run_git(dir, &["init", "-q", "-b", "main"]);
-        run_git(dir, &["config", "user.email", "test@example.com"]);
-        run_git(dir, &["config", "user.name", "Test"]);
-        write_file(dir, "src/lib.rs", "pub mod a;\npub mod b;\n");
-        write_file(
-            dir,
-            "src/a.rs",
-            "use crate::b::Bar;\npub struct Foo;\nfn _x(_b: Bar) {}\n",
-        );
-        write_file(
-            dir,
-            "src/b.rs",
-            r#"
-pub struct Bar;
-pub fn nest(n: i32) -> i32 {
-    if n > 0 { if n > 1 { if n > 2 { if n > 3 { return n; } } } }
-    0
-}
-"#,
-        );
-        run_git(dir, &["add", "."]);
-        run_git(dir, &["commit", "-q", "-m", "initial"]);
-        write_file(
-            dir,
-            "src/b.rs",
-            r#"
-pub struct Bar;
-pub fn nest(n: i32) -> i32 {
-    if n > 0 { if n > 1 { if n > 2 { if n > 3 { return n; } if n > 4 { return n + 1; } } } }
-    0
-}
-"#,
-        );
-        run_git(dir, &["add", "src/b.rs"]);
-        run_git(dir, &["commit", "-q", "-m", "tweak b"]);
-    }
-
     #[test]
     fn no_op_when_cwd_has_neither_repo_nor_crate() {
         let dir = tempfile::tempdir().unwrap();
@@ -120,7 +84,7 @@ pub fn nest(n: i32) -> i32 {
     #[test]
     fn injects_hotspot_and_coupling_sections() {
         let dir = tempfile::tempdir().unwrap();
-        init_repo_with_crate(dir.path());
+        init_repo_with_crate_for_session_summary(dir.path());
 
         let out = SummaryHook::new()
             .handle(input(dir.path().to_path_buf()))
@@ -161,21 +125,7 @@ pub fn nest(n: i32) -> i32 {
     #[test]
     fn hotspot_only_when_no_crate_root() {
         let dir = tempfile::tempdir().unwrap();
-        run_git(dir.path(), &["init", "-q", "-b", "main"]);
-        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
-        run_git(dir.path(), &["config", "user.name", "Test"]);
-        write_file(
-            dir.path(),
-            "loose.rs",
-            r#"
-pub fn nest(n: i32) -> i32 {
-    if n > 0 { if n > 1 { if n > 2 { if n > 3 { return n; } } } }
-    0
-}
-"#,
-        );
-        run_git(dir.path(), &["add", "."]);
-        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        init_repo_with_loose_rust_file(dir.path());
 
         let out = SummaryHook::new()
             .handle(input(dir.path().to_path_buf()))
