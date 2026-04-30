@@ -61,6 +61,7 @@ pub(crate) fn has_command_prefix(existing: &str, wanted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     #[test]
     fn has_command_prefix_matches_exact() {
@@ -75,5 +76,26 @@ mod tests {
     #[test]
     fn has_command_prefix_rejects_word_extension() {
         assert!(!has_command_prefix("a b cx", "a b c"));
+    }
+
+    #[test]
+    fn home_scoped_path_returns_none_when_home_is_unset() {
+        let original = std::env::var_os("HOME");
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        assert_eq!(home_scoped_path(".config/agent"), None);
+        set_home(original);
+    }
+
+    fn set_home(value: Option<OsString>) {
+        match value {
+            Some(v) => unsafe {
+                std::env::set_var("HOME", v);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
     }
 }

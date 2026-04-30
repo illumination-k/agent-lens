@@ -774,6 +774,52 @@ fn delta(xs: &[i32]) -> i32 {
         })
     }
 
+    #[test]
+    fn scored_pair_count_includes_below_threshold_pairs() {
+        let stats = ScoreStats {
+            pairs: vec![ScoredPair {
+                i: 0,
+                j: 1,
+                components: SimilarityComponents {
+                    similarity: 0.9,
+                    body_similarity: 0.9,
+                    signature_similarity: Some(0.9),
+                    type_overlap: Some(0.9),
+                    identifier_overlap: Some(0.9),
+                },
+            }],
+            exact_match_count: 0,
+            below_threshold_count: 2,
+            diff_filtered_count: 0,
+        };
+
+        assert_eq!(stats.scored_pair_count(), 3);
+    }
+
+    #[test]
+    fn trees_match_without_distance_checks_value_and_children_count() {
+        let leaf_a = lens_domain::TreeNode::new("leaf", "a");
+        let leaf_b = lens_domain::TreeNode::new("leaf", "b");
+        assert!(!trees_match_without_distance(&leaf_a, &leaf_b, true));
+        assert!(trees_match_without_distance(&leaf_a, &leaf_b, false));
+
+        let parent_one_child = lens_domain::TreeNode::with_children(
+            "parent",
+            "",
+            vec![lens_domain::TreeNode::leaf("x")],
+        );
+        let parent_two_children = lens_domain::TreeNode::with_children(
+            "parent",
+            "",
+            vec![lens_domain::TreeNode::leaf("x"), lens_domain::TreeNode::leaf("y")],
+        );
+        assert!(!trees_match_without_distance(
+            &parent_one_child,
+            &parent_two_children,
+            false
+        ));
+    }
+
     proptest! {
         #[test]
         fn cheap_tsed_filters_do_not_drop_pairs_that_reach_threshold(
