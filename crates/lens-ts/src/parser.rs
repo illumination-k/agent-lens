@@ -214,6 +214,7 @@ impl FunctionVisitor for FunctionDefCollector {
             start_line: item.start_line,
             end_line: item.end_line,
             is_test,
+            signature: None,
             tree: function_body_tree(item.body),
         });
     }

@@ -131,6 +131,7 @@ fn function_def_from(
         start_line,
         end_line,
         is_test,
+        signature: None,
         tree: builder.finish(),
     }
 }

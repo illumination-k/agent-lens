@@ -128,6 +128,7 @@ fn function_def_from(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Opti
         start_line,
         end_line,
         is_test,
+        signature: None,
         tree,
     })
 }

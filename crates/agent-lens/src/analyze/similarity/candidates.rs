@@ -243,7 +243,7 @@ pub(super) fn candidate_pairs(
     let (pairs, filter_counts) = if use_lsh {
         let trees: Vec<&lens_domain::TreeNode> = eligible_indices
             .iter()
-            .filter_map(|&i| corpus.get(i).map(|f| &f.def.tree))
+            .filter_map(|&i| corpus.get(i).map(|f| f.def.body_tree()))
             .collect();
         filter_size_compatible_pairs(
             lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
@@ -517,6 +517,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 is_test,
+                signature: None,
                 tree: lens_domain::TreeNode::with_children(
                     "Block",
                     "",

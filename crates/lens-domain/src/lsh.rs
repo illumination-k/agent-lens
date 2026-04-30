@@ -266,6 +266,7 @@ mod tests {
             start_line: 1,
             end_line: 10,
             is_test: false,
+            signature: None,
             tree: TreeNode::with_children("Block", "", children),
         }
     }
@@ -362,6 +363,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 is_test: false,
+                signature: None,
                 tree: TreeNode::leaf("Lit"),
             },
             FunctionDef {
@@ -369,6 +371,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 is_test: false,
+                signature: None,
                 tree: TreeNode::leaf("Lit"),
             },
         ];
@@ -413,6 +416,7 @@ mod tests {
             start_line: 1,
             end_line: label_kinds.len().max(1),
             is_test: false,
+            signature: None,
             tree: TreeNode::with_children("Block", "", children),
         }
     }
