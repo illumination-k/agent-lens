@@ -305,12 +305,12 @@ fn build_tree_profiles(corpus: &[OwnedFunction], min_lines: usize) -> Vec<TreePr
     if use_lsh_profiles {
         corpus
             .par_iter()
-            .map(|f| TreeProfile::from_tree_for_scoring(f.def.body_tree()))
+            .map(|f| TreeProfile::from_tree_for_scoring(f.body_tree()))
             .collect()
     } else {
         corpus
             .iter()
-            .map(|f| TreeProfile::from_tree(f.def.body_tree()))
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
             .collect()
     }
 }
@@ -454,8 +454,8 @@ fn score_candidate_pair(
     let profile_a = profiles.get(i)?;
     let profile_b = profiles.get(j)?;
     let compare_values = opts.apted.compare_values;
-    let body_a = a.def.body_tree();
-    let body_b = b.def.body_tree();
+    let body_a = a.body_tree();
+    let body_b = b.body_tree();
     let exact_match =
         is_exact_match_without_distance(profile_a, profile_b, body_a, body_b, compare_values);
     let body_similarity = if exact_match {
@@ -473,7 +473,7 @@ fn score_candidate_pair(
             opts,
         )
     };
-    let signature = signature_components(a.def.signature.as_ref(), b.def.signature.as_ref());
+    let signature = signature_components(a.signature(), b.signature());
     let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
     let similarity = (BODY_SIMILARITY_WEIGHT * body_similarity)
         + (SIGNATURE_SIMILARITY_WEIGHT * signature_similarity);
@@ -516,8 +516,8 @@ struct SignatureComponents {
 }
 
 fn signature_components(
-    a: Option<&lens_domain::FunctionSignature>,
-    b: Option<&lens_domain::FunctionSignature>,
+    a: Option<&lens_domain::SignatureShape>,
+    b: Option<&lens_domain::SignatureShape>,
 ) -> SignatureComponents {
     let (Some(a), Some(b)) = (a, b) else {
         return SignatureComponents {
@@ -528,35 +528,23 @@ fn signature_components(
     };
 
     let identifier_overlap = token_overlap(
-        a.name_tokens
-            .iter()
-            .chain(a.parameter_names.iter())
-            .map(String::as_str),
-        b.name_tokens
-            .iter()
-            .chain(b.parameter_names.iter())
-            .map(String::as_str),
+        a.name_tokens().chain(a.parameter_names()),
+        b.name_tokens().chain(b.parameter_names()),
     );
     let type_overlap = token_overlap(
-        a.parameter_type_paths
-            .iter()
-            .chain(a.return_type_paths.iter())
-            .map(String::as_str),
-        b.parameter_type_paths
-            .iter()
-            .chain(b.return_type_paths.iter())
-            .map(String::as_str),
+        a.parameter_type_paths()
+            .chain(a.return_type_paths.iter().map(String::as_str)),
+        b.parameter_type_paths()
+            .chain(b.return_type_paths.iter().map(String::as_str)),
     );
-    let parameter_name_overlap = token_overlap(
-        a.parameter_names.iter().map(String::as_str),
-        b.parameter_names.iter().map(String::as_str),
-    );
-    let generic_overlap = token_overlap(
-        a.generics.iter().map(String::as_str),
-        b.generics.iter().map(String::as_str),
-    );
-    let parameter_count = count_similarity(a.parameter_count, b.parameter_count);
-    let receiver = if a.receiver == b.receiver { 1.0 } else { 0.0 };
+    let parameter_name_overlap = token_overlap(a.parameter_names(), b.parameter_names());
+    let generic_overlap = token_overlap(a.generics(), b.generics());
+    let parameter_count = count_similarity(a.parameter_count(), b.parameter_count());
+    let receiver = if a.receiver_kind() == b.receiver_kind() {
+        1.0
+    } else {
+        0.0
+    };
     let signature_similarity = (0.25 * identifier_overlap)
         + (0.10 * parameter_count)
         + (0.05 * parameter_name_overlap)
@@ -683,7 +671,7 @@ fn function_touches_changes(f: &OwnedFunction, changed: &HashMap<PathBuf, Vec<Li
     changed.get(&f.file).is_some_and(|ranges| {
         ranges
             .iter()
-            .any(|r| r.overlaps(f.def.start_line, f.def.end_line))
+            .any(|r| r.overlaps(f.start_line(), f.end_line()))
     })
 }
 
@@ -903,14 +891,14 @@ fn delta(xs: &[i32]) -> i32 {
             file: PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test: false,
-            def: lens_domain::FunctionDef {
+            shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line,
                 end_line,
                 is_test: false,
                 signature: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
-            },
+            }),
         }
     }
 
@@ -1046,7 +1034,7 @@ fn delta(xs: &[i32]) -> i32 {
         parameter_names: &[&str],
         parameter_type_paths: &[&str],
         return_type_paths: &[&str],
-    ) -> lens_domain::FunctionSignature {
+    ) -> lens_domain::SignatureShape {
         lens_domain::FunctionSignature {
             name_tokens: name_tokens.iter().map(|s| (*s).to_owned()).collect(),
             parameter_count: parameter_names.len(),
@@ -1059,6 +1047,7 @@ fn delta(xs: &[i32]) -> i32 {
             generics: Vec::new(),
             receiver: lens_domain::ReceiverShape::None,
         }
+        .into()
     }
 
     fn rust_sig_with_receiver(
@@ -1068,16 +1057,22 @@ fn delta(xs: &[i32]) -> i32 {
         return_type_paths: &[&str],
         generics: &[&str],
         receiver: lens_domain::ReceiverShape,
-    ) -> lens_domain::FunctionSignature {
-        let mut sig = rust_sig(
-            name_tokens,
-            parameter_names,
-            parameter_type_paths,
-            return_type_paths,
-        );
+    ) -> lens_domain::SignatureShape {
+        let mut sig = lens_domain::FunctionSignature {
+            name_tokens: name_tokens.iter().map(|s| (*s).to_owned()).collect(),
+            parameter_count: parameter_names.len(),
+            parameter_names: parameter_names.iter().map(|s| (*s).to_owned()).collect(),
+            parameter_type_paths: parameter_type_paths
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            return_type_paths: return_type_paths.iter().map(|s| (*s).to_owned()).collect(),
+            generics: Vec::new(),
+            receiver: lens_domain::ReceiverShape::None,
+        };
         sig.generics = generics.iter().map(|s| (*s).to_owned()).collect();
         sig.receiver = receiver;
-        sig
+        sig.into()
     }
 
     #[test]
@@ -1178,27 +1173,43 @@ fn delta(xs: &[i32]) -> i32 {
                 file: PathBuf::from("lib.rs"),
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
-                def: lens_domain::FunctionDef {
+                shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "left".to_owned(),
                     start_line: 1,
                     end_line: 5,
                     is_test: false,
-                    signature: Some(rust_sig(&["left"], &["id"], &["UserId"], &["User"])),
+                    signature: Some(lens_domain::FunctionSignature {
+                        name_tokens: vec!["left".to_owned()],
+                        parameter_count: 1,
+                        parameter_names: vec!["id".to_owned()],
+                        parameter_type_paths: vec!["UserId".to_owned()],
+                        return_type_paths: vec!["User".to_owned()],
+                        generics: Vec::new(),
+                        receiver: lens_domain::ReceiverShape::None,
+                    }),
                     tree: left_body,
-                },
+                }),
             },
             OwnedFunction {
                 file: PathBuf::from("lib.rs"),
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
-                def: lens_domain::FunctionDef {
+                shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "right".to_owned(),
                     start_line: 7,
                     end_line: 11,
                     is_test: false,
-                    signature: Some(rust_sig(&["right"], &["id"], &["OrderId"], &["Order"])),
+                    signature: Some(lens_domain::FunctionSignature {
+                        name_tokens: vec!["right".to_owned()],
+                        parameter_count: 1,
+                        parameter_names: vec!["id".to_owned()],
+                        parameter_type_paths: vec!["OrderId".to_owned()],
+                        return_type_paths: vec!["Order".to_owned()],
+                        generics: Vec::new(),
+                        receiver: lens_domain::ReceiverShape::None,
+                    }),
                     tree: right_body,
-                },
+                }),
             },
         ];
         let profiles = build_tree_profiles(&corpus, 1);

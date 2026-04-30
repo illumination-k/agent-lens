@@ -121,9 +121,9 @@ impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
     fn from(f: &'a OwnedFunction) -> Self {
         Self {
             file: f.rel_path.as_str(),
-            name: f.def.name.as_str(),
-            start_line: f.def.start_line,
-            end_line: f.def.end_line,
+            name: f.name(),
+            start_line: f.start_line(),
+            end_line: f.end_line(),
             is_test: f.is_test,
         }
     }
@@ -197,14 +197,14 @@ mod tests {
             file: PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test: false,
-            def: lens_domain::FunctionDef {
+            shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
                 signature: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
-            },
+            }),
         }
     }
 

@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::{FunctionComplexity, FunctionDef};
-use lens_rust::{CallIndexOptions, CallKind, CallSite, RustFunctionDef};
+use lens_domain::{CallShape, FunctionComplexity, FunctionShape, SyntaxFact};
+use lens_rust::CallIndexOptions;
 use serde::Serialize;
 
 use super::{
@@ -94,11 +94,11 @@ impl FunctionGraphAnalyzer {
         }
 
         let module = module_path_for(root, file);
-        let mut functions = lens_rust::extract_functions_with_modules(&source, &module)
+        let mut functions = lens_rust::extract_function_shapes_with_modules(&source, &module)
             .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
         functions.retain(|f| self.includes_function(f, path_is_test));
 
-        let calls = lens_rust::extract_call_sites_with_options_and_base_module(
+        let calls = lens_rust::extract_call_shapes_with_options_and_base_module(
             &source,
             CallIndexOptions {
                 include_cfg_test_blocks: !self.exclude_tests,
@@ -118,8 +118,8 @@ impl FunctionGraphAnalyzer {
         })
     }
 
-    fn includes_function(&self, f: &RustFunctionDef, path_is_test: bool) -> bool {
-        let is_test = f.function.is_test || path_is_test;
+    fn includes_function(&self, f: &FunctionShape, path_is_test: bool) -> bool {
+        let is_test = f.is_test || path_is_test;
         if self.only_tests {
             return is_test;
         }
@@ -133,8 +133,8 @@ impl FunctionGraphAnalyzer {
 struct FileGraphInput {
     file: String,
     path_is_test: bool,
-    functions: Vec<RustFunctionDef>,
-    calls: Vec<CallSite>,
+    functions: Vec<FunctionShape>,
+    calls: Vec<CallShape>,
     complexity: Vec<FunctionComplexity>,
 }
 
@@ -272,19 +272,27 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<NodeView> {
     for file in files {
         let complexity = ComplexityIndex::new(&file.complexity);
         for f in &file.functions {
-            let metrics = complexity.get(&f.function);
+            let metrics = complexity.get(f);
             nodes.push(NodeView {
-                id: node_id(&file.file, &f.function),
-                name: f.name.clone(),
-                qualified_name: f.qualified_name.clone(),
+                id: node_id(&file.file, f),
+                name: f.display_name.clone(),
+                qualified_name: f
+                    .qualified_name
+                    .known_value()
+                    .cloned()
+                    .unwrap_or_else(|| f.display_name.clone()),
                 file: file.file.clone(),
-                module: f.module.clone(),
-                impl_owner: f.impl_owner.clone(),
-                start_line: f.function.start_line,
-                end_line: f.function.end_line,
-                is_test: f.function.is_test || file.path_is_test,
+                module: f.module_path.known_value().cloned().unwrap_or_default(),
+                impl_owner: f
+                    .owner
+                    .known_value()
+                    .and_then(|owner| owner.as_ref())
+                    .map(|owner| owner.display_name.clone()),
+                start_line: f.span.start_line,
+                end_line: f.span.end_line,
+                is_test: f.is_test || file.path_is_test,
                 weights: NodeWeights {
-                    loc: f.function.line_count(),
+                    loc: f.line_count(),
                     cyclomatic_complexity: metrics.map(|m| m.cyclomatic),
                     cognitive_complexity: metrics.map(|m| m.cognitive),
                     max_nesting: metrics.map(|m| m.max_nesting),
@@ -318,9 +326,13 @@ impl<'a> ComplexityIndex<'a> {
         Self { by_exact }
     }
 
-    fn get(&self, f: &FunctionDef) -> Option<&'a FunctionComplexity> {
+    fn get(&self, f: &FunctionShape) -> Option<&'a FunctionComplexity> {
         self.by_exact
-            .get(&(f.name.as_str(), f.start_line, f.end_line))
+            .get(&(
+                node_local_name(f).as_str(),
+                f.span.start_line,
+                f.span.end_line,
+            ))
             .copied()
     }
 }
@@ -333,23 +345,22 @@ fn build_edges(files: &[FileGraphInput], nodes: &[NodeView]) -> Vec<EdgeView> {
     for file in files {
         for site in &file.calls {
             let from = site
-                .caller_qualified_name
-                .as_deref()
+                .caller_qualified_name()
                 .and_then(|caller| caller_index.resolve_in_file(&file.file, caller));
-            if site.caller_name.is_some() && from.is_none() {
+            if site.caller_qualified_name().is_some() && from.is_none() {
                 continue;
             }
             let (to, resolution) = resolver.resolve(site);
             let key = EdgeKey {
                 from: from.clone(),
                 to: to.clone(),
-                callee_name: site.callee_name.clone(),
+                callee_name: site.callee_name().map(ToOwned::to_owned),
                 resolution,
             };
             let entry = grouped.entry(key).or_insert_with(|| EdgeView {
                 from,
                 to,
-                callee_name: site.callee_name.clone(),
+                callee_name: site.callee_name().map(ToOwned::to_owned),
                 resolution,
                 call_count: 0,
                 call_lines: Vec::new(),
@@ -433,11 +444,11 @@ impl Resolver {
         }
     }
 
-    fn resolve(&self, site: &CallSite) -> (Option<String>, Resolution) {
-        let Some(callee_name) = site.callee_name.as_deref() else {
+    fn resolve(&self, site: &CallShape) -> (Option<String>, Resolution) {
+        let Some(callee_name) = site.callee_name() else {
             return (None, Resolution::Anonymous);
         };
-        if site.call_kind == CallKind::ReceiverMethod {
+        if site.has_receiver_expression() {
             return (None, Resolution::Unresolved);
         }
         for candidate in lexical_candidates(site) {
@@ -452,12 +463,15 @@ impl Resolver {
     }
 }
 
-fn lexical_candidates(site: &CallSite) -> Vec<String> {
-    let Some(callee_name) = site.callee_name.as_deref() else {
+fn lexical_candidates(site: &CallShape) -> Vec<String> {
+    let Some(callee_name) = site.callee_name() else {
         return Vec::new();
     };
-    let Some(callee_path) = site.callee_path.as_deref() else {
-        return vec![qualify_module(&site.module, callee_name)];
+    let Some(module) = site.caller_module() else {
+        return Vec::new();
+    };
+    let Some(callee_path) = site.callee_path() else {
+        return vec![qualify_module(module, callee_name)];
     };
     let segments: Vec<&str> = callee_path.split("::").collect();
     if segments.is_empty() {
@@ -467,27 +481,27 @@ fn lexical_candidates(site: &CallSite) -> Vec<String> {
     match segments[0] {
         "crate" => candidates.push(callee_path.to_owned()),
         "self" => {
-            if let Some(path) = prefix_with_tail(module_segments(&site.module), &segments, 1) {
+            if let Some(path) = prefix_with_tail(module_segments(module), &segments, 1) {
                 candidates.push(path);
             }
         }
         "super" => {
-            if let Some(path) = resolve_super_path(&site.module, &segments) {
+            if let Some(path) = resolve_super_path(module, &segments) {
                 candidates.push(path);
             }
         }
         "Self" => {
-            if let Some(owner) = site.caller_impl_owner.as_deref()
+            if let Some(owner) = site.caller_owner()
                 && let Some(tail) = join_tail(&segments, 1)
             {
-                candidates.push(qualify_module(&site.module, &format!("{owner}::{tail}")));
+                candidates.push(qualify_module(module, &format!("{owner}::{tail}")));
             }
         }
         _ => {
             if segments.len() == 1 {
-                candidates.push(qualify_module(&site.module, callee_name));
+                candidates.push(qualify_module(module, callee_name));
             } else {
-                candidates.push(qualify_module(&site.module, callee_path));
+                candidates.push(qualify_module(module, &callee_path));
             }
             if let Some(alias_target) = alias_target(site, segments[0])
                 && let Some(path) = prefix_with_tail(
@@ -508,12 +522,18 @@ fn lexical_candidates(site: &CallSite) -> Vec<String> {
     dedupe_preserving_order(candidates)
 }
 
-fn alias_target<'a>(site: &'a CallSite, alias: &str) -> Option<&'a str> {
-    site.visible_aliases
+fn alias_target<'a>(site: &'a CallShape, alias: &str) -> Option<&'a str> {
+    site.visible_imports
         .iter()
         .rev()
-        .find(|entry| entry.alias == alias)
-        .map(|entry| entry.target.as_str())
+        .find(|entry| {
+            matches!(
+                &entry.local_alias,
+                SyntaxFact::Known(Some(local_alias)) if local_alias == alias
+            )
+        })
+        .and_then(|entry| entry.imported_module.known_value())
+        .map(String::as_str)
 }
 
 fn module_segments(module: &str) -> Vec<String> {
@@ -619,8 +639,18 @@ fn apply_static_degrees(nodes: &mut [NodeView], edges: &[EdgeView]) {
     }
 }
 
-fn node_id(file: &str, f: &FunctionDef) -> String {
-    format!("{}:{}:{}", file, f.name, f.start_line)
+fn node_id(file: &str, f: &FunctionShape) -> String {
+    format!("{}:{}:{}", file, node_local_name(f), f.span.start_line)
+}
+
+fn node_local_name(f: &FunctionShape) -> String {
+    f.owner
+        .known_value()
+        .and_then(|owner| owner.as_ref())
+        .map_or_else(
+            || f.display_name.clone(),
+            |owner| format!("{}::{}", owner.display_name, f.display_name),
+        )
 }
 
 fn name_last_segment(name: &str) -> &str {
@@ -680,6 +710,7 @@ fn format_markdown(report: &Report) -> String {
 mod tests {
     use super::*;
     use crate::test_support::write_file;
+    use lens_domain::{ImportShape, ReceiverExprKind};
     use rstest::rstest;
     use serde_json::Value;
 
@@ -710,23 +741,27 @@ mod tests {
             .unwrap()
     }
 
-    fn site(path: &str) -> CallSite {
-        CallSite {
-            callee_name: path.rsplit("::").next().map(ToOwned::to_owned),
-            callee_path: Some(path.to_owned()),
-            caller_name: Some("caller".to_owned()),
-            module: "crate::m".to_owned(),
-            caller_qualified_name: Some("crate::m::caller".to_owned()),
-            caller_impl_owner: Some("S".to_owned()),
-            call_kind: CallKind::Path,
-            visible_aliases: vec![
-                lens_rust::UseAlias {
-                    alias: "parse".to_owned(),
-                    target: "crate::a::parse".to_owned(),
+    fn site(path: &str) -> CallShape {
+        CallShape {
+            callee_display_name: SyntaxFact::Known(path.rsplit("::").next().map(ToOwned::to_owned)),
+            callee_path_segments: SyntaxFact::Known(
+                path.split("::").map(ToOwned::to_owned).collect(),
+            ),
+            caller_module: SyntaxFact::Known("crate::m".to_owned()),
+            caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),
+            caller_owner: SyntaxFact::Known(Some("S".to_owned())),
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            lexical_resolution: lens_domain::LexicalResolutionStatus::NotAttempted,
+            visible_imports: vec![
+                ImportShape {
+                    local_alias: SyntaxFact::Known(Some("parse".to_owned())),
+                    imported_module: SyntaxFact::Known("crate::a::parse".to_owned()),
+                    exported_symbol: SyntaxFact::Unknown,
                 },
-                lens_rust::UseAlias {
-                    alias: "a".to_owned(),
-                    target: "crate::a".to_owned(),
+                ImportShape {
+                    local_alias: SyntaxFact::Known(Some("a".to_owned())),
+                    imported_module: SyntaxFact::Known("crate::a".to_owned()),
+                    exported_symbol: SyntaxFact::Unknown,
                 },
             ],
             line: 1,

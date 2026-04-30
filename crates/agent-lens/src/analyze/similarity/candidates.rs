@@ -231,7 +231,7 @@ pub(super) fn candidate_pairs(
     let eligible_indices: Vec<usize> = corpus
         .iter()
         .enumerate()
-        .filter(move |(_, a)| a.def.line_count() >= min_lines)
+        .filter(move |(_, a)| a.line_count() >= min_lines)
         .map(|(i, _)| i)
         .collect();
     let mut strategy = CandidateStrategy::default();
@@ -243,7 +243,7 @@ pub(super) fn candidate_pairs(
     let (pairs, filter_counts) = if use_lsh {
         let trees: Vec<&lens_domain::TreeNode> = eligible_indices
             .iter()
-            .filter_map(|&i| corpus.get(i).map(|f| f.def.body_tree()))
+            .filter_map(|&i| corpus.get(i).map(OwnedFunction::body_tree))
             .collect();
         filter_size_compatible_pairs(
             lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
@@ -295,7 +295,7 @@ fn same_test_class(corpus: &[OwnedFunction], i: usize, j: usize) -> bool {
 pub(super) fn eligible_function_count(corpus: &[OwnedFunction], min_lines: usize) -> usize {
     corpus
         .iter()
-        .filter(|function| function.def.line_count() >= min_lines)
+        .filter(|function| function.line_count() >= min_lines)
         .count()
 }
 
@@ -512,7 +512,7 @@ mod tests {
             file: std::path::PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test,
-            def: lens_domain::FunctionDef {
+            shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
                 end_line: 5,
@@ -526,7 +526,7 @@ mod tests {
                         lens_domain::TreeNode::leaf("Return"),
                     ],
                 ),
-            },
+            }),
         }
     }
 
@@ -539,7 +539,7 @@ mod tests {
         ];
         let profiles: Vec<_> = corpus
             .iter()
-            .map(|f| TreeProfile::from_tree(&f.def.tree))
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
             .collect();
         let candidates = candidate_pairs(
             &corpus,
