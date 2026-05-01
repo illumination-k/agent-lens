@@ -16,15 +16,15 @@ postinstall = "if [ -z \"${CI:-}\" ]; then prek install -f; fi"
 description = "Format with dprint and shfmt"
 run = [
   "dprint fmt",
-  "shfmt -w .",
+  "git ls-files -z -- '*.sh' | xargs -0 shfmt -w",
 ]
 
 [tasks."lint:base"]
 description = "Lint with dprint, shfmt, shellcheck"
 run = [
   "dprint check",
-  "shfmt -d .",
-  "find . -name '*.sh' -exec shellcheck {} +",
+  "git ls-files -z -- '*.sh' | xargs -0 shfmt -d",
+  "git ls-files -z -- '*.sh' | xargs -0 shellcheck",
 ]
 
 [tasks."lint:gha"]

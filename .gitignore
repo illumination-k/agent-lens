@@ -15,6 +15,17 @@ Thumbs.db
 # Rust
 target/
 
+# Web
+.pnpm-store/
+web/node_modules/
+web/dist/
+web/.tanstack/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+web/public/function-graph.json
+
 # cargo-mutants
 mutants.out/
 mutants.out.old/

@@ -5,7 +5,8 @@
   "dockerfile": {},
   "yaml": {},
   "excludes": [
-    "**/*-lock.json"
+    "**/*-lock.json",
+    "**/pnpm-lock.yaml"
   ],
   "plugins": [
     "https://plugins.dprint.dev/json-0.21.1.wasm",

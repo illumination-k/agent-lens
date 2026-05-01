@@ -1,0 +1,29 @@
+{
+  "name": "agent-lens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "generate:graph": "mkdir -p public && cargo run --manifest-path ../Cargo.toml --locked -p agent-lens -- analyze function-graph .. > public/function-graph.json",
+    "preview": "vite preview --outDir dist/client",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@tanstack/react-router": "^1",
+    "@tanstack/react-start": "^1",
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react-swc": "^4",
+    "oxfmt": "^0",
+    "oxlint": "^1",
+    "react": "^19",
+    "react-dom": "^19",
+    "typescript": "^6",
+    "vite": "^8",
+    "vitest": "^4"
+  }
+}
