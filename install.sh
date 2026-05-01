@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash -s -- --tag main --dir "$HOME/.local/bin"
+#   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash -s -- --tag rolling --dir "$HOME/.local/bin"
 #
 # Environment variables:
 #   AGENT_LENS_TAG    Release tag to install (default: latest stable release).

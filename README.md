@@ -62,7 +62,7 @@ or environment variables:
 curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh \
   | bash -s -- --dir /usr/local/bin
 
-# pin a specific release tag, or use main for the rolling prerelease
+# pin a specific release tag, or use rolling for the rolling prerelease
 AGENT_LENS_TAG=v0.1.0 AGENT_LENS_DIR="$HOME/.local/bin" \
   bash <(curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh)
 ```
@@ -82,8 +82,8 @@ mise use github:illumination-k/agent-lens
 # pin a specific release tag
 mise use github:illumination-k/agent-lens@v0.1.0
 
-# opt into the rolling main prerelease
-mise use 'github:illumination-k/agent-lens@main[prerelease=true]'
+# opt into the rolling prerelease built from main
+mise use 'github:illumination-k/agent-lens@rolling[prerelease=true]'
 ```
 
 Or add it to `mise.toml` directly:
@@ -94,11 +94,11 @@ Or add it to `mise.toml` directly:
 ```
 
 To track the rolling prerelease built from `main`, opt into prereleases and pin
-`main` instead:
+`rolling` instead:
 
 ```toml
 [tools]
-"github:illumination-k/agent-lens" = { version = "main", prerelease = true }
+"github:illumination-k/agent-lens" = { version = "rolling", prerelease = true }
 ```
 
 The `prerelease = true` option is required because mise's GitHub backend
@@ -119,10 +119,10 @@ cargo install --path crates/agent-lens
 ### Manual download
 
 Pre-built binaries are published for version tags as normal releases. The
-current `main` branch is also published as a rolling prerelease named `main`.
+current `main` branch is also published as a rolling prerelease named `rolling`.
 Grab a tarball or `.zip` directly from the
 [GitHub Releases page](https://github.com/illumination-k/agent-lens/releases)
-or pin `main` when you explicitly want the prerelease build.
+or pin `rolling` when you explicitly want the prerelease build.
 
 ## Quick start
 

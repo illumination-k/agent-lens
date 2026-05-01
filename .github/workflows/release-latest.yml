@@ -137,10 +137,10 @@ jobs:
             fi
 
             short_sha="$(printf '%s' "${SHA}" | cut -c1-12)"
-            gh release delete main --cleanup-tag --yes || true
-            gh release create main \
+            gh release delete rolling --cleanup-tag --yes || true
+            gh release create rolling \
               --target "${SHA}" \
-              --title "main (${short_sha})" \
+              --title "rolling main (${short_sha})" \
               --notes "Rolling prerelease built from \`main\` at ${SHA}." \
               --prerelease \
               dist/*
