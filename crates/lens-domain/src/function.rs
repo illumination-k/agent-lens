@@ -309,10 +309,32 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
         return Vec::new();
     }
 
-    // Densely re-index the items that actually appear in pairs. Working in
-    // local index space keeps the similarity hashmap small even when the
-    // caller's index space is sparse (e.g. one cluster carved out of a
-    // 10k-function corpus).
+    let (active, local_of) = build_active_index(pairs);
+    let sim = build_pair_similarity(pairs, &local_of, threshold);
+
+    let out = if let Some(clique) = try_complete_clique(&active, &sim) {
+        vec![clique]
+    } else {
+        let slots = merge_complete_link(active.len(), &sim, threshold);
+        build_clusters_from_slots(slots, &active, &sim)
+    };
+
+    tracing::debug!(
+        target: PROFILE_TARGET,
+        pair_count = pairs.len(),
+        active_count = active.len(),
+        cluster_count = out.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "similarity clustering finished"
+    );
+    out
+}
+
+/// Densely re-index the items that actually appear in pairs. Working in
+/// local index space keeps the similarity hashmap small even when the
+/// caller's index space is sparse (e.g. one cluster carved out of a
+/// 10k-function corpus).
+fn build_active_index(pairs: &[(usize, usize, f64)]) -> (Vec<usize>, HashMap<usize, usize>) {
     let mut active_set: HashSet<usize> = HashSet::new();
     for (a, b, _) in pairs {
         active_set.insert(*a);
@@ -322,9 +344,17 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
     active.sort();
     let local_of: HashMap<usize, usize> =
         active.iter().enumerate().map(|(li, &i)| (i, li)).collect();
+    (active, local_of)
+}
 
-    // Sparse similarity matrix keyed by sorted local indices. Duplicate
-    // input triples for the same pair keep the highest score.
+/// Sparse similarity matrix keyed by sorted local indices. Duplicate input
+/// triples for the same pair keep the highest score; below-threshold and
+/// self-pair triples are dropped.
+fn build_pair_similarity(
+    pairs: &[(usize, usize, f64)],
+    local_of: &HashMap<usize, usize>,
+    threshold: f64,
+) -> HashMap<(usize, usize), f64> {
     let mut sim: HashMap<(usize, usize), f64> = HashMap::with_capacity(pairs.len());
     for (a, b, s) in pairs {
         if *s < threshold {
@@ -344,29 +374,36 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
             })
             .or_insert(*s);
     }
+    sim
+}
 
-    let full_pair_count = complete_pair_count(active.len());
-    if active.len() >= 2 && sim.len() == full_pair_count {
-        let (min_similarity, max_similarity) = sim_minmax(sim.values().copied());
-        let out = vec![SimilarCluster {
-            members: active,
-            min_similarity,
-            max_similarity,
-        }];
-        tracing::debug!(
-            target: PROFILE_TARGET,
-            pair_count = pairs.len(),
-            active_count = out[0].members.len(),
-            cluster_count = out.len(),
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "similarity clustering finished"
-        );
-        return out;
+/// Fast path: when every pair in the complete graph over `active` is
+/// present in `sim`, the answer is one cluster containing every active
+/// item — no merging needed.
+fn try_complete_clique(
+    active: &[usize],
+    sim: &HashMap<(usize, usize), f64>,
+) -> Option<SimilarCluster> {
+    if active.len() < 2 || sim.len() != complete_pair_count(active.len()) {
+        return None;
     }
+    let (min_similarity, max_similarity) = sim_minmax(sim.values().copied());
+    Some(SimilarCluster {
+        members: active.to_vec(),
+        min_similarity,
+        max_similarity,
+    })
+}
 
-    // Each slot holds the current cluster (sorted local indices) or `None`
-    // once it has been merged into another.
-    let mut slots: Vec<Option<Vec<usize>>> = (0..active.len()).map(|li| Some(vec![li])).collect();
+/// Greedy complete-link merging. Each slot holds the current cluster
+/// (sorted local indices) or `None` once merged away. Returns the slot
+/// vector for the caller to materialise into [`SimilarCluster`]s.
+fn merge_complete_link(
+    active_len: usize,
+    sim: &HashMap<(usize, usize), f64>,
+    threshold: f64,
+) -> Vec<Option<Vec<usize>>> {
+    let mut slots: Vec<Option<Vec<usize>>> = (0..active_len).map(|li| Some(vec![li])).collect();
     let mut cluster_sim = sim.clone();
     let mut heap = BinaryHeap::with_capacity(cluster_sim.len());
     for (&(ci, cj), &score) in &cluster_sim {
@@ -386,12 +423,23 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
         update_cluster_similarities(ci, cj, &slots, threshold, &mut cluster_sim, &mut heap);
     }
 
+    slots
+}
+
+/// Materialise surviving slots into ranked [`SimilarCluster`]s: drop
+/// singletons, project local indices back to caller indices, attach min/max
+/// internal similarity, and sort by (max_similarity desc, size desc).
+fn build_clusters_from_slots(
+    slots: Vec<Option<Vec<usize>>>,
+    active: &[usize],
+    sim: &HashMap<(usize, usize), f64>,
+) -> Vec<SimilarCluster> {
     let mut out: Vec<SimilarCluster> = slots
         .into_iter()
         .flatten()
         .filter(|c| c.len() >= 2)
         .map(|c| {
-            let (min_s, max_s) = internal_minmax(&c, &sim);
+            let (min_s, max_s) = internal_minmax(&c, sim);
             let members: Vec<usize> = c.iter().filter_map(|li| active.get(*li).copied()).collect();
             SimilarCluster {
                 members,
@@ -406,14 +454,6 @@ pub fn cluster_similar_pairs(pairs: &[(usize, usize, f64)], threshold: f64) -> V
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(b.members.len().cmp(&a.members.len()))
     });
-    tracing::debug!(
-        target: PROFILE_TARGET,
-        pair_count = pairs.len(),
-        active_count = active.len(),
-        cluster_count = out.len(),
-        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-        "similarity clustering finished"
-    );
     out
 }
 
@@ -859,5 +899,137 @@ mod tests {
         // which is the triangle (min 0.93), so we expect option A.
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].members, vec![0, 1, 2]);
+    }
+
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+
+    /// Generate a list of similarity triples over a small index space so
+    /// proptest can exercise the full clustering pipeline. Triples drawn
+    /// from a sparse 0..8 index space land in many of the interesting
+    /// regimes (singletons, full cliques, partial cliques, chains) within
+    /// a few generated cases.
+    fn arb_pairs() -> impl Strategy<Value = Vec<(usize, usize, f64)>> {
+        prop_vec((0usize..8, 0usize..8, 0.0_f64..1.0_f64), 0..32).prop_map(|raw| {
+            raw.into_iter()
+                .filter(|(a, b, _)| a != b)
+                .map(|(a, b, s)| {
+                    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                    (lo, hi, s)
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        /// Complete-link guarantee: every pair of members inside a cluster
+        /// must have a recorded similarity above the threshold. A failure
+        /// here means the merge loop pulled an item in via a weaker
+        /// transitive chain.
+        #[test]
+        fn cluster_members_are_pairwise_above_threshold(
+            pairs in arb_pairs(),
+            threshold in 0.1_f64..0.9_f64,
+        ) {
+            let sim_lookup: HashMap<(usize, usize), f64> = pairs
+                .iter()
+                .fold(HashMap::new(), |mut acc, &(a, b, s)| {
+                    let key = sorted_key(a, b);
+                    acc.entry(key).and_modify(|cur| if s > *cur { *cur = s; }).or_insert(s);
+                    acc
+                });
+            let clusters = cluster_similar_pairs(&pairs, threshold);
+            for cluster in &clusters {
+                for (i, &x) in cluster.members.iter().enumerate() {
+                    for &y in &cluster.members[i + 1..] {
+                        let s = sim_lookup.get(&sorted_key(x, y)).copied();
+                        prop_assert!(
+                            s.is_some_and(|s| s >= threshold),
+                            "members {x} and {y} share no above-threshold edge: {s:?}",
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Output is a partition of the active items: every item appears
+        /// in at most one cluster, and only items that actually showed up
+        /// in `pairs` (above threshold) can appear at all.
+        #[test]
+        fn cluster_output_is_a_partition(
+            pairs in arb_pairs(),
+            threshold in 0.1_f64..0.9_f64,
+        ) {
+            let active_above_threshold: HashSet<usize> = pairs
+                .iter()
+                .filter(|(_, _, s)| *s >= threshold)
+                .flat_map(|(a, b, _)| [*a, *b])
+                .collect();
+            let clusters = cluster_similar_pairs(&pairs, threshold);
+            let mut seen: HashSet<usize> = HashSet::new();
+            for cluster in &clusters {
+                prop_assert!(cluster.members.len() >= 2);
+                for &m in &cluster.members {
+                    prop_assert!(
+                        seen.insert(m),
+                        "item {m} appeared in two clusters",
+                    );
+                    prop_assert!(
+                        active_above_threshold.contains(&m),
+                        "item {m} is not in any above-threshold pair",
+                    );
+                }
+            }
+        }
+
+        /// Output ordering: clusters are sorted by `max_similarity`
+        /// descending, with `members.len()` descending as the tiebreaker.
+        #[test]
+        fn cluster_output_is_sorted_by_max_similarity_then_size(
+            pairs in arb_pairs(),
+            threshold in 0.1_f64..0.9_f64,
+        ) {
+            let clusters = cluster_similar_pairs(&pairs, threshold);
+            for w in clusters.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                let max_cmp = a.max_similarity
+                    .partial_cmp(&b.max_similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                let ordered = match max_cmp {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => a.members.len() >= b.members.len(),
+                    std::cmp::Ordering::Less => false,
+                };
+                prop_assert!(
+                    ordered,
+                    "out of order: ({}, {}) before ({}, {})",
+                    a.max_similarity, a.members.len(),
+                    b.max_similarity, b.members.len(),
+                );
+            }
+        }
+
+        /// `min_similarity` is by definition the smallest internal pair
+        /// score, so it must always be `>= threshold`. A regression here
+        /// would mean some sub-threshold edge sneaked into the cluster.
+        #[test]
+        fn cluster_min_similarity_respects_threshold(
+            pairs in arb_pairs(),
+            threshold in 0.1_f64..0.9_f64,
+        ) {
+            let clusters = cluster_similar_pairs(&pairs, threshold);
+            for cluster in &clusters {
+                prop_assert!(
+                    cluster.min_similarity >= threshold,
+                    "min_similarity {} < threshold {}",
+                    cluster.min_similarity, threshold,
+                );
+                prop_assert!(
+                    cluster.max_similarity >= cluster.min_similarity,
+                    "max {} < min {}",
+                    cluster.max_similarity, cluster.min_similarity,
+                );
+            }
+        }
     }
 }
