@@ -5,7 +5,10 @@
 //! ladder; consolidating them here cuts the structural duplication and
 //! means a future fix lands in one place.
 
-use syn::{Block, ImplItem, Item, ItemImpl, ItemTrait, Signature, TraitItem, Type};
+use syn::{
+    Attribute, Block, ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemTrait, Signature, TraitItem,
+    Type,
+};
 
 use crate::attrs::{has_cfg_test, is_test_function};
 
@@ -74,43 +77,69 @@ where
     F: FnMut(FnSite<'_>),
 {
     match item {
-        Item::Fn(item_fn) => {
-            let is_test = in_test_context || is_test_function(&item_fn.attrs);
-            visit(FnSite {
-                owner: None,
-                is_trait_impl: false,
-                is_test,
-                sig: &item_fn.sig,
-                block: &item_fn.block,
-            });
-        }
+        Item::Fn(item_fn) => walk_fn(item_fn, in_test_context, visit),
         Item::Impl(item_impl) => {
-            let item_is_test = has_cfg_test(&item_impl.attrs);
-            if opts.skip_cfg_test_blocks && item_is_test {
-                return;
+            if let Some(nested_ctx) = enter_cfg_test_block(&item_impl.attrs, opts, in_test_context)
+            {
+                walk_impl(item_impl, nested_ctx, visit);
             }
-            walk_impl(item_impl, in_test_context || item_is_test, visit);
         }
         Item::Trait(item_trait) => {
-            let item_is_test = has_cfg_test(&item_trait.attrs);
-            if opts.skip_cfg_test_blocks && item_is_test {
-                return;
+            if let Some(nested_ctx) = enter_cfg_test_block(&item_trait.attrs, opts, in_test_context)
+            {
+                walk_trait(item_trait, nested_ctx, visit);
             }
-            walk_trait(item_trait, in_test_context || item_is_test, visit);
         }
         Item::Mod(item_mod) => {
-            let item_is_test = has_cfg_test(&item_mod.attrs);
-            if opts.skip_cfg_test_blocks && item_is_test {
-                return;
-            }
-            if let Some((_, items)) = &item_mod.content {
-                let nested_test_context = in_test_context || item_is_test;
-                for nested in items {
-                    walk_item(nested, opts, nested_test_context, visit);
-                }
+            if let Some(nested_ctx) = enter_cfg_test_block(&item_mod.attrs, opts, in_test_context) {
+                walk_mod(item_mod, opts, nested_ctx, visit);
             }
         }
         _ => {}
+    }
+}
+
+/// Decide whether to descend into a `#[cfg(test)]`-gated `mod`/`impl`/`trait`
+/// block, and what test-context flag to propagate inside.
+///
+/// Returns `None` when the block should be skipped per `opts`. Otherwise
+/// returns the test-context flag for nested items: `true` once we are inside
+/// any `#[cfg(test)]` ancestor.
+fn enter_cfg_test_block(
+    attrs: &[Attribute],
+    opts: WalkOptions,
+    in_test_context: bool,
+) -> Option<bool> {
+    let item_is_test = has_cfg_test(attrs);
+    if opts.skip_cfg_test_blocks && item_is_test {
+        return None;
+    }
+    Some(in_test_context || item_is_test)
+}
+
+fn walk_fn<F>(item_fn: &ItemFn, in_test_context: bool, visit: &mut F)
+where
+    F: FnMut(FnSite<'_>),
+{
+    let is_test = in_test_context || is_test_function(&item_fn.attrs);
+    visit(FnSite {
+        owner: None,
+        is_trait_impl: false,
+        is_test,
+        sig: &item_fn.sig,
+        block: &item_fn.block,
+    });
+}
+
+fn walk_mod<F>(item_mod: &ItemMod, opts: WalkOptions, in_test_context: bool, visit: &mut F)
+where
+    F: FnMut(FnSite<'_>),
+{
+    let Some((_, items)) = &item_mod.content else {
+        return;
+    };
+    for nested in items {
+        walk_item(nested, opts, in_test_context, visit);
     }
 }
 
