@@ -238,6 +238,7 @@ impl ComplexityVisitor {
             Expr::StringLiteral(_) => self.halstead.operand("<str>"),
             Expr::BytesLiteral(_) => self.halstead.operand("<bytes>"),
             Expr::FString(_) => self.halstead.operand("<fstring>"),
+            Expr::TString(_) => self.halstead.operand("<tstring>"),
             Expr::BooleanLiteral(b) => {
                 self.halstead
                     .operand(if b.value { "True" } else { "False" });

@@ -255,6 +255,7 @@ fn expr_label(expr: &Expr) -> &'static str {
         Expr::Compare(_) => "Compare",
         Expr::Call(_) => "Call",
         Expr::FString(_) => "FString",
+        Expr::TString(_) => "TString",
         Expr::StringLiteral(_) => "Str",
         Expr::BytesLiteral(_) => "Bytes",
         Expr::NumberLiteral(_) => "Num",
@@ -637,6 +638,15 @@ def recursive(n):
         assert!(
             find_label(&tree, "Call").is_some(),
             "Call expression should be present in the tree",
+        );
+    }
+
+    #[test]
+    fn parse_records_template_string_expression_label() {
+        let tree = parse_tree("x = t'hello {name}'\n");
+        assert!(
+            find_label(&tree, "TString").is_some(),
+            "template string expression should be present in the tree",
         );
     }
 
