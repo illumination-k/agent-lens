@@ -1,0 +1,22 @@
+[tools]
+node = "25.9.0"
+pnpm = "11.0.1"
+
+[tasks."fmt:ts"]
+description = "Format with oxfmt"
+
+run = "pnpm --dir web exec oxfmt --write src scripts"
+
+[tasks."lint:ts"]
+description = "Lint and type-check TypeScript"
+
+run = ["pnpm --dir web exec oxlint -c oxlint.config.ts .", "pnpm --dir web exec tsc --noEmit"]
+
+[tasks."test:ts"]
+description = "Run tests with vitest"
+
+run = "pnpm --dir web exec vitest run"
+
+[tasks."ci:ts"]
+description = "Run TypeScript lint, type-check, and test tasks"
+depends = ["lint:ts", "test:ts"]

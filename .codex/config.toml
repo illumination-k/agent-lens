@@ -7,7 +7,7 @@ exclude = ["^RUSTUP_TOOLCHAIN$"]
 
 [shell_environment_policy.set]
 # Mirror the Claude project env defaults so mise resolves the same task groups.
-MISE_ENV = "base,rust,security"
+MISE_ENV = "base,rust,ts,security"
 
 [features]
 # Ensure Codex lifecycle hooks are enabled for this repository.

@@ -1,0 +1,37 @@
+name: CI TypeScript
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "mise.ts.toml"
+      - "mise.base.toml"
+      - ".github/workflows/ci_ts.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "mise.ts.toml"
+      - "mise.base.toml"
+      - ".github/workflows/ci_ts.yml"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      MISE_ENV: ts
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+
+      - name: Install dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: CI
+        run: mise run ci:ts
