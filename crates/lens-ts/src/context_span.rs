@@ -114,6 +114,31 @@ mod tests {
     }
 
     #[test]
+    fn skips_assets_and_counts_dynamic_import_targets() {
+        let root = mk_temp_project();
+        let route = root.join("src").join("routes").join("index.tsx");
+        let main = root.join("src").join("main.ts");
+        let css = root.join("src").join("styles.css");
+        std::fs::create_dir_all(route.parent().expect("parent")).expect("mkdir routes");
+        std::fs::write(
+            &route,
+            "import '../styles.css'; export function Route(){ void import('../main'); return null; }",
+        )
+        .expect("write route");
+        std::fs::write(&main, "export const start = () => 1;").expect("write main");
+        std::fs::write(&css, "body { color: red; }").expect("write css");
+
+        let report = extract_context_spans(&route).expect("context span");
+        let route = span(&report, "crate::routes");
+
+        assert_eq!(route.direct, 1);
+        assert_eq!(route.transitive, 1);
+        assert_eq!(route.reachable, vec![ModulePath::new("crate::main")]);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn missing_entry_surfaces_coupling_io_error() {
         let missing = std::path::Path::new("/definitely/does/not/exist.ts");
         let err = extract_context_spans(missing).expect_err("must fail");

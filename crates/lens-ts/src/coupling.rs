@@ -6,14 +6,15 @@
 //! edges between those file modules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ExportAllDeclaration, ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier,
-    Statement,
+    ImportExpression, Statement,
 };
+use oxc_ast_visit::{Visit, walk::walk_import_expression};
 use oxc_parser::Parser;
 
 use crate::parser::{Dialect, TsParseError};
@@ -48,13 +49,8 @@ pub struct TsModule {
 /// Build the transitive file graph rooted at `entry` by following
 /// relative module specifiers (`./` and `../`).
 pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
-    let entry = entry.to_path_buf();
-    let root_dir = entry
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-
-    let mut out = Vec::new();
+    let entry = normalize_path(entry);
+    let mut discovered = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut stack = vec![entry];
 
@@ -71,22 +67,26 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
             path: file.clone(),
             source,
         })?;
-        let module_path = file_to_module_path(&file, &root_dir);
         let base = file.parent().unwrap_or_else(|| Path::new("."));
         for link in &links {
             if let Some(next) = resolve_relative_module(base, &link.specifier)
                 && next.exists()
             {
-                stack.push(next);
+                stack.push(normalize_path(&next));
             }
         }
-        out.push(TsModule {
-            path: module_path,
-            file: file.clone(),
-            links,
-        });
+        discovered.push((file.clone(), links));
     }
 
+    let root_dir = common_source_root(&discovered);
+    let mut out: Vec<TsModule> = discovered
+        .into_iter()
+        .map(|(file, links)| TsModule {
+            path: file_to_module_path(&file, &root_dir),
+            file,
+            links,
+        })
+        .collect();
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
@@ -145,7 +145,41 @@ fn parse_links(source: &str, dialect: Dialect) -> Result<Vec<ImportLink>, TsPars
             _ => {}
         }
     }
+
+    let mut dynamic_imports = DynamicImportVisitor::default();
+    dynamic_imports.visit_program(&ret.program);
+    out.extend(dynamic_imports.links);
+
     Ok(out)
+}
+
+#[derive(Default)]
+struct DynamicImportVisitor {
+    links: Vec<ImportLink>,
+}
+
+impl<'a> Visit<'a> for DynamicImportVisitor {
+    fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
+        if let Some(specifier) = static_string_value(&it.source)
+            && is_relative_specifier(specifier)
+        {
+            self.links.push(ImportLink {
+                specifier: specifier.to_owned(),
+                symbols: vec!["*".to_owned()],
+            });
+        }
+        walk_import_expression(self, it);
+    }
+}
+
+fn static_string_value<'a>(expr: &'a oxc_ast::ast::Expression<'a>) -> Option<&'a str> {
+    match expr {
+        oxc_ast::ast::Expression::StringLiteral(lit) => Some(lit.value.as_str()),
+        oxc_ast::ast::Expression::TemplateLiteral(lit) if lit.quasis.len() == 1 => {
+            lit.quasis[0].value.cooked.map(|cooked| cooked.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn maybe_push_import(out: &mut Vec<ImportLink>, decl: &ImportDeclaration<'_>) {
@@ -210,9 +244,12 @@ fn resolve_relative_module(base: &Path, specifier: &str) -> Option<PathBuf> {
     if !is_relative_specifier(specifier) {
         return None;
     }
+    let specifier = normalize_module_specifier(specifier);
     let joined = base.join(specifier);
     if joined.extension().is_some() {
-        return Some(joined);
+        return Dialect::from_path(&joined)
+            .is_some()
+            .then(|| normalize_path(&joined));
     }
 
     const EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
@@ -220,16 +257,61 @@ fn resolve_relative_module(base: &Path, specifier: &str) -> Option<PathBuf> {
     for ext in EXTS {
         let candidate = joined.with_extension(ext);
         if candidate.exists() {
-            return Some(candidate);
+            return Some(normalize_path(&candidate));
         }
     }
     for ext in EXTS {
         let candidate = joined.join(format!("index.{ext}"));
         if candidate.exists() {
-            return Some(candidate);
+            return Some(normalize_path(&candidate));
         }
     }
-    Some(joined)
+    None
+}
+
+fn normalize_module_specifier(specifier: &str) -> &str {
+    specifier
+        .split_once(['?', '#'])
+        .map_or(specifier, |(path, _)| path)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn common_source_root(discovered: &[(PathBuf, Vec<ImportLink>)]) -> PathBuf {
+    let Some((first, _)) = discovered.first() else {
+        return PathBuf::from(".");
+    };
+    let mut root = first
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
+    for (file, _) in &discovered[1..] {
+        let parent = file.parent().unwrap_or_else(|| Path::new("."));
+        while !parent.starts_with(&root) {
+            if !root.pop() {
+                return PathBuf::from(".");
+            }
+        }
+    }
+    root
 }
 
 fn file_to_module_path(file: &Path, root_dir: &Path) -> ModulePath {
@@ -359,5 +441,117 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn skips_relative_non_code_asset_imports() {
+        let root = mk_temp_project();
+        let entry = root.join("src").join("main.ts");
+        let util = root.join("src").join("util.ts");
+        let css = root.join("src").join("styles.css");
+        let image = root.join("src").join("logo.svg");
+        std::fs::create_dir_all(entry.parent().expect("parent")).expect("mkdir src");
+        std::fs::write(
+            &entry,
+            "import './styles.css'; import logo from './logo.svg?url'; import { util } from './util';",
+        )
+        .expect("write main");
+        std::fs::write(&util, "export const util = 1;").expect("write util");
+        std::fs::write(&css, "body { color: red; }").expect("write css");
+        std::fs::write(&image, "<svg></svg>").expect("write svg");
+
+        let modules = build_module_tree(&entry).expect("tree");
+        let edges = extract_edges(&modules);
+
+        assert_eq!(
+            modules.iter().map(|m| m.path.as_str()).collect::<Vec<_>>(),
+            vec!["crate::main", "crate::util"],
+            "asset imports must not be parsed as source modules"
+        );
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to.as_str(), "crate::util");
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn follows_static_dynamic_imports() {
+        let root = mk_temp_project();
+        let route = root.join("src").join("routes").join("index.tsx");
+        let main = root.join("src").join("main.ts");
+        std::fs::create_dir_all(route.parent().expect("parent")).expect("mkdir routes");
+        std::fs::write(
+            &route,
+            "export function Route(){ void import('../main'); return null; }",
+        )
+        .expect("write route");
+        std::fs::write(&main, "export const start = () => 1;").expect("write main");
+
+        let modules = build_module_tree(&route).expect("tree");
+        let edges = extract_edges(&modules);
+
+        assert!(
+            modules.iter().any(|m| m.path.as_str() == "crate::main"),
+            "dynamic import target must be included in the graph"
+        );
+        assert!(edges.iter().any(|e| e.from.as_str() == "crate::routes"
+            && e.to.as_str() == "crate::main"
+            && e.symbol == "*"
+            && e.kind == EdgeKind::Use));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn follows_no_substitution_template_dynamic_imports() {
+        let root = mk_temp_project();
+        let route = root.join("src").join("routes").join("index.tsx");
+        let main = root.join("src").join("main.ts");
+        std::fs::create_dir_all(route.parent().expect("parent")).expect("mkdir routes");
+        std::fs::write(
+            &route,
+            "export function Route(){ void import(`../main`); return null; }",
+        )
+        .expect("write route");
+        std::fs::write(&main, "export const start = () => 1;").expect("write main");
+
+        let modules = build_module_tree(&route).expect("tree");
+
+        assert!(
+            modules.iter().any(|m| m.path.as_str() == "crate::main"),
+            "template literal without substitutions is a static import target"
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn ignores_template_dynamic_imports_with_substitutions() {
+        let root = mk_temp_project();
+        let route = root.join("src").join("routes").join("index.tsx");
+        let main = root.join("src").join("main.ts");
+        std::fs::create_dir_all(route.parent().expect("parent")).expect("mkdir routes");
+        std::fs::write(
+            &route,
+            "const suffix = ''; export function Route(){ void import(`../main${suffix}`); return null; }",
+        )
+        .expect("write route");
+        std::fs::write(&main, "export const start = () => 1;").expect("write main");
+
+        let modules = build_module_tree(&route).expect("tree");
+        let edges = extract_edges(&modules);
+
+        assert!(!modules.iter().any(|m| m.path.as_str() == "crate::main"));
+        assert!(edges.is_empty());
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn normalize_path_removes_current_directory_components() {
+        assert_eq!(
+            normalize_path(Path::new("src/./routes/../main.ts")),
+            PathBuf::from("src/main.ts")
+        );
     }
 }
