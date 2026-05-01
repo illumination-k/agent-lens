@@ -38,4 +38,9 @@ exclude_re = [
   # similarity: tracing-only telemetry helpers
   "log_candidate_stats",
   "log_score_stats",
+  # similarity: complete-clique fast path is a performance shortcut that
+  # produces identical clusters to the heap-based merge loop, so any mutant
+  # turning the predicate into `None`/`always-false` is observationally
+  # equivalent to the slow path under behaviour-only assertions.
+  "try_complete_clique",
 ]
