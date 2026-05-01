@@ -435,4 +435,51 @@ mod tests {
             Some("graph"),
         );
     }
+
+    #[test]
+    fn parenthesized_bare_callees_keep_the_inner_name() {
+        let source = "function caller() { (helper)(); }\nfunction helper() {}\n";
+
+        let calls = extract_call_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+
+        assert_eq!(calls[0].callee_name(), Some("helper"));
+        assert_eq!(calls[0].callee_path().as_deref(), Some("helper"));
+        assert!(!calls[0].has_receiver_expression());
+    }
+
+    #[test]
+    fn parenthesized_static_member_objects_keep_the_object_path() {
+        let source = "function caller() { (Api).create(); }\n";
+
+        let calls = extract_call_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+
+        assert_eq!(calls[0].callee_name(), Some("create"));
+        assert_eq!(calls[0].callee_path().as_deref(), Some("Api::create"));
+        assert!(!calls[0].has_receiver_expression());
+    }
+
+    #[test]
+    fn nested_static_member_paths_are_preserved() {
+        let source = "function caller() { Api.Services.create(); }\n";
+
+        let calls = extract_call_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+
+        assert_eq!(calls[0].callee_name(), Some("create"));
+        assert_eq!(
+            calls[0].callee_path().as_deref(),
+            Some("Api::Services::create"),
+        );
+        assert!(!calls[0].has_receiver_expression());
+    }
+
+    #[test]
+    fn lowercase_member_calls_remain_receiver_calls() {
+        let source = "function caller(client) { client.connect(); }\n";
+
+        let calls = extract_call_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+
+        assert_eq!(calls[0].callee_name(), Some("connect"));
+        assert_eq!(calls[0].callee_path().as_deref(), Some("client::connect"));
+        assert!(calls[0].has_receiver_expression());
+    }
 }
