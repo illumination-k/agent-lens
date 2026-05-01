@@ -1,4 +1,4 @@
-//! `analyze function-graph` — emit a Rust static function call graph.
+//! `analyze function-graph` — emit a static function call graph.
 //!
 //! This report is intentionally machine-facing JSON for downstream
 //! visualization tools. It is static and heuristic: no type inference,
@@ -64,7 +64,7 @@ impl FunctionGraphAnalyzer {
         for source_file in collect_source_files(path, &filter)? {
             if !matches!(
                 SourceLang::from_path(&source_file.path),
-                Some(SourceLang::Rust)
+                Some(SourceLang::Rust | SourceLang::TypeScript(_))
             ) {
                 continue;
             }
@@ -87,30 +87,48 @@ impl FunctionGraphAnalyzer {
         path_is_test: bool,
     ) -> Result<FileGraphInput, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
-        if !matches!(lang, SourceLang::Rust) {
-            return Err(AnalyzerError::UnsupportedExtension {
-                path: file.path.clone(),
-            });
-        }
-
-        let module = module_path_for(root, file);
-        let mut functions = lens_rust::extract_function_shapes_with_modules(&source, &module)
-            .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
+        let module = module_path_for(root, file, lang);
+        let mut functions = match lang {
+            SourceLang::Rust => lens_rust::extract_function_shapes_with_modules(&source, &module)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::TypeScript(dialect) => {
+                lens_ts::extract_function_shapes_with_module(&source, dialect, &module)
+                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))?
+            }
+            SourceLang::Python | SourceLang::Go => {
+                return Err(AnalyzerError::UnsupportedExtension {
+                    path: file.path.clone(),
+                });
+            }
+        };
         functions.retain(|f| self.includes_function(f, path_is_test));
 
-        let calls = lens_rust::extract_call_shapes_with_options_and_base_module(
-            &source,
-            CallIndexOptions {
-                include_cfg_test_blocks: !self.exclude_tests,
-            },
-            &module,
-        )
-        .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
-        let complexity = lens_rust::extract_complexity_units(&source)
-            .map_err(|e| AnalyzerError::Parse(Box::new(e)))?;
+        let calls = match lang {
+            SourceLang::Rust => lens_rust::extract_call_shapes_with_options_and_base_module(
+                &source,
+                CallIndexOptions {
+                    include_cfg_test_blocks: !self.exclude_tests,
+                },
+                &module,
+            )
+            .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::TypeScript(dialect) => {
+                lens_ts::extract_call_shapes_with_module(&source, dialect, &module)
+                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))?
+            }
+            SourceLang::Python | SourceLang::Go => Vec::new(),
+        };
+        let complexity = match lang {
+            SourceLang::Rust => lens_rust::extract_complexity_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(&source, dialect)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::Python | SourceLang::Go => Vec::new(),
+        };
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
+            language: lang.graph_language(),
             path_is_test,
             functions,
             calls,
@@ -132,10 +150,36 @@ impl FunctionGraphAnalyzer {
 
 struct FileGraphInput {
     file: String,
+    language: GraphLanguage,
     path_is_test: bool,
     functions: Vec<FunctionShape>,
     calls: Vec<CallShape>,
     complexity: Vec<FunctionComplexity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphLanguage {
+    Rust,
+    TypeScript,
+}
+
+impl GraphLanguage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+        }
+    }
+}
+
+impl SourceLang {
+    fn graph_language(self) -> GraphLanguage {
+        match self {
+            Self::Rust => GraphLanguage::Rust,
+            Self::TypeScript(_) => GraphLanguage::TypeScript,
+            Self::Python | Self::Go => unreachable!("unsupported function-graph language"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -166,7 +210,7 @@ impl Report {
         Self {
             schema_version: SCHEMA_VERSION,
             root: root.display().to_string(),
-            language: "rust",
+            language: graph_language_label(&files),
             node_count: nodes.len(),
             edge_count: edges.len(),
             nodes,
@@ -657,14 +701,34 @@ fn name_last_segment(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
 }
 
-fn module_path_for(root: &Path, file: &SourceFile) -> String {
-    if !root.is_dir() {
-        return "crate".to_owned();
+fn graph_language_label(files: &[FileGraphInput]) -> &'static str {
+    let mut langs = files.iter().map(|file| file.language);
+    let Some(first) = langs.next() else {
+        return "unknown";
+    };
+    if langs.all(|lang| lang == first) {
+        first.label()
+    } else {
+        "mixed"
     }
-    module_path_from_relative_file(&file.display_path)
 }
 
-fn module_path_from_relative_file(file: &str) -> String {
+fn module_path_for(root: &Path, file: &SourceFile, lang: SourceLang) -> String {
+    if !root.is_dir() {
+        return match lang {
+            SourceLang::Rust => "crate".to_owned(),
+            SourceLang::TypeScript(_) => "module".to_owned(),
+            SourceLang::Python | SourceLang::Go => "module".to_owned(),
+        };
+    }
+    match lang {
+        SourceLang::Rust => rust_module_path_from_relative_file(&file.display_path),
+        SourceLang::TypeScript(_) => ts_module_path_from_relative_file(&file.display_path),
+        SourceLang::Python | SourceLang::Go => "module".to_owned(),
+    }
+}
+
+fn rust_module_path_from_relative_file(file: &str) -> String {
     let mut rel = file.replace('\\', "/");
     if let Some(stripped) = rel.strip_prefix("src/") {
         rel = stripped.to_owned();
@@ -686,6 +750,26 @@ fn module_path_from_relative_file(file: &str) -> String {
         "crate".to_owned()
     } else {
         format!("crate::{module}")
+    }
+}
+
+fn ts_module_path_from_relative_file(file: &str) -> String {
+    let mut rel = file.replace('\\', "/");
+    for ext in [".tsx", ".ts", ".jsx", ".js", ".mts", ".cts", ".mjs", ".cjs"] {
+        if let Some(stripped) = rel.strip_suffix(ext) {
+            rel = stripped.to_owned();
+            break;
+        }
+    }
+    let module = rel
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("::");
+    if module.is_empty() {
+        "module".to_owned()
+    } else {
+        module
     }
 }
 
@@ -1029,6 +1113,67 @@ mod tests {
     }
 
     #[test]
+    fn typescript_roots_emit_nodes_edges_and_language() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "helper.ts", "export function helper() {}\n");
+        write_file(
+            dir.path(),
+            "index.ts",
+            "import { helper } from './helper';\nfunction local() {}\nfunction caller() { helper(); local(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+
+        assert_eq!(report["language"], "typescript");
+        assert_eq!(report["node_count"], 3);
+        let names: Vec<_> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["qualified_name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"helper::helper"));
+        assert!(names.contains(&"index::caller"));
+        assert!(names.contains(&"index::local"));
+
+        let helper = edge_by_callee(&report, "helper");
+        assert_eq!(helper["from"], "index.ts:caller:3");
+        assert_eq!(helper["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, helper).as_deref(),
+            Some("helper::helper"),
+        );
+
+        let local = edge_by_callee(&report, "local");
+        assert_eq!(local["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, local).as_deref(),
+            Some("index::local"),
+        );
+    }
+
+    #[test]
+    fn tsx_files_are_parsed_for_function_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "App.tsx",
+            "function helper() {}\nexport function App() { return <button onClick={() => helper()}>Run</button>; }\n",
+        );
+
+        let report = analyze_json(dir.path());
+
+        assert_eq!(report["language"], "typescript");
+        assert_eq!(report["node_count"], 2);
+        let edge = edge_by_callee(&report, "helper");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("App::helper"),
+        );
+    }
+
+    #[test]
     fn path_and_function_test_filters_are_respected() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
@@ -1110,17 +1255,22 @@ mod tests {
 
     #[test]
     fn module_paths_handle_crate_roots_nested_files_and_empty_relative_paths() {
-        assert_eq!(module_path_from_relative_file("lib.rs"), "crate");
-        assert_eq!(module_path_from_relative_file("main.rs"), "crate");
+        assert_eq!(rust_module_path_from_relative_file("lib.rs"), "crate");
+        assert_eq!(rust_module_path_from_relative_file("main.rs"), "crate");
         assert_eq!(
-            module_path_from_relative_file("src/analyze/function_graph.rs"),
+            rust_module_path_from_relative_file("src/analyze/function_graph.rs"),
             "crate::analyze::function_graph"
         );
         assert_eq!(
-            module_path_from_relative_file("src/analyze/mod.rs"),
+            rust_module_path_from_relative_file("src/analyze/mod.rs"),
             "crate::analyze"
         );
-        assert_eq!(module_path_from_relative_file(""), "crate");
+        assert_eq!(rust_module_path_from_relative_file(""), "crate");
+        assert_eq!(
+            ts_module_path_from_relative_file("routes/index.tsx"),
+            "routes::index"
+        );
+        assert_eq!(ts_module_path_from_relative_file("main.ts"), "main");
     }
 
     #[test]
