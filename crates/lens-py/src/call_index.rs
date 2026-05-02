@@ -667,4 +667,75 @@ def caller():
         assert!(call.callee_name().is_none());
         assert!(call.callee_path().is_none());
     }
+
+    #[test]
+    fn nested_attribute_call_preserves_full_path_segments() {
+        // Catches a regression in `expression_path` where dropping the
+        // recursive `Attribute` arm would shorten `a.b.c()` to just `c`.
+        let src = "
+def caller():
+    a.b.c()
+";
+        let call = &calls(src, "main")[0];
+        assert_eq!(call.callee_name(), Some("c"));
+        assert_eq!(call.callee_path().as_deref(), Some("a::b::c"));
+    }
+
+    #[test]
+    fn is_test_propagates_from_test_class_to_inner_methods() {
+        // `helper` is not test-named on its own, but the enclosing
+        // `TestThing` class is — the `||` between owner and self must
+        // surface that, otherwise mutation testing flags the propagation
+        // as a no-op.
+        let src = "
+class TestThing:
+    def helper(self):
+        assert True
+";
+        let funcs = shapes(src, "pkg::main");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].display_name, "helper");
+        assert!(
+            funcs[0].is_test,
+            "method on a Test* class must inherit is_test=true",
+        );
+    }
+
+    #[test]
+    fn single_dot_import_at_module_root_yields_bare_target() {
+        // `from . import util` at a top-level file — `pops == segments.len()`
+        // must still resolve (`>` not `>=`), producing a bare `util` target.
+        let src = "
+from . import util
+
+def caller():
+    util.run()
+";
+        let call = &calls(src, "main")[0];
+        let import = &call.visible_imports[0];
+        assert_eq!(
+            import.imported_module.known_value().map(String::as_str),
+            Some("util"),
+        );
+    }
+
+    #[test]
+    fn single_dot_import_in_nested_module_keeps_parent_path() {
+        // `from . import util` from `pkg::sub::main` resolves to
+        // `pkg::sub::util` (drop one segment, then append the import).
+        // Differentiates `len - pops` from `len / pops`, which would
+        // collapse to `pkg::sub::main::util` here.
+        let src = "
+from . import util
+
+def caller():
+    util.run()
+";
+        let call = &calls(src, "pkg::sub::main")[0];
+        let import = &call.visible_imports[0];
+        assert_eq!(
+            import.imported_module.known_value().map(String::as_str),
+            Some("pkg::sub::util"),
+        );
+    }
 }
