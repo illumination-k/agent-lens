@@ -64,7 +64,7 @@ impl FunctionGraphAnalyzer {
         for source_file in collect_source_files(path, &filter)? {
             if !matches!(
                 SourceLang::from_path(&source_file.path),
-                Some(SourceLang::Rust | SourceLang::TypeScript(_))
+                Some(SourceLang::Rust | SourceLang::TypeScript(_) | SourceLang::Python)
             ) {
                 continue;
             }
@@ -95,7 +95,9 @@ impl FunctionGraphAnalyzer {
                 lens_ts::extract_function_shapes_with_module(&source, dialect, &module)
                     .map_err(|e| AnalyzerError::Parse(Box::new(e)))?
             }
-            SourceLang::Python | SourceLang::Go => {
+            SourceLang::Python => lens_py::extract_function_shapes_with_module(&source, &module)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::Go => {
                 return Err(AnalyzerError::UnsupportedExtension {
                     path: file.path.clone(),
                 });
@@ -116,14 +118,18 @@ impl FunctionGraphAnalyzer {
                 lens_ts::extract_call_shapes_with_module(&source, dialect, &module)
                     .map_err(|e| AnalyzerError::Parse(Box::new(e)))?
             }
-            SourceLang::Python | SourceLang::Go => Vec::new(),
+            SourceLang::Python => lens_py::extract_call_shapes_with_module(&source, &module)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::Go => Vec::new(),
         };
         let complexity = match lang {
             SourceLang::Rust => lens_rust::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
             SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(&source, dialect)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Python | SourceLang::Go => Vec::new(),
+            SourceLang::Python => lens_py::extract_complexity_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            SourceLang::Go => Vec::new(),
         };
 
         Ok(FileGraphInput {
@@ -161,6 +167,7 @@ struct FileGraphInput {
 enum GraphLanguage {
     Rust,
     TypeScript,
+    Python,
 }
 
 impl GraphLanguage {
@@ -168,6 +175,7 @@ impl GraphLanguage {
         match self {
             Self::Rust => "rust",
             Self::TypeScript => "typescript",
+            Self::Python => "python",
         }
     }
 }
@@ -177,7 +185,8 @@ impl SourceLang {
         match self {
             Self::Rust => GraphLanguage::Rust,
             Self::TypeScript(_) => GraphLanguage::TypeScript,
-            Self::Python | Self::Go => unreachable!("unsupported function-graph language"),
+            Self::Python => GraphLanguage::Python,
+            Self::Go => unreachable!("unsupported function-graph language"),
         }
     }
 }
@@ -718,13 +727,15 @@ fn module_path_for(root: &Path, file: &SourceFile, lang: SourceLang) -> String {
         return match lang {
             SourceLang::Rust => "crate".to_owned(),
             SourceLang::TypeScript(_) => "module".to_owned(),
-            SourceLang::Python | SourceLang::Go => "module".to_owned(),
+            SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
+            SourceLang::Go => "module".to_owned(),
         };
     }
     match lang {
         SourceLang::Rust => rust_module_path_from_relative_file(&file.display_path),
         SourceLang::TypeScript(_) => ts_module_path_from_relative_file(&file.display_path),
-        SourceLang::Python | SourceLang::Go => "module".to_owned(),
+        SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
+        SourceLang::Go => "module".to_owned(),
     }
 }
 
@@ -770,6 +781,25 @@ fn ts_module_path_from_relative_file(file: &str) -> String {
         "module".to_owned()
     } else {
         module
+    }
+}
+
+fn python_module_path_from_relative_file(file: &str) -> String {
+    let mut rel = file.replace('\\', "/");
+    if let Some(stripped) = rel.strip_suffix(".py") {
+        rel = stripped.to_owned();
+    }
+    let mut segments: Vec<&str> = rel
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.last() == Some(&"__init__") {
+        segments.pop();
+    }
+    if segments.is_empty() {
+        "module".to_owned()
+    } else {
+        segments.join("::")
     }
 }
 
@@ -1153,6 +1183,92 @@ mod tests {
     }
 
     #[test]
+    fn python_roots_emit_nodes_edges_and_language() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "helper.py", "def helper():\n    return 1\n");
+        write_file(
+            dir.path(),
+            "main.py",
+            "from helper import helper\n\ndef local():\n    return 2\n\ndef caller():\n    helper()\n    local()\n",
+        );
+
+        let report = analyze_json(dir.path());
+
+        assert_eq!(report["language"], "python");
+        assert_eq!(report["node_count"], 3);
+        let names: Vec<_> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["qualified_name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"helper::helper"));
+        assert!(names.contains(&"main::caller"));
+        assert!(names.contains(&"main::local"));
+
+        let helper = edge_by_callee(&report, "helper");
+        assert_eq!(helper["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, helper).as_deref(),
+            Some("helper::helper"),
+        );
+
+        let local = edge_by_callee(&report, "local");
+        assert_eq!(local["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, local).as_deref(),
+            Some("main::local"),
+        );
+    }
+
+    #[test]
+    fn python_self_method_calls_remain_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "service.py",
+            "class Service:\n    def helper(self):\n        return 1\n    def caller(self):\n        return self.helper()\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "helper");
+        assert_eq!(edge["resolution"], "unresolved");
+    }
+
+    #[test]
+    fn python_class_static_calls_resolve_to_owner_qualified_method() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "main.py",
+            "class Helper:\n    @staticmethod\n    def run():\n        return 1\n\ndef caller():\n    Helper.run()\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "run");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("main::Helper::run"),
+        );
+    }
+
+    #[test]
+    fn python_init_files_collapse_to_package_module_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "pkg/__init__.py", "def root():\n    return 1\n");
+
+        let report = analyze_json(dir.path());
+        let names: Vec<_> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["qualified_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["pkg::root"]);
+    }
+
+    #[test]
     fn tsx_files_are_parsed_for_function_graph() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
@@ -1271,6 +1387,16 @@ mod tests {
             "routes::index"
         );
         assert_eq!(ts_module_path_from_relative_file("main.ts"), "main");
+        assert_eq!(python_module_path_from_relative_file("main.py"), "main");
+        assert_eq!(
+            python_module_path_from_relative_file("pkg/sub/main.py"),
+            "pkg::sub::main"
+        );
+        assert_eq!(
+            python_module_path_from_relative_file("pkg/__init__.py"),
+            "pkg"
+        );
+        assert_eq!(python_module_path_from_relative_file(""), "module");
     }
 
     #[test]

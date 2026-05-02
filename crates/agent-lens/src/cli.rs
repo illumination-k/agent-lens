@@ -301,12 +301,14 @@ enum AnalyzeCommand {
     /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
     /// `.cjs`) whose relative imports define the module graph.
     Coupling(AnalyzeCommonArgs),
-    /// Emit a Rust static function call graph as visualization-ready data.
+    /// Emit a static function call graph as visualization-ready data.
     ///
-    /// The graph is heuristic and current-source only: nodes are Rust
-    /// functions, edges are syntactic call sites, and callee resolution is
-    /// limited to exact extracted names or unique last-segment matches. JSON
-    /// is the default; `--format md` emits a compact sanity summary.
+    /// The graph is heuristic and current-source only: nodes are functions,
+    /// edges are syntactic call sites, and callee resolution is limited to
+    /// exact extracted names or unique last-segment matches. The parser is
+    /// chosen from each file extension (Rust, TypeScript/JavaScript, or
+    /// Python); other extensions are ignored silently. JSON is the default;
+    /// `--format md` emits a compact sanity summary.
     FunctionGraph(AnalyzeCommonArgs),
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").

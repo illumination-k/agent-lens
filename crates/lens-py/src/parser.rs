@@ -122,18 +122,24 @@ fn function_def_from(
     // body; we want the line that byte sits on.
     let end_offset = func.range.end().to_usize().saturating_sub(1);
     let end_line = lines.line_of(end_offset);
-    let mut builder = TreeBuilder::new("Block");
-    for stmt in &func.body {
-        builder.visit_stmt(stmt);
-    }
     FunctionDef {
         name: name.to_owned(),
         start_line,
         end_line,
         is_test,
         signature: None,
-        tree: builder.finish(),
+        tree: function_body_tree(func),
     }
+}
+
+/// Lower a function body into a generic [`TreeNode`] rooted at `Block`,
+/// matching the shape similarity / wrapper analyzers expect.
+pub(crate) fn function_body_tree(func: &StmtFunctionDef) -> TreeNode {
+    let mut builder = TreeBuilder::new("Block");
+    for stmt in &func.body {
+        builder.visit_stmt(stmt);
+    }
+    builder.finish()
 }
 
 /// Builds a [`TreeNode`] tree by walking the AST with [`Visitor`].
