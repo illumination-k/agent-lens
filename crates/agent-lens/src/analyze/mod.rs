@@ -202,6 +202,18 @@ impl From<lens_rust::CouplingError> for CrateAnalyzerError {
     }
 }
 
+impl From<lens_ts::CouplingError> for CrateAnalyzerError {
+    fn from(value: lens_ts::CouplingError) -> Self {
+        match value {
+            lens_ts::CouplingError::Io { path, source } => Self::Io { path, source },
+            lens_ts::CouplingError::Parse { path, source } => Self::Parse {
+                path,
+                source: Box::new(source),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
