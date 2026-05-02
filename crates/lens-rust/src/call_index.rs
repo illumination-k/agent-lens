@@ -140,11 +140,12 @@ impl From<CallSite> for CallShape {
         let receiver_expr_kind = match site.call_kind {
             CallKind::Path => ReceiverExprKind::None,
             CallKind::ReceiverMethod => {
-                if site
-                    .callee_path
+                let is_bare_self = site
+                    .callee_name
                     .as_deref()
-                    .is_some_and(|path| path.starts_with("self."))
-                {
+                    .zip(site.callee_path.as_deref())
+                    .is_some_and(|(name, path)| path.strip_prefix("self.") == Some(name));
+                if is_bare_self {
                     ReceiverExprKind::SelfValue
                 } else {
                     ReceiverExprKind::Expression

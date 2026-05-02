@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::{CallShape, FunctionComplexity, FunctionShape, SyntaxFact};
+use lens_domain::{CallShape, FunctionComplexity, FunctionShape, ReceiverExprKind, SyntaxFact};
 use lens_rust::CallIndexOptions;
 use serde::Serialize;
 
@@ -475,12 +475,14 @@ impl CallerIndex {
 struct Resolver {
     qualified: HashMap<String, Vec<String>>,
     last_segment: HashMap<String, Vec<String>>,
+    id_to_qualified: HashMap<String, String>,
 }
 
 impl Resolver {
     fn new(nodes: &[NodeView]) -> Self {
         let mut qualified: HashMap<String, Vec<String>> = HashMap::new();
         let mut last_segment: HashMap<String, Vec<String>> = HashMap::new();
+        let mut id_to_qualified: HashMap<String, String> = HashMap::new();
         for node in nodes {
             qualified
                 .entry(node.qualified_name.clone())
@@ -490,10 +492,12 @@ impl Resolver {
                 .entry(name_last_segment(&node.qualified_name).to_owned())
                 .or_default()
                 .push(node.id.clone());
+            id_to_qualified.insert(node.id.clone(), node.qualified_name.clone());
         }
         Self {
             qualified,
             last_segment,
+            id_to_qualified,
         }
     }
 
@@ -501,6 +505,15 @@ impl Resolver {
         let Some(callee_name) = site.callee_name() else {
             return (None, Resolution::Anonymous);
         };
+        // `self.method()` — receiver is exactly `self`, so the callee must
+        // be a method on the impl/trait owner. Resolve lexically to
+        // `Owner::method` in the caller's module without type inference.
+        if matches!(
+            site.receiver_expr_kind,
+            SyntaxFact::Known(ReceiverExprKind::SelfValue)
+        ) {
+            return self.resolve_self_method(site, callee_name);
+        }
         if site.has_receiver_expression() {
             return (None, Resolution::Unresolved);
         }
@@ -512,7 +525,55 @@ impl Resolver {
         let Some(ids) = self.last_segment.get(callee_name) else {
             return (None, Resolution::Unresolved);
         };
+        // When the callee was written as a multi-segment path like
+        // `Foo::new`, restrict the fallback to candidates whose
+        // qualified name ends with that path. Catches calls reaching a
+        // type through a glob import, and avoids mislabeling external
+        // calls like `String::new()` as ambiguous against unrelated
+        // workspace `new` methods.
+        if let Some(callee_path) = site.callee_path()
+            && callee_path.contains("::")
+        {
+            let narrowed = self.narrow_by_path_suffix(ids, &callee_path);
+            return if narrowed.is_empty() {
+                (None, Resolution::Unresolved)
+            } else {
+                resolve_ids(&narrowed)
+            };
+        }
         resolve_ids(ids)
+    }
+
+    fn resolve_self_method(
+        &self,
+        site: &CallShape,
+        callee_name: &str,
+    ) -> (Option<String>, Resolution) {
+        let Some(module) = site.caller_module() else {
+            return (None, Resolution::Unresolved);
+        };
+        let Some(owner) = site.caller_owner() else {
+            return (None, Resolution::Unresolved);
+        };
+        let candidate = qualify_module(module, &format!("{owner}::{callee_name}"));
+        if let Some(ids) = self.qualified.get(&candidate) {
+            return resolve_ids(ids);
+        }
+        (None, Resolution::Unresolved)
+    }
+
+    fn narrow_by_path_suffix(&self, ids: &[String], callee_path: &str) -> Vec<String> {
+        let suffix = format!("::{callee_path}");
+        ids.iter()
+            .filter(|id| {
+                self.id_to_qualified
+                    .get(id.as_str())
+                    .is_some_and(|qualified| {
+                        qualified == callee_path || qualified.ends_with(&suffix)
+                    })
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -989,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn receiver_method_calls_remain_unresolved() {
+    fn self_method_calls_resolve_to_owner_method() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -998,13 +1059,28 @@ mod tests {
         );
 
         let report = analyze_json(dir.path());
-        let edges = report["edges"].as_array().unwrap();
-        let edge = edges
-            .iter()
-            .find(|e| e["callee_name"] == "helper")
-            .expect("helper method call should be recorded");
+        let edge = edge_by_callee(&report, "helper");
         assert_eq!(edge["from"], "src/lib.rs:S::caller:4");
-        assert_eq!(edge["to"], Value::Null);
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("crate::S::helper"),
+        );
+    }
+
+    #[test]
+    fn self_field_method_calls_remain_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "struct Inner;\nimpl Inner { fn helper(&self) {} }\nstruct S { inner: Inner }\nimpl S { fn caller(&self) { self.inner.helper(); } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        // `self.inner.helper()` is a method call on a non-self receiver,
+        // so we cannot lexically attribute it to `Inner::helper`.
+        let edge = edge_by_callee(&report, "helper");
         assert_eq!(edge["resolution"], "unresolved");
     }
 
@@ -1048,6 +1124,65 @@ mod tests {
             .expect("cfg(test) helper call should be included by default");
         assert_eq!(edge["to"], "src/lib.rs:prod:1");
         assert_eq!(edge["resolution"], "resolved");
+    }
+
+    #[test]
+    fn typed_path_call_disambiguates_shared_method_name() {
+        // Two `new` methods exist on different types. Bare `Type::new()`
+        // calls would otherwise fall through to the last-segment fallback
+        // and report ambiguous; the path suffix narrows them.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub struct Foo; impl Foo { pub fn new() -> Self { Self } } }\n\
+             mod b { pub struct Bar; impl Bar { pub fn new() -> Self { Self } } }\n\
+             mod c { fn caller() { let _ = crate::a::Foo::new(); let _ = crate::b::Bar::new(); } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edges = report["edges"].as_array().unwrap();
+        let foo_new = edges
+            .iter()
+            .find(|e| target_qualified_name(&report, e).as_deref() == Some("crate::a::Foo::new"))
+            .expect("Foo::new should resolve");
+        assert_eq!(foo_new["resolution"], "resolved");
+        let bar_new = edges
+            .iter()
+            .find(|e| target_qualified_name(&report, e).as_deref() == Some("crate::b::Bar::new"))
+            .expect("Bar::new should resolve");
+        assert_eq!(bar_new["resolution"], "resolved");
+        assert_eq!(report["summary"]["ambiguous_edge_count"], 0);
+    }
+
+    #[test]
+    fn external_typed_path_call_is_unresolved_not_ambiguous() {
+        // `String::new()` is external, so it must not be silently bucketed
+        // with unrelated workspace `new` methods. Path syntax disambiguates.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "struct Foo;\nimpl Foo { fn new() -> Self { Self } }\nfn caller() { let _ = String::new(); let _ = Foo::new(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edges = report["edges"].as_array().unwrap();
+        let new_edges: Vec<_> = edges.iter().filter(|e| e["callee_name"] == "new").collect();
+        assert_eq!(new_edges.len(), 2);
+        let foo_new = new_edges
+            .iter()
+            .find(|e| e["resolution"] == "resolved")
+            .expect("Foo::new should resolve");
+        assert_eq!(
+            target_qualified_name(&report, foo_new).as_deref(),
+            Some("crate::Foo::new"),
+        );
+        let string_new = new_edges
+            .iter()
+            .find(|e| e["resolution"] == "unresolved")
+            .expect("String::new should be unresolved, not ambiguous");
+        assert_eq!(string_new["callee_name"], "new");
     }
 
     #[test]
@@ -1222,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn python_self_method_calls_remain_unresolved() {
+    fn python_self_method_calls_resolve_to_class_method() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -1232,7 +1367,11 @@ mod tests {
 
         let report = analyze_json(dir.path());
         let edge = edge_by_callee(&report, "helper");
-        assert_eq!(edge["resolution"], "unresolved");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("service::Service::helper"),
+        );
     }
 
     #[test]
