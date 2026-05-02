@@ -318,7 +318,12 @@ enum AnalyzeCommand {
     /// an agent must open to reason about a given module. `path` may
     /// be a Rust crate root (or a directory containing one), a
     /// TypeScript/JavaScript entry file, or a Python file/directory.
-    ContextSpan(AnalyzeCommonArgs),
+    /// Frameworks with many implicit entries (Next.js App Router,
+    /// file-routed Remix / Astro) can pass `--entry-glob` repeatedly to
+    /// merge several TS/JS entry trees into one report; in that mode
+    /// `path` must be a directory and the patterns are evaluated
+    /// relative to it.
+    ContextSpan(AnalyzeContextSpanArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for supported source files (Rust,
@@ -461,6 +466,19 @@ struct AnalyzeWrapperArgs {
     diff: AnalyzeDiffArgs,
 }
 
+#[derive(Debug, Clone, Args)]
+struct AnalyzeContextSpanArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    /// Treat `path` as a project root and merge the TS/JS module trees
+    /// rooted at every file matching this gitignore-aware glob.
+    /// Repeatable: pass `--entry-glob 'app/**/page.tsx' --entry-glob
+    /// 'app/**/route.ts'` to cover Next.js App Router entries in one
+    /// invocation. Patterns are evaluated relative to `path`.
+    #[arg(long = "entry-glob", value_name = "GLOB")]
+    entry_glob: Vec<String>,
+}
+
 #[derive(Debug, Clone, Args, Default)]
 struct AnalyzePathArgs {
     /// Analyze only files that look like tests (`tests/`, `*_test.*`,
@@ -587,9 +605,10 @@ impl AnalyzeCommand {
                     .analyze(&path, format)?
             }
             Self::ContextSpan(args) => {
-                let (path, format, path_filter) = args.into_parts();
+                let (path, format, path_filter) = args.common.into_parts();
                 ContextSpanAnalyzer::new()
                     .with_analyze_path_args(path_filter)
+                    .with_entry_globs(args.entry_glob)
                     .analyze(&path, format)?
             }
             Self::Hotspot(args) => {
@@ -860,6 +879,7 @@ mod tests {
             "got: {help}"
         );
         assert!(help.contains("Python file/directory"), "got: {help}");
+        assert!(help.contains("--entry-glob"), "got: {help}");
     }
 
     #[rstest]
@@ -1160,8 +1180,32 @@ fn dispatch(n: i32) -> i32 {
         let Command::Analyze(AnalyzeCommand::ContextSpan(args)) = cli.command else {
             panic!("expected analyze context-span");
         };
-        assert_eq!(args.path, PathBuf::from("src/lib.rs"));
-        assert_eq!(args.format, OutputFormat::Md);
+        assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert!(args.entry_glob.is_empty());
+    }
+
+    #[test]
+    fn parses_analyze_context_span_with_entry_globs() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "context-span",
+            "web",
+            "--entry-glob",
+            "app/**/page.tsx",
+            "--entry-glob",
+            "app/**/route.ts",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::ContextSpan(args)) = cli.command else {
+            panic!("expected analyze context-span");
+        };
+        assert_eq!(args.common.path, PathBuf::from("web"));
+        assert_eq!(
+            args.entry_glob,
+            vec!["app/**/page.tsx".to_owned(), "app/**/route.ts".to_owned()]
+        );
     }
 
     #[test]
