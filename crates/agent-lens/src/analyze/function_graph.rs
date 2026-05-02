@@ -1156,6 +1156,30 @@ mod tests {
     }
 
     #[test]
+    fn glob_imported_typed_path_resolves_via_suffix_narrowing() {
+        // Without an explicit `use crate::a::Foo`, a `Foo::new()` call in
+        // module `c` cannot match any direct lexical candidate, so it
+        // hits the last-segment fallback. The suffix narrow then picks
+        // `crate::a::Foo::new` out of the workspace's `new` candidates.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub struct Foo; impl Foo { pub fn new() -> Self { Self } } }\n\
+             mod b { pub struct Bar; impl Bar { pub fn new() -> Self { Self } } }\n\
+             mod c { use crate::a::*; fn caller() { let _ = Foo::new(); } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "new");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("crate::a::Foo::new"),
+        );
+    }
+
+    #[test]
     fn external_typed_path_call_is_unresolved_not_ambiguous() {
         // `String::new()` is external, so it must not be silently bucketed
         // with unrelated workspace `new` methods. Path syntax disambiguates.

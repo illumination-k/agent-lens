@@ -690,6 +690,34 @@ mod tests {
         assert_eq!(paths, [Some("crate::other::foo"), Some("x.bar")]);
     }
 
+    #[rstest]
+    #[case::bare_self("fn caller(x: S) { self.method() }\n", ReceiverExprKind::SelfValue)]
+    #[case::self_field(
+        "fn caller(x: S) { self.field.method() }\n",
+        ReceiverExprKind::Expression
+    )]
+    #[case::value_receiver("fn caller(x: S) { x.method() }\n", ReceiverExprKind::Expression)]
+    #[case::path_call("fn caller() { Foo::method() }\n", ReceiverExprKind::None)]
+    fn receiver_expr_kind_distinguishes_bare_self_from_dotted(
+        #[case] src: &str,
+        #[case] expected: ReceiverExprKind,
+    ) {
+        let shapes = extract_call_shapes_with_options_and_base_module(
+            src,
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+            "crate",
+        )
+        .unwrap();
+        let kind = shapes[0]
+            .receiver_expr_kind
+            .known_value()
+            .copied()
+            .expect("Rust adapter sets receiver_expr_kind");
+        assert_eq!(kind, expected);
+    }
+
     #[test]
     fn neutral_call_shapes_preserve_callee_path_segments() {
         let shapes = extract_call_shapes_with_options_and_base_module(
