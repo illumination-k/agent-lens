@@ -289,14 +289,17 @@ enum AnalyzeCommand {
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
     Complexity(AnalyzeComplexityArgs),
-    /// Report module-level coupling metrics for a Rust crate.
+    /// Report module-level coupling metrics for a Rust crate or a
+    /// TypeScript / JavaScript module graph.
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
     /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly
     /// connected components of the dependency graph (cycles). `path`
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
-    /// containing one.
+    /// containing one, or a TypeScript / JavaScript entry file
+    /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
+    /// `.cjs`) whose relative imports define the module graph.
     Coupling(AnalyzeCommonArgs),
     /// Emit a Rust static function call graph as visualization-ready data.
     ///

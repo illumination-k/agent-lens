@@ -1,38 +1,47 @@
-//! `analyze coupling` — module-level coupling metrics for a Rust crate.
+//! `analyze coupling` — module-level coupling metrics for a Rust crate
+//! or a TypeScript / JavaScript module graph.
 //!
-//! Walks a single crate from a `.rs` root, builds the module tree, then
-//! reports the metrics derived from the cross-module reference graph:
-//! Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
-//! Information Flow Complexity, per-pair Inter-module Coupling
-//! (distinct shared symbols), Robert C. Martin's Instability
-//! `I = Ce / (Ca + Ce)`, and the strongly connected components of the
-//! dependency graph (cycles). JSON is the default machine-readable
-//! output; `--format md` emits a compact summary tuned for LLM context
-//! windows rather than for humans.
+//! Builds a language-specific module tree, then reports the metrics
+//! derived from the cross-module reference graph: Number of Couplings,
+//! Fan-In, Fan-Out, simplified Henry-Kafura Information Flow Complexity,
+//! per-pair Inter-module Coupling (distinct shared symbols),
+//! Robert C. Martin's Instability `I = Ce / (Ca + Ce)`, and the strongly
+//! connected components of the dependency graph (cycles). JSON is the
+//! default machine-readable output; `--format md` emits a compact
+//! summary tuned for LLM context windows rather than for humans.
 //!
-//! Limitations carried over from the underlying extractor:
+//! For Rust the entry point is a `.rs` crate root (or a directory
+//! containing `src/lib.rs` / `src/main.rs`); each `mod` declaration
+//! becomes a node and `use` / qualified-path references become `Use`
+//! edges. For TypeScript / JavaScript the entry point is a single
+//! source file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
+//! `.cjs`) and the graph is grown by following relative `import` /
+//! `export … from` specifiers; one source file is one module.
 //!
-//! * `#[path = "..."]` attributes on `mod` declarations are not honoured.
-//! * Cross-crate references are silently dropped (this analyzer is
-//!   single-crate by design).
-//! * Macro-generated items are invisible to `syn` and therefore
-//!   invisible here.
-//! * Non-standard crate roots (e.g. `[lib].path` in `Cargo.toml`) are
-//!   not detected. Pass the root file directly when the layout is
-//!   unusual.
+//! Limitations carried over from the underlying extractors:
+//!
+//! * Rust: `#[path = "..."]` attributes on `mod` declarations are not
+//!   honoured; cross-crate references are silently dropped (this
+//!   analyzer is single-crate by design); macro-generated items are
+//!   invisible to `syn` and therefore invisible here; non-standard
+//!   crate roots (e.g. `[lib].path` in `Cargo.toml`) are not detected
+//!   — pass the root file directly when the layout is unusual.
+//! * TypeScript / JavaScript: only relative module specifiers
+//!   (`./` and `../`) are followed. Bare specifiers and TypeScript
+//!   path aliases are not resolved.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lens_domain::{
     CouplingEdge, CouplingReport, DependencyCycle, ModuleMetrics, ModulePath, PairCoupling,
     compute_report,
 };
-use lens_rust::{build_module_tree, extract_edges};
 use serde::Serialize;
 
 use super::{
-    AnalyzePathFilter, CouplingAnalyzerError, OutputFormat, format_optional_f64, resolve_crate_root,
+    AnalyzePathFilter, CouplingAnalyzerError, OutputFormat, SourceLang, format_optional_f64,
+    resolve_crate_root,
 };
 
 /// Stateless analyzer entry point. Kept as a struct so per-run
@@ -65,21 +74,26 @@ impl CouplingAnalyzer {
         self
     }
 
-    /// Resolve `path`, build the crate's module tree, and produce a
-    /// report in `format`.
+    /// Resolve `path`, build the language-specific module tree, and
+    /// produce a report in `format`. Rust resolves the crate root from
+    /// a `.rs` file or a directory; TypeScript / JavaScript starts at
+    /// the entry source file and follows relative imports.
     pub fn analyze(
         &self,
         path: &Path,
         format: OutputFormat,
     ) -> Result<String, CouplingAnalyzerError> {
-        let root = resolve_crate_root(path)?;
-        let filter = self.path_filter.compile(&root)?;
-        let mut modules = build_module_tree(&root)?;
-        modules.retain(|m| filter.includes_path(&m.file));
-        let edges = extract_edges(&modules);
-        let module_paths: Vec<ModulePath> = modules.into_iter().map(|m| m.path).collect();
-        let report = compute_report(&module_paths, edges);
-        let view = ReportView::new(&root, &report);
+        let mut graph = build_graph(path)?;
+        let filter = self.path_filter.compile(&graph.root)?;
+        graph.modules.retain(|m| filter.includes_path(&m.file));
+        let kept: std::collections::HashSet<&ModulePath> =
+            graph.modules.iter().map(|m| &m.path).collect();
+        graph
+            .edges
+            .retain(|e| kept.contains(&e.from) && kept.contains(&e.to));
+        let module_paths: Vec<ModulePath> = graph.modules.iter().map(|m| m.path.clone()).collect();
+        let report = compute_report(&module_paths, graph.edges);
+        let view = ReportView::new(&graph.root, &report);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
@@ -87,6 +101,59 @@ impl CouplingAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&view)),
         }
     }
+}
+
+#[derive(Debug)]
+struct ModuleFile {
+    path: ModulePath,
+    file: PathBuf,
+}
+
+#[derive(Debug)]
+struct ModuleGraph {
+    root: PathBuf,
+    modules: Vec<ModuleFile>,
+    edges: Vec<CouplingEdge>,
+}
+
+fn build_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
+    if let Some(SourceLang::TypeScript(_)) = SourceLang::from_path(path) {
+        return build_ts_graph(path);
+    }
+    build_rust_graph(path)
+}
+
+fn build_rust_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
+    let root = resolve_crate_root(path)?;
+    let modules = lens_rust::build_module_tree(&root)?;
+    let edges = lens_rust::extract_edges(&modules);
+    Ok(ModuleGraph {
+        root,
+        modules: modules
+            .into_iter()
+            .map(|m| ModuleFile {
+                path: m.path,
+                file: m.file,
+            })
+            .collect(),
+        edges,
+    })
+}
+
+fn build_ts_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
+    let modules = lens_ts::build_module_tree(path)?;
+    let edges = lens_ts::extract_edges(&modules);
+    Ok(ModuleGraph {
+        root: path.to_path_buf(),
+        modules: modules
+            .into_iter()
+            .map(|m| ModuleFile {
+                path: m.path,
+                file: m.file,
+            })
+            .collect(),
+        edges,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -610,6 +677,146 @@ mod tests {
             near: PathBuf::from("/tmp"),
         };
         assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn typescript_entry_file_reports_fan_in_fan_out_and_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let main = write_file(
+            &src,
+            "main.ts",
+            "import { add } from './util'; export const r = add(1, 2);\n",
+        );
+        write_file(
+            &src,
+            "util.ts",
+            "export function add(a: number, b: number) { return a + b; }\n",
+        );
+
+        let json = CouplingAnalyzer::new()
+            .analyze(&main, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["module_count"], 2);
+        assert!(parsed["edge_count"].as_u64().unwrap() >= 1);
+        let modules = parsed["modules"].as_array().unwrap();
+        let main_m = modules
+            .iter()
+            .find(|m| m["path"] == "crate::main")
+            .expect("crate::main");
+        let util_m = modules
+            .iter()
+            .find(|m| m["path"] == "crate::util")
+            .expect("crate::util");
+        assert!(main_m["fan_out"].as_u64().unwrap() >= 1);
+        assert_eq!(main_m["fan_in"], 0);
+        // util is depended on, so I = 0 (fully stable).
+        assert_eq!(util_m["instability"].as_f64().unwrap(), 0.0);
+        // main only depends on others, so I = 1 (fully unstable).
+        assert_eq!(main_m["instability"].as_f64().unwrap(), 1.0);
+
+        let pairs = parsed["pairs"].as_array().unwrap();
+        assert!(pairs.iter().any(|p| {
+            (p["a"] == "crate::main" && p["b"] == "crate::util")
+                || (p["a"] == "crate::util" && p["b"] == "crate::main")
+        }));
+    }
+
+    #[test]
+    fn typescript_circular_imports_become_a_cycle() {
+        // a → b via Bar, b → a via Foo: a two-node SCC across files.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let entry = write_file(
+            &src,
+            "a.ts",
+            "import { Bar } from './b'; export class Foo { b?: Bar }\n",
+        );
+        write_file(
+            &src,
+            "b.ts",
+            "import { Foo } from './a'; export class Bar { a?: Foo }\n",
+        );
+
+        let json = CouplingAnalyzer::new()
+            .analyze(&entry, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cycle_count"], 1);
+        let cycles = parsed["cycles"].as_array().unwrap();
+        let members: Vec<&str> = cycles[0]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        assert!(members.contains(&"crate::a"));
+        assert!(members.contains(&"crate::b"));
+    }
+
+    #[test]
+    fn typescript_markdown_report_contains_module_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let main = write_file(
+            &src,
+            "main.ts",
+            "import { add } from './util'; export const r = add(1, 2);\n",
+        );
+        write_file(
+            &src,
+            "util.ts",
+            "export function add(a: number, b: number) { return a + b; }\n",
+        );
+
+        let md = CouplingAnalyzer::new()
+            .analyze(&main, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("# Coupling report:"));
+        assert!(md.contains("## Modules"));
+        assert!(md.contains("crate::main"));
+        assert!(md.contains("crate::util"));
+        assert!(md.contains("Top coupled pairs"));
+    }
+
+    #[test]
+    fn typescript_path_exclude_drops_modules_and_their_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let main = write_file(
+            &src,
+            "main.ts",
+            "import { add } from './generated'; export const r = add(1, 2);\n",
+        );
+        write_file(
+            &src,
+            "generated.ts",
+            "export function add(a: number, b: number) { return a + b; }\n",
+        );
+
+        let json = CouplingAnalyzer::new()
+            .with_exclude_patterns(vec!["generated.ts".to_owned()])
+            .analyze(&main, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(modules.contains(&"crate::main"));
+        assert!(!modules.contains(&"crate::generated"));
+        // No edges should reference the dropped module.
+        for e in parsed["edges"].as_array().unwrap() {
+            assert_ne!(e["from"], "crate::generated");
+            assert_ne!(e["to"], "crate::generated");
+        }
     }
 
     #[test]
