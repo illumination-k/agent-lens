@@ -351,11 +351,13 @@ impl CallVisitor {
         line: usize,
     ) {
         let caller = self.current_caller();
+        let module = self.current_module().to_owned();
+        let callee_path = callee_path.map(|p| rewrite_crate_prefix(&p, &module));
         self.sites.push(CallSite {
             callee_name,
             callee_path,
             caller_name: caller.as_ref().map(|c| c.name.clone()),
-            module: self.current_module().to_owned(),
+            module,
             caller_qualified_name: caller.as_ref().map(|c| c.qualified_name.clone()),
             caller_impl_owner: caller.and_then(|c| c.impl_owner),
             call_kind,
@@ -492,7 +494,16 @@ fn record_use_leaf(
 fn absolutize_use_segments(current_module: &str, segments: &[String]) -> Option<String> {
     let first = segments.first()?;
     match first.as_str() {
-        "crate" => Some(segments.join("::")),
+        "crate" => {
+            // Rewrite `crate::a::b` to `<crate_name>::a::b` so the
+            // alias target lines up with the absolute module prefix
+            // attached to the file. Falls back to the literal `crate`
+            // when the caller did not provide a real crate name.
+            let crate_name = current_module_crate_name(current_module);
+            let mut rewritten: Vec<String> = vec![crate_name.to_owned()];
+            rewritten.extend(segments.iter().skip(1).cloned());
+            Some(rewritten.join("::"))
+        }
         "self" => {
             if segments.len() == 1 {
                 Some(current_module.to_owned())
@@ -530,6 +541,32 @@ fn qualify_module(module: &str, name: &str) -> String {
     } else {
         format!("{module}::{name}")
     }
+}
+
+/// First segment of `current_module`, treated as the absolute crate
+/// prefix the caller threaded in. Used to rewrite the literal `crate`
+/// keyword in callee paths and `use` targets so the function-graph
+/// resolver sees a consistent crate-qualified namespace.
+fn current_module_crate_name(current_module: &str) -> &str {
+    let first = current_module.split("::").next().unwrap_or("");
+    if first.is_empty() { "crate" } else { first }
+}
+
+/// Rewrite a callee path's leading `crate::` segment to the actual
+/// crate name. Single-crate analyses (where `current_module` already
+/// starts with `crate`) are unaffected.
+fn rewrite_crate_prefix(path: &str, current_module: &str) -> String {
+    let crate_name = current_module_crate_name(current_module);
+    if crate_name == "crate" {
+        return path.to_owned();
+    }
+    if path == "crate" {
+        return crate_name.to_owned();
+    }
+    if let Some(tail) = path.strip_prefix("crate::") {
+        return format!("{crate_name}::{tail}");
+    }
+    path.to_owned()
 }
 
 /// Pull the last path segment out of a free-call callee expression. We
@@ -850,6 +887,56 @@ fn caller() {
             None,
         );
         assert_eq!(module_segments("crate::a"), ["crate", "a"]);
+    }
+
+    #[test]
+    fn callee_paths_rewrite_crate_keyword_to_real_crate_name() {
+        let sites = extract_call_sites_with_options_and_base_module(
+            "fn caller() { crate::a::foo(); foo(); }\n",
+            CallIndexOptions::default(),
+            "agent_lens",
+        )
+        .unwrap();
+        assert_eq!(
+            sites[0].callee_path.as_deref(),
+            Some("agent_lens::a::foo"),
+            "leading `crate::` segment should be rewritten when a real crate name is supplied",
+        );
+        assert_eq!(
+            sites[1].callee_path.as_deref(),
+            Some("foo"),
+            "non-prefixed paths should pass through unchanged",
+        );
+    }
+
+    #[test]
+    fn use_aliases_rewrite_crate_keyword_to_real_crate_name() {
+        let sites = extract_call_sites_with_options_and_base_module(
+            "use crate::a::parse;\nfn caller() { parse(); }\n",
+            CallIndexOptions::default(),
+            "agent_lens",
+        )
+        .unwrap();
+        let alias = sites[0]
+            .visible_aliases
+            .iter()
+            .find(|a| a.alias == "parse")
+            .expect("parse alias should be visible");
+        assert_eq!(alias.target, "agent_lens::a::parse");
+    }
+
+    #[test]
+    fn rewrite_crate_prefix_is_noop_under_legacy_crate_module() {
+        assert_eq!(
+            rewrite_crate_prefix("crate::a::foo", "crate"),
+            "crate::a::foo"
+        );
+        assert_eq!(rewrite_crate_prefix("foo", "agent_lens"), "foo");
+        assert_eq!(rewrite_crate_prefix("crate", "agent_lens"), "agent_lens");
+        assert_eq!(
+            rewrite_crate_prefix("crate::a", "agent_lens::m"),
+            "agent_lens::a"
+        );
     }
 
     #[test]

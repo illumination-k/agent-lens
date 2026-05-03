@@ -6,6 +6,7 @@
 //! by default; analyzers can opt in to a `--format md` mode for a more
 //! compact human-readable summary.
 
+mod cargo_meta;
 pub mod cohesion;
 pub mod complexity;
 pub mod context_span;
