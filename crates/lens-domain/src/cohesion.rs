@@ -8,7 +8,15 @@
 //! * **LCOM4** — the number of weakly-connected components in the graph
 //!   where methods are vertices and shared field accesses or sibling calls
 //!   are edges. An integer count that also tells you *which* methods cluster
-//!   together.
+//!   together. Methods that are *inert* — alone in their component, with no
+//!   referenced fields and no sibling calls — are excluded from the count
+//!   because they contribute no edge to the cohesion graph and would only
+//!   inflate LCOM4 without representing a real responsibility split. The
+//!   canonical example is a `syn::Visit` callback whose body is empty
+//!   (intentional recursion stop) or that delegates to the default walker
+//!   without touching `self`. The number of such methods is reported
+//!   separately as `inert_method_count` so the original component count
+//!   stays recoverable as `lcom4 + inert_method_count`.
 //! * **LCOM96** (Henderson-Sellers' LCOM\*) — a continuous score in roughly
 //!   `[0, 1]` summarising "what fraction of methods do not touch the average
 //!   field". Useful as a single number when comparing units. Undefined when
@@ -104,7 +112,19 @@ pub struct CohesionUnit {
     pub methods: Vec<MethodCohesion>,
     /// Connected components, each as a sorted list of indices into
     /// [`Self::methods`]. Computed eagerly so the field is canonical.
+    /// Includes inert singletons (their indices appear here even though
+    /// they don't count toward [`Self::lcom4`]); consumers that want the
+    /// raw component count can read `components.len()` directly.
     pub components: Vec<Vec<usize>>,
+    /// LCOM4 with inert methods excluded. See the module docstring and
+    /// [`count_inert_methods`] for the precise definition; in short, a
+    /// method that is alone in its component and references no fields
+    /// and no sibling calls contributes no edge and is dropped from the
+    /// count. Equal to `components.len() - inert_method_count`.
+    pub lcom4: usize,
+    /// Number of methods excluded from [`Self::lcom4`] because they are
+    /// inert (singleton component, zero fields, zero sibling calls).
+    pub inert_method_count: usize,
     /// Henderson-Sellers' LCOM\* (a.k.a. LCOM96). `None` when the metric is
     /// undefined for this unit (fewer than two methods, or no referenced
     /// fields). See [`compute_lcom96`].
@@ -121,6 +141,8 @@ impl CohesionUnit {
         methods: Vec<MethodCohesion>,
     ) -> Self {
         let components = compute_components(&methods);
+        let inert_method_count = count_inert_methods(&methods, &components);
+        let lcom4 = components.len().saturating_sub(inert_method_count);
         let lcom96 = compute_lcom96(&methods);
         Self {
             kind,
@@ -129,6 +151,8 @@ impl CohesionUnit {
             end_line,
             methods,
             components,
+            lcom4,
+            inert_method_count,
             lcom96,
         }
     }
@@ -169,6 +193,29 @@ fn flatten_union_find(mut uf: UnionFind, n: usize) -> Vec<Vec<usize>> {
     }
     components.sort_by_key(|c| c.first().copied().unwrap_or(usize::MAX));
     components
+}
+
+/// Count methods that are *inert* with respect to the cohesion graph:
+/// a singleton component whose lone method references no fields and
+/// calls no siblings. Such a method has degree 0 — neither does it
+/// touch shared state nor does any sibling reach into it — so adding it
+/// to LCOM4 inflates the count without representing a real
+/// responsibility split. See the module docstring for context.
+///
+/// `components` must be the output of [`compute_components`] over the
+/// same `methods` slice; the function trusts that invariant and does
+/// not rebuild the union-find.
+pub fn count_inert_methods(methods: &[MethodCohesion], components: &[Vec<usize>]) -> usize {
+    components
+        .iter()
+        .filter(|c| {
+            if c.len() != 1 {
+                return false;
+            }
+            let m = &methods[c[0]];
+            m.fields.is_empty() && m.calls.is_empty()
+        })
+        .count()
 }
 
 /// Henderson-Sellers' LCOM\* (1996), the so-called LCOM96 score.
@@ -323,10 +370,69 @@ mod tests {
 
     #[test]
     fn build_records_lcom4_and_components() {
+        // `c` is a singleton with no fields and no calls — it's inert
+        // and must not inflate LCOM4. The full component layout is still
+        // exposed via `components`.
         let methods = vec![m("a", &["x"], &[]), m("b", &["x"], &[]), m("c", &[], &[])];
         let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "Foo", 1, 10, methods);
         assert_eq!(unit.components.len(), 2);
         assert_eq!(unit.components, vec![vec![0, 1], vec![2]]);
+        assert_eq!(unit.inert_method_count, 1);
+        assert_eq!(unit.lcom4, 1);
+    }
+
+    #[test]
+    fn inert_singleton_methods_are_excluded_from_lcom4() {
+        // Models a `syn::Visit` impl: two methods sharing a real edge
+        // plus four `fn visit_xxx(&mut self, _: ...) {}` callbacks that
+        // are required by the trait but touch nothing. The cohesion
+        // graph effectively has one component; LCOM4 must reflect that.
+        let methods = vec![
+            m("visit_local", &["locals"], &[]),
+            m("visit_arm", &["locals"], &[]),
+            m("visit_expr_if", &[], &[]),
+            m("visit_expr_while", &[], &[]),
+            m("visit_item_impl", &[], &[]),
+            m("visit_item_mod", &[], &[]),
+        ];
+        let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "LocalWalker", 1, 50, methods);
+        assert_eq!(unit.components.len(), 5);
+        assert_eq!(unit.inert_method_count, 4);
+        assert_eq!(unit.lcom4, 1);
+    }
+
+    #[test]
+    fn singleton_with_a_referenced_field_is_not_inert() {
+        // A lone method that owns a private field IS a real disjoint
+        // responsibility — it should still count toward LCOM4.
+        let methods = vec![m("a", &["x"], &[]), m("b", &["y"], &[])];
+        let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "Foo", 1, 10, methods);
+        assert_eq!(unit.inert_method_count, 0);
+        assert_eq!(unit.lcom4, 2);
+    }
+
+    #[test]
+    fn callee_of_a_sibling_is_not_inert_even_with_empty_footprint() {
+        // `b` has no fields and no outgoing calls, but `a` calls `b`,
+        // so the union-find puts them in the same component. `b` is
+        // *not* inert because it's not a singleton.
+        let methods = vec![m("a", &[], &["b"]), m("b", &[], &[])];
+        let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "Foo", 1, 10, methods);
+        assert_eq!(unit.components, vec![vec![0, 1]]);
+        assert_eq!(unit.inert_method_count, 0);
+        assert_eq!(unit.lcom4, 1);
+    }
+
+    #[test]
+    fn unit_with_only_inert_methods_has_lcom4_zero() {
+        // Degenerate but well-defined: every method is inert, so the
+        // metric saturates at zero. Documents the saturating_sub guard
+        // in `build`.
+        let methods = vec![m("a", &[], &[]), m("b", &[], &[])];
+        let unit = CohesionUnit::build(CohesionUnitKind::Inherent, "Foo", 1, 10, methods);
+        assert_eq!(unit.components.len(), 2);
+        assert_eq!(unit.inert_method_count, 2);
+        assert_eq!(unit.lcom4, 0);
     }
 
     #[test]

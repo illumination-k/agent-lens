@@ -201,11 +201,20 @@ struct UnitView<'a> {
     end_line: usize,
     method_count: usize,
     lcom4: usize,
+    /// Methods excluded from `lcom4` because they are inert (singleton
+    /// component, zero fields, zero sibling calls). Omitted from the
+    /// JSON payload when zero so the common case stays terse.
+    #[serde(skip_serializing_if = "is_zero")]
+    inert_method_count: usize,
     /// Henderson-Sellers' LCOM\*. Serialised as JSON `null` when the
     /// metric is undefined for the unit (single method or no fields).
     lcom96: Option<f64>,
     components: Vec<Vec<&'a str>>,
     methods: Vec<MethodView<'a>>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl<'a> From<&'a CohesionUnit> for UnitView<'a> {
@@ -232,7 +241,8 @@ impl<'a> From<&'a CohesionUnit> for UnitView<'a> {
             start_line: unit.start_line,
             end_line: unit.end_line,
             method_count: unit.methods.len(),
-            lcom4: unit.components.len(),
+            lcom4: unit.lcom4,
+            inert_method_count: unit.inert_method_count,
             lcom96: unit.lcom96,
             components,
             methods,
@@ -339,12 +349,17 @@ fn render_unit(out: &mut String, file: &str, unit: &UnitView<'_>) {
         _ => format!("impl {}", unit.type_name),
     };
     let lcom96 = format_optional_f64(unit.lcom96, 2);
+    let inert = if unit.inert_method_count > 0 {
+        format!(" (+{} inert)", unit.inert_method_count)
+    } else {
+        String::new()
+    };
     // writeln! into a String cannot fail; the result is swallowed
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
     let _ = writeln!(
         out,
-        "- {file}:{header} (L{}-{}) — LCOM4 = {}, LCOM96 = {}, {} method(s)",
+        "- {file}:{header} (L{}-{}) — LCOM4 = {}{inert}, LCOM96 = {}, {} method(s)",
         unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
     );
     for component in &unit.components {
