@@ -53,7 +53,7 @@ agent-lens analyze cohesion <hotspot-path> --format md
 
 ### 4. Verify the file isn't an architectural bottleneck
 
-If the hotspot is a module that lots of other modules import from, refactoring needs more care. Run coupling and context-span on the crate:
+If the hotspot is a module that lots of other modules import from, refactoring needs more care. Run coupling and context-span on the crate (or TS/JS entry):
 
 ```bash
 agent-lens analyze coupling     crates/<name> --format md
@@ -61,6 +61,26 @@ agent-lens analyze context-span crates/<name> --format md
 ```
 
 A high `fan_in` on the hotspot module means changes ripple. A wide `context-span` `files` count means the module is also expensive to reason about end-to-end. Stage the refactor: extract first, then change the implementation.
+
+### 5. Map blast radius at the function level
+
+Module-level coupling tells you which modules depend on the hotspot. To answer "which functions specifically call the function I'm about to change?" use `function-graph`:
+
+```bash
+agent-lens analyze function-graph crates/<name>/src --format md   # sanity counts
+agent-lens analyze function-graph crates/<name>/src \
+  | jq --arg fn "Coupling::collect" '
+      .edges[] | select(.callee_name == ($fn | split("::") | last))
+                 | {from, callee_name, call_lines}'
+```
+
+Useful patterns:
+
+- **Callers**: filter edges by `callee_name` (or `to == "<file>:<name>:<line>"` for resolved hits) to enumerate call sites before signature changes.
+- **Callees / blast radius**: filter edges by `from == "<node id>"` to see what the function depends on. A high `outgoing_call_count` warns that extraction will fan out into many helpers.
+- **Apparently-dead code**: nodes with `incoming_call_count == 0` outside tests / public API / hooks are candidates to delete after the refactor lands.
+
+The graph is heuristic — `unresolved` and `ambiguous` edges are normal (trait dispatch, dynamic calls, external imports). Treat `function-graph` as a "where might this break?" prompt, not a verifier.
 
 ## Reading the metrics
 

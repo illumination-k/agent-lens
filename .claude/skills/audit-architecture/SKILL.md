@@ -1,26 +1,28 @@
 ---
 name: audit-architecture
-description: Use when the user wants to evaluate the structural health of a Rust crate — module coupling, Fan-In bottlenecks, dependency cycles, instability, or `impl`-level cohesion (LCOM4). Wraps `agent-lens analyze coupling` and `agent-lens analyze cohesion`.
+description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `context-span`, and `cohesion`. Works on Rust crates and TypeScript / JavaScript module graphs (with Python supported by `context-span` / `cohesion`).
 ---
 
 # Audit module structure with agent-lens
 
 Three analyzers cover the architecture question:
 
-- `coupling` — module-level metrics for a Rust crate: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles).
-- `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Built on the same dependency graph as `coupling`.
+- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates and on TS/JS module graphs (the entry file's relative-import closure).
+- `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, and Python. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
 - `cohesion` — per-`impl` (Rust) / per-class (TS, Python) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
-
-`coupling` and `context-span` are Rust-only (Rust crate dependency graph). `cohesion` runs on Rust, TypeScript / JavaScript, and Python.
 
 ## Workflow
 
-### 1. Crate-wide coupling
+### 1. Crate-wide / entry-wide coupling
 
-`coupling` takes either a `.rs` crate root (`src/lib.rs` / `src/main.rs`) or a directory containing one:
+`coupling` takes either a Rust crate root (`src/lib.rs` / `src/main.rs`, or a directory containing one) or a TypeScript / JavaScript entry file (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` / `.cjs`) whose relative imports define the module graph:
 
 ```bash
+# Rust crate
 agent-lens analyze coupling crates/agent-lens --format md
+
+# TS/JS module graph from an entry
+agent-lens analyze coupling app/src/index.ts --format md
 ```
 
 Look for, in order:
@@ -35,7 +37,23 @@ Look for, in order:
 Pair `coupling` with `context-span` to estimate how much of the crate an agent must hold in context to safely change a given module:
 
 ```bash
+# Rust crate
 agent-lens analyze context-span crates/agent-lens --format md
+
+# TS/JS entry
+agent-lens analyze context-span app/src/index.ts --format md
+
+# Python file or directory
+agent-lens analyze context-span pkg/foo --format md
+```
+
+For TS/JS frameworks where there is no single entry (Next.js App Router, Remix, Astro), pass `path` as the project root and merge several entry trees with `--entry-glob` (repeatable):
+
+```bash
+agent-lens analyze context-span app \
+  --entry-glob 'app/**/page.tsx' \
+  --entry-glob 'app/**/route.ts' \
+  --format md
 ```
 
 A module with a large `files` count is expensive to onboard onto. If a hub from step 1 also has a wide span, splitting the hub gives an outsized win (smaller change, smaller blast radius).
@@ -90,6 +108,7 @@ agent-lens analyze cohesion <path> | jq '.files[].units[] | select(.lcom4 >= 2)'
 ## Don't reach for it when
 
 - The user wants per-function complexity — that's `complexity`, not `coupling`/`cohesion`.
-- The crate is a single file — Fan-In / Fan-Out are degenerate, the report will be empty.
-- The "module structure" question is across crates — coupling is intra-crate today. For inter-crate dependency questions, `cargo tree` is the right tool.
-- The codebase isn't Rust and the question is about coupling / context span — only Rust is supported there. `cohesion` does run on TS/JS/Python.
+- The crate / entry tree is a single file — Fan-In / Fan-Out are degenerate, the report will be empty.
+- The "module structure" question is across Rust crates — `coupling` is intra-crate. For inter-crate dependency questions, `cargo tree` is the right tool.
+- The codebase is Python and the question is about coupling — `coupling` does not parse Python imports. `context-span` and `cohesion` do run on Python.
+- The TS/JS project has no single entry file (e.g. a library exporting many barrels, or a Next.js App Router app) — `coupling` requires one entry, so you'll need to pick a representative one. `context-span` supports merging entries via `--entry-glob`, but `coupling` does not.
