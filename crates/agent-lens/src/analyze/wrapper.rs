@@ -15,60 +15,29 @@ use std::path::Path;
 use lens_domain::{ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
-use super::{
-    AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, SourceLang, changed_line_ranges,
-    collect_source_files, overlaps_any, read_source,
-};
+use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::{AnalyzerError, OutputFormat, SourceFile, SourceLang, read_source};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
 /// CLI surface.
 #[derive(Debug, Default, Clone)]
 pub struct WrapperAnalyzer {
-    diff_only: bool,
-    path_filter: AnalyzePathFilter,
+    filter: FilterConfig,
 }
 
 impl WrapperAnalyzer {
     pub fn new() -> Self {
-        Self {
-            diff_only: false,
-            path_filter: AnalyzePathFilter::new(),
-        }
+        Self::default()
     }
 
-    /// Restrict reports to wrappers intersecting an unstaged changed line
-    /// in `git diff -U0`.
-    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
-        self.diff_only = diff_only;
-        self
-    }
-
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.path_filter = self.path_filter.with_only_tests(only_tests);
-        self
-    }
-
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
-        self
-    }
+    delegate_filter_builders!(filter);
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let files = self.collect_file_reports(path)?;
         let report = Report::new(path, &files);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report)),
-        }
+        render_report(&report, format, || format_markdown(&report))
     }
 
     /// Resolve `path` to a list of per-file reports. Single-file inputs
@@ -76,17 +45,13 @@ impl WrapperAnalyzer {
     /// honouring `.gitignore`. Files with no findings are dropped so the
     /// output stays signal-dense.
     fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
-        let filter = self.path_filter.compile(path)?;
         // Pass 1: produce wrapper findings AND a call-site index for
         // every supported source file. Splitting it from the metric
         // rollup lets reuse metrics see calls in files that themselves
         // contain no wrappers.
-        let mut per_files: Vec<PerFile> = Vec::new();
-        for source_file in collect_source_files(path, &filter)? {
-            if let Some(per) = self.scan_file(&source_file)? {
-                per_files.push(per);
-            }
-        }
+        let mut per_files = self
+            .filter
+            .collect_per_file(path, |sf| self.scan_file(sf))?;
         // Reuse metrics are workspace-wide by construction. A
         // single-file input only sees calls inside that one file, so
         // every cross-file rollup would trivially be 0. To avoid
@@ -108,10 +73,8 @@ impl WrapperAnalyzer {
     fn scan_file(&self, file: &SourceFile) -> Result<Option<PerFile>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
         let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
-        if self.diff_only {
-            let changed = changed_line_ranges(&file.path);
-            findings.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
-        }
+        self.filter
+            .retain_changed(&mut findings, &file.path, |f| (f.start_line, f.end_line));
         // Call sites are only used by the reuse-metrics pass, which is
         // a Rust-only signal today — the TS / Py adapters do not yet
         // expose a call-site index, so non-Rust files get an empty

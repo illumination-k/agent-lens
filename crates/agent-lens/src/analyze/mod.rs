@@ -17,6 +17,7 @@ mod format;
 pub mod function_graph;
 pub mod hotspot;
 mod path_filter;
+mod runner;
 pub mod similarity;
 mod source_files;
 pub mod wrapper;
