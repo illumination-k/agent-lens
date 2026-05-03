@@ -522,7 +522,7 @@ impl Resolver {
             return self.resolve_self_method(site, callee_name);
         }
         if site.has_receiver_expression() {
-            return (None, Resolution::Unresolved);
+            return self.resolve_receiver_method(site, callee_name);
         }
         for candidate in lexical_candidates(site) {
             if let Some(ids) = self.qualified.get(&candidate) {
@@ -567,6 +567,61 @@ impl Resolver {
             return resolve_ids(ids);
         }
         (None, Resolution::Unresolved)
+    }
+
+    /// Receiver method calls (`obj.foo()`) cannot be type-inferred
+    /// without semantic analysis, so we resolve heuristically by
+    /// last-segment match, then narrow ambiguous matches to the
+    /// caller's crate.
+    ///
+    /// * 0 candidates → [`Resolution::Unresolved`] (likely external/std).
+    /// * 1 candidate → [`Resolution::Resolved`].
+    /// * Many candidates with exactly one in the caller's crate →
+    ///   [`Resolution::Resolved`] for that crate-local match.
+    /// * Otherwise → [`Resolution::Ambiguous`].
+    ///
+    /// False-positive risk is real: a call on `String` whose method
+    /// happens to share a name with a unique workspace function would
+    /// resolve to the workspace match. The crate narrowing keeps this
+    /// risk bounded to the caller's crate when multiple candidates
+    /// exist; users who want precision should prefer typed paths.
+    fn resolve_receiver_method(
+        &self,
+        site: &CallShape,
+        callee_name: &str,
+    ) -> (Option<String>, Resolution) {
+        let Some(ids) = self.last_segment.get(callee_name) else {
+            return (None, Resolution::Unresolved);
+        };
+        self.resolve_with_crate_narrowing(ids, site)
+    }
+
+    fn resolve_with_crate_narrowing(
+        &self,
+        ids: &[String],
+        site: &CallShape,
+    ) -> (Option<String>, Resolution) {
+        if ids.len() == 1 {
+            return (ids.first().cloned(), Resolution::Resolved);
+        }
+        let Some(caller_crate) = caller_crate_segment(site) else {
+            return (None, Resolution::Ambiguous);
+        };
+        let local: Vec<String> = ids
+            .iter()
+            .filter(|id| self.node_in_crate(id, caller_crate))
+            .cloned()
+            .collect();
+        if local.len() == 1 {
+            return (local.first().cloned(), Resolution::Resolved);
+        }
+        (None, Resolution::Ambiguous)
+    }
+
+    fn node_in_crate(&self, id: &str, crate_name: &str) -> bool {
+        self.id_to_qualified
+            .get(id)
+            .is_some_and(|qualified| qualified_in_crate(qualified, crate_name))
     }
 
     fn narrow_by_path_suffix(&self, ids: &[String], callee_path: &str) -> Vec<String> {
@@ -776,6 +831,21 @@ fn node_local_name(f: &FunctionShape) -> String {
 
 fn name_last_segment(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
+}
+
+/// First segment of the call site's lexical module — the crate that
+/// owns the caller. `None` when the module is unknown or empty.
+fn caller_crate_segment(site: &CallShape) -> Option<&str> {
+    site.caller_module()
+        .and_then(|module| module.split("::").next())
+        .filter(|s| !s.is_empty())
+}
+
+fn qualified_in_crate(qualified: &str, crate_name: &str) -> bool {
+    qualified == crate_name
+        || qualified
+            .strip_prefix(crate_name)
+            .is_some_and(|rest| rest.starts_with("::"))
 }
 
 fn graph_language_label(files: &[FileGraphInput]) -> &'static str {
@@ -1116,7 +1186,11 @@ mod tests {
     }
 
     #[test]
-    fn self_field_method_calls_remain_unresolved() {
+    fn receiver_method_resolves_via_unique_workspace_match() {
+        // `self.inner.helper()` is a method call on a non-self
+        // receiver. We cannot infer `self.inner`'s type, but `helper`
+        // is unique workspace-wide so the last-segment fallback
+        // attributes the call to `Inner::helper`.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -1125,10 +1199,93 @@ mod tests {
         );
 
         let report = analyze_json(dir.path());
-        // `self.inner.helper()` is a method call on a non-self receiver,
-        // so we cannot lexically attribute it to `Inner::helper`.
         let edge = edge_by_callee(&report, "helper");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("crate::Inner::helper"),
+        );
+    }
+
+    #[test]
+    fn receiver_method_call_with_no_workspace_match_stays_unresolved() {
+        // `s.len()` targets std's `String::len`, which is not in the
+        // workspace. The receiver-method resolver must not invent a
+        // match when the last segment has no workspace candidate.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn caller(s: String) { let _ = s.len(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "len");
         assert_eq!(edge["resolution"], "unresolved");
+        assert_eq!(edge["to"], Value::Null);
+    }
+
+    #[test]
+    fn receiver_method_narrows_ambiguous_match_to_callers_crate() {
+        // Two workspace crates each declare a method named `parse`.
+        // A bare receiver call from `agent_a` cannot pick either via
+        // last-segment alone, but crate narrowing keeps the
+        // same-crate match.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-a/Cargo.toml",
+            "[package]\nname = \"agent-a\"\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-a/src/lib.rs",
+            "pub struct Foo;\nimpl Foo { pub fn parse(&self) {} }\n\
+             pub fn caller(f: Foo) { f.parse(); }\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-b/Cargo.toml",
+            "[package]\nname = \"agent-b\"\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-b/src/lib.rs",
+            "pub struct Bar;\nimpl Bar { pub fn parse(&self) {} }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "parse");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("agent_a::Foo::parse"),
+        );
+    }
+
+    #[test]
+    fn receiver_method_with_multiple_candidates_in_callers_crate_is_ambiguous() {
+        // Two methods named `parse` live in the caller's crate.
+        // Crate narrowing cannot tiebreak, so the call goes ambiguous
+        // (still better signal than the previous blanket Unresolved).
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub struct Foo; impl Foo { pub fn parse(&self) {} } }\n\
+             mod b { pub struct Bar; impl Bar { pub fn parse(&self) {} } }\n\
+             fn caller(x: crate::a::Foo) { x.parse(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "parse");
+        assert_eq!(edge["resolution"], "ambiguous");
+        assert_eq!(edge["to"], Value::Null);
     }
 
     #[rstest]
