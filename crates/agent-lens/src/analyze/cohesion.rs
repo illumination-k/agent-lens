@@ -311,10 +311,8 @@ fn render_ranked_units(
         .filter(|row| row.unit.lcom4 >= min_score)
         .collect();
     rows.sort_by(|a, b| {
-        b.unit
-            .lcom4
-            .cmp(&a.unit.lcom4)
-            .then_with(|| compare_lcom96_desc(a.unit.lcom96, b.unit.lcom96))
+        compare_lcom96_desc(a.unit.lcom96, b.unit.lcom96)
+            .then_with(|| b.unit.lcom4.cmp(&a.unit.lcom4))
             .then_with(|| b.unit.method_count.cmp(&a.unit.method_count))
             .then_with(|| a.unit.start_line.cmp(&b.unit.start_line))
             .then_with(|| a.file.cmp(b.file))
@@ -333,13 +331,18 @@ fn render_ranked_units(
     }
 }
 
+/// Descending compare on `Option<f64>` LCOM96 scores, with `None`
+/// pinned to the top end of the range as a synthetic `1.0`. The metric
+/// is undefined when no fields are referenced (typical for module
+/// units of free functions, or tiny utility impls), and that case is
+/// the *most* split a unit can be: there is no shared state to anchor
+/// cohesion at all. Treating `None` as the worst-case score keeps such
+/// units visible in the ranking instead of sinking them below
+/// half-cohesive impls that happen to expose a field.
 fn compare_lcom96_desc(a: Option<f64>, b: Option<f64>) -> Ordering {
-    match (a, b) {
-        (Some(a), Some(b)) => b.total_cmp(&a),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
+    let av = a.unwrap_or(1.0);
+    let bv = b.unwrap_or(1.0);
+    bv.total_cmp(&av)
 }
 
 fn render_unit(out: &mut String, file: &str, unit: &UnitView<'_>) {
@@ -473,7 +476,10 @@ impl Foo {
     }
 
     #[test]
-    fn markdown_top_and_min_score_rank_units_by_lcom4() {
+    fn markdown_top_and_min_score_rank_units_by_lcom96_then_lcom4() {
+        // Both impls have LCOM96 = 1.0 (every method touches a disjoint
+        // field), so the primary key ties and the secondary LCOM4 key
+        // decides: `High` (LCOM4=3) ranks above `Low` (LCOM4=2).
         let dir = tempfile::tempdir().unwrap();
         let src = r#"
 struct High { a: i32, b: i32, c: i32 }
@@ -498,6 +504,85 @@ impl Low {
         assert!(md.contains("Top 1 by cohesion risk"));
         assert!(md.contains("impl High"), "got: {md}");
         assert!(!md.contains("impl Low"), "got: {md}");
+    }
+
+    #[test]
+    fn markdown_ranks_higher_lcom96_above_higher_lcom4() {
+        // `Strict` has LCOM4=2 but LCOM96=1.0 (perfectly disjoint
+        // fields). `Mixed` has a higher LCOM4=3 but LCOM96≈0.83 because
+        // four of its methods share the same field. Old sort (LCOM4
+        // primary) would rank `Mixed` first; the LCOM96-primary sort
+        // surfaces `Strict` instead — every method really is doing
+        // something disjoint, while `Mixed` is mostly cohesive with a
+        // few outliers.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+struct Strict { a: i32, b: i32 }
+impl Strict {
+    fn ga(&self) -> i32 { self.a }
+    fn gb(&self) -> i32 { self.b }
+}
+
+struct Mixed { hot: i32, x: i32, y: i32 }
+impl Mixed {
+    fn h1(&self) -> i32 { self.hot }
+    fn h2(&self) -> i32 { self.hot }
+    fn h3(&self) -> i32 { self.hot }
+    fn h4(&self) -> i32 { self.hot }
+    fn gx(&self) -> i32 { self.x }
+    fn gy(&self) -> i32 { self.y }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let md = CohesionAnalyzer::new()
+            .with_min_score(Some(2))
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        let strict_pos = md.find("impl Strict").expect("Strict listed");
+        let mixed_pos = md.find("impl Mixed").expect("Mixed listed");
+        assert!(
+            strict_pos < mixed_pos,
+            "Strict (LCOM96=1.0) should rank above Mixed (LCOM96<1.0); got:\n{md}"
+        );
+    }
+
+    #[test]
+    fn markdown_pins_undefined_lcom96_to_the_top_of_its_lcom4_band() {
+        // The module unit has three sibling-call components and no
+        // module-level fields, so LCOM96 is undefined. Treating `None`
+        // as the worst-case score keeps it above `Hub`, an impl that
+        // also has LCOM4=3 but with a defined, lower LCOM96 (≈0.83
+        // because four methods share the same `hot` field).
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+fn alpha() -> i32 { beta() + gamma() }
+fn beta() -> i32 { 1 }
+fn gamma() -> i32 { 2 }
+fn delta() -> i32 { epsilon() }
+fn epsilon() -> i32 { 3 }
+fn zeta() -> i32 { eta() }
+fn eta() -> i32 { 4 }
+
+struct Hub { hot: i32, x: i32, y: i32 }
+impl Hub {
+    fn h1(&self) -> i32 { self.hot }
+    fn h2(&self) -> i32 { self.hot }
+    fn h3(&self) -> i32 { self.hot }
+    fn gx(&self) -> i32 { self.x }
+    fn gy(&self) -> i32 { self.y }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+        let md = CohesionAnalyzer::new()
+            .with_min_score(Some(2))
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        let module_pos = md.find("module <module>").expect("module unit listed");
+        let hub_pos = md.find("impl Hub").expect("Hub listed");
+        assert!(
+            module_pos < hub_pos,
+            "module unit (LCOM96=n/a) should rank above defined-but-low LCOM96 impl; got:\n{md}"
+        );
     }
 
     #[test]
