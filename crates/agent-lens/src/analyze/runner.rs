@@ -81,7 +81,7 @@ impl FilterConfig {
     /// Compile the path filter against `path` and walk it (single file
     /// or directory, respecting `.gitignore`), returning every
     /// supported source file the analyzer should inspect.
-    pub fn collect_source_files(&self, path: &Path) -> Result<Vec<SourceFile>, AnalyzerError> {
+    fn collect_source_files(&self, path: &Path) -> Result<Vec<SourceFile>, AnalyzerError> {
         let filter = self.path_filter().compile(path)?;
         collect_source_files(path, &filter)
     }
