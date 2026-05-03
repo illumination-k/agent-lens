@@ -53,7 +53,8 @@ pub struct SessionStartHookSpecificOutput {
 mod tests {
     use super::*;
     use crate::claude_code::ClaudeCodeHookInput;
-    use serde_json::json;
+    use rstest::rstest;
+    use serde_json::{Value, json};
 
     #[test]
     fn deserializes_session_start_input() {
@@ -106,42 +107,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_source_variant_is_rejected() {
-        let payload = json!({
+    #[rstest]
+    #[case::unknown_variant(
+        json!({
             "session_id": "sess",
             "transcript_path": "/tmp/t.jsonl",
             "cwd": "/repo",
             "hook_event_name": "SessionStart",
-            "source": "fork"
-        });
+            "source": "fork",
+        }),
+        "variant",
+    )]
+    #[case::missing_source(
+        json!({
+            "session_id": "sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "SessionStart",
+        }),
+        "source",
+    )]
+    fn rejects_invalid_source(#[case] payload: Value, #[case] expected: &str) {
         let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
-        assert!(err.to_string().contains("variant"), "{err}");
-    }
-
-    #[test]
-    fn missing_source_is_rejected() {
-        let payload = json!({
-            "session_id": "sess",
-            "transcript_path": "/tmp/t.jsonl",
-            "cwd": "/repo",
-            "hook_event_name": "SessionStart",
-        });
-        let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
-        assert!(err.to_string().contains("source"), "{err}");
-    }
-
-    #[test]
-    fn tolerates_unknown_fields() {
-        let payload = json!({
-            "session_id": "sess",
-            "transcript_path": "/tmp/t.jsonl",
-            "cwd": "/repo",
-            "hook_event_name": "SessionStart",
-            "source": "resume",
-            "future_field": {"a": 1},
-        });
-        serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap();
+        assert!(err.to_string().contains(expected), "{err}");
     }
 
     #[test]

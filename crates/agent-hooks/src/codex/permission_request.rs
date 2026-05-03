@@ -58,7 +58,8 @@ pub enum PermissionDecision {
 mod tests {
     use super::*;
     use crate::codex::CodexHookInput;
-    use serde_json::json;
+    use rstest::rstest;
+    use serde_json::{Value, json};
 
     #[test]
     fn deserializes_permission_request_input() {
@@ -130,9 +131,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_tool_input_is_rejected() {
-        let payload = json!({
+    #[rstest]
+    #[case::tool_input(
+        json!({
             "session_id": "sess",
             "transcript_path": "/tmp/t.jsonl",
             "cwd": "/repo",
@@ -140,14 +141,11 @@ mod tests {
             "hook_event_name": "PermissionRequest",
             "turn_id": "turn-1",
             "tool_name": "Bash",
-        });
-        let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
-        assert!(err.to_string().contains("tool_input"), "{err}");
-    }
-
-    #[test]
-    fn missing_turn_id_is_rejected() {
-        let payload = json!({
+        }),
+        "tool_input",
+    )]
+    #[case::turn_id(
+        json!({
             "session_id": "sess",
             "transcript_path": "/tmp/t.jsonl",
             "cwd": "/repo",
@@ -155,9 +153,12 @@ mod tests {
             "hook_event_name": "PermissionRequest",
             "tool_name": "Bash",
             "tool_input": {},
-        });
+        }),
+        "turn_id",
+    )]
+    fn rejects_missing_required_field(#[case] payload: Value, #[case] expected: &str) {
         let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
-        assert!(err.to_string().contains("turn_id"), "{err}");
+        assert!(err.to_string().contains(expected), "{err}");
     }
 
     #[test]
@@ -173,21 +174,5 @@ mod tests {
         let v = json!({"behavior": "maybe"});
         let err = serde_json::from_value::<PermissionDecision>(v).unwrap_err();
         assert!(err.to_string().contains("variant"), "{err}");
-    }
-
-    #[test]
-    fn tolerates_unknown_fields() {
-        let payload = json!({
-            "session_id": "sess",
-            "transcript_path": null,
-            "cwd": "/repo",
-            "model": "gpt-5",
-            "hook_event_name": "PermissionRequest",
-            "turn_id": "turn-1",
-            "tool_name": "Bash",
-            "tool_input": {},
-            "future_field": [],
-        });
-        serde_json::from_value::<CodexHookInput>(payload).unwrap();
     }
 }

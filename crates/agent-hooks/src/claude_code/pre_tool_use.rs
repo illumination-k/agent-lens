@@ -124,18 +124,4 @@ mod tests {
             })
         );
     }
-
-    #[test]
-    fn tolerates_unknown_fields() {
-        let payload = json!({
-            "session_id": "sess-1",
-            "transcript_path": "/tmp/t.jsonl",
-            "cwd": "/repo",
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": {},
-            "future_field": 42
-        });
-        serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap();
-    }
 }

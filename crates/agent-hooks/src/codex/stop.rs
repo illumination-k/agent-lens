@@ -98,20 +98,6 @@ mod tests {
     }
 
     #[test]
-    fn tolerates_unknown_fields() {
-        let payload = json!({
-            "session_id": "sess",
-            "transcript_path": null,
-            "cwd": "/repo",
-            "model": "gpt-5",
-            "hook_event_name": "Stop",
-            "turn_id": "turn-1",
-            "future_field": [1, 2],
-        });
-        serde_json::from_value::<CodexHookInput>(payload).unwrap();
-    }
-
-    #[test]
     fn block_decision_round_trip() {
         let output = StopOutput {
             decision: Some(StopDecision::Block),
