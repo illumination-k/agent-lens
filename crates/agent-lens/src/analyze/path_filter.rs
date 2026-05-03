@@ -29,19 +29,6 @@ impl AnalyzePathFilter {
         self
     }
 
-    /// Whether the filter is restricted to test paths. Surfaced for
-    /// analyzers (e.g. similarity) that also need to filter at function
-    /// granularity beyond the path level.
-    pub fn only_tests(&self) -> bool {
-        self.only_tests
-    }
-
-    /// Whether the filter excludes test paths. Surfaced for the same
-    /// reason as [`Self::only_tests`].
-    pub fn exclude_tests(&self) -> bool {
-        self.exclude_tests
-    }
-
     pub fn compile(&self, root: &Path) -> Result<CompiledPathFilter, PathFilterError> {
         let base = if root.is_dir() {
             root.to_path_buf()

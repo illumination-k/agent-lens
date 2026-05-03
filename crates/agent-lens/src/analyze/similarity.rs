@@ -138,7 +138,7 @@ impl SimilarityAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
-        let corpus = collect_corpus(path, self.filter.path_filter(), self.function_selection())?;
+        let corpus = collect_corpus(path, &self.filter.path_filter(), self.function_selection())?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
