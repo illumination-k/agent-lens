@@ -13,6 +13,7 @@ use lens_domain::{CallShape, FunctionComplexity, FunctionShape, ReceiverExprKind
 use lens_rust::CallIndexOptions;
 use serde::Serialize;
 
+use super::cargo_meta::{CrateInfo, CrateNameCache, FALLBACK_CRATE_NAME};
 use super::{
     AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, SourceLang, collect_source_files,
     read_source,
@@ -61,6 +62,7 @@ impl FunctionGraphAnalyzer {
         };
         let filter = collection_filter.compile(path)?;
         let mut files = Vec::new();
+        let mut crate_cache = CrateNameCache::new();
         for source_file in collect_source_files(path, &filter)? {
             if !matches!(
                 SourceLang::from_path(&source_file.path),
@@ -69,7 +71,7 @@ impl FunctionGraphAnalyzer {
                 continue;
             }
             let path_is_test = filter.is_test_path(&source_file.path);
-            files.push(self.scan_file(path, &source_file, path_is_test)?);
+            files.push(self.scan_file(path, &source_file, path_is_test, &mut crate_cache)?);
         }
         let report = Report::build(path, files);
         match format {
@@ -85,9 +87,14 @@ impl FunctionGraphAnalyzer {
         root: &Path,
         file: &SourceFile,
         path_is_test: bool,
+        crate_cache: &mut CrateNameCache,
     ) -> Result<FileGraphInput, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
-        let module = module_path_for(root, file, lang);
+        let crate_info = match lang {
+            SourceLang::Rust => Some(crate_cache.lookup(&file.path)),
+            _ => None,
+        };
+        let module = module_path_for(root, file, lang, crate_info.as_ref());
         let mut functions = match lang {
             SourceLang::Rust => lens_rust::extract_function_shapes_with_modules(&source, &module)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
@@ -783,21 +790,55 @@ fn graph_language_label(files: &[FileGraphInput]) -> &'static str {
     }
 }
 
-fn module_path_for(root: &Path, file: &SourceFile, lang: SourceLang) -> String {
+fn module_path_for(
+    root: &Path,
+    file: &SourceFile,
+    lang: SourceLang,
+    crate_info: Option<&CrateInfo>,
+) -> String {
     if !root.is_dir() {
         return match lang {
-            SourceLang::Rust => "crate".to_owned(),
+            SourceLang::Rust => crate_info
+                .map(|info| info.crate_name.clone())
+                .unwrap_or_else(|| FALLBACK_CRATE_NAME.to_owned()),
             SourceLang::TypeScript(_) => "module".to_owned(),
             SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
             SourceLang::Go => "module".to_owned(),
         };
     }
     match lang {
-        SourceLang::Rust => rust_module_path_from_relative_file(&file.display_path),
+        SourceLang::Rust => rust_module_path_for_file(file, crate_info),
         SourceLang::TypeScript(_) => ts_module_path_from_relative_file(&file.display_path),
         SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
         SourceLang::Go => "module".to_owned(),
     }
+}
+
+/// Compute the absolute Rust module path for `file`. When the
+/// surrounding `Cargo.toml` is known, qualify with the real crate
+/// name and resolve the file relative to `<crate_root>/src/` so
+/// workspace analyses no longer collapse every crate under literal
+/// `crate::` (which made same-named items collide).
+///
+/// Falls back to the legacy display-path heuristic with a literal
+/// `crate` prefix when no manifest was found, preserving behaviour
+/// for single-file analyses and tests that build a synthetic tree
+/// without a `Cargo.toml`.
+fn rust_module_path_for_file(file: &SourceFile, crate_info: Option<&CrateInfo>) -> String {
+    let Some(info) = crate_info else {
+        return rust_module_path_from_relative_file(&file.display_path);
+    };
+    let Some(crate_root) = info.crate_root.as_deref() else {
+        return rust_module_path_from_relative_file(&file.display_path);
+    };
+    let src_root = crate_root.join("src");
+    let relative = file
+        .path
+        .strip_prefix(&src_root)
+        .ok()
+        .map(|p| p.display().to_string().replace('\\', "/"))
+        .unwrap_or_else(|| file.display_path.replace('\\', "/"));
+    qualify_rust_module_segments(&relative, &info.crate_name)
 }
 
 fn rust_module_path_from_relative_file(file: &str) -> String {
@@ -805,23 +846,29 @@ fn rust_module_path_from_relative_file(file: &str) -> String {
     if let Some(stripped) = rel.strip_prefix("src/") {
         rel = stripped.to_owned();
     }
+    qualify_rust_module_segments(&rel, FALLBACK_CRATE_NAME)
+}
+
+fn qualify_rust_module_segments(rel: &str, crate_name: &str) -> String {
     if rel == "lib.rs" || rel == "main.rs" {
-        return "crate".to_owned();
+        return crate_name.to_owned();
     }
-    if let Some(stripped) = rel.strip_suffix("/mod.rs") {
-        rel = stripped.to_owned();
+    let trimmed = if let Some(stripped) = rel.strip_suffix("/mod.rs") {
+        stripped
     } else if let Some(stripped) = rel.strip_suffix(".rs") {
-        rel = stripped.to_owned();
-    }
-    let module = rel
+        stripped
+    } else {
+        rel
+    };
+    let module = trimmed
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join("::");
     if module.is_empty() {
-        "crate".to_owned()
+        crate_name.to_owned()
     } else {
-        format!("crate::{module}")
+        format!("{crate_name}::{module}")
     }
 }
 
@@ -1222,6 +1269,86 @@ mod tests {
         let edge = &report["edges"].as_array().unwrap()[0];
         assert_eq!(edge["to"], Value::Null);
         assert_eq!(edge["resolution"], "ambiguous");
+    }
+
+    #[test]
+    fn cargo_manifest_qualifies_module_paths_with_real_crate_name() {
+        // When a `Cargo.toml` is present, the module prefix should
+        // come from `[package].name` (with hyphens normalised to
+        // underscores) instead of the literal `crate`.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Cargo.toml", "[package]\nname = \"my-pkg\"\n");
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn helper() {}\nfn caller() { helper(); crate::helper(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let nodes = report["nodes"].as_array().unwrap();
+        let helper = nodes.iter().find(|n| n["name"] == "helper").unwrap();
+        assert_eq!(helper["qualified_name"], "my_pkg::helper");
+        assert_eq!(helper["module"], "my_pkg");
+
+        // Both bare and `crate::`-prefixed calls land on the same
+        // resolved node, so they aggregate into one edge.
+        let edges = report["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["resolution"], "resolved");
+        assert_eq!(edges[0]["call_count"], 2);
+    }
+
+    #[test]
+    fn workspace_member_crates_disambiguate_same_named_items() {
+        // Two workspace crates each declare `Foo::new`. Without crate
+        // qualification both nodes collapse under `crate::Foo::new`
+        // and the call goes ambiguous; with the manifest lookup they
+        // become `agent_a::Foo::new` and `agent_b::Foo::new`.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-a/Cargo.toml",
+            "[package]\nname = \"agent-a\"\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-a/src/lib.rs",
+            "pub struct Foo;\nimpl Foo { pub fn new() -> Self { Self } }\n\
+             pub fn caller() { let _ = Foo::new(); }\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-b/Cargo.toml",
+            "[package]\nname = \"agent-b\"\n",
+        );
+        write_file(
+            dir.path(),
+            "crates/agent-b/src/lib.rs",
+            "pub struct Foo;\nimpl Foo { pub fn new() -> Self { Self } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let qualified: Vec<&str> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n["qualified_name"].as_str())
+            .collect();
+        assert!(qualified.contains(&"agent_a::Foo::new"));
+        assert!(qualified.contains(&"agent_b::Foo::new"));
+
+        let edge = edge_by_callee(&report, "new");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("agent_a::Foo::new"),
+        );
+        assert_eq!(report["summary"]["ambiguous_edge_count"], 0);
     }
 
     #[test]
