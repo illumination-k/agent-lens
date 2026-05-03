@@ -59,14 +59,6 @@ impl FilterConfig {
         self.diff_only
     }
 
-    pub fn only_tests(&self) -> bool {
-        self.only_tests
-    }
-
-    pub fn exclude_tests(&self) -> bool {
-        self.exclude_tests
-    }
-
     /// Build a fresh [`AnalyzePathFilter`] reflecting the current
     /// state. Cheap to call (a few bool copies plus a `Vec` clone) and
     /// kept as a factory rather than a borrowed field so the config
@@ -252,24 +244,14 @@ mod tests {
     }
 
     #[test]
-    fn accessors_reflect_builder_state() {
-        // Lock down the four accessors against silent regressions: each
-        // builder must propagate to the matching accessor, otherwise
-        // analyzers (e.g. similarity) that read the flags out for
-        // function-level filtering would silently disagree with the
-        // path-level walk.
-        let cfg = FilterConfig::default()
-            .with_diff_only(true)
-            .with_only_tests(true)
-            .with_exclude_patterns(vec!["gen.rs".to_owned()]);
-        assert!(cfg.diff_only(), "with_diff_only -> diff_only");
-        assert!(cfg.only_tests(), "with_only_tests -> only_tests");
-        assert!(!cfg.exclude_tests(), "default exclude_tests stays false");
-
-        let cfg = FilterConfig::default().with_exclude_tests(true);
-        assert!(cfg.exclude_tests(), "with_exclude_tests -> exclude_tests");
-        assert!(!cfg.only_tests());
-        assert!(!cfg.diff_only());
+    fn diff_only_accessor_reflects_builder_state() {
+        // `diff_only()` is read by similarity to short-circuit its
+        // pair-level diff filter; the other path-filter knobs flow into
+        // `path_filter()` and are exercised end-to-end by the analyzer
+        // test suites. Pin `diff_only` directly so the accessor can't
+        // silently invert.
+        assert!(FilterConfig::default().with_diff_only(true).diff_only());
+        assert!(!FilterConfig::default().diff_only());
     }
 
     #[test]

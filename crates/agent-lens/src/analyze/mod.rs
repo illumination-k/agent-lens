@@ -37,7 +37,7 @@ pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub type CouplingAnalyzerError = CrateAnalyzerError;
 pub use similarity::{
     DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
-    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer,
+    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, FunctionSelection, SimilarityAnalyzer,
 };
 pub use wrapper::WrapperAnalyzer;
 
