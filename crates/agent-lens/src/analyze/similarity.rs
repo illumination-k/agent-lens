@@ -18,7 +18,8 @@ use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_simila
 use rayon::prelude::*;
 use tracing::debug;
 
-use super::{AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
+use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::{AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
 
 mod candidates;
 mod corpus;
@@ -84,10 +85,7 @@ impl FunctionSelection {
 pub struct SimilarityAnalyzer {
     threshold: f64,
     opts: TSEDOptions,
-    diff_only: bool,
-    exclude_tests: bool,
-    only_tests: bool,
-    path_filter: AnalyzePathFilter,
+    filter: FilterConfig,
     min_lines: usize,
     top: Option<usize>,
 }
@@ -110,10 +108,7 @@ impl SimilarityAnalyzer {
         Self {
             threshold: DEFAULT_THRESHOLD,
             opts: TSEDOptions::default(),
-            diff_only: false,
-            exclude_tests: false,
-            only_tests: false,
-            path_filter: AnalyzePathFilter::new(),
+            filter: FilterConfig::default(),
             min_lines: DEFAULT_MIN_LINES,
             top: None,
         }
@@ -125,32 +120,7 @@ impl SimilarityAnalyzer {
         fn with_threshold, threshold: f64
     }
 
-    with_setter! {
-        /// Restrict reports to pairs where at least one function intersects
-        /// an unstaged changed line in `git diff -U0`.
-        fn with_diff_only, diff_only: bool
-    }
-
-    /// Drop test paths and test scaffolding before computing similarity.
-    /// In addition to the shared path-level filter, this filters
-    /// `#[test]` / `#[rstest]` / `#[<runner>::test]` functions and items
-    /// inside `#[cfg(test)] mod` blocks.
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.exclude_tests = exclude_tests;
-        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.only_tests = only_tests;
-        self.path_filter = self.path_filter.with_only_tests(only_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
-        self
-    }
+    delegate_filter_builders!(filter);
 
     with_setter! {
         /// Skip functions shorter than this many source lines. `similarity-ts`
@@ -168,7 +138,7 @@ impl SimilarityAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
-        let corpus = collect_corpus(path, &self.path_filter, self.function_selection())?;
+        let corpus = collect_corpus(path, self.filter.path_filter(), self.function_selection())?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
@@ -186,18 +156,13 @@ impl SimilarityAnalyzer {
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "analyze similarity finished"
         );
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report, self.top)),
-        }
+        render_report(&report, format, || format_markdown(&report, self.top))
     }
 
     fn function_selection(&self) -> FunctionSelection {
-        if self.only_tests {
+        if self.filter.only_tests() {
             FunctionSelection::OnlyTests
-        } else if self.exclude_tests {
+        } else if self.filter.exclude_tests() {
             FunctionSelection::ExcludeTests
         } else {
             FunctionSelection::All
@@ -274,7 +239,7 @@ impl SimilarityAnalyzer {
     }
 
     fn changed_ranges_for_run(&self, corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
-        if !self.diff_only {
+        if !self.filter.diff_only() {
             return HashMap::new();
         }
         let diff_started = Instant::now();
@@ -294,7 +259,7 @@ impl SimilarityAnalyzer {
         candidates: &'a CandidatePairs,
         changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
     ) -> (Cow<'a, [(usize, usize)]>, usize) {
-        if !self.diff_only {
+        if !self.filter.diff_only() {
             return (Cow::Borrowed(candidates.pairs.as_slice()), 0);
         }
         filter_pairs_touching_changes(corpus, candidates, changed_by_file)
