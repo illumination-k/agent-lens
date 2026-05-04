@@ -59,7 +59,7 @@ pub enum ContextSpanAnalyzerError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error(
-        "unsupported context-span root {path:?}; pass a Rust crate root, a TS/JS entry file, or a Python file/directory"
+        "unsupported context-span root {path:?}; pass a Rust crate root, a TS/JS entry file, a Python file/directory, or a Go file/module directory"
     )]
     UnsupportedRoot { path: PathBuf },
     #[error(
@@ -140,6 +140,19 @@ impl From<lens_py::CouplingError> for ContextSpanAnalyzerError {
                 source: Box::new(source),
             },
             lens_py::CouplingError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
+        }
+    }
+}
+
+impl From<lens_golang::CouplingError> for ContextSpanAnalyzerError {
+    fn from(value: lens_golang::CouplingError) -> Self {
+        match value {
+            lens_golang::CouplingError::Io { path, source } => Self::Io { path, source },
+            lens_golang::CouplingError::Parse { path, source } => Self::Parse {
+                path,
+                source: Box::new(source),
+            },
+            lens_golang::CouplingError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
         }
     }
 }
@@ -234,13 +247,19 @@ fn build_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
             SourceLang::Rust => build_rust_graph(path),
             SourceLang::TypeScript(_) => build_ts_graph(path),
             SourceLang::Python => build_python_graph(path),
-            SourceLang::Go => Err(ContextSpanAnalyzerError::UnsupportedRoot {
-                path: path.to_path_buf(),
-            }),
+            SourceLang::Go => build_go_graph(path),
         };
     }
 
     if path.is_dir() {
+        // `go.mod` is the unambiguous signal of a Go module root, so
+        // check it before the Rust crate-root resolver and the Python
+        // fallback. Without this, a Go project would fall through to
+        // Python's directory walk and report nonsense (or to the Rust
+        // resolver and fail with a confusing error).
+        if path.join("go.mod").is_file() {
+            return build_go_graph(path);
+        }
         if let Ok(root) = resolve_crate_root(path) {
             return build_rust_graph(&root);
         }
@@ -293,6 +312,27 @@ fn build_python_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerErr
         });
     }
     let edges = lens_py::extract_edges(&modules);
+    Ok(ModuleGraph {
+        root: path.to_path_buf(),
+        modules: modules
+            .into_iter()
+            .map(|m| ModuleFile {
+                path: m.path,
+                file: m.file,
+            })
+            .collect(),
+        edges,
+    })
+}
+
+fn build_go_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
+    let modules = lens_golang::build_module_tree(path)?;
+    if modules.is_empty() {
+        return Err(ContextSpanAnalyzerError::UnsupportedRoot {
+            path: path.to_path_buf(),
+        });
+    }
+    let edges = lens_golang::extract_edges(&modules);
     Ok(ModuleGraph {
         root: path.to_path_buf(),
         modules: modules
@@ -639,6 +679,41 @@ mod tests {
             .collect();
         assert!(reachable.contains(&"crate::a"));
         assert!(reachable.contains(&"crate::b"));
+    }
+
+    #[test]
+    fn go_module_directory_reports_import_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "a/a.go",
+            "package a\n\nimport \"github.com/x/proj/b\"\n\nvar _ = b.X\n",
+        );
+        write_file(
+            dir.path(),
+            "b/b.go",
+            "package b\n\nimport \"github.com/x/proj/c\"\n\nvar X = c.Y\n",
+        );
+        write_file(dir.path(), "c/c.go", "package c\n\nvar Y = 1\n");
+
+        let json = ContextSpanAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules = parsed["modules"].as_array().unwrap();
+        let a = modules.iter().find(|m| m["path"] == "crate::a").unwrap();
+        assert_eq!(a["direct"].as_u64().unwrap(), 1);
+        assert_eq!(a["transitive"].as_u64().unwrap(), 2);
+        assert_eq!(a["files"].as_u64().unwrap(), 2);
+        let reachable: Vec<&str> = a["reachable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(reachable.contains(&"crate::b"));
+        assert!(reachable.contains(&"crate::c"));
     }
 
     #[test]

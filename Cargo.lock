@@ -750,6 +750,7 @@ version = "0.1.0"
 dependencies = [
  "lens-domain",
  "rstest",
+ "tempfile",
  "thiserror",
  "tree-sitter",
  "tree-sitter-go",

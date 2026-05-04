@@ -289,26 +289,27 @@ enum AnalyzeCommand {
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
     Complexity(AnalyzeComplexityArgs),
-    /// Report module-level coupling metrics for a Rust crate or a
-    /// TypeScript / JavaScript module graph.
+    /// Report module-level coupling metrics for a Rust crate, a
+    /// TypeScript / JavaScript module graph, or a Go module.
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
     /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly
     /// connected components of the dependency graph (cycles). `path`
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
-    /// containing one, or a TypeScript / JavaScript entry file
+    /// containing one, a TypeScript / JavaScript entry file
     /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
-    /// `.cjs`) whose relative imports define the module graph.
+    /// `.cjs`) whose relative imports define the module graph, or a
+    /// `.go` file or Go module directory (containing `go.mod`).
     Coupling(AnalyzeCommonArgs),
     /// Emit a static function call graph as visualization-ready data.
     ///
     /// The graph is heuristic and current-source only: nodes are functions,
     /// edges are syntactic call sites, and callee resolution is limited to
     /// exact extracted names or unique last-segment matches. The parser is
-    /// chosen from each file extension (Rust, TypeScript/JavaScript, or
-    /// Python); other extensions are ignored silently. JSON is the default;
-    /// `--format md` emits a compact sanity summary.
+    /// chosen from each file extension (Rust, TypeScript/JavaScript,
+    /// Python, or Go); other extensions are ignored silently. JSON is the
+    /// default; `--format md` emits a compact sanity summary.
     FunctionGraph(AnalyzeCommonArgs),
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
@@ -319,12 +320,13 @@ enum AnalyzeCommand {
     /// span. Useful as an "onboarding cost" estimate — how many files
     /// an agent must open to reason about a given module. `path` may
     /// be a Rust crate root (or a directory containing one), a
-    /// TypeScript/JavaScript entry file, or a Python file/directory.
-    /// Frameworks with many implicit entries (Next.js App Router,
-    /// file-routed Remix / Astro) can pass `--entry-glob` repeatedly to
-    /// merge several TS/JS entry trees into one report; in that mode
-    /// `path` must be a directory and the patterns are evaluated
-    /// relative to it.
+    /// TypeScript/JavaScript entry file, a Python file/directory, or a
+    /// Go file or module directory (containing `go.mod`). Frameworks
+    /// with many implicit entries (Next.js App Router, file-routed
+    /// Remix / Astro) can pass `--entry-glob` repeatedly to merge
+    /// several TS/JS entry trees into one report; in that mode `path`
+    /// must be a directory and the patterns are evaluated relative to
+    /// it.
     ContextSpan(AnalyzeContextSpanArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
@@ -959,6 +961,7 @@ mod tests {
             "got: {help}"
         );
         assert!(help.contains("Python file/directory"), "got: {help}");
+        assert!(help.contains("Go file or module directory"), "got: {help}");
         assert!(help.contains("--entry-glob"), "got: {help}");
     }
 

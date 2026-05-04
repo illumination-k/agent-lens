@@ -193,6 +193,38 @@ fn receiver_type_text(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
+/// Lower a function body's tree-sitter node into the generic
+/// [`TreeNode`] used by APTED. Wrapper around [`build_tree`] that pins
+/// `is_root = true` so the resulting tree's root carries the canonical
+/// `"Block"` label.
+pub(crate) fn function_body_tree(body: Node<'_>, source: &[u8]) -> TreeNode {
+    build_tree(body, source, /* is_root = */ true)
+}
+
+/// Strip the surrounding quotes from a Go string literal.
+///
+/// Go has two string literal forms — interpreted strings (`"..."`) and
+/// raw strings (`` `...` ``). Both are valid in `import` statements,
+/// and their content (the import path) is identical between forms;
+/// only escape handling differs, which doesn't matter for import
+/// paths. Inputs that are too short to carry both delimiters or that
+/// don't match a quote pair fall through unchanged so callers see the
+/// original tokens rather than a silently-truncated value.
+pub(crate) fn unquote_go_string_literal(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() < 2 {
+        return trimmed.to_owned();
+    }
+    let bytes = trimmed.as_bytes();
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if (first == b'"' && last == b'"') || (first == b'`' && last == b'`') {
+        trimmed[1..trimmed.len() - 1].to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// Recursively lower a tree-sitter node into the generic [`TreeNode`]
 /// used by APTED. Identifier-bearing nodes carry their text as `value`
 /// so optional value-aware comparison can tell `Add` from `Mul`.
@@ -233,6 +265,32 @@ mod tests {
     use super::*;
     use lens_domain::{TSEDOptions, calculate_tsed, find_similar_functions};
     use rstest::rstest;
+
+    #[rstest]
+    #[case::interpreted_string("\"hello\"", "hello")]
+    #[case::raw_string("`world`", "world")]
+    // `<` (not `<=` or `==`) is the right boundary: a length-2 string
+    // (`""`) must still strip to the empty inner string, while a
+    // single delimiter character is too short to round-trip and must
+    // pass through unchanged.
+    #[case::empty("", "")]
+    #[case::single_quote_only("\"", "\"")]
+    #[case::single_backtick_only("`", "`")]
+    #[case::two_char_quoted_empty("\"\"", "")]
+    #[case::two_char_raw_empty("``", "")]
+    // Both endpoints must match the same delimiter style — without the
+    // `&&` between (first quote AND last quote) and (first backtick AND
+    // last backtick) inside an `||`, mismatched ends would silently
+    // pass through `[1..len-1]` and chop off real characters.
+    #[case::mismatched_quote_to_backtick("\"foo`", "\"foo`")]
+    #[case::mismatched_backtick_to_quote("`foo\"", "`foo\"")]
+    #[case::no_quotes("hello", "hello")]
+    fn unquote_go_string_literal_handles_quoting_shapes(
+        #[case] input: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(unquote_go_string_literal(input), expected);
+    }
 
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = GoParser::new();
