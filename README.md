@@ -47,7 +47,7 @@ protocol payloads and reports; everything else goes to stderr through
 
 ## Install
 
-### One-liner (Linux x86_64, macOS arm64 / x86_64)
+### One-liner (Linux x86_64 / arm64, glibc or musl; macOS arm64 / x86_64)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
