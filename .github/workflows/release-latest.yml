@@ -43,6 +43,14 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+            apt: musl-tools
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+            apt: musl-tools
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
@@ -52,6 +60,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive: zip
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -60,6 +71,16 @@ jobs:
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
           cache: false
+
+      - name: Install apt packages
+        if: matrix.apt != ''
+        env:
+          APT_PACKAGES: ${{ matrix.apt }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $APT_PACKAGES
 
       - name: Add rust target
         run: rustup target add ${{ matrix.target }}

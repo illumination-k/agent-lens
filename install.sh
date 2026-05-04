@@ -71,14 +71,27 @@ fetch() {
 	fi
 }
 
+detect_libc() {
+	# Prefer musl on systems whose dynamic loader is provided by musl (Alpine,
+	# Void musl, etc). Fall back to glibc otherwise.
+	if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+		echo "musl"
+	elif [ -f /lib/ld-musl-x86_64.so.1 ] || [ -f /lib/ld-musl-aarch64.so.1 ]; then
+		echo "musl"
+	else
+		echo "gnu"
+	fi
+}
+
 detect_target() {
 	os="$(uname -s)"
 	arch="$(uname -m)"
 	case "$os" in
 	Linux)
+		libc="$(detect_libc)"
 		case "$arch" in
-		x86_64 | amd64) echo "x86_64-unknown-linux-gnu" ;;
-		aarch64 | arm64) echo "aarch64-unknown-linux-gnu" ;;
+		x86_64 | amd64) echo "x86_64-unknown-linux-${libc}" ;;
+		aarch64 | arm64) echo "aarch64-unknown-linux-${libc}" ;;
 		*) err "unsupported Linux architecture: $arch (only x86_64 and aarch64 have pre-built binaries; build from source with cargo)" ;;
 		esac
 		;;
@@ -90,7 +103,7 @@ detect_target() {
 		esac
 		;;
 	MINGW* | MSYS* | CYGWIN*)
-		err "Windows is not supported by install.sh; download the .zip from https://github.com/$REPO/releases manually"
+		err "use install.sh from a POSIX shell only; on Windows, download the .zip from https://github.com/$REPO/releases manually (x86_64-pc-windows-msvc or aarch64-pc-windows-msvc)"
 		;;
 	*)
 		err "unsupported OS: $os"
