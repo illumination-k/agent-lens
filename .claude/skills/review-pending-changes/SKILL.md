@@ -38,13 +38,19 @@ agent-lens analyze complexity <path> --diff-only --format md
 
 If a report is empty, skip it silently — empty diff-only output is the success case.
 
-### 3. Crate-level coupling (no `--diff-only`)
+### 3. Crate / entry-level coupling (no `--diff-only`)
 
-`coupling` doesn't have a diff mode; it's a whole-crate metric. Only re-run it if the diff added or removed `mod` declarations, `pub use` re-exports, or moved files between modules:
+`coupling` doesn't have a diff mode; it's a whole-graph metric. Only re-run it if the diff changed module structure — for Rust, added or removed `mod` declarations, `pub use` re-exports, or moved files between modules; for TS/JS, added or removed relative `import` / `export` statements at module scope:
 
 ```bash
+# Rust
 git diff --name-only | grep -q -E '(lib|main|mod)\.rs|src/.*\.rs' && \
   agent-lens analyze coupling crates/<name> --format md
+
+# TS/JS — re-run when imports/exports moved
+git diff -U0 -- '*.ts' '*.tsx' '*.js' '*.jsx' \
+  | grep -qE '^[+-](import |export )' && \
+  agent-lens analyze coupling app/src/index.ts --format md
 ```
 
 ### 4. Aggregate and decide

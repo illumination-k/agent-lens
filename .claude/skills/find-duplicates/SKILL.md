@@ -71,6 +71,18 @@ This drops `#[test]` / `#[rstest]` / `#[<runner>::test]` free functions and ever
 - **wrapper hit, single call site** — inline it.
 - **wrapper hit, many call sites** — keep, but verify the indirection is doing real work (lifetime adjustment, trait dispatch, error mapping). If not, the function is a tax.
 
+## Confirming call-site count for a wrapper hit
+
+`wrapper` reports a hit but doesn't tell you _how many_ call sites it has — and "many call sites" vs "one call site" decides between inline and keep. Use `function-graph` to count:
+
+```bash
+agent-lens analyze function-graph crates/<name>/src \
+  | jq --arg fn "<wrapper-fn-name>" '
+      [.edges[] | select(.callee_name == $fn)] | length'
+```
+
+If the count is `1`, inline the wrapper. If `2+`, look at the call sites (`.edges[] | select(.callee_name == $fn) | {from, call_lines}`) before deciding. Resolution is heuristic, so treat the count as "at least N", not exact.
+
 ## Don't reach for it when
 
 - The "duplication" is structural / architectural (e.g. two services that do the same job) — that's a coupling/coherence question, not a TSED one.
