@@ -108,19 +108,6 @@ mod tests {
     }
 
     #[test]
-    fn tolerates_unknown_fields() {
-        let payload = json!({
-            "session_id": "sess",
-            "transcript_path": "/tmp/t.jsonl",
-            "cwd": "/repo",
-            "hook_event_name": "UserPromptSubmit",
-            "prompt": "hi",
-            "future_field": [1, 2, 3],
-        });
-        serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap();
-    }
-
-    #[test]
     fn empty_prompt_is_accepted() {
         let payload = json!({
             "session_id": "sess",

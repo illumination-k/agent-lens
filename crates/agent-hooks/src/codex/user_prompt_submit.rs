@@ -114,21 +114,6 @@ mod tests {
     }
 
     #[test]
-    fn tolerates_unknown_fields() {
-        let payload = json!({
-            "session_id": "sess",
-            "transcript_path": null,
-            "cwd": "/repo",
-            "model": "gpt-5",
-            "hook_event_name": "UserPromptSubmit",
-            "turn_id": "turn-1",
-            "prompt": "hi",
-            "future_field": "ignored",
-        });
-        serde_json::from_value::<CodexHookInput>(payload).unwrap();
-    }
-
-    #[test]
     fn block_decision_round_trip() {
         let output = UserPromptSubmitOutput {
             decision: Some(UserPromptSubmitDecision::Block),

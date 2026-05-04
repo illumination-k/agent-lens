@@ -51,7 +51,8 @@ pub enum ClaudeCodeHookInput {
 #[cfg(test)]
 mod dispatch_tests {
     use super::ClaudeCodeHookInput;
-    use serde_json::json;
+    use rstest::rstest;
+    use serde_json::{Value, json};
 
     fn ctx() -> serde_json::Value {
         json!({
@@ -157,5 +158,52 @@ mod dispatch_tests {
         });
         let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
         assert!(err.to_string().contains("session_id"), "{err}");
+    }
+
+    #[rstest]
+    #[case::pre_tool_use(json!({
+        "session_id": "sess-1",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {},
+        "future_field": 42,
+    }))]
+    #[case::post_tool_use(json!({
+        "session_id": "sess",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
+        "tool_input": {"file_path": "a.rs"},
+        "tool_response": {"success": true},
+        "future_field": 42,
+    }))]
+    #[case::session_start(json!({
+        "session_id": "sess",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "SessionStart",
+        "source": "resume",
+        "future_field": {"a": 1},
+    }))]
+    #[case::stop(json!({
+        "session_id": "sess",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "Stop",
+        "future": "ignored",
+    }))]
+    #[case::user_prompt_submit(json!({
+        "session_id": "sess",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "hi",
+        "future_field": [1, 2, 3],
+    }))]
+    fn tolerates_unknown_fields(#[case] payload: Value) {
+        serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap();
     }
 }

@@ -140,21 +140,4 @@ mod tests {
             })
         );
     }
-
-    #[test]
-    fn tolerates_unknown_fields() {
-        let payload = json!({
-            "session_id": "sess",
-            "transcript_path": null,
-            "cwd": "/repo",
-            "model": "gpt-5",
-            "hook_event_name": "PreToolUse",
-            "turn_id": "turn-1",
-            "tool_name": "Bash",
-            "tool_use_id": "call-1",
-            "tool_input": {},
-            "future_field": 42
-        });
-        serde_json::from_value::<CodexHookInput>(payload).unwrap();
-    }
 }

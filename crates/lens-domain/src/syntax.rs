@@ -20,10 +20,6 @@ pub enum SyntaxFact<T> {
 }
 
 impl<T> SyntaxFact<T> {
-    pub fn known(value: T) -> Self {
-        Self::Known(value)
-    }
-
     pub fn as_ref(&self) -> SyntaxFact<&T> {
         match self {
             Self::Known(value) => SyntaxFact::Known(value),

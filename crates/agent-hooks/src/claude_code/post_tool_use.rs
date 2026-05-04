@@ -37,6 +37,7 @@ pub enum PostToolUseDecision {
 mod tests {
     use super::*;
     use crate::claude_code::ClaudeCodeHookInput;
+    use rstest::rstest;
     use serde_json::json;
 
     fn full_payload() -> serde_json::Value {
@@ -61,30 +62,14 @@ mod tests {
         assert_eq!(input.tool_response, json!({"success": true}));
     }
 
-    #[test]
-    fn missing_tool_name_is_rejected() {
+    #[rstest]
+    #[case("tool_name")]
+    #[case("tool_response")]
+    fn rejects_missing_required_field(#[case] field: &str) {
         let mut payload = full_payload();
-        payload.as_object_mut().unwrap().remove("tool_name");
+        payload.as_object_mut().unwrap().remove(field);
         let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
-        assert!(err.to_string().contains("tool_name"), "{err}");
-    }
-
-    #[test]
-    fn missing_tool_response_is_rejected() {
-        let mut payload = full_payload();
-        payload.as_object_mut().unwrap().remove("tool_response");
-        let err = serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap_err();
-        assert!(err.to_string().contains("tool_response"), "{err}");
-    }
-
-    #[test]
-    fn tolerates_unknown_fields() {
-        let mut payload = full_payload();
-        payload
-            .as_object_mut()
-            .unwrap()
-            .insert("future_field".into(), json!(42));
-        serde_json::from_value::<ClaudeCodeHookInput>(payload).unwrap();
+        assert!(err.to_string().contains(field), "{err}");
     }
 
     #[test]

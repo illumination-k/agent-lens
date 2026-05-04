@@ -68,7 +68,8 @@ pub enum CodexHookInput {
 #[cfg(test)]
 mod dispatch_tests {
     use super::CodexHookInput;
-    use serde_json::json;
+    use rstest::rstest;
+    use serde_json::{Value, json};
 
     fn ctx() -> serde_json::Value {
         json!({
@@ -176,6 +177,75 @@ mod dispatch_tests {
             .insert("hook_event_name".into(), json!("Telepathy"));
         let err = serde_json::from_value::<CodexHookInput>(payload).unwrap_err();
         assert!(err.to_string().contains("variant"), "{err}");
+    }
+
+    #[rstest]
+    #[case::permission_request(json!({
+        "session_id": "sess",
+        "transcript_path": null,
+        "cwd": "/repo",
+        "model": "gpt-5",
+        "hook_event_name": "PermissionRequest",
+        "turn_id": "turn-1",
+        "tool_name": "Bash",
+        "tool_input": {},
+        "future_field": [],
+    }))]
+    #[case::pre_tool_use(json!({
+        "session_id": "sess",
+        "transcript_path": null,
+        "cwd": "/repo",
+        "model": "gpt-5",
+        "hook_event_name": "PreToolUse",
+        "turn_id": "turn-1",
+        "tool_name": "Bash",
+        "tool_use_id": "call-1",
+        "tool_input": {},
+        "future_field": 42,
+    }))]
+    #[case::post_tool_use(json!({
+        "session_id": "sess",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/repo",
+        "model": "gpt-5",
+        "hook_event_name": "PostToolUse",
+        "turn_id": "turn-1",
+        "tool_name": "apply_patch",
+        "tool_use_id": "call-1",
+        "tool_input": {"command": "*** Begin Patch\n*** End Patch"},
+        "tool_response": {"success": true},
+        "future_field": "ignored",
+    }))]
+    #[case::session_start(json!({
+        "session_id": "sess",
+        "transcript_path": null,
+        "cwd": "/repo",
+        "model": "gpt-5",
+        "hook_event_name": "SessionStart",
+        "source": "resume",
+        "future_field": {"a": 1},
+    }))]
+    #[case::stop(json!({
+        "session_id": "sess",
+        "transcript_path": null,
+        "cwd": "/repo",
+        "model": "gpt-5",
+        "hook_event_name": "Stop",
+        "turn_id": "turn-1",
+        "future_field": [1, 2],
+    }))]
+    #[case::user_prompt_submit(json!({
+        "session_id": "sess",
+        "transcript_path": null,
+        "cwd": "/repo",
+        "model": "gpt-5",
+        "hook_event_name": "UserPromptSubmit",
+        "turn_id": "turn-1",
+        "prompt": "hi",
+        "future_field": "ignored",
+    }))]
+    fn tolerates_unknown_fields(#[case] payload: Value) {
+        serde_json::from_value::<CodexHookInput>(payload).unwrap();
     }
 
     #[test]

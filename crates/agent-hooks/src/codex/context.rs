@@ -58,7 +58,8 @@ pub struct CommonHookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use rstest::rstest;
+    use serde_json::{Value, json};
 
     #[test]
     fn hook_context_round_trip_with_path() {
@@ -100,26 +101,26 @@ mod tests {
         assert!(ctx.transcript_path.is_none());
     }
 
-    #[test]
-    fn hook_context_missing_session_id_is_rejected() {
-        let v = json!({
+    #[rstest]
+    #[case::session_id(
+        json!({
             "transcript_path": null,
             "cwd": "/work",
             "model": "gpt-5",
-        });
-        let err = serde_json::from_value::<HookContext>(v).unwrap_err();
-        assert!(err.to_string().contains("session_id"), "{err}");
-    }
-
-    #[test]
-    fn hook_context_missing_model_is_rejected() {
-        let v = json!({
+        }),
+        "session_id",
+    )]
+    #[case::model(
+        json!({
             "session_id": "sess",
             "transcript_path": null,
             "cwd": "/work",
-        });
+        }),
+        "model",
+    )]
+    fn hook_context_rejects_missing_required_field(#[case] v: Value, #[case] expected: &str) {
         let err = serde_json::from_value::<HookContext>(v).unwrap_err();
-        assert!(err.to_string().contains("model"), "{err}");
+        assert!(err.to_string().contains(expected), "{err}");
     }
 
     #[test]
