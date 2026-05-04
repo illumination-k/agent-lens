@@ -42,7 +42,7 @@ fn analyze_function(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Optio
     let body = node.child_by_field_name("body")?;
     let name = qualify(owner, function_name_text(node, source)?);
     let stmt = single_statement(body)?;
-    let expr = statement_expr(stmt)?;
+    let expr = statement_expr(stmt, source)?;
     let (callee, args) = core_call(expr, source)?;
     let params = collect_param_names(node, source);
 
@@ -80,7 +80,7 @@ fn single_statement(block: Node<'_>) -> Option<Node<'_>> {
     Some(first)
 }
 
-fn statement_expr(stmt: Node<'_>) -> Option<Node<'_>> {
+fn statement_expr<'a>(stmt: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
     match stmt.kind() {
         "expression_statement" => stmt
             .child_by_field_name("expression")
@@ -93,18 +93,47 @@ fn statement_expr(stmt: Node<'_>) -> Option<Node<'_>> {
                 return None;
             }
             if expr.kind() == "expression_list" {
-                let mut inner = expr.walk();
-                let mut xs = expr.named_children(&mut inner);
-                let only = xs.next()?;
-                if xs.next().is_some() {
-                    return None;
-                }
-                return Some(only);
+                return single_expression_list_child(expr);
             }
             Some(expr)
         }
+        // `_, _ = call(...)` — a forwarding call whose results are
+        // intentionally discarded. With every LHS being a blank
+        // identifier, the statement carries no extra semantics, so the
+        // RHS expression is the same shape we look at for an
+        // expression-statement wrapper.
+        "assignment_statement" => {
+            let left = stmt.child_by_field_name("left")?;
+            if !all_blank_identifiers(left, source) {
+                return None;
+            }
+            let right = stmt.child_by_field_name("right")?;
+            single_expression_list_child(right)
+        }
         _ => None,
     }
+}
+
+fn single_expression_list_child(expr_list: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = expr_list.walk();
+    let mut xs = expr_list.named_children(&mut cursor);
+    let only = xs.next()?;
+    if xs.next().is_some() {
+        return None;
+    }
+    Some(only)
+}
+
+fn all_blank_identifiers(expr_list: Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = expr_list.walk();
+    let mut any = false;
+    for child in expr_list.named_children(&mut cursor) {
+        any = true;
+        if child.kind() != "identifier" || child.utf8_text(source).ok() != Some("_") {
+            return false;
+        }
+    }
+    any
 }
 
 fn core_call<'a>(expr: Node<'a>, source: &'a [u8]) -> Option<(String, Vec<Node<'a>>)> {
@@ -152,6 +181,15 @@ fn passthrough_arg_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         "keyed_element" => {
             let value = node.child_by_field_name("value")?;
             passthrough_arg_name(value, source)
+        }
+        // `args...` in a call site. The grammar wraps the spread in a
+        // `variadic_argument` whose sole named child is the underlying
+        // expression; matching its name against the corresponding
+        // variadic parameter (which `collect_param_names` already picks
+        // up) keeps `func f(... args ...T) { g(..., args...) }` looking
+        // like a pure forward.
+        "variadic_argument" => {
+            first_named_child(node).and_then(|c| passthrough_arg_name(c, source))
         }
         _ => None,
     }
@@ -297,6 +335,67 @@ func Wrap(source string, flag bool) int {
     fn rejects_indexed_callee_passthrough() {
         let src =
             "package p\nfunc Wrap(fs []func(int) int, i int, x int) int { return fs[i](x) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn detects_variadic_passthrough_with_blank_assignment() {
+        // The motivating shape: a Fprintf-style wrapper that drops both
+        // return values via `_, _ =` and forwards `args...` through to
+        // an inner variadic call. Every Go logging helper looks like
+        // this, so missing it would dilute wrapper findings on real
+        // code.
+        let src = r#"
+package p
+
+import (
+    "fmt"
+    "io"
+)
+
+func writef(w io.Writer, format string, args ...any) {
+    _, _ = fmt.Fprintf(w, format, args...)
+}
+"#;
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "writef");
+        assert_eq!(got[0].callee, "fmt.Fprintf");
+    }
+
+    #[test]
+    fn detects_single_blank_assignment_wrapper() {
+        let src = "package p\nfunc Wrap(x int) { _ = target(x) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].callee, "target");
+    }
+
+    #[test]
+    fn rejects_assignment_with_named_lhs() {
+        // `y = ...` keeps the value alive past the call; treating it as
+        // a wrapper would hide a use-site that the agent should still
+        // see. Only fully-discarded calls qualify.
+        let src = "package p\nvar y int\nfunc Wrap(x int) { y = target(x) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn detects_variadic_passthrough_in_return() {
+        let src = "package p\nfunc Wrap(args ...int) int { return target(args...) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].callee, "target");
+    }
+
+    #[test]
+    fn rejects_variadic_with_mismatched_name() {
+        // `args...` only counts as a forward if the spread name matches
+        // a parameter; a bare `xs...` against `args ...int` should not
+        // pass the structural check.
+        let src = "package p\nvar xs []int\nfunc Wrap(args ...int) int { return target(xs...) }\n";
         let got = find_wrappers(src).unwrap();
         assert!(got.is_empty());
     }
