@@ -16,9 +16,9 @@ use std::path::Path;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
+use super::runner::{FilterConfig, delegate_filter_builders, render_report};
 use super::{
-    AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, SourceLang, changed_line_ranges,
-    collect_source_files, format_optional_f64, overlaps_any, read_source,
+    AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64, read_source,
 };
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
@@ -26,27 +26,14 @@ use super::{
 /// CLI surface.
 #[derive(Debug, Default, Clone)]
 pub struct ComplexityAnalyzer {
-    diff_only: bool,
+    filter: FilterConfig,
     top: Option<usize>,
     min_score: Option<u32>,
-    path_filter: AnalyzePathFilter,
 }
 
 impl ComplexityAnalyzer {
     pub fn new() -> Self {
-        Self {
-            diff_only: false,
-            top: None,
-            min_score: None,
-            path_filter: AnalyzePathFilter::new(),
-        }
-    }
-
-    /// Restrict reports to functions intersecting an unstaged changed
-    /// line in `git diff -U0`.
-    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
-        self.diff_only = diff_only;
-        self
+        Self::default()
     }
 
     /// Cap the markdown report's function ranking to the top-N entries.
@@ -64,46 +51,17 @@ impl ComplexityAnalyzer {
         self
     }
 
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.path_filter = self.path_filter.with_only_tests(only_tests);
-        self
-    }
-
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
-        self
-    }
+    delegate_filter_builders!(filter);
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let files = self.collect_file_reports(path)?;
+        let files = self
+            .filter
+            .collect_per_file(path, |sf| self.analyze_file(sf))?;
         let report = Report::new(path, &files);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report, self.top, self.min_score)),
-        }
-    }
-
-    /// Resolve `path` to a list of per-file reports. Single-file inputs
-    /// produce a one-element vec; directory inputs walk recursively,
-    /// honouring `.gitignore`. Files with no functions are dropped so the
-    /// output stays signal-dense.
-    fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
-        let filter = self.path_filter.compile(path)?;
-        let mut out = Vec::new();
-        for source_file in collect_source_files(path, &filter)? {
-            if let Some(report) = self.analyze_file(&source_file)? {
-                out.push(report);
-            }
-        }
-        Ok(out)
+        render_report(&report, format, || {
+            format_markdown(&report, self.top, self.min_score)
+        })
     }
 
     /// Analyze a single file. Returns `None` when the file has no
@@ -112,10 +70,8 @@ impl ComplexityAnalyzer {
     fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
         let mut functions = extract_units(lang, &source).map_err(AnalyzerError::Parse)?;
-        if self.diff_only {
-            let changed = changed_line_ranges(&file.path);
-            functions.retain(|f| overlaps_any(f.start_line, f.end_line, &changed));
-        }
+        self.filter
+            .retain_changed(&mut functions, &file.path, |f| (f.start_line, f.end_line));
         if functions.is_empty() {
             return Ok(None);
         }

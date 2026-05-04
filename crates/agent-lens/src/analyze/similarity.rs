@@ -18,7 +18,8 @@ use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_simila
 use rayon::prelude::*;
 use tracing::debug;
 
-use super::{AnalyzePathFilter, AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
+use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::{AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
 
 mod candidates;
 mod corpus;
@@ -60,14 +61,30 @@ const SIGNATURE_SIMILARITY_WEIGHT: f64 = 0.2;
 /// around 10 seconds gives a limit around 13M pairs.
 const MAX_CANDIDATE_PAIRS: usize = 13_000_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FunctionSelection {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FunctionSelection {
+    #[default]
     All,
     ExcludeTests,
     OnlyTests,
 }
 
 impl FunctionSelection {
+    /// Build a selection from the same `(only_tests, exclude_tests)`
+    /// CLI args that drive the path-level filter. The CLI is the
+    /// canonical caller — passing both flags from one place lets path
+    /// and function-level test filtering stay in lock-step without the
+    /// analyzer having to read them back from the path filter.
+    pub fn from_args(only_tests: bool, exclude_tests: bool) -> Self {
+        if only_tests {
+            Self::OnlyTests
+        } else if exclude_tests {
+            Self::ExcludeTests
+        } else {
+            Self::All
+        }
+    }
+
     pub(super) fn includes(self, is_test: bool) -> bool {
         match self {
             Self::All => true,
@@ -84,10 +101,8 @@ impl FunctionSelection {
 pub struct SimilarityAnalyzer {
     threshold: f64,
     opts: TSEDOptions,
-    diff_only: bool,
-    exclude_tests: bool,
-    only_tests: bool,
-    path_filter: AnalyzePathFilter,
+    filter: FilterConfig,
+    selection: FunctionSelection,
     min_lines: usize,
     top: Option<usize>,
 }
@@ -110,10 +125,8 @@ impl SimilarityAnalyzer {
         Self {
             threshold: DEFAULT_THRESHOLD,
             opts: TSEDOptions::default(),
-            diff_only: false,
-            exclude_tests: false,
-            only_tests: false,
-            path_filter: AnalyzePathFilter::new(),
+            filter: FilterConfig::default(),
+            selection: FunctionSelection::All,
             min_lines: DEFAULT_MIN_LINES,
             top: None,
         }
@@ -125,31 +138,15 @@ impl SimilarityAnalyzer {
         fn with_threshold, threshold: f64
     }
 
+    delegate_filter_builders!(filter);
+
     with_setter! {
-        /// Restrict reports to pairs where at least one function intersects
-        /// an unstaged changed line in `git diff -U0`.
-        fn with_diff_only, diff_only: bool
-    }
-
-    /// Drop test paths and test scaffolding before computing similarity.
-    /// In addition to the shared path-level filter, this filters
-    /// `#[test]` / `#[rstest]` / `#[<runner>::test]` functions and items
-    /// inside `#[cfg(test)] mod` blocks.
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.exclude_tests = exclude_tests;
-        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.only_tests = only_tests;
-        self.path_filter = self.path_filter.with_only_tests(only_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
-        self
+        /// Function-level test filter. Path-level test filtering is set
+        /// independently via `with_only_tests` / `with_exclude_tests`;
+        /// the CLI keeps both in sync by deriving this value from the
+        /// same `(only_tests, exclude_tests)` args via
+        /// [`FunctionSelection::from_args`].
+        fn with_function_selection, selection: FunctionSelection
     }
 
     with_setter! {
@@ -168,7 +165,7 @@ impl SimilarityAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
-        let corpus = collect_corpus(path, &self.path_filter, self.function_selection())?;
+        let corpus = collect_corpus(path, &self.filter.path_filter(), self.selection)?;
         let function_count = corpus.len();
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
@@ -186,22 +183,7 @@ impl SimilarityAnalyzer {
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "analyze similarity finished"
         );
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report, self.top)),
-        }
-    }
-
-    fn function_selection(&self) -> FunctionSelection {
-        if self.only_tests {
-            FunctionSelection::OnlyTests
-        } else if self.exclude_tests {
-            FunctionSelection::ExcludeTests
-        } else {
-            FunctionSelection::All
-        }
+        render_report(&report, format, || format_markdown(&report, self.top))
     }
 
     /// Pairwise TSED over the corpus, then complete-link clustering. Inlined
@@ -274,7 +256,7 @@ impl SimilarityAnalyzer {
     }
 
     fn changed_ranges_for_run(&self, corpus: &[OwnedFunction]) -> HashMap<PathBuf, Vec<LineRange>> {
-        if !self.diff_only {
+        if !self.filter.diff_only() {
             return HashMap::new();
         }
         let diff_started = Instant::now();
@@ -294,7 +276,7 @@ impl SimilarityAnalyzer {
         candidates: &'a CandidatePairs,
         changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
     ) -> (Cow<'a, [(usize, usize)]>, usize) {
-        if !self.diff_only {
+        if !self.filter.diff_only() {
             return (Cow::Borrowed(candidates.pairs.as_slice()), 0);
         }
         filter_pairs_touching_changes(corpus, candidates, changed_by_file)
@@ -1035,6 +1017,31 @@ fn delta(xs: &[i32]) -> i32 {
     }
 
     #[test]
+    fn function_selection_from_args_maps_each_combo() {
+        // CLI exposes `only_tests` and `exclude_tests` as mutually
+        // exclusive flags (clap `conflicts_with`). The mapping pinned
+        // here is the contract the trait impl in `cli.rs` relies on.
+        assert_eq!(
+            FunctionSelection::from_args(false, false),
+            FunctionSelection::All
+        );
+        assert_eq!(
+            FunctionSelection::from_args(true, false),
+            FunctionSelection::OnlyTests
+        );
+        assert_eq!(
+            FunctionSelection::from_args(false, true),
+            FunctionSelection::ExcludeTests
+        );
+        // Both true is impossible via the CLI but the mapping still
+        // needs a deterministic answer; only_tests wins.
+        assert_eq!(
+            FunctionSelection::from_args(true, true),
+            FunctionSelection::OnlyTests
+        );
+    }
+
+    #[test]
     fn token_overlap_count_similarity_and_pair_keys_cover_edge_cases() {
         assert_eq!(token_overlap([].into_iter(), ["user"].into_iter()), 0.0);
         assert_eq!(
@@ -1538,7 +1545,7 @@ mod tests {
 
         let json = SimilarityAnalyzer::new()
             .with_threshold(0.5)
-            .with_only_tests(true)
+            .with_function_selection(FunctionSelection::OnlyTests)
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1719,7 +1726,7 @@ function test_beta(): void {
 
         let without_tests = SimilarityAnalyzer::new()
             .with_threshold(0.5)
-            .with_exclude_tests(true)
+            .with_function_selection(FunctionSelection::ExcludeTests)
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&without_tests).unwrap();

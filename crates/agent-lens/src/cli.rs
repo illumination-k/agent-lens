@@ -19,7 +19,7 @@ use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
-    HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
+    FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
@@ -566,9 +566,23 @@ impl_with_analyze_path_args!(
     FunctionGraphAnalyzer,
     ContextSpanAnalyzer,
     HotspotAnalyzer,
-    SimilarityAnalyzer,
     WrapperAnalyzer,
 );
+
+// Similarity needs the same `(only_tests, exclude_tests)` args at two
+// granularities: the path-level filter (skip whole files) plus a
+// function-level [`FunctionSelection`] (drop `#[test]` fns inside
+// non-test files). Wire both from the same args here so the analyzer
+// itself never has to read the bools back out of the path filter.
+impl WithAnalyzePathArgs for SimilarityAnalyzer {
+    fn with_analyze_path_args(self, args: AnalyzePathArgs) -> Self {
+        let selection = FunctionSelection::from_args(args.only_tests, args.exclude_tests);
+        self.with_only_tests(args.only_tests)
+            .with_exclude_tests(args.exclude_tests)
+            .with_exclude_patterns(args.exclude)
+            .with_function_selection(selection)
+    }
+}
 
 impl AnalyzeCommand {
     /// Pick the right analyzer for this CLI variant and produce its
@@ -847,6 +861,70 @@ mod tests {
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    /// `WithAnalyzePathArgs for SimilarityAnalyzer` is the only special
+    /// case in the trait family — it derives a [`FunctionSelection`] in
+    /// addition to the path-level filter so test-function filtering
+    /// stays in lock-step with path-level filtering. Drive the trait
+    /// impl end-to-end on a fixture with one `#[test]` and one
+    /// production function and assert each path-args combination
+    /// surfaces the right corpus.
+    #[test]
+    fn similarity_with_analyze_path_args_threads_function_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn production(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+
+#[cfg(test)]
+mod tests {
+    fn alpha() -> i32 {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        a + b + c + d
+    }
+}
+"#,
+        );
+
+        let run = |args: AnalyzePathArgs| {
+            let json = SimilarityAnalyzer::new()
+                .with_threshold(0.5)
+                .with_analyze_path_args(args)
+                .analyze(&file, OutputFormat::Json)
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            parsed["function_count"].as_u64().unwrap()
+        };
+
+        assert_eq!(run(AnalyzePathArgs::default()), 2, "All keeps both");
+        assert_eq!(
+            run(AnalyzePathArgs {
+                only_tests: true,
+                ..AnalyzePathArgs::default()
+            }),
+            1,
+            "OnlyTests drops the production fn"
+        );
+        assert_eq!(
+            run(AnalyzePathArgs {
+                exclude_tests: true,
+                ..AnalyzePathArgs::default()
+            }),
+            1,
+            "ExcludeTests drops the test fn"
+        );
     }
 
     fn help_for(args: &[&str]) -> String {

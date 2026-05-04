@@ -17,6 +17,7 @@ mod format;
 pub mod function_graph;
 pub mod hotspot;
 mod path_filter;
+mod runner;
 pub mod similarity;
 mod source_files;
 pub mod wrapper;
@@ -36,7 +37,7 @@ pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub type CouplingAnalyzerError = CrateAnalyzerError;
 pub use similarity::{
     DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
-    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, SimilarityAnalyzer,
+    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, FunctionSelection, SimilarityAnalyzer,
 };
 pub use wrapper::WrapperAnalyzer;
 
