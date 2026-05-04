@@ -216,6 +216,19 @@ impl From<lens_ts::CouplingError> for CrateAnalyzerError {
     }
 }
 
+impl From<lens_golang::CouplingError> for CrateAnalyzerError {
+    fn from(value: lens_golang::CouplingError) -> Self {
+        match value {
+            lens_golang::CouplingError::Io { path, source } => Self::Io { path, source },
+            lens_golang::CouplingError::Parse { path, source } => Self::Parse {
+                path,
+                source: Box::new(source),
+            },
+            lens_golang::CouplingError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

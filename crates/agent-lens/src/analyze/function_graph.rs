@@ -66,7 +66,12 @@ impl FunctionGraphAnalyzer {
         for source_file in collect_source_files(path, &filter)? {
             if !matches!(
                 SourceLang::from_path(&source_file.path),
-                Some(SourceLang::Rust | SourceLang::TypeScript(_) | SourceLang::Python)
+                Some(
+                    SourceLang::Rust
+                        | SourceLang::TypeScript(_)
+                        | SourceLang::Python
+                        | SourceLang::Go
+                )
             ) {
                 continue;
             }
@@ -94,7 +99,7 @@ impl FunctionGraphAnalyzer {
             SourceLang::Rust => Some(crate_cache.lookup(&file.path)),
             _ => None,
         };
-        let module = module_path_for(root, file, lang, crate_info.as_ref());
+        let module = module_path_for(root, file, lang, crate_info.as_ref(), &source);
         let mut functions = match lang {
             SourceLang::Rust => lens_rust::extract_function_shapes_with_modules(&source, &module)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
@@ -104,11 +109,8 @@ impl FunctionGraphAnalyzer {
             }
             SourceLang::Python => lens_py::extract_function_shapes_with_module(&source, &module)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Go => {
-                return Err(AnalyzerError::UnsupportedExtension {
-                    path: file.path.clone(),
-                });
-            }
+            SourceLang::Go => lens_golang::extract_function_shapes_with_module(&source, &module)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
         functions.retain(|f| self.includes_function(f, path_is_test));
 
@@ -127,7 +129,8 @@ impl FunctionGraphAnalyzer {
             }
             SourceLang::Python => lens_py::extract_call_shapes_with_module(&source, &module)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Go => Vec::new(),
+            SourceLang::Go => lens_golang::extract_call_shapes_with_module(&source, &module)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
         let complexity = match lang {
             SourceLang::Rust => lens_rust::extract_complexity_units(&source)
@@ -136,7 +139,8 @@ impl FunctionGraphAnalyzer {
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
             SourceLang::Python => lens_py::extract_complexity_units(&source)
                 .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Go => Vec::new(),
+            SourceLang::Go => lens_golang::extract_complexity_units(&source)
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
         };
 
         Ok(FileGraphInput {
@@ -175,6 +179,7 @@ enum GraphLanguage {
     Rust,
     TypeScript,
     Python,
+    Go,
 }
 
 impl GraphLanguage {
@@ -183,6 +188,7 @@ impl GraphLanguage {
             Self::Rust => "rust",
             Self::TypeScript => "typescript",
             Self::Python => "python",
+            Self::Go => "go",
         }
     }
 }
@@ -193,7 +199,7 @@ impl SourceLang {
             Self::Rust => GraphLanguage::Rust,
             Self::TypeScript(_) => GraphLanguage::TypeScript,
             Self::Python => GraphLanguage::Python,
-            Self::Go => unreachable!("unsupported function-graph language"),
+            Self::Go => GraphLanguage::Go,
         }
     }
 }
@@ -865,6 +871,7 @@ fn module_path_for(
     file: &SourceFile,
     lang: SourceLang,
     crate_info: Option<&CrateInfo>,
+    source: &str,
 ) -> String {
     if !root.is_dir() {
         return match lang {
@@ -873,14 +880,14 @@ fn module_path_for(
                 .unwrap_or_else(|| FALLBACK_CRATE_NAME.to_owned()),
             SourceLang::TypeScript(_) => "module".to_owned(),
             SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
-            SourceLang::Go => "module".to_owned(),
+            SourceLang::Go => go_module_path_from_file(&file.display_path, source),
         };
     }
     match lang {
         SourceLang::Rust => rust_module_path_for_file(file, crate_info),
         SourceLang::TypeScript(_) => ts_module_path_from_relative_file(&file.display_path),
         SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
-        SourceLang::Go => "module".to_owned(),
+        SourceLang::Go => go_module_path_from_file(&file.display_path, source),
     }
 }
 
@@ -979,6 +986,50 @@ fn python_module_path_from_relative_file(file: &str) -> String {
     } else {
         segments.join("::")
     }
+}
+
+/// Go's compilation unit is a *package* (directory), not a single file,
+/// so two `.go` files sharing a directory must collapse to the same
+/// module path. Use the parent-directory segments when the file lives
+/// in a subdirectory; for files that sit directly at the analyzer's
+/// root, peek at the `package` clause and use the declared package
+/// name. That keeps a one-file project's qualified names stable
+/// (`main::caller` rather than the `module::caller` placeholder a bare
+/// path-based heuristic would produce).
+fn go_module_path_from_file(file: &str, source: &str) -> String {
+    let rel = file.replace('\\', "/");
+    let segments: Vec<&str> = rel
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() > 1 {
+        return segments[..segments.len() - 1].join("::");
+    }
+    extract_go_package_name(source).unwrap_or_else(|| "module".to_owned())
+}
+
+/// Pluck the package name out of the first `package <name>` line.
+/// Skips line comments and blank lines; ignores `package` keywords
+/// that appear inside block comments because the simple scan can't
+/// see the comment boundaries — that's acceptable since `gofmt`-clean
+/// Go always declares its package on the first non-comment line.
+fn extract_go_package_name(source: &str) -> Option<String> {
+    for raw in source.lines() {
+        let line = raw.trim_start();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("package")
+            && let Some(first) = rest.split_whitespace().next()
+        {
+            return Some(first.to_owned());
+        }
+        // First non-comment, non-blank line that wasn't a package
+        // clause: bail out — anything else means we wandered past the
+        // header and the file is malformed for our purposes.
+        return None;
+    }
+    None
 }
 
 fn format_markdown(report: &Report) -> String {
@@ -1716,6 +1767,72 @@ mod tests {
     }
 
     #[test]
+    fn go_directory_yields_module_qualified_names_and_call_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "main.go",
+            concat!(
+                "package main\n\n",
+                "import \"github.com/x/proj/pkg/util\"\n\n",
+                "func caller() { util.Run() }\n",
+            ),
+        );
+        write_file(
+            dir.path(),
+            "pkg/util/util.go",
+            "package util\n\nfunc Run() {}\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let qualified: Vec<&str> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["qualified_name"].as_str().unwrap())
+            .collect();
+        assert!(
+            qualified.contains(&"main::caller"),
+            "expected main::caller node, got {qualified:?}",
+        );
+        assert!(
+            qualified.contains(&"pkg::util::Run"),
+            "expected pkg::util::Run node, got {qualified:?}",
+        );
+
+        let edge = edge_by_callee(&report, "Run");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("pkg::util::Run"),
+        );
+        assert_eq!(report["language"], "go");
+    }
+
+    #[test]
+    fn go_method_calls_carry_owner_qualified_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "service/service.go",
+            "package service\n\ntype Service struct{}\n\nfunc (s *Service) Helper() int { return 1 }\n\nfunc (s *Service) Caller() int { return Helper() }\n\nfunc Helper() int { return 0 }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let qualified: Vec<&str> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["qualified_name"].as_str().unwrap())
+            .collect();
+        // module qualified to "service" (package directory).
+        assert!(qualified.contains(&"service::Service::Caller"));
+        assert!(qualified.contains(&"service::Service::Helper"));
+        assert!(qualified.contains(&"service::Helper"));
+    }
+
+    #[test]
     fn tsx_files_are_parsed_for_function_graph() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
@@ -1844,6 +1961,30 @@ mod tests {
             "pkg"
         );
         assert_eq!(python_module_path_from_relative_file(""), "module");
+
+        assert_eq!(
+            go_module_path_from_file("main.go", "package main\n\nfunc main() {}\n"),
+            "main",
+        );
+        assert_eq!(
+            go_module_path_from_file("pkg/util/util.go", "package util\n"),
+            "pkg::util",
+        );
+        // No trailing parent and a missing package clause fall back to
+        // the placeholder so qualified names stay non-empty.
+        assert_eq!(
+            go_module_path_from_file("loose.go", "// pkg-less\n"),
+            "module"
+        );
+        // The package-name scanner must skip *both* blank lines and
+        // line comments (the `||` between the two checks). With `||`
+        // flipped to `&&`, the comment line would not be skipped, the
+        // function would bail on the first comment, and the package
+        // clause below would never be reached.
+        assert_eq!(
+            go_module_path_from_file("solo.go", "// header\n\npackage solo\nfunc f() {}\n"),
+            "solo",
+        );
     }
 
     #[test]

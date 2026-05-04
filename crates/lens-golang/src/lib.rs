@@ -17,12 +17,18 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod attrs;
+mod call_index;
 mod cohesion;
 mod complexity;
+mod context_span;
+mod coupling;
 mod parser;
 mod wrapper;
 
+pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};
 pub use cohesion::extract_cohesion_units;
 pub use complexity::extract_complexity_units;
+pub use context_span::{build_context_span_report, extract_context_spans};
+pub use coupling::{CouplingError, GoPackage, build_module_tree, extract_edges};
 pub use parser::{GoParseError, GoParser};
 pub use wrapper::find_wrappers;

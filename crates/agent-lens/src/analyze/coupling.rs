@@ -117,10 +117,30 @@ struct ModuleGraph {
 }
 
 fn build_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
-    if let Some(SourceLang::TypeScript(_)) = SourceLang::from_path(path) {
-        return build_ts_graph(path);
+    if let Some(lang) = SourceLang::from_path(path) {
+        return match lang {
+            SourceLang::TypeScript(_) => build_ts_graph(path),
+            SourceLang::Go => build_go_graph(path),
+            SourceLang::Rust => build_rust_graph(path),
+            SourceLang::Python => Err(CouplingAnalyzerError::UnsupportedRoot {
+                path: path.to_path_buf(),
+            }),
+        };
+    }
+    if path.is_dir() && has_go_workspace_marker(path) {
+        return build_go_graph(path);
     }
     build_rust_graph(path)
+}
+
+/// `go.mod` is the unambiguous signal that a directory is a Go module
+/// root. Without it we'd fall through to the Rust crate-root resolver,
+/// which would then fail with a confusing "no usable Rust crate root"
+/// error on a Go project. Checking for `go.mod` first is cheap and lets
+/// the analyzer accept a directory like `analyze coupling .` from a Go
+/// repo's root.
+fn has_go_workspace_marker(path: &Path) -> bool {
+    path.join("go.mod").is_file()
 }
 
 fn build_rust_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
@@ -143,6 +163,22 @@ fn build_rust_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
 fn build_ts_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
     let modules = lens_ts::build_module_tree(path)?;
     let edges = lens_ts::extract_edges(&modules);
+    Ok(ModuleGraph {
+        root: path.to_path_buf(),
+        modules: modules
+            .into_iter()
+            .map(|m| ModuleFile {
+                path: m.path,
+                file: m.file,
+            })
+            .collect(),
+        edges,
+    })
+}
+
+fn build_go_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
+    let modules = lens_golang::build_module_tree(path)?;
+    let edges = lens_golang::extract_edges(&modules);
     Ok(ModuleGraph {
         root: path.to_path_buf(),
         modules: modules
@@ -817,6 +853,69 @@ mod tests {
             assert_ne!(e["from"], "crate::generated");
             assert_ne!(e["to"], "crate::generated");
         }
+    }
+
+    #[test]
+    fn go_module_directory_reports_local_import_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "main.go",
+            concat!(
+                "package main\n\n",
+                "import \"github.com/x/proj/pkg/util\"\n\n",
+                "func main() { util.Run() }\n",
+            ),
+        );
+        write_file(
+            dir.path(),
+            "pkg/util/util.go",
+            "package util\n\nfunc Run() {}\n",
+        );
+
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(modules.contains(&"crate"));
+        assert!(modules.contains(&"crate::pkg::util"));
+        assert!(parsed["edge_count"].as_u64().unwrap() >= 1);
+        let util = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["path"] == "crate::pkg::util")
+            .expect("util module");
+        // util is depended on by main, so I = 0 (fully stable).
+        assert_eq!(util["instability"].as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn go_external_imports_do_not_create_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "main.go",
+            concat!(
+                "package main\n\n",
+                "import (\n    \"fmt\"\n    \"github.com/foo/bar\"\n)\n\n",
+                "func main() { fmt.Println(bar.Stuff) }\n",
+            ),
+        );
+
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["edge_count"], 0);
     }
 
     #[test]
