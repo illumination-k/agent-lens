@@ -87,6 +87,40 @@ pub fn nest(n: i32) -> i32 {
     run_git(dir, &["commit", "-q", "-m", "tweak b"]);
 }
 
+/// Create a tiny TypeScript project (with a `package.json` so the
+/// session-summary entry probe recognises it) inside an initialized
+/// git repo with two commits so hotspot analysis has churn signal to
+/// rank.
+pub fn init_repo_with_ts_project_for_session_summary(dir: &Path) {
+    run_git(dir, &["init", "-q", "-b", "main"]);
+    run_git(dir, &["config", "user.email", "test@example.com"]);
+    run_git(dir, &["config", "user.name", "Test"]);
+    write_file(
+        dir,
+        "package.json",
+        "{\n  \"name\": \"demo\",\n  \"private\": true\n}\n",
+    );
+    write_file(
+        dir,
+        "src/main.ts",
+        "import { add } from './util';\nexport const r = add(1, 2);\n",
+    );
+    write_file(
+        dir,
+        "src/util.ts",
+        "export function add(a: number, b: number) { return a + b; }\n",
+    );
+    run_git(dir, &["add", "."]);
+    run_git(dir, &["commit", "-q", "-m", "initial"]);
+    write_file(
+        dir,
+        "src/util.ts",
+        "export function add(a: number, b: number) {\n  if (a > 0) { return a + b; }\n  return a + b;\n}\n",
+    );
+    run_git(dir, &["add", "src/util.ts"]);
+    run_git(dir, &["commit", "-q", "-m", "tweak util"]);
+}
+
 /// Initialize a git repo with a Rust file but no top-level crate root
 /// (`src/lib.rs` or `src/main.rs`).
 pub fn init_repo_with_loose_rust_file(dir: &Path) {

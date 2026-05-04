@@ -8,10 +8,10 @@
 //! The point is an "onboarding sketch" — what the agent should know
 //! about this codebase before it starts touching files. Both halves
 //! are best-effort: a session that starts outside a git working tree
-//! gets a report without the hotspot section, and a session that isn't
-//! anchored at a Rust crate gets one without the coupling section. If
-//! neither half produces signal, the hook stays silent and falls
-//! through to a default no-op response.
+//! gets a report without the hotspot section, and a session that is
+//! anchored at neither a Rust crate nor a TS/JS project gets one
+//! without the coupling section. If neither half produces signal, the
+//! hook stays silent and falls through to a default no-op response.
 //!
 //! The body itself is rendered by [`crate::hooks::core::render_summary`]
 //! and shared with the parallel Claude Code SessionStart handler; this
@@ -57,7 +57,8 @@ impl Hook for SummaryHook {
 mod tests {
     use super::*;
     use crate::test_support::{
-        init_repo_with_crate_for_session_summary, init_repo_with_loose_rust_file, write_file,
+        init_repo_with_crate_for_session_summary, init_repo_with_loose_rust_file,
+        init_repo_with_ts_project_for_session_summary, write_file,
     };
     use agent_hooks::codex::{HookContext, SessionStartSource};
     use std::path::PathBuf;
@@ -158,5 +159,25 @@ mod tests {
             !body.contains("## Coupling"),
             "should skip coupling: {body}"
         );
+    }
+
+    #[test]
+    fn injects_coupling_section_for_ts_project_without_crate_root() {
+        // A pure TS project (no Rust crate root) should still get a
+        // coupling thumbnail — falling back to the conventional
+        // `src/main.ts` entry resolved from `package.json`.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_ts_project_for_session_summary(dir.path());
+
+        let out = SummaryHook::new()
+            .handle(input(dir.path().to_path_buf()))
+            .unwrap();
+        let body = out
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .expect("expected additionalContext");
+        assert!(body.contains("## Coupling"), "want coupling: {body}");
+        assert!(body.contains("crate::main"), "want main module: {body}");
+        assert!(body.contains("crate::util"), "want util module: {body}");
     }
 }

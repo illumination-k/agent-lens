@@ -115,9 +115,15 @@ enum SessionStartCommand {
     /// Inject a one-shot summary of the project's hotspots and
     /// coupling thumbnail into the new Claude Code session.
     ///
-    /// Runs once per session against `cwd`. Pieces that don't apply
-    /// (cwd outside a git working tree, or not anchored at a Rust
-    /// crate) are silently omitted; if neither applies, the hook
+    /// Runs once per session against `cwd`. The hotspot ranking covers
+    /// every supported language, and the coupling thumbnail is built
+    /// from a Rust crate when one is anchored at `cwd` or, failing
+    /// that, from a TypeScript / JavaScript entry file probed at the
+    /// conventional locations (`src/index.ts`, `src/main.ts`,
+    /// `index.ts`, …) when `cwd` carries a `tsconfig.json` or
+    /// `package.json`. Pieces that don't apply (cwd outside a git
+    /// working tree, or anchored at neither a Rust crate nor a TS/JS
+    /// project) are silently omitted; if neither applies, the hook
     /// returns a no-op and Claude Code starts unchanged.
     Summary,
 }
@@ -259,9 +265,15 @@ enum CodexSessionStartCommand {
     /// Inject a one-shot summary of the project's hotspots and
     /// coupling thumbnail into the new Codex session.
     ///
-    /// Runs once per session against `cwd`. Pieces that don't apply
-    /// (cwd outside a git working tree, or not anchored at a Rust
-    /// crate) are silently omitted; if neither applies, the hook
+    /// Runs once per session against `cwd`. The hotspot ranking covers
+    /// every supported language, and the coupling thumbnail is built
+    /// from a Rust crate when one is anchored at `cwd` or, failing
+    /// that, from a TypeScript / JavaScript entry file probed at the
+    /// conventional locations (`src/index.ts`, `src/main.ts`,
+    /// `index.ts`, …) when `cwd` carries a `tsconfig.json` or
+    /// `package.json`. Pieces that don't apply (cwd outside a git
+    /// working tree, or anchored at neither a Rust crate nor a TS/JS
+    /// project) are silently omitted; if neither applies, the hook
     /// returns a no-op and Codex starts unchanged.
     Summary,
 }

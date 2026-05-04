@@ -51,7 +51,8 @@ impl Hook for SummaryHook {
 mod tests {
     use super::*;
     use crate::test_support::{
-        init_repo_with_crate_for_session_summary, init_repo_with_loose_rust_file, write_file,
+        init_repo_with_crate_for_session_summary, init_repo_with_loose_rust_file,
+        init_repo_with_ts_project_for_session_summary, write_file,
     };
     use agent_hooks::claude_code::{HookContext, SessionStartSource};
     use std::path::PathBuf;
@@ -139,5 +140,25 @@ mod tests {
             !body.contains("## Coupling"),
             "should skip coupling: {body}"
         );
+    }
+
+    #[test]
+    fn injects_coupling_section_for_ts_project_without_crate_root() {
+        // A pure TS project (no Rust crate root) should still get a
+        // coupling thumbnail — falling back to the conventional
+        // `src/main.ts` entry resolved from `package.json`.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_ts_project_for_session_summary(dir.path());
+
+        let out = SummaryHook::new()
+            .handle(input(dir.path().to_path_buf()))
+            .unwrap();
+        let body = out
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .expect("expected additionalContext");
+        assert!(body.contains("## Coupling"), "want coupling: {body}");
+        assert!(body.contains("crate::main"), "want main module: {body}");
+        assert!(body.contains("crate::util"), "want util module: {body}");
     }
 }

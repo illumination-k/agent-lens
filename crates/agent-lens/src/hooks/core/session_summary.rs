@@ -2,16 +2,21 @@
 //!
 //! Both the Claude Code and Codex SessionStart handlers want to inject
 //! the same payload — a hotspot ranking plus a coupling thumbnail of the
-//! crate the agent is anchored at. The two protocols only differ in how
-//! that body is shaped into a hook response, so the rendering itself
+//! project the agent is anchored at. The two protocols only differ in
+//! how that body is shaped into a hook response, so the rendering itself
 //! lives here and the agent-specific modules are thin adapters that wrap
 //! [`render_summary`] in their respective output types.
+//!
+//! The coupling thumbnail prefers a Rust crate when one is anchored at
+//! `cwd`; otherwise it falls back to a TypeScript / JavaScript entry
+//! file probed from the conventional locations (`src/index.ts`,
+//! `src/main.ts`, `index.ts`, …) when `cwd` looks like a TS/JS project
+//! (presence of `tsconfig.json` or `package.json`).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use lens_domain::{CouplingReport, DependencyCycle, ModuleMetrics, PairCoupling, compute_report};
-use lens_rust::{build_module_tree, extract_edges};
 use tracing::warn;
 
 use crate::analyze::{HotspotAnalyzer, HotspotError, OutputFormat, resolve_crate_root};
@@ -43,8 +48,8 @@ pub enum SessionSummaryError {
 
 /// Render a hotspot + coupling summary for `cwd`, or return `None` when
 /// neither section produces signal (cwd outside a git working tree and
-/// not anchored at a Rust crate). The header is included so callers can
-/// inject the body verbatim.
+/// anchored at neither a Rust crate nor a TS/JS project). The header is
+/// included so callers can inject the body verbatim.
 pub fn render_summary(cwd: &Path) -> Result<Option<String>, SessionSummaryError> {
     let mut sections: Vec<String> = Vec::new();
     if let Some(s) = render_hotspot_section(cwd)? {
@@ -139,27 +144,96 @@ impl HotspotRow {
     }
 }
 
-/// Build the crate's coupling graph from `cwd` and return a compact
-/// section, or `None` when `cwd` isn't anchored at a Rust crate (no
-/// `src/lib.rs` or `src/main.rs`) — that path is "not for us" rather
-/// than an error worth surfacing.
+/// Build a coupling thumbnail for `cwd` and return a compact section,
+/// or `None` when `cwd` is anchored at neither a Rust crate (no
+/// `src/lib.rs` or `src/main.rs`) nor a TypeScript / JavaScript project
+/// (no `tsconfig.json` / `package.json` plus a recognisable entry
+/// file). Rust takes precedence so a workspace that ships both keeps
+/// the existing thumbnail.
 fn render_coupling_section(cwd: &Path) -> Result<Option<String>, SessionSummaryError> {
-    let root = match resolve_crate_root(cwd) {
-        Ok(p) => p,
-        Err(crate::analyze::CrateAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
-        Err(e) => return Err(SessionSummaryError::Coupling(e)),
+    let report = match build_rust_coupling_report(cwd)? {
+        Some(report) => report,
+        None => match build_ts_coupling_report(cwd) {
+            Some(report) => report,
+            None => return Ok(None),
+        },
     };
-    let modules = build_module_tree(&root)
-        .map_err(|e| SessionSummaryError::Coupling(crate::analyze::CrateAnalyzerError::from(e)))?;
-    let edges = extract_edges(&modules);
-    let module_paths: Vec<lens_domain::ModulePath> = modules.into_iter().map(|m| m.path).collect();
-    let report = compute_report(&module_paths, edges);
 
     if report.modules.is_empty() {
         return Ok(None);
     }
 
     Ok(Some(format_coupling(&report)))
+}
+
+fn build_rust_coupling_report(cwd: &Path) -> Result<Option<CouplingReport>, SessionSummaryError> {
+    let root = match resolve_crate_root(cwd) {
+        Ok(p) => p,
+        Err(crate::analyze::CrateAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
+        Err(e) => return Err(SessionSummaryError::Coupling(e)),
+    };
+    let modules = lens_rust::build_module_tree(&root)
+        .map_err(|e| SessionSummaryError::Coupling(crate::analyze::CrateAnalyzerError::from(e)))?;
+    let edges = lens_rust::extract_edges(&modules);
+    let module_paths: Vec<lens_domain::ModulePath> = modules.into_iter().map(|m| m.path).collect();
+    Ok(Some(compute_report(&module_paths, edges)))
+}
+
+/// Probe `cwd` for a TypeScript / JavaScript project and produce a
+/// coupling report rooted at the conventional entry file. Returns
+/// `None` whenever the heuristic gives up — TS parse / IO failures are
+/// degraded to a `tracing::warn` and a missing section rather than
+/// bubbled up, mirroring the hotspot section's "best-effort" stance.
+fn build_ts_coupling_report(cwd: &Path) -> Option<CouplingReport> {
+    let entry = resolve_ts_entry(cwd)?;
+    let modules = match lens_ts::build_module_tree(&entry) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                entry = %entry.display(),
+                error = %e,
+                "skipping TypeScript coupling section",
+            );
+            return None;
+        }
+    };
+    let edges = lens_ts::extract_edges(&modules);
+    let module_paths: Vec<lens_domain::ModulePath> = modules.into_iter().map(|m| m.path).collect();
+    Some(compute_report(&module_paths, edges))
+}
+
+/// Common entry-file names for a TS/JS project, probed in priority
+/// order. Kept short and conventional — the goal is to recognise
+/// idiomatic layouts (Vite, tsup, plain TS), not to handle every
+/// possible custom build.
+const TS_ENTRY_CANDIDATES: &[&str] = &[
+    "src/index.ts",
+    "src/index.tsx",
+    "src/main.ts",
+    "src/main.tsx",
+    "src/lib.ts",
+    "src/lib.tsx",
+    "index.ts",
+    "index.tsx",
+    "main.ts",
+    "main.tsx",
+];
+
+fn resolve_ts_entry(cwd: &Path) -> Option<PathBuf> {
+    // Require a marker so we don't try to coerce arbitrary directories
+    // into TS projects. `tsconfig.json` is the strongest signal, then
+    // `package.json` (which most TS/JS repos carry).
+    let has_marker = cwd.join("tsconfig.json").is_file() || cwd.join("package.json").is_file();
+    if !has_marker {
+        return None;
+    }
+    for candidate in TS_ENTRY_CANDIDATES {
+        let p = cwd.join(candidate);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn format_coupling(report: &CouplingReport) -> String {
@@ -238,6 +312,7 @@ fn format_cycle(cycle: &DependencyCycle) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_file;
     use lens_domain::ModulePath;
 
     fn module(path: &str, fan_in: usize, fan_out: usize, ifc: u64) -> ModuleMetrics {
@@ -351,6 +426,109 @@ mod tests {
         assert!(
             !out.contains("Dependency cycles:"),
             "should skip empty section: {out}",
+        );
+    }
+
+    #[test]
+    fn resolve_ts_entry_requires_a_project_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        // A bare `src/main.ts` with no marker shouldn't be picked up:
+        // arbitrary `.ts` files outside a real project would otherwise
+        // get dragged into a coupling thumbnail.
+        write_file(dir.path(), "src/main.ts", "export const x = 1;\n");
+        assert!(resolve_ts_entry(dir.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_ts_entry_picks_first_existing_candidate_under_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "package.json", "{\"name\":\"demo\"}\n");
+        write_file(dir.path(), "src/main.ts", "export const x = 1;\n");
+        let resolved = resolve_ts_entry(dir.path()).expect("entry resolved");
+        assert!(
+            resolved.ends_with("src/main.ts"),
+            "got {}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn resolve_ts_entry_prefers_index_over_main() {
+        // `src/index.ts` ranks above `src/main.ts` so a project that
+        // ships both lands on the more conventional library entry.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "tsconfig.json", "{}\n");
+        write_file(dir.path(), "src/index.ts", "export const x = 1;\n");
+        write_file(dir.path(), "src/main.ts", "export const y = 2;\n");
+        let resolved = resolve_ts_entry(dir.path()).expect("entry resolved");
+        assert!(
+            resolved.ends_with("src/index.ts"),
+            "got {}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn ts_coupling_section_lists_modules_when_entry_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "package.json", "{\"name\":\"demo\"}\n");
+        write_file(
+            dir.path(),
+            "src/main.ts",
+            "import { add } from './util';\nexport const r = add(1, 2);\n",
+        );
+        write_file(
+            dir.path(),
+            "src/util.ts",
+            "export function add(a: number, b: number) { return a + b; }\n",
+        );
+
+        let body = render_summary(dir.path()).unwrap().expect("summary body");
+        assert!(body.contains("## Coupling"), "want coupling: {body}");
+        assert!(body.contains("crate::main"), "want main module: {body}");
+        assert!(body.contains("crate::util"), "want util module: {body}");
+    }
+
+    #[test]
+    fn rust_coupling_takes_precedence_over_ts_when_both_present() {
+        // A repo that ships both a Rust crate and a TS project should
+        // still emit the Rust thumbnail — it's the primary source of
+        // truth for `agent-lens` itself, and changing the precedence
+        // would silently regress existing setups.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "package.json", "{\"name\":\"demo\"}\n");
+        write_file(
+            dir.path(),
+            "src/main.ts",
+            "import { add } from './util';\nexport const r = add(1, 2);\n",
+        );
+        write_file(
+            dir.path(),
+            "src/util.ts",
+            "export function add(a: number, b: number) { return a + b; }\n",
+        );
+        // Two-module Rust crate with cross-module references so the
+        // thumbnail's module table is non-empty (`format_coupling`
+        // hides modules with ifc=0).
+        write_file(dir.path(), "src/lib.rs", "pub mod a;\npub mod b;\n");
+        write_file(
+            dir.path(),
+            "src/a.rs",
+            "pub fn helper() {}\npub struct Foo;\n",
+        );
+        write_file(
+            dir.path(),
+            "src/b.rs",
+            "use crate::a::Foo;\nfn _x(_f: Foo) { crate::a::helper(); }\n",
+        );
+
+        let body = render_summary(dir.path()).unwrap().expect("summary body");
+        assert!(body.contains("## Coupling"), "want coupling: {body}");
+        assert!(body.contains("crate::a"), "want Rust module: {body}");
+        assert!(body.contains("crate::b"), "want Rust module: {body}");
+        assert!(
+            !body.contains("crate::util"),
+            "should not surface TS module: {body}",
         );
     }
 }
