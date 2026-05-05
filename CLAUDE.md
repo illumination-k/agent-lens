@@ -12,6 +12,7 @@ The project bundles two related surfaces:
 
 - Hook handlers that integrate with coding-agent workflows and surface focused context at useful moments.
 - On-demand analyzers that report codebase shape: duplication, wrappers, cohesion, complexity, coupling, context span, and hotspots.
+- A baseline / ratchet mode (`agent-lens baseline save | check`) that snapshots an analyzer's per-item metrics and on later runs fails only on regressions (worsened existing items, plus new items per `--new-item-policy`). Existing debt is grandfathered. Snapshots default to `.agent-lens/baseline/<analyzer>.json` under the git root and are intended to be committed so CI shares the same ratchet as the team. v1 covers the four numeric-metric analyzers: complexity, cohesion, coupling, hotspot.
 
 ## Development Process
 

@@ -54,19 +54,26 @@ impl CohesionAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let files = self
-            .filter
-            .collect_per_file(path, |sf| self.analyze_file(sf))?;
+        let files = self.collect(path)?;
         let report = Report::new(path, &files);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.min_score)
         })
     }
 
+    /// Walk `path` and return one [`CohesionFileReport`] per supported
+    /// source file with at least one cohesion unit (after filtering).
+    /// Used by [`Self::analyze`] before rendering, and by the baseline
+    /// subsystem to access typed per-unit data without re-extracting.
+    pub fn collect(&self, path: &Path) -> Result<Vec<CohesionFileReport>, AnalyzerError> {
+        self.filter
+            .collect_per_file(path, |sf| self.analyze_file(sf))
+    }
+
     /// Analyze a single file. Returns `None` when the file has no
     /// units (after filtering), so empty entries don't pollute the
     /// directory-mode report.
-    fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
+    fn analyze_file(&self, file: &SourceFile) -> Result<Option<CohesionFileReport>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
         let mut units = extract_units(lang, &source).map_err(AnalyzerError::Parse)?;
         self.filter
@@ -74,7 +81,7 @@ impl CohesionAnalyzer {
         if units.is_empty() {
             return Ok(None);
         }
-        Ok(Some(FileReport {
+        Ok(Some(CohesionFileReport {
             file: file.display_path.clone(),
             units,
         }))
@@ -103,10 +110,14 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, Bo
 /// Per-file slice of the report. Owns the display path so directory mode
 /// can attach a path relative to the walk root without storing the original
 /// `PathBuf`.
-#[derive(Debug)]
-struct FileReport {
-    file: String,
-    units: Vec<CohesionUnit>,
+///
+/// Public so the baseline subsystem can consume the typed per-file
+/// breakdown that [`CohesionAnalyzer::collect`] returns, without having
+/// to re-walk the corpus or parse the JSON report back out.
+#[derive(Debug, Clone)]
+pub struct CohesionFileReport {
+    pub file: String,
+    pub units: Vec<CohesionUnit>,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,7 +130,7 @@ struct Report<'a> {
 }
 
 impl<'a> Report<'a> {
-    fn new(path: &Path, files: &'a [FileReport]) -> Self {
+    fn new(path: &Path, files: &'a [CohesionFileReport]) -> Self {
         let unit_count = files.iter().map(|f| f.units.len()).sum();
         Self {
             root: path.display().to_string(),
@@ -137,8 +148,8 @@ struct FileView<'a> {
     units: Vec<UnitView<'a>>,
 }
 
-impl<'a> From<&'a FileReport> for FileView<'a> {
-    fn from(f: &'a FileReport) -> Self {
+impl<'a> From<&'a CohesionFileReport> for FileView<'a> {
+    fn from(f: &'a CohesionFileReport) -> Self {
         Self {
             file: f.file.as_str(),
             unit_count: f.units.len(),

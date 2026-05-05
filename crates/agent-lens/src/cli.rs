@@ -21,6 +21,11 @@ use agent_lens::analyze::{
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
     FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
 };
+use agent_lens::baseline::{
+    AnalyzerKind as BaselineAnalyzerKind, AnalyzerOptions as BaselineAnalyzerOptions,
+    BaselineCheck, BaselineCommand as BaselineRunnerCommand, BaselineSave, FailOn, NewItemPolicy,
+    RunOutcome, run_baseline,
+};
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
@@ -60,6 +65,19 @@ enum Command {
     /// Run an on-demand analyzer that emits LLM-friendly context.
     #[command(subcommand)]
     Analyze(AnalyzeCommand),
+    /// Save or check a baseline snapshot of analyzer metrics, then
+    /// fail only on regressions on later runs (a "ratchet").
+    ///
+    /// `agent-lens baseline save <analyzer> <path> [analyzer-args]
+    /// [--out PATH]` writes a snapshot of the analyzer's per-item
+    /// metrics to disk. `agent-lens baseline check <analyzer> <path>
+    /// [analyzer-args] [--baseline PATH]` re-runs the analyzer, diffs
+    /// against the snapshot, prints a regression report on stdout,
+    /// and exits 0 (clean) or 2 (regressions found). Existing debt is
+    /// grandfathered; only worsened items and (per `--new-item-policy`)
+    /// new items flip the exit code.
+    #[command(subcommand)]
+    Baseline(BaselineCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -503,11 +521,138 @@ struct AnalyzePathArgs {
     exclude: Vec<String>,
 }
 
+#[derive(Debug, Subcommand)]
+enum BaselineCommand {
+    /// Save a snapshot of the chosen analyzer's current per-item
+    /// metrics to disk.
+    #[command(subcommand)]
+    Save(BaselineSaveCommand),
+    /// Compare current per-item metrics against a saved baseline.
+    /// Exits 2 on regressions (existing items that got worse, plus
+    /// new items per `--new-item-policy`); 0 when clean.
+    #[command(subcommand)]
+    Check(BaselineCheckCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum BaselineSaveCommand {
+    /// Snapshot per-function complexity (cognitive, cyclomatic,
+    /// max_nesting). The stored ratchet metrics are
+    /// `cognitive,cyclomatic,max_nesting`; `maintainability_index` is
+    /// recorded but not ratcheted by default.
+    Complexity(BaselineComplexityArgs),
+    /// Snapshot per-cohesion-unit LCOM4. Inherent and trait `impl`s,
+    /// classes, and module-level units are all keyed on
+    /// `(file, kind, trait_name?, type_name)`.
+    Cohesion(BaselineCohesionArgs),
+    /// Snapshot per-module coupling (fan_out and instability).
+    /// Dependency cycles are recorded under `extras.cycles` so
+    /// `check` can flag newly-introduced cycles as regressions.
+    Coupling(BaselineCouplingArgs),
+    /// Snapshot per-file hotspot scores (`commits × cognitive_max`).
+    /// Note: scores depend on the git churn window — pin `--since`
+    /// when comparing across machines or commits.
+    Hotspot(BaselineHotspotArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum BaselineCheckCommand {
+    /// Compare current per-function complexity against the saved
+    /// snapshot.
+    Complexity(BaselineComplexityArgs),
+    /// Compare current per-unit cohesion against the saved snapshot.
+    Cohesion(BaselineCohesionArgs),
+    /// Compare current per-module coupling against the saved
+    /// snapshot, including a fresh check for newly-introduced cycles.
+    Coupling(BaselineCouplingArgs),
+    /// Compare current per-file hotspot scores against the saved
+    /// snapshot.
+    Hotspot(BaselineHotspotArgs),
+}
+
+#[derive(Debug, Args)]
+struct BaselineComplexityArgs {
+    #[command(flatten)]
+    analyze: AnalyzeComplexityArgs,
+    #[command(flatten)]
+    save: BaselineSaveOptions,
+    #[command(flatten)]
+    check: BaselineCheckOptions,
+}
+
+#[derive(Debug, Args)]
+struct BaselineCohesionArgs {
+    #[command(flatten)]
+    analyze: AnalyzeCohesionArgs,
+    #[command(flatten)]
+    save: BaselineSaveOptions,
+    #[command(flatten)]
+    check: BaselineCheckOptions,
+}
+
+#[derive(Debug, Args)]
+struct BaselineCouplingArgs {
+    #[command(flatten)]
+    analyze: AnalyzeCommonArgs,
+    #[command(flatten)]
+    save: BaselineSaveOptions,
+    #[command(flatten)]
+    check: BaselineCheckOptions,
+}
+
+#[derive(Debug, Args)]
+struct BaselineHotspotArgs {
+    #[command(flatten)]
+    analyze: AnalyzeHotspotArgs,
+    #[command(flatten)]
+    save: BaselineSaveOptions,
+    #[command(flatten)]
+    check: BaselineCheckOptions,
+}
+
+#[derive(Debug, Args, Default)]
+struct BaselineSaveOptions {
+    /// Where to write the snapshot. Defaults to
+    /// `<git-root>/.agent-lens/baseline/<analyzer>.json` (or
+    /// `<cwd>/.agent-lens/baseline/<analyzer>.json` outside git).
+    /// Honored on `save` only — `check` reads `--baseline` instead.
+    #[arg(long, value_name = "PATH")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Default)]
+struct BaselineCheckOptions {
+    /// Snapshot to read on `check`. Defaults to the same path `save`
+    /// would write to. Honored on `check` only.
+    #[arg(long, value_name = "PATH")]
+    baseline: Option<PathBuf>,
+    /// How `check` treats new items absent from the baseline.
+    /// `strict` (default) flags any new item with non-zero primary
+    /// metric as a regression (new debt). `threshold` flags only
+    /// items whose primary metric exceeds the analyzer's standard
+    /// cutoff. `ignore` reports new items but never flips the exit
+    /// code on them.
+    #[arg(long, value_enum, default_value_t = NewItemPolicy::default())]
+    new_item_policy: NewItemPolicy,
+    /// Which kinds of findings flip the exit code on `check`.
+    /// `any` (default) fires on either a worsened existing item or a
+    /// new-item-policy hit; `regression` only on worsened existing
+    /// items; `new-item` only on new-item hits.
+    #[arg(long, value_enum, default_value_t = FailOn::default())]
+    fail_on: FailOn,
+    /// Override the metrics that count toward "regressed" for an
+    /// existing item. Repeatable. Empty = use the analyzer's
+    /// defaults (e.g. `cognitive,cyclomatic,max_nesting` for
+    /// complexity).
+    #[arg(long = "metric", value_name = "METRIC")]
+    metrics: Vec<String>,
+}
+
 pub fn main() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             error!(error = %err, "agent-lens failed");
             ExitCode::from(1)
@@ -525,22 +670,236 @@ fn init_tracing() {
         .try_init();
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Hook(HookCommand::SessionStart(sub)) => run_session_start(sub),
-        Command::Hook(HookCommand::PreToolUse(sub)) => run_pre_tool_use(sub),
-        Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
-        Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args),
-        Command::CodexHook(CodexHookCommand::SessionStart(sub)) => run_codex_session_start(sub),
-        Command::CodexHook(CodexHookCommand::PreToolUse(sub)) => run_codex_pre_tool_use(sub),
-        Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
-        Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
-        Command::Analyze(sub) => run_analyze(sub),
+        Command::Hook(HookCommand::SessionStart(sub)) => {
+            run_session_start(sub)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Hook(HookCommand::PreToolUse(sub)) => {
+            run_pre_tool_use(sub)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Hook(HookCommand::PostToolUse(sub)) => {
+            run_post_tool_use(sub)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Hook(HookCommand::Setup(args)) => {
+            run_hook_setup(args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::CodexHook(CodexHookCommand::SessionStart(sub)) => {
+            run_codex_session_start(sub)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::CodexHook(CodexHookCommand::PreToolUse(sub)) => {
+            run_codex_pre_tool_use(sub)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => {
+            run_codex_post_tool_use(sub)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::CodexHook(CodexHookCommand::Setup(args)) => {
+            run_codex_hook_setup(args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Analyze(sub) => {
+            run_analyze(sub)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Baseline(sub) => run_baseline_command(sub),
     }
 }
 
 fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
     write_stdout_line(&cmd.run()?)
+}
+
+/// Dispatch a parsed `agent-lens baseline ...` invocation. Save
+/// commands emit a small status JSON on stdout and exit 0; check
+/// commands emit the full regression JSON and exit per the runner's
+/// [`agent_lens::baseline::BaselineExitCode`].
+fn run_baseline_command(cmd: BaselineCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let runner_cmd = match cmd {
+        BaselineCommand::Save(save) => BaselineRunnerCommand::Save(build_save(save)?),
+        BaselineCommand::Check(check) => BaselineRunnerCommand::Check(build_check(check)?),
+    };
+    let outcome = run_baseline(runner_cmd, &cwd)?;
+    match outcome {
+        RunOutcome::Save(save) => {
+            write_stdout_json(&save)?;
+            info!(
+                analyzer = %save.analyzer,
+                path = %save.path.display(),
+                items = save.item_count,
+                "wrote baseline snapshot",
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        RunOutcome::Check(check) => {
+            write_stdout_json(&check.report)?;
+            Ok(ExitCode::from(check.exit_code.as_u8()))
+        }
+    }
+}
+
+fn build_save(cmd: BaselineSaveCommand) -> Result<BaselineSave, Box<dyn std::error::Error>> {
+    Ok(match cmd {
+        BaselineSaveCommand::Complexity(args) => BaselineSave {
+            kind: BaselineAnalyzerKind::Complexity,
+            target: args.analyze.common.path.clone(),
+            out: args.save.out,
+            args_record: complexity_args_record(&args.analyze),
+            analyzer_options: complexity_options(&args.analyze),
+        },
+        BaselineSaveCommand::Cohesion(args) => BaselineSave {
+            kind: BaselineAnalyzerKind::Cohesion,
+            target: args.analyze.common.path.clone(),
+            out: args.save.out,
+            args_record: cohesion_args_record(&args.analyze),
+            analyzer_options: cohesion_options(&args.analyze),
+        },
+        BaselineSaveCommand::Coupling(args) => BaselineSave {
+            kind: BaselineAnalyzerKind::Coupling,
+            target: args.analyze.path.clone(),
+            out: args.save.out,
+            args_record: coupling_args_record(&args.analyze),
+            analyzer_options: coupling_options(&args.analyze),
+        },
+        BaselineSaveCommand::Hotspot(args) => BaselineSave {
+            kind: BaselineAnalyzerKind::Hotspot,
+            target: args.analyze.common.path.clone(),
+            out: args.save.out,
+            args_record: hotspot_args_record(&args.analyze),
+            analyzer_options: hotspot_options(&args.analyze),
+        },
+    })
+}
+
+fn build_check(cmd: BaselineCheckCommand) -> Result<BaselineCheck, Box<dyn std::error::Error>> {
+    Ok(match cmd {
+        BaselineCheckCommand::Complexity(args) => BaselineCheck {
+            kind: BaselineAnalyzerKind::Complexity,
+            target: args.analyze.common.path.clone(),
+            baseline: args.check.baseline,
+            policy: args.check.new_item_policy,
+            fail_on: args.check.fail_on,
+            metrics_override: args.check.metrics,
+            args_record: complexity_args_record(&args.analyze),
+            analyzer_options: complexity_options(&args.analyze),
+        },
+        BaselineCheckCommand::Cohesion(args) => BaselineCheck {
+            kind: BaselineAnalyzerKind::Cohesion,
+            target: args.analyze.common.path.clone(),
+            baseline: args.check.baseline,
+            policy: args.check.new_item_policy,
+            fail_on: args.check.fail_on,
+            metrics_override: args.check.metrics,
+            args_record: cohesion_args_record(&args.analyze),
+            analyzer_options: cohesion_options(&args.analyze),
+        },
+        BaselineCheckCommand::Coupling(args) => BaselineCheck {
+            kind: BaselineAnalyzerKind::Coupling,
+            target: args.analyze.path.clone(),
+            baseline: args.check.baseline,
+            policy: args.check.new_item_policy,
+            fail_on: args.check.fail_on,
+            metrics_override: args.check.metrics,
+            args_record: coupling_args_record(&args.analyze),
+            analyzer_options: coupling_options(&args.analyze),
+        },
+        BaselineCheckCommand::Hotspot(args) => BaselineCheck {
+            kind: BaselineAnalyzerKind::Hotspot,
+            target: args.analyze.common.path.clone(),
+            baseline: args.check.baseline,
+            policy: args.check.new_item_policy,
+            fail_on: args.check.fail_on,
+            metrics_override: args.check.metrics,
+            args_record: hotspot_args_record(&args.analyze),
+            analyzer_options: hotspot_options(&args.analyze),
+        },
+    })
+}
+
+fn complexity_options(args: &AnalyzeComplexityArgs) -> BaselineAnalyzerOptions {
+    BaselineAnalyzerOptions {
+        diff_only: args.diff.diff_only,
+        only_tests: args.common.path_filter.only_tests,
+        exclude_tests: args.common.path_filter.exclude_tests,
+        exclude: args.common.path_filter.exclude.clone(),
+        since: None,
+    }
+}
+
+fn cohesion_options(args: &AnalyzeCohesionArgs) -> BaselineAnalyzerOptions {
+    BaselineAnalyzerOptions {
+        diff_only: args.diff.diff_only,
+        only_tests: args.common.path_filter.only_tests,
+        exclude_tests: args.common.path_filter.exclude_tests,
+        exclude: args.common.path_filter.exclude.clone(),
+        since: None,
+    }
+}
+
+fn coupling_options(args: &AnalyzeCommonArgs) -> BaselineAnalyzerOptions {
+    BaselineAnalyzerOptions {
+        diff_only: false,
+        only_tests: args.path_filter.only_tests,
+        exclude_tests: args.path_filter.exclude_tests,
+        exclude: args.path_filter.exclude.clone(),
+        since: None,
+    }
+}
+
+fn hotspot_options(args: &AnalyzeHotspotArgs) -> BaselineAnalyzerOptions {
+    BaselineAnalyzerOptions {
+        diff_only: false,
+        only_tests: args.common.path_filter.only_tests,
+        exclude_tests: args.common.path_filter.exclude_tests,
+        exclude: args.common.path_filter.exclude.clone(),
+        since: args.since.clone(),
+    }
+}
+
+fn complexity_args_record(args: &AnalyzeComplexityArgs) -> serde_json::Value {
+    serde_json::json!({
+        "path": args.common.path.display().to_string(),
+        "diff_only": args.diff.diff_only,
+        "only_tests": args.common.path_filter.only_tests,
+        "exclude_tests": args.common.path_filter.exclude_tests,
+        "exclude": args.common.path_filter.exclude,
+    })
+}
+
+fn cohesion_args_record(args: &AnalyzeCohesionArgs) -> serde_json::Value {
+    serde_json::json!({
+        "path": args.common.path.display().to_string(),
+        "diff_only": args.diff.diff_only,
+        "only_tests": args.common.path_filter.only_tests,
+        "exclude_tests": args.common.path_filter.exclude_tests,
+        "exclude": args.common.path_filter.exclude,
+    })
+}
+
+fn coupling_args_record(args: &AnalyzeCommonArgs) -> serde_json::Value {
+    serde_json::json!({
+        "path": args.path.display().to_string(),
+        "only_tests": args.path_filter.only_tests,
+        "exclude_tests": args.path_filter.exclude_tests,
+        "exclude": args.path_filter.exclude,
+    })
+}
+
+fn hotspot_args_record(args: &AnalyzeHotspotArgs) -> serde_json::Value {
+    serde_json::json!({
+        "path": args.common.path.display().to_string(),
+        "since": args.since,
+        "only_tests": args.common.path_filter.only_tests,
+        "exclude_tests": args.common.path_filter.exclude_tests,
+        "exclude": args.common.path_filter.exclude,
+    })
 }
 
 trait WithAnalyzePathArgs: Sized {

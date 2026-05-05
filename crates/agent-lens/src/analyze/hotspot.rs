@@ -111,6 +111,27 @@ impl HotspotAnalyzer {
     }
 
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, HotspotError> {
+        let collection = self.collect(path)?;
+        let view = ReportView::new(
+            &collection.target,
+            &collection.repo_root,
+            collection.since.as_deref(),
+            &collection.entries,
+        );
+        match format {
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&view).map_err(HotspotError::Serialize)
+            }
+            OutputFormat::Md => Ok(format_markdown(&view, self.top)),
+        }
+    }
+
+    /// Resolve `path`, gather churn and complexity, and return the typed
+    /// [`HotspotCollection`] used by the renderer and by the baseline
+    /// subsystem. Returns the canonicalised target and detected repo
+    /// root so adapters can produce stable item ids without re-walking
+    /// the filesystem.
+    pub fn collect(&self, path: &Path) -> Result<HotspotCollection, HotspotError> {
         let abs = canonicalize(path)?;
         let repo_root = git_repo_root(&abs)?;
         let scope_rel = relative_to(&abs, &repo_root);
@@ -121,14 +142,25 @@ impl HotspotAnalyzer {
         let complexity = collect_complexity(&abs, &repo_root, &filter)?;
         let entries = compute_hotspots(churn, complexity);
 
-        let view = ReportView::new(&abs, &repo_root, self.since.as_deref(), &entries);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&view).map_err(HotspotError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&view, self.top)),
-        }
+        Ok(HotspotCollection {
+            target: abs,
+            repo_root,
+            since: self.since.clone(),
+            entries,
+        })
     }
+}
+
+/// Public typed result of [`HotspotAnalyzer::collect`]. Carries enough
+/// context (target, repo root, since window) for downstream consumers
+/// such as baseline adapters to attach stable identifiers to each
+/// [`HotspotEntry`].
+#[derive(Debug)]
+pub struct HotspotCollection {
+    pub target: PathBuf,
+    pub repo_root: PathBuf,
+    pub since: Option<String>,
+    pub entries: Vec<HotspotEntry>,
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, HotspotError> {

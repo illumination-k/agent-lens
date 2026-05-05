@@ -26,12 +26,12 @@ use std::path::{Path, PathBuf};
 
 use lens_domain::LanguageParser;
 
-pub use cohesion::CohesionAnalyzer;
-pub use complexity::ComplexityAnalyzer;
+pub use cohesion::{CohesionAnalyzer, CohesionFileReport};
+pub use complexity::{ComplexityAnalyzer, ComplexityFileReport};
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
-pub use coupling::CouplingAnalyzer;
+pub use coupling::{CouplingAnalyzer, CouplingCollection};
 pub use function_graph::FunctionGraphAnalyzer;
-pub use hotspot::{HotspotAnalyzer, HotspotError};
+pub use hotspot::{HotspotAnalyzer, HotspotCollection, HotspotError};
 
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
 pub type CouplingAnalyzerError = CrateAnalyzerError;

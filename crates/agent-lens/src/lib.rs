@@ -14,6 +14,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod analyze;
+pub mod baseline;
 pub mod hooks;
 
 #[doc(hidden)]
