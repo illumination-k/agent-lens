@@ -83,6 +83,20 @@ impl CouplingAnalyzer {
         path: &Path,
         format: OutputFormat,
     ) -> Result<String, CouplingAnalyzerError> {
+        let collection = self.collect(path)?;
+        let view = ReportView::new(&collection.root, &collection.report);
+        match format {
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
+            }
+            OutputFormat::Md => Ok(format_markdown(&view)),
+        }
+    }
+
+    /// Build the language-specific module tree for `path`, apply path
+    /// filters, and return the typed [`CouplingCollection`] used by the
+    /// renderer and by the baseline subsystem.
+    pub fn collect(&self, path: &Path) -> Result<CouplingCollection, CouplingAnalyzerError> {
         let mut graph = build_graph(path)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
@@ -93,14 +107,21 @@ impl CouplingAnalyzer {
             .retain(|e| kept.contains(&e.from) && kept.contains(&e.to));
         let module_paths: Vec<ModulePath> = graph.modules.iter().map(|m| m.path.clone()).collect();
         let report = compute_report(&module_paths, graph.edges);
-        let view = ReportView::new(&graph.root, &report);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&view)),
-        }
+        Ok(CouplingCollection {
+            root: graph.root,
+            report,
+        })
     }
+}
+
+/// Public typed result of [`CouplingAnalyzer::collect`]. Carries the
+/// resolved entry root next to the [`CouplingReport`] so callers (the
+/// renderer, baseline adapters) don't have to re-resolve the crate / TS
+/// entry / Go module root from the original path.
+#[derive(Debug)]
+pub struct CouplingCollection {
+    pub root: PathBuf,
+    pub report: CouplingReport,
 }
 
 #[derive(Debug)]
