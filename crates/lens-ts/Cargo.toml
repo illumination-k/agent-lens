@@ -14,7 +14,7 @@ oxc_ast = "0.127"
 oxc_ast_visit = "0.127"
 oxc_parser = "0.127"
 oxc_span = "0.127"
-oxc_syntax = "0.127"
+oxc_syntax = "0.129"
 thiserror = { workspace = true }
 
 [dev-dependencies]
