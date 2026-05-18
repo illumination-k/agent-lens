@@ -158,11 +158,11 @@ agent-lens analyze complexity src/foo.rs
 # Complexity only for functions overlapping `git diff -U0` hunks
 agent-lens analyze complexity src/foo.rs --diff-only
 
-# Module-level Fan-In / Fan-Out / Henry-Kafura IFC, Instability,
-# and cyclic SCCs for a Rust crate
+# Module-level Fan-In / Fan-Out / Henry-Kafura IFC, Instability, and
+# cyclic SCCs for a Rust crate, TS/JS module graph, or Go module
 agent-lens analyze coupling crates/agent-lens
 
-# Rust static function graph for visualization tooling
+# Static function call graph for visualization tooling
 agent-lens analyze function-graph crates/agent-lens
 
 # Per-module transitive dependency closure ("how many files do I need
@@ -253,9 +253,9 @@ Analyzer-specific options today:
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
-`wrapper`, `cohesion`, and `hotspot` cover all four language families.
-`context-span` covers Rust, TypeScript / JavaScript, and Python. `coupling`
-and `function-graph` are Rust-only.
+`wrapper`, `cohesion`, `hotspot`, `function-graph`, and `context-span` cover
+all four language families. `coupling` covers Rust, TypeScript / JavaScript,
+and Go.
 
 ### As a Claude Code hook
 
@@ -415,16 +415,16 @@ new handlers to plug into the same plumbing.
 
 ### Analyzers
 
-| Subcommand       | What it surfaces                                                                                                                                                                                                                                                                       | Languages                 |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `similarity`     | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                                                                            | Rust, TS / JS, Python, Go |
-| `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                                                                         | Rust, TS / JS, Python, Go |
-| `cohesion`       | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                                                                             | Rust, TS / JS, Python, Go |
-| `complexity`     | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                                                     | Rust, TS / JS, Python, Go |
-| `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                      | Rust                      |
-| `function-graph` | Static Rust function nodes and heuristic caller→callee edges as visualization-ready JSON. Node weights include static call counts, fan-in/out, LOC, Cyclomatic / Cognitive / Nesting, Halstead Volume, Maintainability Index, plus runtime placeholders for later trace/profile joins. | Rust                      |
-| `context-span`   | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                                                                              | Rust, TS / JS, Python     |
-| `hotspot`        | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                                                                       | Rust, TS / JS, Python, Go |
+| Subcommand       | What it surfaces                                                                                                                                                                                                                                                                  | Languages                 |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `similarity`     | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                                                                       | Rust, TS / JS, Python, Go |
+| `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                                                                    | Rust, TS / JS, Python, Go |
+| `cohesion`       | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                                                                        | Rust, TS / JS, Python, Go |
+| `complexity`     | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                                                | Rust, TS / JS, Python, Go |
+| `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                 | Rust, TS / JS, Go         |
+| `function-graph` | Static function nodes and heuristic caller→callee edges as visualization-ready JSON. Node weights include static call counts, fan-in/out, LOC, Cyclomatic / Cognitive / Nesting, Halstead Volume, Maintainability Index, plus runtime placeholders for later trace/profile joins. | Rust, TS / JS, Python, Go |
+| `context-span`   | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                                                                         | Rust, TS / JS, Python, Go |
+| `hotspot`        | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                                                                  | Rust, TS / JS, Python, Go |
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
@@ -454,21 +454,22 @@ Adding a language means writing one adapter crate and wiring it into the
 | Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser)    | `lens-py`     |
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
-`similarity`, `complexity`, `wrapper`, `cohesion`, and `hotspot` are wired
-through the Rust, TypeScript / JavaScript, Python, and Go adapters.
-`context-span` is wired through Rust, TypeScript / JavaScript, and Python.
-`coupling` is Rust-only today because it reaches into Rust `mod` resolution.
-`function-graph` is also Rust-only and uses a syntactic call-site index rather
-than type inference or macro expansion. Its JSON is meant for external
-visualization: callers can switch graph layers between structure
-(`fan_in`/`fan_out`, call counts), maintainability (`loc`, complexity, MI),
-and later runtime overlays (`total_time_ms`, `self_time_ms`, errors).
+`similarity`, `complexity`, `wrapper`, `cohesion`, `hotspot`,
+`function-graph`, and `context-span` are wired through the Rust,
+TypeScript / JavaScript, Python, and Go adapters. `coupling` is wired
+through the Rust, TypeScript / JavaScript, and Go adapters; Python is not
+covered yet because it has no `coupling` module-graph extractor.
+`function-graph` uses a syntactic call-site index rather than type inference
+or macro expansion. Its JSON is meant for external visualization: callers can
+switch graph layers between structure (`fan_in`/`fan_out`, call counts),
+maintainability (`loc`, complexity, MI), and later runtime overlays
+(`total_time_ms`, `self_time_ms`, errors).
 
 ## Workspace layout
 
 ```
 crates/
-├── agent-lens/    # the CLI binary (clap-derived dispatch only)
+├── agent-lens/    # the CLI binary (clap dispatch + agent-lens.toml profile runner)
 ├── agent-hooks/   # Claude Code & Codex hook protocol schemas + Hook trait
 ├── lens-domain/   # language-neutral primitives: TreeNode, APTED, TSED,
 │                  # FunctionDef, CohesionUnit, FunctionComplexity,

@@ -1,21 +1,21 @@
 ---
 name: audit-architecture
-description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `context-span`, and `cohesion`. Works on Rust crates and TypeScript / JavaScript module graphs (with Python supported by `context-span` / `cohesion`).
+description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `context-span`, and `cohesion`. `coupling` works on Rust crates, TypeScript / JavaScript module graphs, and Go modules; `context-span` and `cohesion` additionally support Python.
 ---
 
 # Audit module structure with agent-lens
 
 Three analyzers cover the architecture question:
 
-- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates and on TS/JS module graphs (the entry file's relative-import closure).
-- `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, and Python. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
-- `cohesion` — per-`impl` (Rust) / per-class (TS, Python) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
+- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), and Go modules (package-granular).
+- `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, Python, and Go. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
+- `cohesion` — per-`impl` (Rust) / per-class (TS, Python, Go) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
 
 ## Workflow
 
 ### 1. Crate-wide / entry-wide coupling
 
-`coupling` takes either a Rust crate root (`src/lib.rs` / `src/main.rs`, or a directory containing one) or a TypeScript / JavaScript entry file (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` / `.cjs`) whose relative imports define the module graph:
+`coupling` takes a Rust crate root (`src/lib.rs` / `src/main.rs`, or a directory containing one), a TypeScript / JavaScript entry file (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` / `.cjs`) whose relative imports define the module graph, or a Go file / module directory (one containing `go.mod`):
 
 ```bash
 # Rust crate
@@ -23,6 +23,9 @@ agent-lens analyze coupling crates/agent-lens --format md
 
 # TS/JS module graph from an entry
 agent-lens analyze coupling app/src/index.ts --format md
+
+# Go module (directory containing go.mod)
+agent-lens analyze coupling ./cmd/server --format md
 ```
 
 Look for, in order:
@@ -45,6 +48,9 @@ agent-lens analyze context-span app/src/index.ts --format md
 
 # Python file or directory
 agent-lens analyze context-span pkg/foo --format md
+
+# Go file or module directory
+agent-lens analyze context-span ./cmd/server --format md
 ```
 
 For TS/JS frameworks where there is no single entry (Next.js App Router, Remix, Astro), pass `path` as the project root and merge several entry trees with `--entry-glob` (repeatable):
