@@ -7,6 +7,8 @@
 //!   binary can serve many hooks from `settings.json`.
 //! * [`analyze`] — on-demand code analyses that produce LLM-friendly context
 //!   (e.g. cohesion reports).
+//! * [`config`] — `agent-lens.toml` parsing: named analysis profiles that
+//!   the `run` subcommand fans out across several analyzers.
 //!
 //! Only the pieces exercised by the current CLI live here today; the rest
 //! will land as new subcommands are added.
@@ -14,6 +16,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod analyze;
+pub mod config;
 pub mod hooks;
 
 #[doc(hidden)]

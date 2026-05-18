@@ -52,8 +52,11 @@ pub(crate) use source_files::{SourceFile, collect_source_files};
 /// Output format shared across analyzers.
 ///
 /// Lives at the module root so every analyzer's `--format` flag
-/// resolves to the same enum, both in clap and in the public API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+/// resolves to the same enum, both in clap and in the public API. The
+/// `Deserialize` impl lets `agent-lens.toml` profiles name a format with
+/// the same `json` / `md` spelling clap accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Json,
     Md,

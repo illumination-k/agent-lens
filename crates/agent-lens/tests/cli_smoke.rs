@@ -137,3 +137,88 @@ fn codex_hook_setup_project_writes_config_toml() {
     assert!(contents.contains("agent-lens codex-hook pre-tool-use complexity"));
     assert!(contents.contains("agent-lens codex-hook post-tool-use similarity"));
 }
+
+const BRANCHY_RS: &str = "fn branchy(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\n";
+
+#[test]
+fn run_profile_emits_combined_markdown_report() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"complexity\", \"wrapper\"]\n\n[profile.audit.complexity]\nmin-score = 1\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "audit"], dir.path(), None);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("## complexity"), "got: {stdout}");
+    assert!(stdout.contains("## wrapper"), "got: {stdout}");
+    assert!(stdout.contains("`branchy`"), "got: {stdout}");
+}
+
+#[test]
+fn run_profile_emits_combined_json_report() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "audit"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["profile"], "audit");
+    assert_eq!(json["results"][0]["tool"], "complexity");
+    assert!(json["results"][0]["report"].is_object(), "got: {json}");
+}
+
+#[test]
+fn run_resolves_target_relative_to_explicit_config_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    write_file(
+        dir.path(),
+        "cfg/agent-lens.toml",
+        "[profile.audit]\npath = \"../src\"\ntools = [\"complexity\"]\n",
+    );
+
+    let output = agent_lens(
+        &["run", "audit", "--config", "cfg/agent-lens.toml"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["profile"], "audit");
+    assert_eq!(json["results"][0]["tool"], "complexity");
+}
+
+#[test]
+fn run_with_unknown_profile_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "missing"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("agent-lens failed"), "got: {stderr}");
+}
+
+#[test]
+fn run_without_a_config_file_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(&["run", "audit"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("agent-lens failed"), "got: {stderr}");
+}

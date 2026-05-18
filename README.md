@@ -179,15 +179,60 @@ agent-lens analyze wrapper src/foo.rs
 agent-lens analyze wrapper src/foo.rs --diff-only
 ```
 
+### As a profile runner
+
+For a repeatable multi-analyzer pass, declare a named profile in an
+`agent-lens.toml` and run it with `agent-lens run <name>`. A profile bundles a
+target path, shared path filters, an ordered list of analyzers, and optional
+per-tool overrides; `run` executes each analyzer through the same code path as
+`agent-lens analyze` and emits one combined report.
+
+```toml
+# agent-lens.toml — discovered by walking up from the current directory
+[profile.web]
+path = "web/" # target handed to every tool
+format = "md" # json (default) or md
+exclude = ["tests/**/*.ts"] # extra --exclude globs
+exclude-tests = true # or only-tests
+tools = ["similarity", "complexity", "cohesion"] # analyzers to run, in order
+
+# Per-tool overrides live in [profile.<name>.<tool>] sub-tables and mirror the
+# matching CLI flags. Tables are optional; omitted options use the analyzer's
+# CLI default. `coupling` and `function-graph` take no table — they have no
+# extra options.
+[profile.web.similarity]
+threshold = 0.9
+min-lines = 8
+top = 20
+
+[profile.web.complexity]
+min-score = 12
+top = 20
+```
+
+```bash
+# Run the `web` profile from the nearest agent-lens.toml
+agent-lens run web
+
+# Point at an explicit config file
+agent-lens run web --config path/to/agent-lens.toml
+```
+
+Keys are kebab-case and match the CLI flags. A relative `path` resolves against
+the directory holding `agent-lens.toml`. Unknown keys — a typo like `entrypont`,
+or an option set on the wrong tool — are rejected at parse time rather than
+silently ignored.
+
 ### Current command surface
 
-The current binary exposes three top-level command trees:
+The current binary exposes three top-level command trees plus a `run` command:
 
 | Command tree | Commands                                                                                                                                  |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper` |
 | `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper` |
 | `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `coupling`, `function-graph`, `context-span`, `hotspot`                                |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                             |
 
 Analyzer commands share `PATH`, `--format json|md`, `--only-tests`,
 `--exclude-tests`, and repeatable `--exclude GLOB`. Directory analyzers walk
