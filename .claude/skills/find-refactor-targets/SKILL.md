@@ -41,19 +41,19 @@ agent-lens analyze complexity <hotspot-path> --format md
 
 Read the report and pick the worst offender(s) — usually one or two functions account for the file's `cognitive_max`.
 
-### 3. (Rust only) Check the surrounding `impl`
+### 3. Check the surrounding `impl` / class
 
-If the worst function lives in an `impl` block, see whether the block itself is incoherent:
+If the worst function lives in an `impl` block (Rust) or a class (TS/JS, Python, Go), see whether the unit itself is incoherent:
 
 ```bash
 agent-lens analyze cohesion <hotspot-path> --format md
 ```
 
-`lcom4 ≥ 2` plus high cognitive in the same `impl` means: the methods are doing unrelated jobs _and_ one of them is a landmine. Splitting the `impl` is a high-leverage move.
+`lcom4 ≥ 2` plus high cognitive in the same unit means: the methods are doing unrelated jobs _and_ one of them is a landmine. Splitting the unit is a high-leverage move.
 
 ### 4. Verify the file isn't an architectural bottleneck
 
-If the hotspot is a module that lots of other modules import from, refactoring needs more care. Run coupling and context-span on the crate (or TS/JS entry):
+If the hotspot is a module that lots of other modules import from, refactoring needs more care. Run coupling and context-span on the crate (or TS/JS entry, or Go module):
 
 ```bash
 agent-lens analyze coupling     crates/<name> --format md

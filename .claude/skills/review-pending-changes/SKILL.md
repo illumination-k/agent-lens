@@ -20,10 +20,11 @@ The PostToolUse hook already runs `similarity` + `wrapper` on every Edit/Write, 
 ### 1. Find the touched source files
 
 ```bash
-git diff --name-only --diff-filter=AM | grep -E '\.(rs|ts|tsx|js|jsx|py)$'
+git diff --name-only --diff-filter=AM \
+  | grep -E '\.(rs|tsx?|mts|cts|jsx?|mjs|cjs|py|go)$'
 ```
 
-All four diff-only analyzers (`similarity`, `wrapper`, `cohesion`, `complexity`) accept Rust, TypeScript / JavaScript, and Python — no need to fan out by extension.
+All four diff-only analyzers (`similarity`, `wrapper`, `cohesion`, `complexity`) accept Rust, TypeScript / JavaScript, Python, and Go — no need to fan out by extension.
 
 ### 2. Run the diff-scoped analyzers per file
 
@@ -40,7 +41,7 @@ If a report is empty, skip it silently — empty diff-only output is the success
 
 ### 3. Crate / entry-level coupling (no `--diff-only`)
 
-`coupling` doesn't have a diff mode; it's a whole-graph metric. Only re-run it if the diff changed module structure — for Rust, added or removed `mod` declarations, `pub use` re-exports, or moved files between modules; for TS/JS, added or removed relative `import` / `export` statements at module scope:
+`coupling` doesn't have a diff mode; it's a whole-graph metric, and it runs on Rust crates, TS/JS module graphs, and Go modules. Only re-run it if the diff changed module structure — for Rust, added or removed `mod` declarations, `pub use` re-exports, or moved files between modules; for TS/JS, added or removed relative `import` / `export` statements at module scope; for Go, added or removed local `import` statements:
 
 ```bash
 # Rust
@@ -51,6 +52,10 @@ git diff --name-only | grep -q -E '(lib|main|mod)\.rs|src/.*\.rs' && \
 git diff -U0 -- '*.ts' '*.tsx' '*.js' '*.jsx' \
   | grep -qE '^[+-](import |export )' && \
   agent-lens analyze coupling app/src/index.ts --format md
+
+# Go — re-run when local imports moved
+git diff -U0 -- '*.go' | grep -qE '^[+-]\s*"' && \
+  agent-lens analyze coupling ./cmd/server --format md
 ```
 
 ### 4. Aggregate and decide
