@@ -21,6 +21,7 @@ use agent_lens::analyze::{
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
     FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
 };
+use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
     SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
@@ -34,7 +35,7 @@ use agent_lens::hooks::pre_tool_use::{CohesionHook, ComplexityHook};
 use agent_lens::hooks::session_start::SummaryHook as SessionStartSummaryHook;
 use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -60,6 +61,25 @@ enum Command {
     /// Run an on-demand analyzer that emits LLM-friendly context.
     #[command(subcommand)]
     Analyze(AnalyzeCommand),
+    /// Run every analyzer in a named `agent-lens.toml` profile.
+    ///
+    /// A profile bundles a target path, shared path filters, an ordered
+    /// list of analyzers, and optional per-tool overrides. The config is
+    /// discovered by walking up from the current directory (or pointed
+    /// at with `--config`); each analyzer runs through the same path as
+    /// `agent-lens analyze`, and the per-tool reports are emitted as one
+    /// combined document.
+    Run(RunArgs),
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    /// Name of the `[profile.<name>]` table to run.
+    profile: String,
+    /// Path to an explicit `agent-lens.toml`. Defaults to the nearest
+    /// one found by walking up from the current directory.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -536,11 +556,195 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
         Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
         Command::Analyze(sub) => run_analyze(sub),
+        Command::Run(args) => run_profile(args),
     }
 }
 
 fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
     write_stdout_line(&cmd.run()?)
+}
+
+/// Run every analyzer in a named `agent-lens.toml` profile and emit one
+/// combined report.
+///
+/// Each analyzer is driven through the same [`AnalyzeCommand`] the
+/// `analyze` subcommand builds, so a profile run and the equivalent
+/// hand-typed commands produce identical per-tool output.
+fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = match args.config {
+        Some(path) => path,
+        None => {
+            let cwd = std::env::current_dir()?;
+            config::discover(&cwd).ok_or(ConfigError::NotFound { start: cwd })?
+        }
+    };
+    let config = config::load(&config_path)?;
+    let profile = config.profile(&args.profile)?;
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let target = profile.resolved_path(config_dir);
+    let format = profile.format.unwrap_or(OutputFormat::Json);
+
+    warn_unused_tool_options(&args.profile, profile);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut sections: Vec<(config::ToolName, String)> = Vec::new();
+    for &tool in &profile.tools {
+        if !seen.insert(tool) {
+            info!(
+                profile = %args.profile,
+                tool = tool.as_str(),
+                "tool listed more than once in profile; running it only once",
+            );
+            continue;
+        }
+        let report = build_analyze_command(tool, profile, &target, format).run()?;
+        sections.push((tool, report));
+    }
+
+    write_stdout_line(&render_profile_report(&args.profile, format, &sections)?)
+}
+
+/// Warn when a `[profile.<name>.<tool>]` table is set for a tool the
+/// profile's `tools` list never runs — its options would otherwise be
+/// silently ignored.
+fn warn_unused_tool_options(profile_name: &str, profile: &config::Profile) {
+    let warn_unused = |present: bool, tool: config::ToolName| {
+        if present && !profile.tools.contains(&tool) {
+            warn!(
+                profile = profile_name,
+                tool = tool.as_str(),
+                "options table set for a tool not listed in `tools`; ignored",
+            );
+        }
+    };
+    warn_unused(profile.similarity.is_some(), config::ToolName::Similarity);
+    warn_unused(profile.complexity.is_some(), config::ToolName::Complexity);
+    warn_unused(profile.cohesion.is_some(), config::ToolName::Cohesion);
+    warn_unused(profile.hotspot.is_some(), config::ToolName::Hotspot);
+    warn_unused(
+        profile.context_span.is_some(),
+        config::ToolName::ContextSpan,
+    );
+    warn_unused(profile.wrapper.is_some(), config::ToolName::Wrapper);
+}
+
+/// Translate one profile tool entry into the [`AnalyzeCommand`] the
+/// `analyze` subcommand would build for the same options. Per-tool tables
+/// that are absent fall back to the analyzer's CLI defaults.
+fn build_analyze_command(
+    tool: config::ToolName,
+    profile: &config::Profile,
+    target: &Path,
+    format: OutputFormat,
+) -> AnalyzeCommand {
+    let common = AnalyzeCommonArgs {
+        path: target.to_path_buf(),
+        format,
+        path_filter: AnalyzePathArgs {
+            only_tests: profile.only_tests,
+            exclude_tests: profile.exclude_tests,
+            exclude: profile.exclude.clone(),
+        },
+    };
+    match tool {
+        config::ToolName::Cohesion => {
+            let opts = profile.cohesion.clone().unwrap_or_default();
+            AnalyzeCommand::Cohesion(AnalyzeCohesionArgs {
+                common,
+                diff: AnalyzeDiffArgs {
+                    diff_only: opts.diff_only,
+                },
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                min_score: opts.min_score,
+            })
+        }
+        config::ToolName::Complexity => {
+            let opts = profile.complexity.clone().unwrap_or_default();
+            AnalyzeCommand::Complexity(AnalyzeComplexityArgs {
+                common,
+                diff: AnalyzeDiffArgs {
+                    diff_only: opts.diff_only,
+                },
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                min_score: opts.min_score,
+            })
+        }
+        config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
+        config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
+        config::ToolName::ContextSpan => {
+            let opts = profile.context_span.clone().unwrap_or_default();
+            AnalyzeCommand::ContextSpan(AnalyzeContextSpanArgs {
+                common,
+                entry_glob: opts.entry_glob,
+            })
+        }
+        config::ToolName::Hotspot => {
+            let opts = profile.hotspot.clone().unwrap_or_default();
+            AnalyzeCommand::Hotspot(AnalyzeHotspotArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                since: opts.since,
+            })
+        }
+        config::ToolName::Similarity => {
+            let opts = profile.similarity.clone().unwrap_or_default();
+            AnalyzeCommand::Similarity(AnalyzeSimilarityArgs {
+                common,
+                diff: AnalyzeDiffArgs {
+                    diff_only: opts.diff_only,
+                },
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                threshold: opts.threshold.unwrap_or(DEFAULT_SIMILARITY_THRESHOLD),
+                min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
+            })
+        }
+        config::ToolName::Wrapper => {
+            let opts = profile.wrapper.clone().unwrap_or_default();
+            AnalyzeCommand::Wrapper(AnalyzeWrapperArgs {
+                common,
+                diff: AnalyzeDiffArgs {
+                    diff_only: opts.diff_only,
+                },
+            })
+        }
+    }
+}
+
+/// Render the per-tool reports as one document: stacked `## <tool>`
+/// sections for markdown, or a `{profile, results}` object for JSON where
+/// each analyzer's JSON output is nested under its tool name.
+fn render_profile_report(
+    profile: &str,
+    format: OutputFormat,
+    sections: &[(config::ToolName, String)],
+) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(match format {
+        OutputFormat::Md => {
+            let mut out = String::new();
+            for (tool, report) in sections {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("## ");
+                out.push_str(tool.as_str());
+                out.push_str("\n\n");
+                out.push_str(report.trim_end_matches('\n'));
+                out.push('\n');
+            }
+            out
+        }
+        OutputFormat::Json => {
+            let mut results = Vec::with_capacity(sections.len());
+            for (tool, report) in sections {
+                let report: serde_json::Value = serde_json::from_str(report)?;
+                results.push(serde_json::json!({ "tool": tool.as_str(), "report": report }));
+            }
+            serde_json::to_string(&serde_json::json!({
+                "profile": profile,
+                "results": results,
+            }))?
+        }
+    })
 }
 
 trait WithAnalyzePathArgs: Sized {
@@ -1430,5 +1634,124 @@ fn dispatch(n: i32) -> i32 {
         let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
         let canonical_resolved = std::fs::canonicalize(&resolved).unwrap();
         assert_eq!(canonical_resolved, canonical_dir);
+    }
+
+    #[test]
+    fn parses_run_with_profile_and_config() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "run",
+            "web",
+            "--config",
+            "cfg/agent-lens.toml",
+        ])
+        .expect("clean parse");
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.profile, "web");
+        assert_eq!(args.config, Some(PathBuf::from("cfg/agent-lens.toml")));
+    }
+
+    #[test]
+    fn parses_run_without_config_flag() {
+        let cli = Cli::try_parse_from(["agent-lens", "run", "backend"]).expect("clean parse");
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.profile, "backend");
+        assert_eq!(args.config, None);
+    }
+
+    #[test]
+    fn run_requires_a_profile_name() {
+        let err = Cli::try_parse_from(["agent-lens", "run"]).expect_err("missing profile");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn build_analyze_command_maps_similarity_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\ndiff-only = true\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Similarity,
+            &profile,
+            Path::new("/repo/web"),
+            OutputFormat::Md,
+        );
+        let AnalyzeCommand::Similarity(args) = cmd else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.common.path, PathBuf::from("/repo/web"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert!((args.threshold - 0.7).abs() < f64::EPSILON);
+        assert_eq!(args.min_lines, 9);
+        assert_eq!(args.ranking.top, Some(4));
+        assert!(args.diff.diff_only);
+    }
+
+    #[test]
+    fn build_analyze_command_uses_similarity_defaults_without_table() {
+        let profile: config::Profile =
+            toml::from_str("path = \"web\"\ntools = [\"similarity\"]\n").unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Similarity,
+            &profile,
+            Path::new("web"),
+            OutputFormat::Json,
+        );
+        let AnalyzeCommand::Similarity(args) = cmd else {
+            panic!("expected analyze similarity");
+        };
+        assert!((args.threshold - DEFAULT_SIMILARITY_THRESHOLD).abs() < f64::EPSILON);
+        assert_eq!(args.min_lines, DEFAULT_SIMILARITY_MIN_LINES);
+        assert_eq!(args.ranking.top, None);
+        assert!(!args.diff.diff_only);
+    }
+
+    #[test]
+    fn build_analyze_command_propagates_profile_path_filters() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"web\"\nexclude = [\"gen/**\"]\nexclude-tests = true\ntools = [\"coupling\"]\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Coupling,
+            &profile,
+            Path::new("web"),
+            OutputFormat::Json,
+        );
+        let AnalyzeCommand::Coupling(args) = cmd else {
+            panic!("expected analyze coupling");
+        };
+        assert_eq!(args.path_filter.exclude, ["gen/**"]);
+        assert!(args.path_filter.exclude_tests);
+        assert!(!args.path_filter.only_tests);
+    }
+
+    #[test]
+    fn render_profile_report_md_stacks_tool_sections() {
+        let sections = vec![
+            (config::ToolName::Complexity, "complexity body\n".to_owned()),
+            (config::ToolName::Wrapper, "wrapper body".to_owned()),
+        ];
+        let out = render_profile_report("audit", OutputFormat::Md, &sections).unwrap();
+        assert!(
+            out.contains("## complexity\n\ncomplexity body\n"),
+            "got: {out}",
+        );
+        assert!(out.contains("## wrapper\n\nwrapper body\n"), "got: {out}",);
+    }
+
+    #[test]
+    fn render_profile_report_json_nests_each_tool_report() {
+        let sections = vec![(config::ToolName::Complexity, "{\"k\":1}".to_owned())];
+        let out = render_profile_report("audit", OutputFormat::Json, &sections).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["profile"], "audit");
+        assert_eq!(value["results"][0]["tool"], "complexity");
+        assert_eq!(value["results"][0]["report"]["k"], 1);
     }
 }
