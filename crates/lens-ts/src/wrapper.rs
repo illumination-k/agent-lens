@@ -457,4 +457,15 @@ class Child extends Parent {
         let findings = find_wrappers(src, Dialect::Tsx).unwrap();
         assert_eq!(names(&findings), ["shim"]);
     }
+
+    #[test]
+    fn nested_forwarding_callback_is_detected_as_a_wrapper() {
+        // A closure whose whole body forwards its parameter to another
+        // function is a thin wrapper just like a top-level one, and is
+        // reported under its `<parent>::closure#N` name.
+        let src = "function setup() {\n    const shim = (y: number): number => b(y);\n}\n";
+        let findings = run(src);
+        assert_eq!(names(&findings), ["setup::closure#1"]);
+        assert_eq!(findings[0].callee, "b");
+    }
 }

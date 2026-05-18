@@ -20,7 +20,9 @@
 //!
 //! Closures and inner functions defined *inside* a function body
 //! contribute to the enclosing function's score, mirroring how a reader
-//! actually experiences the code.
+//! actually experiences the code. They are *additionally* reported as
+//! their own `<parent>::closure#N` units (see [`crate::walk`]), so a
+//! callback that is complex in its own right is still visible directly.
 //!
 //! The traversal that finds function-shaped items lives in
 //! [`crate::walk`]; this module only converts each [`FunctionItem`] into
@@ -824,5 +826,30 @@ function f(): void {
             "expected total_operands >= 6, got {}",
             f.halstead.total_operands,
         );
+    }
+
+    #[test]
+    fn nested_function_is_reported_as_its_own_complexity_unit() {
+        // A callback with real control flow gets its own unit so its
+        // complexity is visible directly, not just folded into `setup`.
+        let units = extract(
+            r#"
+function setup(x: number): void {
+    const handler = () => {
+        if (x > 0) {
+            return;
+        }
+    };
+}
+"#,
+        );
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, ["setup", "setup::closure#1"]);
+        let handler = units
+            .iter()
+            .find(|u| u.name == "setup::closure#1")
+            .expect("the callback must be its own unit");
+        // The `if` inside the callback gives it a cyclomatic of 2.
+        assert_eq!(handler.cyclomatic, 2);
     }
 }

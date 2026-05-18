@@ -4,6 +4,12 @@
 //! expressions bound to a `const`/`let`/`var`, and items declared inside
 //! `namespace` / `module` blocks.
 //!
+//! Functions nested inside another function's body — callbacks, event
+//! handlers, closures such as `el.onclick = () => …` — are emitted as
+//! well, each as a synthetic `<parent>::closure#N` unit (1-based, source
+//! order; see [`scan_nested_functions`]). The walk is depth-first: a
+//! function is emitted before any function found inside its body.
+//!
 //! The shape of the AST traversal used to be duplicated between
 //! [`crate::parser`] (which collects [`lens_domain::FunctionDef`]) and
 //! [`crate::complexity`] (which collects [`lens_domain::FunctionComplexity`]).
@@ -18,8 +24,16 @@
 //! the AST shape.
 
 use oxc_ast::ast::*;
+use oxc_ast_visit::Visit;
+use oxc_syntax::scope::ScopeFlags;
 
 use crate::line_index::LineIndex;
+
+/// Name infix used for a function nested inside another function's body.
+/// The walker mints `<parent>::closure#<N>` (`N` is 1-based, source
+/// order); [`crate::parser`] parses the prefix back out so a nested
+/// function inherits the test classification of its enclosing function.
+pub(crate) const NESTED_SEGMENT_PREFIX: &str = "closure#";
 
 /// One extracted function unit. The walker has already resolved the
 /// 1-based inclusive line range and the qualified name (e.g.
@@ -142,14 +156,16 @@ fn walk_class<V: FunctionVisitor>(class: &Class, line_index: &LineIndex, visitor
             && let Some(body) = &m.value.body
             && let Some(name) = method_key_name(&m.key)
         {
+            let qualified = format!("{class_name}::{name}");
             visitor.on_function(FunctionItem {
-                name: format!("{class_name}::{name}"),
+                name: qualified.clone(),
                 start_line: line_index.line(m.span.start),
                 end_line: line_index.line(m.span.end),
                 body,
                 params: &m.value.params,
                 is_constructor: matches!(m.kind, MethodDefinitionKind::Constructor),
             });
+            scan_nested_functions(&qualified, body, line_index, visitor);
         }
     }
 }
@@ -171,13 +187,14 @@ fn visit_function<V: FunctionVisitor>(
         None => raw_name.to_owned(),
     };
     visitor.on_function(FunctionItem {
-        name,
+        name: name.clone(),
         start_line: line_index.line(func.span.start),
         end_line: line_index.line(body.span.end),
         body,
         params: &func.params,
         is_constructor: false,
     });
+    scan_nested_functions(&name, body, line_index, visitor);
 }
 
 fn visit_variable_declarator<V: FunctionVisitor>(
@@ -193,27 +210,95 @@ fn visit_variable_declarator<V: FunctionVisitor>(
     match init {
         Expression::ArrowFunctionExpression(arrow) => {
             visitor.on_function(FunctionItem {
-                name,
+                name: name.clone(),
                 start_line: line_index.line(decl.span.start),
                 end_line: line_index.line(arrow.body.span.end),
                 body: &arrow.body,
                 params: &arrow.params,
                 is_constructor: false,
             });
+            scan_nested_functions(&name, &arrow.body, line_index, visitor);
         }
         Expression::FunctionExpression(f) => {
             if let Some(body) = &f.body {
                 visitor.on_function(FunctionItem {
-                    name,
+                    name: name.clone(),
                     start_line: line_index.line(decl.span.start),
                     end_line: line_index.line(body.span.end),
                     body,
                     params: &f.params,
                     is_constructor: false,
                 });
+                scan_nested_functions(&name, body, line_index, visitor);
             }
         }
         _ => {}
+    }
+}
+
+/// Emit every function nested inside `body` as its own [`FunctionItem`].
+///
+/// Arrow functions, function expressions and function declarations found
+/// anywhere in `body` — call arguments (`addEventListener("click", …)`),
+/// assignment right-hand sides (`el.onclick = …`), JSX attribute values
+/// (`onClick={…}`), initialisers, object methods, and so on — each become
+/// a unit named `<parent>::closure#<N>`. Indices are 1-based and reset per
+/// parent, so a closure inside `setup`'s first closure is
+/// `setup::closure#1::closure#1`.
+fn scan_nested_functions<V: FunctionVisitor>(
+    parent: &str,
+    body: &FunctionBody,
+    line_index: &LineIndex,
+    visitor: &mut V,
+) {
+    let mut scanner = NestedScanner {
+        visitor,
+        parent,
+        line_index,
+        counter: 0,
+    };
+    scanner.visit_function_body(body);
+}
+
+/// [`Visit`] adapter that finds the functions directly nested in a body.
+///
+/// Every node type apart from the two function shapes uses the default
+/// walk, so the scan reaches functions buried deep inside expressions and
+/// JSX. The two function arms emit the nested unit and then re-enter
+/// [`scan_nested_functions`] for its body rather than letting the default
+/// walk descend — that keeps `closure#N` indices scoped to one parent.
+struct NestedScanner<'s, V> {
+    visitor: &'s mut V,
+    parent: &'s str,
+    line_index: &'s LineIndex,
+    counter: usize,
+}
+
+impl<V: FunctionVisitor> NestedScanner<'_, V> {
+    fn emit(&mut self, params: &FormalParameters, body: &FunctionBody, start: u32) {
+        self.counter += 1;
+        let name = format!("{}::{NESTED_SEGMENT_PREFIX}{}", self.parent, self.counter);
+        self.visitor.on_function(FunctionItem {
+            name: name.clone(),
+            start_line: self.line_index.line(start),
+            end_line: self.line_index.line(body.span.end),
+            body,
+            params,
+            is_constructor: false,
+        });
+        scan_nested_functions(&name, body, self.line_index, self.visitor);
+    }
+}
+
+impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
+    fn visit_function(&mut self, func: &Function<'a>, _flags: ScopeFlags) {
+        if let Some(body) = &func.body {
+            self.emit(&func.params, body, func.span.start);
+        }
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        self.emit(&arrow.params, &arrow.body, arrow.span.start);
     }
 }
 

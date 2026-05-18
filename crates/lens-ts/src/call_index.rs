@@ -15,6 +15,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
+use oxc_syntax::scope::ScopeFlags;
 
 use crate::attrs::name_looks_like_test_function;
 use crate::line_index::LineIndex;
@@ -163,6 +164,16 @@ impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_> {
         ));
         walk::walk_call_expression(self, it);
     }
+
+    // A call site belongs to exactly one function: its nearest enclosing
+    // one. The walker already emits each nested function as its own
+    // `<parent>::closure#N` unit, so stop the descent here rather than
+    // re-attributing a callback's calls to the function that registered
+    // it (`el.onclick = () => help()` is a call by the closure, not by
+    // the enclosing function).
+    fn visit_function(&mut self, _it: &Function<'a>, _flags: ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
 }
 
 fn call_shape(
@@ -481,5 +492,37 @@ mod tests {
         assert_eq!(calls[0].callee_name(), Some("connect"));
         assert_eq!(calls[0].callee_path().as_deref(), Some("client::connect"));
         assert!(calls[0].has_receiver_expression());
+    }
+
+    #[test]
+    fn nested_functions_get_their_own_function_shapes() {
+        let source = "function setup() { const handler = () => {}; }\n";
+        let functions =
+            extract_function_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+        let qualified: Vec<&str> = functions
+            .iter()
+            .filter_map(|f| f.qualified_name.known_value().map(String::as_str))
+            .collect();
+        assert!(qualified.contains(&"src::main::setup"), "got {qualified:?}");
+        assert!(
+            qualified.contains(&"src::main::setup::closure#1"),
+            "got {qualified:?}",
+        );
+    }
+
+    #[test]
+    fn calls_inside_a_nested_function_are_owned_by_the_closure() {
+        // The `helper()` call is made by the callback, not by the
+        // function that defines it: the call shape's caller is the
+        // closure, and `setup` itself contributes no calls.
+        let source = "function setup() { const run = () => helper(); }\nfunction helper() {}\n";
+        let calls = extract_call_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee_name(), Some("helper"));
+        assert_eq!(
+            calls[0].caller_qualified_name(),
+            Some("src::main::setup::closure#1"),
+        );
     }
 }
