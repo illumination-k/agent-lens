@@ -360,6 +360,20 @@ since = "90.days.ago"
     }
 
     #[test]
+    fn load_accepts_only_tests_without_exclude_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            "[profile.web]\npath = \"web/\"\nonly-tests = true\ntools = [\"similarity\"]\n",
+        );
+        let config = load(&path).unwrap();
+        let web = config.profile("web").unwrap();
+        assert!(web.only_tests);
+        assert!(!web.exclude_tests);
+    }
+
+    #[test]
     fn load_rejects_only_tests_and_exclude_tests_together() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(

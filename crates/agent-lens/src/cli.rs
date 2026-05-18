@@ -584,7 +584,13 @@ fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let target = profile.resolved_path(config_dir);
     let format = profile.format.unwrap_or(OutputFormat::Json);
 
-    warn_unused_tool_options(&args.profile, profile);
+    for tool in unused_tool_option_tables(profile) {
+        warn!(
+            profile = %args.profile,
+            tool = tool.as_str(),
+            "options table set for a tool not listed in `tools`; ignored",
+        );
+    }
 
     let mut seen = std::collections::HashSet::new();
     let mut sections: Vec<(config::ToolName, String)> = Vec::new();
@@ -604,28 +610,25 @@ fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     write_stdout_line(&render_profile_report(&args.profile, format, &sections)?)
 }
 
-/// Warn when a `[profile.<name>.<tool>]` table is set for a tool the
-/// profile's `tools` list never runs — its options would otherwise be
-/// silently ignored.
-fn warn_unused_tool_options(profile_name: &str, profile: &config::Profile) {
-    let warn_unused = |present: bool, tool: config::ToolName| {
-        if present && !profile.tools.contains(&tool) {
-            warn!(
-                profile = profile_name,
-                tool = tool.as_str(),
-                "options table set for a tool not listed in `tools`; ignored",
-            );
-        }
-    };
-    warn_unused(profile.similarity.is_some(), config::ToolName::Similarity);
-    warn_unused(profile.complexity.is_some(), config::ToolName::Complexity);
-    warn_unused(profile.cohesion.is_some(), config::ToolName::Cohesion);
-    warn_unused(profile.hotspot.is_some(), config::ToolName::Hotspot);
-    warn_unused(
-        profile.context_span.is_some(),
-        config::ToolName::ContextSpan,
-    );
-    warn_unused(profile.wrapper.is_some(), config::ToolName::Wrapper);
+/// Tool-option tables (`[profile.<name>.<tool>]`) set for a tool the
+/// profile's `tools` list never runs — their options would otherwise be
+/// silently ignored, so `run` warns about each one.
+fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName> {
+    [
+        (profile.similarity.is_some(), config::ToolName::Similarity),
+        (profile.complexity.is_some(), config::ToolName::Complexity),
+        (profile.cohesion.is_some(), config::ToolName::Cohesion),
+        (profile.hotspot.is_some(), config::ToolName::Hotspot),
+        (
+            profile.context_span.is_some(),
+            config::ToolName::ContextSpan,
+        ),
+        (profile.wrapper.is_some(), config::ToolName::Wrapper),
+    ]
+    .into_iter()
+    .filter(|&(present, tool)| present && !profile.tools.contains(&tool))
+    .map(|(_, tool)| tool)
+    .collect()
 }
 
 /// Translate one profile tool entry into the [`AnalyzeCommand`] the
@@ -1738,11 +1741,34 @@ fn dispatch(n: i32) -> i32 {
             (config::ToolName::Wrapper, "wrapper body".to_owned()),
         ];
         let out = render_profile_report("audit", OutputFormat::Md, &sections).unwrap();
-        assert!(
-            out.contains("## complexity\n\ncomplexity body\n"),
-            "got: {out}",
+        // No leading newline, and a single blank line between sections.
+        assert_eq!(
+            out,
+            "## complexity\n\ncomplexity body\n\n## wrapper\n\nwrapper body\n",
         );
-        assert!(out.contains("## wrapper\n\nwrapper body\n"), "got: {out}",);
+    }
+
+    #[test]
+    fn unused_tool_option_tables_flags_tables_off_the_tools_list() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.9\n\n[complexity]\nmin-score = 3\n\n[wrapper]\ndiff-only = true\n",
+        )
+        .unwrap();
+        // similarity is listed in `tools`, so only complexity and wrapper
+        // are flagged — in the fixed iteration order.
+        assert_eq!(
+            unused_tool_option_tables(&profile),
+            [config::ToolName::Complexity, config::ToolName::Wrapper],
+        );
+    }
+
+    #[test]
+    fn unused_tool_option_tables_empty_when_every_table_is_listed() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.9\n",
+        )
+        .unwrap();
+        assert!(unused_tool_option_tables(&profile).is_empty());
     }
 
     #[test]
