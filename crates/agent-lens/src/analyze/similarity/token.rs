@@ -77,12 +77,9 @@ fn k_grams(tokens: &[u64], width: usize) -> impl Iterator<Item = u64> + '_ {
 }
 
 fn k_gram_hash(window: &[u64]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for &token in window {
-        hash ^= token;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    window.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn multiset(items: impl Iterator<Item = u64>) -> HashMap<u64, usize> {
@@ -93,13 +90,8 @@ fn multiset(items: impl Iterator<Item = u64>) -> HashMap<u64, usize> {
     counts
 }
 
-/// Ruzicka similarity: `sum(min) / sum(max)` over the union of keys. Two
-/// empty multisets count as identical so that two empty bodies score 1.0
-/// rather than dividing by zero.
+/// Ruzicka similarity: `sum(min) / sum(max)` over the union of keys.
 fn weighted_jaccard(a: &HashMap<u64, usize>, b: &HashMap<u64, usize>) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
     let mut intersection = 0usize;
     let mut union = 0usize;
     for (token, &count_a) in a {
@@ -112,6 +104,8 @@ fn weighted_jaccard(a: &HashMap<u64, usize>, b: &HashMap<u64, usize>) -> f64 {
             union += count_b;
         }
     }
+    // Two empty multisets (e.g. two empty bodies) have no union; treat
+    // them as identical rather than dividing by zero.
     if union == 0 {
         1.0
     } else {
@@ -212,6 +206,28 @@ mod tests {
         let profile = TokenProfile::from_tree(&body, false);
         // Below the k-gram width, so the score must still be defined.
         assert_eq!(token_similarity(&profile, &profile), 1.0);
+    }
+
+    #[test]
+    fn a_long_body_paired_with_a_tiny_one_falls_back_to_unigrams() {
+        // Only one body clears the k-gram width. The fallback must trigger
+        // for the *pair*: scoring the tiny body's empty k-gram set against
+        // the long body's would force the score to 0 despite shared tokens.
+        let long = block(vec![
+            TreeNode::leaf("Let"),
+            TreeNode::leaf("Let"),
+            TreeNode::leaf("Let"),
+            TreeNode::leaf("Let"),
+        ]);
+        let tiny = block(vec![TreeNode::leaf("Let")]);
+        let score = token_similarity(
+            &TokenProfile::from_tree(&long, false),
+            &TokenProfile::from_tree(&tiny, false),
+        );
+        assert!(
+            score > 0.0 && score < 1.0,
+            "shared unigrams must score between 0 and 1: {score}",
+        );
     }
 
     #[test]
