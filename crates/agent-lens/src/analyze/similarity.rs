@@ -2280,6 +2280,58 @@ def beta(ys):
     }
 
     #[test]
+    fn score_token_candidate_pair_weights_a_partial_body_overlap() {
+        // Bodies overlap only partially, so `body_similarity` lands
+        // strictly between 0 and 1 — the case that pins down the body
+        // weight as a multiplier rather than any other operator.
+        fn body(third: &str) -> lens_domain::TreeNode {
+            lens_domain::TreeNode::with_children(
+                "Block",
+                "",
+                vec![
+                    lens_domain::TreeNode::leaf("Let"),
+                    lens_domain::TreeNode::leaf("Let"),
+                    lens_domain::TreeNode::leaf(third),
+                ],
+            )
+        }
+        fn function(name: &str, third: &str) -> OwnedFunction {
+            OwnedFunction {
+                file: PathBuf::from("lib.rs"),
+                rel_path: "lib.rs".to_owned(),
+                is_test: false,
+                shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
+                    name: name.to_owned(),
+                    start_line: 1,
+                    end_line: 5,
+                    is_test: false,
+                    signature: None,
+                    tree: body(third),
+                }),
+            }
+        }
+        let corpus = vec![function("left", "Let"), function("right", "Call")];
+        let token_profiles = build_token_profiles(&corpus, false);
+
+        let score = score_token_candidate_pair(&corpus, &token_profiles, 0, 1).unwrap();
+
+        let body = score.components.body_similarity;
+        assert!(
+            body > 0.0 && body < 1.0,
+            "expected a partial overlap: {body}"
+        );
+        assert!(!score.exact_match);
+        // No signatures, so the signature term contributes its 1.0 default.
+        assert!(score.components.signature_similarity.is_none());
+        let expected = BODY_SIMILARITY_WEIGHT * body + SIGNATURE_SIMILARITY_WEIGHT * 1.0;
+        assert!(
+            (score.components.similarity - expected).abs() < 1e-9,
+            "similarity {} should be {expected}",
+            score.components.similarity,
+        );
+    }
+
+    #[test]
     fn enforce_candidate_pair_limit_surfaces_concrete_numbers() {
         let err = enforce_candidate_pair_limit(20_000, 13_000_001, 13_000_000, 5, "lsh")
             .expect_err("candidate overage should be rejected");
