@@ -76,6 +76,7 @@ impl CohesionAnalyzer {
         }
         Ok(Some(FileReport {
             file: file.display_path.clone(),
+            lang,
             units,
         }))
     }
@@ -102,11 +103,49 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, Bo
 
 /// Per-file slice of the report. Owns the display path so directory mode
 /// can attach a path relative to the walk root without storing the original
-/// `PathBuf`.
+/// `PathBuf`. The `lang` is kept so each unit can be labelled with the
+/// construct it actually is in that language (see [`unit_label`]).
 #[derive(Debug)]
 struct FileReport {
     file: String,
+    lang: SourceLang,
     units: Vec<CohesionUnit>,
+}
+
+/// The `<module>` sentinel a language adapter uses as the `type_name` of a
+/// file-scope module unit — one that has no name of its own. Kept in sync
+/// with the per-adapter `MODULE_UNIT_NAME` constants.
+const MODULE_UNIT_NAME: &str = "<module>";
+
+/// Render a cohesion unit's label for agent-facing output.
+///
+/// [`CohesionUnitKind`] is deliberately language-agnostic, so the same
+/// `Inherent` kind covers a Rust `impl`, a Python or TypeScript `class`,
+/// and a Go method set on a receiver type. Picking the keyword per
+/// language keeps the report honest: an agent reading `class Foo` versus
+/// `impl Foo` versus `type Foo` sees the construct that exists in the
+/// source instead of a Rust-centric stand-in. Module units render as the
+/// bare `module` keyword (file scope) or `module <name>` (a named inline
+/// module / namespace).
+pub(crate) fn unit_label(lang: SourceLang, kind: &CohesionUnitKind, type_name: &str) -> String {
+    match kind {
+        CohesionUnitKind::Trait { trait_name } => format!("impl {trait_name} for {type_name}"),
+        CohesionUnitKind::Module => {
+            if type_name == MODULE_UNIT_NAME {
+                "module".to_owned()
+            } else {
+                format!("module {type_name}")
+            }
+        }
+        CohesionUnitKind::Inherent => {
+            let keyword = match lang {
+                SourceLang::Rust => "impl",
+                SourceLang::Python | SourceLang::TypeScript(_) => "class",
+                SourceLang::Go => "type",
+            };
+            format!("{keyword} {type_name}")
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -125,7 +164,7 @@ impl<'a> Report<'a> {
             root: path.display().to_string(),
             file_count: files.len(),
             unit_count,
-            files: files.iter().map(FileView::from).collect(),
+            files: files.iter().map(FileView::new).collect(),
         }
     }
 }
@@ -137,12 +176,12 @@ struct FileView<'a> {
     units: Vec<UnitView<'a>>,
 }
 
-impl<'a> From<&'a FileReport> for FileView<'a> {
-    fn from(f: &'a FileReport) -> Self {
+impl<'a> FileView<'a> {
+    fn new(f: &'a FileReport) -> Self {
         Self {
             file: f.file.as_str(),
             unit_count: f.units.len(),
-            units: f.units.iter().map(UnitView::from).collect(),
+            units: f.units.iter().map(|u| UnitView::new(u, f.lang)).collect(),
         }
     }
 }
@@ -150,6 +189,12 @@ impl<'a> From<&'a FileReport> for FileView<'a> {
 #[derive(Debug, Serialize)]
 struct UnitView<'a> {
     kind: &'static str,
+    /// Agent-facing label naming the construct in language-appropriate
+    /// terms — `impl Foo` (Rust), `class Foo` (Python / TypeScript),
+    /// `type Foo` (Go), `impl Trait for Foo`, or `module` / `module foo`.
+    /// `kind` stays language-agnostic; this is the only field that names
+    /// the source construct precisely. See [`unit_label`].
+    label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     trait_name: Option<&'a str>,
     type_name: &'a str,
@@ -173,13 +218,14 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-impl<'a> From<&'a CohesionUnit> for UnitView<'a> {
-    fn from(unit: &'a CohesionUnit) -> Self {
+impl<'a> UnitView<'a> {
+    fn new(unit: &'a CohesionUnit, lang: SourceLang) -> Self {
         let (kind, trait_name) = match &unit.kind {
             CohesionUnitKind::Inherent => ("inherent", None),
             CohesionUnitKind::Trait { trait_name } => ("trait", Some(trait_name.as_str())),
             CohesionUnitKind::Module => ("module", None),
         };
+        let label = unit_label(lang, &unit.kind, unit.type_name.as_str());
         let components: Vec<Vec<&str>> = unit
             .components
             .iter()
@@ -192,6 +238,7 @@ impl<'a> From<&'a CohesionUnit> for UnitView<'a> {
         let methods = unit.methods.iter().map(MethodView::from).collect();
         Self {
             kind,
+            label,
             trait_name,
             type_name: unit.type_name.as_str(),
             start_line: unit.start_line,
@@ -302,11 +349,6 @@ fn compare_lcom96_desc(a: Option<f64>, b: Option<f64>) -> Ordering {
 }
 
 fn render_unit(out: &mut String, file: &str, unit: &UnitView<'_>) {
-    let header = match (unit.kind, unit.trait_name) {
-        ("module", _) => format!("module {}", unit.type_name),
-        (_, Some(t)) => format!("impl {t} for {}", unit.type_name),
-        _ => format!("impl {}", unit.type_name),
-    };
     let lcom96 = format_optional_f64(unit.lcom96, 2);
     let inert = if unit.inert_method_count > 0 {
         format!(" (+{} inert)", unit.inert_method_count)
@@ -318,8 +360,8 @@ fn render_unit(out: &mut String, file: &str, unit: &UnitView<'_>) {
     // `unwrap_used` lint.
     let _ = writeln!(
         out,
-        "- {file}:{header} (L{}-{}) — LCOM4 = {}{inert}, LCOM96 = {}, {} method(s)",
-        unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
+        "- {file}:{} (L{}-{}) — LCOM4 = {}{inert}, LCOM96 = {}, {} method(s)",
+        unit.label, unit.start_line, unit.end_line, unit.lcom4, lcom96, unit.method_count,
     );
     for component in &unit.components {
         let _ = writeln!(out, "  - {{{}}}", component.join(", "));
@@ -328,8 +370,37 @@ fn render_unit(out: &mut String, file: &str, unit: &UnitView<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::test_support::{run_git, write_file};
+
+    #[rstest]
+    #[case(SourceLang::Rust, CohesionUnitKind::Inherent, "Foo", "impl Foo")]
+    #[case(SourceLang::Python, CohesionUnitKind::Inherent, "Foo", "class Foo")]
+    #[case(
+        SourceLang::TypeScript(lens_ts::Dialect::Ts),
+        CohesionUnitKind::Inherent,
+        "Foo",
+        "class Foo"
+    )]
+    #[case(SourceLang::Go, CohesionUnitKind::Inherent, "Foo", "type Foo")]
+    #[case(SourceLang::Rust, CohesionUnitKind::Module, "<module>", "module")]
+    #[case(SourceLang::Rust, CohesionUnitKind::Module, "inner", "module inner")]
+    #[case(
+        SourceLang::Rust,
+        CohesionUnitKind::Trait { trait_name: "Bag".to_owned() },
+        "Foo",
+        "impl Bag for Foo"
+    )]
+    fn unit_label_names_the_construct_per_language(
+        #[case] lang: SourceLang,
+        #[case] kind: CohesionUnitKind,
+        #[case] type_name: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(unit_label(lang, &kind, type_name), expected);
+    }
 
     #[test]
     fn json_report_includes_components_lcom4_and_lcom96() {
@@ -352,6 +423,7 @@ impl Thing {
         assert_eq!(units[0]["lcom4"], 2);
         assert_eq!(units[0]["type_name"], "Thing");
         assert_eq!(units[0]["kind"], "inherent");
+        assert_eq!(units[0]["label"], "impl Thing");
         // Two methods, two disjoint fields → LCOM96 = 1.0.
         let lcom96 = units[0]["lcom96"].as_f64().unwrap();
         assert!((lcom96 - 1.0).abs() < 1e-9, "got {lcom96}");
@@ -533,7 +605,7 @@ impl Hub {
             .with_min_score(Some(2))
             .analyze(&file, OutputFormat::Md)
             .unwrap();
-        let module_pos = md.find("module <module>").expect("module unit listed");
+        let module_pos = md.find("lib.rs:module (L").expect("module unit listed");
         let hub_pos = md.find("impl Hub").expect("Hub listed");
         assert!(
             module_pos < hub_pos,
@@ -569,6 +641,9 @@ class Counter:
         assert_eq!(parsed["unit_count"], 1);
         assert_eq!(parsed["files"][0]["units"][0]["type_name"], "Counter");
         assert_eq!(parsed["files"][0]["units"][0]["lcom4"], 1);
+        // A Python class must be labelled `class`, not the Rust-only
+        // `impl` keyword that `kind: "inherent"` would suggest.
+        assert_eq!(parsed["files"][0]["units"][0]["label"], "class Counter");
     }
 
     #[test]
@@ -642,9 +717,11 @@ export function gb(): number { return b; }
         let md = CohesionAnalyzer::new()
             .analyze(&file, OutputFormat::Md)
             .unwrap();
-        // Module units render with `module <name>` (rather than
+        // Module units render with the `module` keyword (rather than
         // `impl <name>`) so the agent can tell the granularity apart.
-        assert!(md.contains("module <module>"), "got: {md}");
+        // The file-scope unit has no name, so the sentinel is dropped.
+        assert!(md.contains("lib.ts:module (L"), "got: {md}");
+        assert!(!md.contains("<module>"), "got: {md}");
         assert!(md.contains("LCOM4 = 2"));
     }
 
@@ -888,5 +965,50 @@ impl A { fn gx(&self) -> i32 { self.x } }
             .map(|f| f["file"].as_str().unwrap())
             .collect();
         assert!(!files.contains(&"src/generated.rs"));
+    }
+
+    #[test]
+    fn markdown_labels_python_class_as_class_not_impl() {
+        // A Python `class` must not be mislabelled `impl` — that keyword
+        // is Rust-only. Two disjoint field clusters push LCOM4 to 2 so
+        // the unit clears the default markdown floor.
+        let dir = tempfile::tempdir().unwrap();
+        let src = "
+class Widget:
+    def ga(self):
+        return self.a
+    def gb(self):
+        return self.b
+";
+        let file = write_file(dir.path(), "lib.py", src);
+        let md = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("class Widget"), "got: {md}");
+        assert!(!md.contains("impl Widget"), "got: {md}");
+    }
+
+    #[test]
+    fn go_method_set_is_labelled_with_type_keyword() {
+        // Go has neither classes nor `impl` blocks: methods attach to a
+        // receiver type. The label must use Go's `type` keyword.
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+package main
+
+type Widget struct {
+    a int
+    b int
+}
+
+func (w Widget) GetA() int { return w.a }
+func (w Widget) GetB() int { return w.b }
+"#;
+        let file = write_file(dir.path(), "lib.go", src);
+        let json = CohesionAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["files"][0]["units"][0]["label"], "type Widget");
     }
 }

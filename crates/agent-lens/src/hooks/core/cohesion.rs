@@ -8,9 +8,10 @@
 
 use std::fmt::Write as _;
 
-use lens_domain::{CohesionUnit, CohesionUnitKind};
+use lens_domain::CohesionUnit;
 
 use crate::analyze::SourceLang;
+use crate::analyze::cohesion::unit_label;
 use crate::hooks::core::{EditedSource, HookError};
 
 /// LCOM4 value at or above which a cohesion unit is reported. `1` means
@@ -44,7 +45,7 @@ impl CohesionCore {
                 continue;
             }
             total += flagged.len();
-            append_section(&mut body, &src.rel_path, &flagged);
+            append_section(&mut body, &src.rel_path, src.lang, &flagged);
         }
 
         if total == 0 {
@@ -72,19 +73,13 @@ fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, Ho
     }
 }
 
-fn append_section(out: &mut String, file_path: &str, units: &[&CohesionUnit]) {
+fn append_section(out: &mut String, file_path: &str, lang: SourceLang, units: &[&CohesionUnit]) {
     // writeln! into a String cannot fail; the result is swallowed
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
     let _ = writeln!(out, "{file_path}:");
     for unit in units {
-        let header = match &unit.kind {
-            CohesionUnitKind::Inherent => format!("impl {}", unit.type_name),
-            CohesionUnitKind::Trait { trait_name } => {
-                format!("impl {trait_name} for {}", unit.type_name)
-            }
-            CohesionUnitKind::Module => format!("module {}", unit.type_name),
-        };
+        let header = unit_label(lang, &unit.kind, unit.type_name.as_str());
         let inert = if unit.inert_method_count > 0 {
             format!(" (+{} inert)", unit.inert_method_count)
         } else {
@@ -215,8 +210,9 @@ impl Thing {
     fn module_unit_is_reported_with_module_prefix() {
         // Two top-level Python functions split across two unrelated
         // module-level fields → LCOM4 = 2 → flagged. The header must
-        // say `module <module>`, not `impl <module>`, so the agent
-        // reading the report can tell the granularity apart.
+        // say `module`, not `impl`, so the agent reading the report can
+        // tell the granularity apart. The file-scope unit has no name,
+        // so the label is the bare keyword.
         let src = EditedSource {
             rel_path: "lib.py".to_owned(),
             lang: SourceLang::Python,
@@ -239,9 +235,35 @@ def record(s):
             .expect("expected a report");
         assert!(out.contains("lib.py"), "should mention file: {out}");
         assert!(
-            out.contains("module <module>"),
+            out.contains("- module (L"),
             "should label module unit: {out}",
         );
+        assert!(!out.contains("<module>"), "should drop sentinel: {out}");
         assert!(out.contains("LCOM4=2"), "should report lcom4: {out}");
+    }
+
+    #[test]
+    fn python_class_is_labelled_class_not_impl() {
+        // A Python `class` must not be mislabelled `impl` — that keyword
+        // is Rust-only. Two disjoint field clusters push LCOM4 to 2 so
+        // the unit clears the floor and gets reported.
+        let src = EditedSource {
+            rel_path: "lib.py".to_owned(),
+            lang: SourceLang::Python,
+            source: r#"
+class Widget:
+    def ga(self):
+        return self.a
+    def gb(self):
+        return self.b
+"#
+            .to_owned(),
+        };
+        let out = CohesionCore::new()
+            .run(&[src])
+            .unwrap()
+            .expect("expected a report");
+        assert!(out.contains("class Widget"), "should label class: {out}");
+        assert!(!out.contains("impl Widget"), "should not say impl: {out}");
     }
 }

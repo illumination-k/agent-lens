@@ -299,7 +299,9 @@ func (t *Thing) B() int { return t.b }
         );
         let out = hook.handle(input).unwrap();
         let msg = out.common.system_message.expect("expected a report");
-        assert!(msg.contains("impl Thing"), "should label receiver: {msg}");
+        // Go has no `impl` blocks: methods attach to a receiver type, so
+        // the unit is labelled with Go's `type` keyword.
+        assert!(msg.contains("type Thing"), "should label receiver: {msg}");
         assert!(msg.contains("LCOM4=2"), "should report lcom4: {msg}");
     }
 
