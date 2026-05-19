@@ -10,8 +10,9 @@
 //!
 //! Items declared inside `namespace` / `module` blocks are walked
 //! recursively, mirroring how `lens-rust` walks inline `mod foo {}`.
-//! Functions defined *inside* another function body are deliberately
-//! left out; their containing function is the unit of analysis.
+//! Functions defined *inside* another function body — callbacks, event
+//! handlers, closures — are extracted too, each as a `<parent>::closure#N`
+//! unit minted by [`crate::walk`].
 //!
 //! The actual AST traversal lives in [`crate::walk`]; this module is the
 //! [`LanguageParser`]-shaped adapter that converts each visited
@@ -226,13 +227,42 @@ impl FunctionVisitor for FunctionDefCollector {
 /// don't propagate as owners (the walker passes `None` through
 /// `walk_module_body`) so a namespaced free function shows up bare
 /// here.
+///
+/// A nested function (`<parent>::closure#N`) carries no test marker of
+/// its own — it inherits the classification of the enclosing named
+/// function or method, so the `::closure#N` chain is peeled off first.
 fn is_test_item(qualified: &str) -> bool {
-    match qualified.rsplit_once("::") {
+    let base = strip_nested_segments(qualified);
+    match base.rsplit_once("::") {
         Some((owner, method)) => {
             name_looks_like_test_class(owner) || name_looks_like_test_function(method)
         }
-        None => name_looks_like_test_function(qualified),
+        None => name_looks_like_test_function(base),
     }
+}
+
+/// Peel any trailing `::closure#N` segments minted by [`crate::walk`] for
+/// nested functions, returning the qualified name of the enclosing named
+/// function or method (e.g. `test_foo::closure#1` → `test_foo`).
+fn strip_nested_segments(name: &str) -> &str {
+    let mut base = name;
+    while let Some((head, tail)) = base.rsplit_once("::") {
+        if is_nested_segment(tail) {
+            base = head;
+        } else {
+            break;
+        }
+    }
+    base
+}
+
+/// True iff `segment` is a `closure#<digits>` segment — the shape
+/// [`crate::walk`] mints for a nested function. A real identifier can
+/// never collide: `#` is only legal in a `#private` field, never mid-name.
+fn is_nested_segment(segment: &str) -> bool {
+    segment
+        .strip_prefix(crate::walk::NESTED_SEGMENT_PREFIX)
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn statement_tree(stmt: &Statement) -> TreeNode {
@@ -719,6 +749,162 @@ function Wrap() { return <div><span>a</span><span>b</span></div>; }
         assert!(
             find_node(tree, "Expr").is_none(),
             "fragment must not fall through to the generic `Expr` leaf",
+        );
+    }
+
+    fn names(funcs: &[FunctionDef]) -> Vec<&str> {
+        funcs.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    /// Every shape of function nested inside another function's body is
+    /// extracted as a `<parent>::closure#N` unit alongside its parent —
+    /// callbacks, event handlers and plain closures alike.
+    #[rstest]
+    #[case::arrow_binding("function setup() {\n    const handler = () => {};\n}\n")]
+    #[case::event_handler_property(
+        "function setup(btn: any) {\n    btn.onclick = () => doThing();\n}\n"
+    )]
+    #[case::callback_argument(
+        "function setup(el: any) {\n    el.addEventListener(\"click\", () => run());\n}\n"
+    )]
+    #[case::nested_function_declaration("function setup() {\n    function inner() {}\n}\n")]
+    #[case::nested_function_expression("function setup() {\n    const f = function () {};\n}\n")]
+    fn extracts_nested_function_as_closure_unit(#[case] src: &str) {
+        let funcs = parse_functions(src);
+        assert_eq!(names(&funcs), ["setup", "setup::closure#1"]);
+    }
+
+    #[test]
+    fn jsx_event_handler_is_extracted_as_a_nested_function() {
+        // The canonical `onClick={() => …}` handler — a nested function
+        // buried in a JSX attribute value.
+        let src =
+            "function App() {\n    return <button onClick={() => helper()}>Run</button>;\n}\n";
+        let funcs = parse_tsx_functions(src);
+        assert_eq!(names(&funcs), ["App", "App::closure#1"]);
+    }
+
+    #[test]
+    fn sibling_nested_functions_are_numbered_in_source_order() {
+        let src =
+            "function setup() {\n    const first = () => {};\n    const second = () => {};\n}\n";
+        let funcs = parse_functions(src);
+        assert_eq!(
+            names(&funcs),
+            ["setup", "setup::closure#1", "setup::closure#2"],
+        );
+    }
+
+    #[test]
+    fn deeply_nested_functions_qualify_under_their_parent() {
+        // A closure inside a closure resets the index and qualifies under
+        // the immediate parent rather than the outermost function.
+        let src = "function setup() {\n    const outer = () => {\n        const inner = () => {};\n    };\n}\n";
+        let funcs = parse_functions(src);
+        assert_eq!(
+            names(&funcs),
+            ["setup", "setup::closure#1", "setup::closure#1::closure#1"],
+        );
+    }
+
+    #[test]
+    fn nested_function_in_a_method_qualifies_under_the_method() {
+        let src = "class Widget {\n    render() {\n        const onClick = () => this.update();\n    }\n}\n";
+        let funcs = parse_functions(src);
+        assert_eq!(
+            names(&funcs),
+            ["Widget::render", "Widget::render::closure#1"]
+        );
+    }
+
+    #[test]
+    fn nested_function_inside_a_test_function_inherits_the_test_flag() {
+        // A closure has no test marker of its own; it must inherit the
+        // classification of the enclosing `test_*` function so
+        // `--exclude-tests` drops it alongside its parent.
+        let src = "function test_setup() {\n    const handler = () => {};\n}\n";
+        let funcs = parse_functions(src);
+        assert_eq!(names(&funcs), ["test_setup", "test_setup::closure#1"]);
+        assert!(
+            funcs.iter().all(|f| f.is_test),
+            "closure inside a test function must be marked test",
+        );
+    }
+
+    #[test]
+    fn nested_function_inside_production_function_stays_production() {
+        let src = "function compute() {\n    const handler = () => {};\n}\n";
+        let funcs = parse_functions(src);
+        assert!(funcs.iter().all(|f| !f.is_test));
+    }
+
+    #[rstest]
+    #[case::closure_in_test_function("test_run::closure#1", true)]
+    #[case::deep_closure_in_test_function("test_run::closure#1::closure#2", true)]
+    #[case::closure_in_test_class_method("TestSuite::check::closure#1", true)]
+    #[case::closure_in_production_method("Service::compute::closure#1", false)]
+    #[case::closure_in_production_function("compute::closure#1", false)]
+    #[case::private_method_is_not_a_closure_segment("Service::#closure", false)]
+    fn is_test_item_peels_closure_segments(#[case] qualified: &str, #[case] expected: bool) {
+        assert_eq!(is_test_item(qualified), expected);
+    }
+
+    /// Only a `closure#<digits>` segment is a nested-function marker. An
+    /// empty or non-numeric index must not match, so a real name can
+    /// never be mistaken for a synthetic one.
+    #[rstest]
+    #[case::numbered("closure#1", true)]
+    #[case::multi_digit("closure#42", true)]
+    #[case::empty_index("closure#", false)]
+    #[case::non_digit_index("closure#a", false)]
+    #[case::no_hash("closure", false)]
+    #[case::private_method("#closure", false)]
+    #[case::plain_name("helper", false)]
+    fn is_nested_segment_matches_only_closure_indices(
+        #[case] segment: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_nested_segment(segment), expected);
+    }
+
+    #[test]
+    fn identical_nested_callbacks_are_detected_as_clones() {
+        // Two functions register a structurally identical callback. The
+        // callbacks are their own units, so the duplication surfaces even
+        // though the registering functions differ.
+        let src = r#"
+function setupA(el: any): void {
+    el.addEventListener("click", () => {
+        let total = 0;
+        for (const x of [1, 2, 3]) {
+            total += x;
+        }
+        report(total);
+    });
+}
+
+function setupB(el: any): void {
+    el.on("press", () => {
+        let sum = 0;
+        for (const y of [1, 2, 3]) {
+            sum += y;
+        }
+        report(sum);
+    });
+}
+"#;
+        let funcs = parse_functions(src);
+        let pairs = find_similar_functions(&funcs, 0.85, &TSEDOptions::default());
+        assert!(
+            pairs.iter().any(|p| {
+                let names = [p.a.name.as_str(), p.b.name.as_str()];
+                names.contains(&"setupA::closure#1") && names.contains(&"setupB::closure#1")
+            }),
+            "expected the two callbacks to cluster: {:?}",
+            pairs
+                .iter()
+                .map(|p| (p.a.name.as_str(), p.b.name.as_str()))
+                .collect::<Vec<_>>(),
         );
     }
 }

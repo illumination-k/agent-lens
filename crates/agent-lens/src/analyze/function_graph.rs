@@ -1844,7 +1844,21 @@ mod tests {
         let report = analyze_json(dir.path());
 
         assert_eq!(report["language"], "typescript");
-        assert_eq!(report["node_count"], 2);
+        // The `onClick` handler is a nested function, so it is its own
+        // node alongside `helper` and `App`.
+        assert_eq!(report["node_count"], 3);
+        let qualified: Vec<&str> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["qualified_name"].as_str().unwrap())
+            .collect();
+        assert!(
+            qualified.contains(&"App::App::closure#1"),
+            "got {qualified:?}"
+        );
+        // The `helper()` call lives in the handler, so the resolved edge
+        // is owned by the closure rather than re-attributed to `App`.
         let edge = edge_by_callee(&report, "helper");
         assert_eq!(edge["resolution"], "resolved");
         assert_eq!(
