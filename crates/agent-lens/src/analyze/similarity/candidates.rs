@@ -6,7 +6,7 @@ use lens_domain::{
     CandidateStrategy, TSEDOptions, collect_subtree_sizes, lsh_candidate_pairs_for_trees,
 };
 
-use super::OwnedFunction;
+use super::{OwnedFunction, SimilarityMethod};
 
 #[derive(Debug)]
 pub(super) struct TreeProfile {
@@ -221,12 +221,19 @@ impl CandidatePairStrategy {
 /// both functions meet the `min_lines` filter. Large corpora go through the
 /// same LSH pre-filter used by `lens-domain`; small corpora keep the exact
 /// cartesian path because LSH setup costs more than it saves there.
+///
+/// The TSED-only cheap filters (size / label / arity / shingle bounds)
+/// prune pairs that cannot reach `threshold` under tree-edit distance.
+/// They are unsound for [`SimilarityMethod::Token`], whose score is not
+/// bounded by those quantities, so the token method skips them and scores
+/// every enumerated pair.
 pub(super) fn candidate_pairs(
     corpus: &[OwnedFunction],
     min_lines: usize,
     profiles: &[TreeProfile],
     threshold: f64,
     opts: &TSEDOptions,
+    method: SimilarityMethod,
 ) -> CandidatePairs {
     let eligible_indices: Vec<usize> = corpus
         .iter()
@@ -245,30 +252,36 @@ pub(super) fn candidate_pairs(
             .iter()
             .filter_map(|&i| corpus.get(i).map(OwnedFunction::body_tree))
             .collect();
-        filter_size_compatible_pairs(
-            lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
-                .into_iter()
-                .filter_map(|(i, j)| {
-                    let a = eligible_indices.get(i).copied()?;
-                    let b = eligible_indices.get(j).copied()?;
-                    Some((a, b))
-                })
-                .filter(|(i, j)| same_test_class(corpus, *i, *j)),
-            profiles,
-            threshold,
-            opts,
-        )
+        let lsh_pairs = lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
+            .into_iter()
+            .filter_map(|(i, j)| {
+                let a = eligible_indices.get(i).copied()?;
+                let b = eligible_indices.get(j).copied()?;
+                Some((a, b))
+            })
+            .filter(|(i, j)| same_test_class(corpus, *i, *j));
+        match method {
+            SimilarityMethod::Tsed => {
+                filter_size_compatible_pairs(lsh_pairs, profiles, threshold, opts)
+            }
+            SimilarityMethod::Token => {
+                (lsh_pairs.collect::<Vec<_>>(), CheapFilterCounts::default())
+            }
+        }
     } else {
-        filter_tsed_compatible_pairs(
-            eligible_indices
-                .iter()
-                .enumerate()
-                .flat_map(|(pos, &i)| eligible_indices[pos + 1..].iter().map(move |&j| (i, j)))
-                .filter(|(i, j)| same_test_class(corpus, *i, *j)),
-            profiles,
-            threshold,
-            opts,
-        )
+        let cartesian = eligible_indices
+            .iter()
+            .enumerate()
+            .flat_map(|(pos, &i)| eligible_indices[pos + 1..].iter().map(move |&j| (i, j)))
+            .filter(|(i, j)| same_test_class(corpus, *i, *j));
+        match method {
+            SimilarityMethod::Tsed => {
+                filter_tsed_compatible_pairs(cartesian, profiles, threshold, opts)
+            }
+            SimilarityMethod::Token => {
+                (cartesian.collect::<Vec<_>>(), CheapFilterCounts::default())
+            }
+        }
     };
     CandidatePairs {
         pairs,
@@ -547,9 +560,63 @@ mod tests {
             &profiles,
             0.0,
             &lens_domain::TSEDOptions::default(),
+            SimilarityMethod::Tsed,
         );
 
         assert_eq!(candidates.pairs, vec![(0, 1), (0, 2), (1, 2)]);
+    }
+
+    fn owned_function_with_tree(name: &str, tree: lens_domain::TreeNode) -> OwnedFunction {
+        OwnedFunction {
+            file: std::path::PathBuf::from("lib.rs"),
+            rel_path: "lib.rs".to_owned(),
+            is_test: false,
+            shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
+                name: name.to_owned(),
+                start_line: 1,
+                end_line: 5,
+                is_test: false,
+                signature: None,
+                tree,
+            }),
+        }
+    }
+
+    #[test]
+    fn token_method_skips_tsed_cheap_filters() {
+        // These two bodies share no labels, so the TSED cheap filters
+        // prune the pair outright. The token method must still enumerate
+        // it: its score is not bounded by tree-edit distance.
+        let corpus = vec![
+            owned_function_with_tree(
+                "a",
+                lens_domain::TreeNode::with_children(
+                    "Block",
+                    "",
+                    vec![lens_domain::TreeNode::leaf("Let")],
+                ),
+            ),
+            owned_function_with_tree(
+                "b",
+                lens_domain::TreeNode::with_children(
+                    "Loop",
+                    "",
+                    vec![lens_domain::TreeNode::leaf("Call")],
+                ),
+            ),
+        ];
+        let profiles: Vec<_> = corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
+            .collect();
+        let opts = lens_domain::TSEDOptions::default();
+
+        let tsed = candidate_pairs(&corpus, 1, &profiles, 0.99, &opts, SimilarityMethod::Tsed);
+        let token = candidate_pairs(&corpus, 1, &profiles, 0.99, &opts, SimilarityMethod::Token);
+
+        assert!(tsed.pairs.is_empty(), "TSED should prune the disjoint pair");
+        assert_eq!(token.pairs, vec![(0, 1)]);
+        assert_eq!(token.total_len(), 1);
     }
 
     #[test]

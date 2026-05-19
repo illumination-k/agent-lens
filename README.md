@@ -138,6 +138,10 @@ agent-lens analyze similarity crates/lens-rust/src
 # Same, but emit a compact summary instead of the full JSON
 agent-lens analyze similarity src/foo.rs --format md --top 10 --min-score 0.9
 
+# Score with token k-gram overlap instead of TSED tree-edit distance:
+# faster and more tolerant of reordered code, but less precise
+agent-lens analyze similarity crates/lens-rust/src --method token
+
 # All analyzers accept path filters: focus tests, drop tests, or exclude globs
 agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
@@ -203,6 +207,7 @@ tools = ["similarity", "complexity", "cohesion"] # analyzers to run, in order
 [profile.web.similarity]
 threshold = 0.9
 min-lines = 8
+method = "tsed" # or "token"
 top = 20
 
 [profile.web.complexity]
@@ -240,16 +245,16 @@ recursively with `.gitignore` semantics.
 
 Analyzer-specific options today:
 
-| Analyzer         | Extra options                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------- |
-| `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--min-lines N`, `--diff-only`, `--top N` |
-| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                             |
-| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                             |
-| `wrapper`        | `--diff-only`                                                                         |
-| `hotspot`        | `--since VALUE`, `--top N`                                                            |
-| `coupling`       | shared analyzer options only                                                          |
-| `function-graph` | shared analyzer options only                                                          |
-| `context-span`   | shared analyzer options only                                                          |
+| Analyzer         | Extra options                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--min-lines N`, `--method tsed\|token`, `--diff-only`, `--top N` |
+| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                     |
+| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                     |
+| `wrapper`        | `--diff-only`                                                                                                 |
+| `hotspot`        | `--since VALUE`, `--top N`                                                                                    |
+| `coupling`       | shared analyzer options only                                                                                  |
+| `function-graph` | shared analyzer options only                                                                                  |
+| `context-span`   | shared analyzer options only                                                                                  |
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,

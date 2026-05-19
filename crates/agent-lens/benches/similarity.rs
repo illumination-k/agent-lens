@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use agent_lens::analyze::{OutputFormat, SimilarityAnalyzer};
+use agent_lens::analyze::{OutputFormat, SimilarityAnalyzer, SimilarityMethod};
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 
@@ -11,6 +11,7 @@ fn bench_similarity(c: &mut Criterion) {
     let large_dense = dense_bench_corpus(32, 32);
     let large_sparse = sparse_bench_corpus(32, 32);
     let analyzer = SimilarityAnalyzer::new();
+    let token_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Token);
 
     c.bench_function("similarity_directory_cartesian_32_functions", |b| {
         b.iter(|| {
@@ -45,6 +46,16 @@ fn bench_similarity(c: &mut Criterion) {
     c.bench_function("similarity_directory_lsh_sparse_1024_functions", |b| {
         b.iter(|| {
             let report = match analyzer.analyze(large_sparse.path(), OutputFormat::Json) {
+                Ok(report) => report,
+                Err(err) => panic!("similarity benchmark failed: {err}"),
+            };
+            std::hint::black_box(report.len());
+        });
+    });
+
+    c.bench_function("similarity_token_directory_lsh_dense_1024_functions", |b| {
+        b.iter(|| {
+            let report = match token_analyzer.analyze(large_dense.path(), OutputFormat::Json) {
                 Ok(report) => report,
                 Err(err) => panic!("similarity benchmark failed: {err}"),
             };
