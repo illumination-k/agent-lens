@@ -11,6 +11,9 @@ use super::{OwnedFunction, SimilarityComponents};
 pub(super) struct Report<'a> {
     /// Input path: a single source file, or the root directory walked.
     root: String,
+    /// Body-scoring algorithm used: `tsed` or `token`. Surfaced because
+    /// the two methods are not on the same score scale.
+    method: &'static str,
     function_count: usize,
     threshold: f64,
     min_lines: usize,
@@ -21,6 +24,7 @@ pub(super) struct Report<'a> {
 impl<'a> Report<'a> {
     pub(super) fn new(
         path: &Path,
+        method: &'static str,
         threshold: f64,
         min_lines: usize,
         function_count: usize,
@@ -28,6 +32,7 @@ impl<'a> Report<'a> {
     ) -> Self {
         Self {
             root: path.display().to_string(),
+            method,
             function_count,
             threshold,
             min_lines,
@@ -145,8 +150,8 @@ struct PairView<'a> {
 
 pub(super) fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
     let mut out = format!(
-        "# Similarity report: {} ({} function(s), threshold {:.2}, min lines {})\n",
-        report.root, report.function_count, report.threshold, report.min_lines,
+        "# Similarity report: {} ({} method, {} function(s), threshold {:.2}, min lines {})\n",
+        report.root, report.method, report.function_count, report.threshold, report.min_lines,
     );
     if report.clusters.is_empty() {
         out.push_str("\n_No similar function clusters at or above threshold._\n");

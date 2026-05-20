@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::analyze::OutputFormat;
+use crate::analyze::{OutputFormat, SimilarityMethod};
 
 /// File name searched for when discovering a project config.
 pub const CONFIG_FILE_NAME: &str = "agent-lens.toml";
@@ -154,6 +154,9 @@ pub struct SimilarityOptions {
     pub threshold: Option<f64>,
     pub min_lines: Option<usize>,
     pub top: Option<usize>,
+    /// Body-scoring algorithm: `tsed` (default) or `token`. Mirrors the
+    /// `--method` CLI flag.
+    pub method: Option<SimilarityMethod>,
     #[serde(default)]
     pub diff_only: bool,
 }

@@ -19,7 +19,8 @@ use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
-    FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, WrapperAnalyzer,
+    FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod,
+    WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -480,6 +481,13 @@ struct AnalyzeSimilarityArgs {
     /// report.
     #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
     min_lines: usize,
+    /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
+    /// distance over the body AST. `token` compares preorder token
+    /// k-gram multisets — faster and more tolerant of reordered code,
+    /// but less precise. Scores from the two methods are not directly
+    /// comparable.
+    #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
+    method: SimilarityMethod,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -699,6 +707,7 @@ fn build_analyze_command(
                 ranking: AnalyzeRankingArgs { top: opts.top },
                 threshold: opts.threshold.unwrap_or(DEFAULT_SIMILARITY_THRESHOLD),
                 min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
+                method: opts.method.unwrap_or_default(),
             })
         }
         config::ToolName::Wrapper => {
@@ -850,6 +859,7 @@ impl AnalyzeCommand {
                     .with_threshold(args.threshold)
                     .with_diff_only(args.diff.diff_only)
                     .with_min_lines(args.min_lines)
+                    .with_method(args.method)
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -1300,6 +1310,25 @@ mod tests {
         assert!((args.threshold - 0.85).abs() < f64::EPSILON);
         assert_eq!(args.min_lines, 8);
         assert_eq!(args.ranking.top, Some(3));
+        // `--method` is omitted above, so it defaults to TSED.
+        assert_eq!(args.method, SimilarityMethod::Tsed);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_method() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--method",
+            "token",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.method, SimilarityMethod::Token);
     }
 
     #[test]
@@ -1675,7 +1704,7 @@ fn dispatch(n: i32) -> i32 {
     #[test]
     fn build_analyze_command_maps_similarity_options() {
         let profile: config::Profile = toml::from_str(
-            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\ndiff-only = true\n",
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\nmethod = \"token\"\ndiff-only = true\n",
         )
         .unwrap();
         let cmd = build_analyze_command(
@@ -1692,6 +1721,7 @@ fn dispatch(n: i32) -> i32 {
         assert!((args.threshold - 0.7).abs() < f64::EPSILON);
         assert_eq!(args.min_lines, 9);
         assert_eq!(args.ranking.top, Some(4));
+        assert_eq!(args.method, SimilarityMethod::Token);
         assert!(args.diff.diff_only);
     }
 
@@ -1711,6 +1741,7 @@ fn dispatch(n: i32) -> i32 {
         assert!((args.threshold - DEFAULT_SIMILARITY_THRESHOLD).abs() < f64::EPSILON);
         assert_eq!(args.min_lines, DEFAULT_SIMILARITY_MIN_LINES);
         assert_eq!(args.ranking.top, None);
+        assert_eq!(args.method, SimilarityMethod::Tsed);
         assert!(!args.diff.diff_only);
     }
 
