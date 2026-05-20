@@ -100,48 +100,10 @@ impl FunctionGraphAnalyzer {
             _ => None,
         };
         let module = module_path_for(root, file, lang, crate_info.as_ref(), &source);
-        let mut functions = match lang {
-            SourceLang::Rust => lens_rust::extract_function_shapes_with_modules(&source, &module)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::TypeScript(dialect) => {
-                lens_ts::extract_function_shapes_with_module(&source, dialect, &module)
-                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))?
-            }
-            SourceLang::Python => lens_py::extract_function_shapes_with_module(&source, &module)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Go => lens_golang::extract_function_shapes_with_module(&source, &module)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-        };
+        let mut functions = extract_function_shapes(lang, &source, &module)?;
         functions.retain(|f| self.includes_function(f, path_is_test));
-
-        let calls = match lang {
-            SourceLang::Rust => lens_rust::extract_call_shapes_with_options_and_base_module(
-                &source,
-                CallIndexOptions {
-                    include_cfg_test_blocks: !self.exclude_tests,
-                },
-                &module,
-            )
-            .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::TypeScript(dialect) => {
-                lens_ts::extract_call_shapes_with_module(&source, dialect, &module)
-                    .map_err(|e| AnalyzerError::Parse(Box::new(e)))?
-            }
-            SourceLang::Python => lens_py::extract_call_shapes_with_module(&source, &module)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Go => lens_golang::extract_call_shapes_with_module(&source, &module)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-        };
-        let complexity = match lang {
-            SourceLang::Rust => lens_rust::extract_complexity_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::TypeScript(dialect) => lens_ts::extract_complexity_units(&source, dialect)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Python => lens_py::extract_complexity_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-            SourceLang::Go => lens_golang::extract_complexity_units(&source)
-                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
-        };
+        let calls = extract_call_shapes(lang, &source, &module, !self.exclude_tests)?;
+        let complexity = extract_complexity(lang, &source)?;
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -162,6 +124,75 @@ impl FunctionGraphAnalyzer {
             return !is_test;
         }
         true
+    }
+}
+
+fn parse_err<E>(e: E) -> AnalyzerError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    AnalyzerError::Parse(Box::new(e))
+}
+
+fn extract_function_shapes(
+    lang: SourceLang,
+    source: &str,
+    module: &str,
+) -> Result<Vec<FunctionShape>, AnalyzerError> {
+    match lang {
+        SourceLang::Rust => {
+            lens_rust::extract_function_shapes_with_modules(source, module).map_err(parse_err)
+        }
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::extract_function_shapes_with_module(source, dialect, module).map_err(parse_err)
+        }
+        SourceLang::Python => {
+            lens_py::extract_function_shapes_with_module(source, module).map_err(parse_err)
+        }
+        SourceLang::Go => {
+            lens_golang::extract_function_shapes_with_module(source, module).map_err(parse_err)
+        }
+    }
+}
+
+fn extract_call_shapes(
+    lang: SourceLang,
+    source: &str,
+    module: &str,
+    include_cfg_test_blocks: bool,
+) -> Result<Vec<CallShape>, AnalyzerError> {
+    match lang {
+        SourceLang::Rust => lens_rust::extract_call_shapes_with_options_and_base_module(
+            source,
+            CallIndexOptions {
+                include_cfg_test_blocks,
+            },
+            module,
+        )
+        .map_err(parse_err),
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::extract_call_shapes_with_module(source, dialect, module).map_err(parse_err)
+        }
+        SourceLang::Python => {
+            lens_py::extract_call_shapes_with_module(source, module).map_err(parse_err)
+        }
+        SourceLang::Go => {
+            lens_golang::extract_call_shapes_with_module(source, module).map_err(parse_err)
+        }
+    }
+}
+
+fn extract_complexity(
+    lang: SourceLang,
+    source: &str,
+) -> Result<Vec<FunctionComplexity>, AnalyzerError> {
+    match lang {
+        SourceLang::Rust => lens_rust::extract_complexity_units(source).map_err(parse_err),
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::extract_complexity_units(source, dialect).map_err(parse_err)
+        }
+        SourceLang::Python => lens_py::extract_complexity_units(source).map_err(parse_err),
+        SourceLang::Go => lens_golang::extract_complexity_units(source).map_err(parse_err),
     }
 }
 
