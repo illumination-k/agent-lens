@@ -13,7 +13,7 @@ oxc_allocator = "0.130"
 oxc_ast = "0.130"
 oxc_ast_visit = "0.130"
 oxc_parser = "0.130"
-oxc_span = "0.130"
+oxc_span = "0.131"
 oxc_syntax = "0.130"
 thiserror = { workspace = true }
 
