@@ -13,6 +13,7 @@ pub mod context_span;
 pub mod coupling;
 mod crate_root;
 mod diff;
+mod error_from;
 mod format;
 pub mod function_graph;
 pub mod hotspot;
@@ -193,45 +194,11 @@ pub enum CrateAnalyzerError {
     PathFilter(#[from] PathFilterError),
 }
 
-impl From<lens_rust::CouplingError> for CrateAnalyzerError {
-    fn from(value: lens_rust::CouplingError) -> Self {
-        match value {
-            lens_rust::CouplingError::Io { path, source } => Self::Io { path, source },
-            lens_rust::CouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-            lens_rust::CouplingError::MissingMod { parent, name, near } => {
-                Self::MissingMod { parent, name, near }
-            }
-        }
-    }
-}
+use error_from::impl_from_coupling_error;
 
-impl From<lens_ts::CouplingError> for CrateAnalyzerError {
-    fn from(value: lens_ts::CouplingError) -> Self {
-        match value {
-            lens_ts::CouplingError::Io { path, source } => Self::Io { path, source },
-            lens_ts::CouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-        }
-    }
-}
-
-impl From<lens_golang::CouplingError> for CrateAnalyzerError {
-    fn from(value: lens_golang::CouplingError) -> Self {
-        match value {
-            lens_golang::CouplingError::Io { path, source } => Self::Io { path, source },
-            lens_golang::CouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-            lens_golang::CouplingError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
-        }
-    }
-}
+impl_from_coupling_error!(lens_rust::CouplingError => CrateAnalyzerError, MissingMod);
+impl_from_coupling_error!(lens_ts::CouplingError => CrateAnalyzerError);
+impl_from_coupling_error!(lens_golang::CouplingError => CrateAnalyzerError, UnsupportedRoot);
 
 #[cfg(test)]
 mod tests {

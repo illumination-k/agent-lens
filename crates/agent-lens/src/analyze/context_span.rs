@@ -40,6 +40,7 @@ use lens_domain::{
 use serde::Serialize;
 use tracing::warn;
 
+use super::error_from::impl_from_coupling_error;
 use super::{
     AnalyzePathFilter, OutputFormat, SourceLang, relative_display_path, resolve_crate_root,
 };
@@ -89,20 +90,10 @@ pub enum ContextSpanAnalyzerError {
     },
 }
 
-impl From<lens_rust::CouplingError> for ContextSpanAnalyzerError {
-    fn from(value: lens_rust::CouplingError) -> Self {
-        match value {
-            lens_rust::CouplingError::Io { path, source } => Self::Io { path, source },
-            lens_rust::CouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-            lens_rust::CouplingError::MissingMod { parent, name, near } => {
-                Self::MissingMod { parent, name, near }
-            }
-        }
-    }
-}
+impl_from_coupling_error!(lens_rust::CouplingError => ContextSpanAnalyzerError, MissingMod);
+impl_from_coupling_error!(lens_ts::CouplingError => ContextSpanAnalyzerError);
+impl_from_coupling_error!(lens_py::CouplingError => ContextSpanAnalyzerError, UnsupportedRoot);
+impl_from_coupling_error!(lens_golang::CouplingError => ContextSpanAnalyzerError, UnsupportedRoot);
 
 impl From<super::CrateAnalyzerError> for ContextSpanAnalyzerError {
     fn from(value: super::CrateAnalyzerError) -> Self {
@@ -115,44 +106,6 @@ impl From<super::CrateAnalyzerError> for ContextSpanAnalyzerError {
             }
             super::CrateAnalyzerError::Serialize(source) => Self::Serialize(source),
             super::CrateAnalyzerError::PathFilter(source) => Self::PathFilter(source),
-        }
-    }
-}
-
-impl From<lens_ts::CouplingError> for ContextSpanAnalyzerError {
-    fn from(value: lens_ts::CouplingError) -> Self {
-        match value {
-            lens_ts::CouplingError::Io { path, source } => Self::Io { path, source },
-            lens_ts::CouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-        }
-    }
-}
-
-impl From<lens_py::CouplingError> for ContextSpanAnalyzerError {
-    fn from(value: lens_py::CouplingError) -> Self {
-        match value {
-            lens_py::CouplingError::Io { path, source } => Self::Io { path, source },
-            lens_py::CouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-            lens_py::CouplingError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
-        }
-    }
-}
-
-impl From<lens_golang::CouplingError> for ContextSpanAnalyzerError {
-    fn from(value: lens_golang::CouplingError) -> Self {
-        match value {
-            lens_golang::CouplingError::Io { path, source } => Self::Io { path, source },
-            lens_golang::CouplingError::Parse { path, source } => Self::Parse {
-                path,
-                source: Box::new(source),
-            },
-            lens_golang::CouplingError::UnsupportedRoot { path } => Self::UnsupportedRoot { path },
         }
     }
 }
