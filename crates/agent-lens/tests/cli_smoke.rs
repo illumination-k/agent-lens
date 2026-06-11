@@ -292,3 +292,124 @@ fn run_without_a_config_file_exits_nonzero() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("agent-lens failed"), "got: {stderr}");
 }
+
+#[test]
+fn help_md_emits_markdown_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(&["help", "--md"], dir.path(), None);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("# agent-lens"), "got: {stdout}");
+    assert!(
+        stdout.contains("### `agent-lens analyze similarity`"),
+        "got: {stdout}",
+    );
+    assert!(stdout.contains("## `agent-lens skills`"), "got: {stdout}");
+}
+
+#[test]
+fn skills_list_names_each_bundled_skill() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(&["skills", "list"], dir.path(), None);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("## agent-lens"), "got: {stdout}");
+    assert!(stdout.contains("## find-duplicates"), "got: {stdout}");
+    assert!(
+        stdout.contains("agent-lens skills install"),
+        "got: {stdout}",
+    );
+}
+
+#[test]
+fn skills_install_project_writes_files_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(
+        &["skills", "install", "--scope", "project"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["wrote"], true);
+    assert!(
+        json["created"]
+            .as_array()
+            .unwrap()
+            .contains(&"agent-lens".into())
+    );
+
+    let installed = dir.path().join(".claude/skills/agent-lens/SKILL.md");
+    assert!(installed.exists());
+    let contents = std::fs::read_to_string(&installed).unwrap();
+    assert!(contents.contains("name: agent-lens"), "got: {contents}");
+
+    let output = agent_lens(
+        &["skills", "install", "--scope", "project"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["wrote"], false);
+    assert_eq!(json["unchanged"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn skills_install_dry_run_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(
+        &["skills", "install", "--scope", "project", "--dry-run"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["wrote"], false);
+    assert!(!dir.path().join(".claude/skills").exists());
+}
+
+#[test]
+fn skills_install_reports_conflict_until_forced() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join(".claude/skills/agent-lens/SKILL.md");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "local edits\n").unwrap();
+
+    let output = agent_lens(
+        &["skills", "install", "--scope", "project"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert!(
+        json["conflicts"]
+            .as_array()
+            .unwrap()
+            .contains(&"agent-lens".into())
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "local edits\n");
+
+    let output = agent_lens(
+        &["skills", "install", "--scope", "project", "--force"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert!(
+        json["updated"]
+            .as_array()
+            .unwrap()
+            .contains(&"agent-lens".into())
+    );
+    assert!(
+        std::fs::read_to_string(&target)
+            .unwrap()
+            .contains("name: agent-lens")
+    );
+}
