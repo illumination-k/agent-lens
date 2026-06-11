@@ -35,7 +35,8 @@ use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use agent_lens::hooks::pre_tool_use::{CohesionHook, ComplexityHook};
 use agent_lens::hooks::session_start::SummaryHook as SessionStartSummaryHook;
 use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use agent_lens::{help_md, skills};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -44,7 +45,11 @@ use tracing_subscriber::EnvFilter;
     name = "agent-lens",
     about = "Hook handlers and analyzers that give coding agents a sharper view of the codebase.",
     version,
-    propagate_version = true
+    propagate_version = true,
+    // We ship our own `help` subcommand (with `--md`), so turn off clap's
+    // auto-generated one to avoid a name clash. `--help` flags are
+    // untouched and still work everywhere.
+    disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -71,6 +76,70 @@ enum Command {
     /// `agent-lens analyze`, and the per-tool reports are emitted as one
     /// combined document.
     Run(RunArgs),
+    /// List or install the Claude Code skills bundled with this binary.
+    ///
+    /// The skills teach a coding agent which analyzer fits a given
+    /// question, so installing them into a project's `.claude/skills`
+    /// (or `$HOME/.claude/skills`) is how a fresh checkout gets
+    /// `agent-lens`-aware routing.
+    #[command(subcommand)]
+    Skills(SkillsCommand),
+    /// Print the command reference, optionally as agent-friendly Markdown.
+    ///
+    /// Without flags this prints the same long help clap renders for
+    /// `--help`. With `--md` it emits a dense Markdown document covering
+    /// every subcommand, its description, and its options in one place —
+    /// tuned for dropping into an LLM context.
+    Help(HelpArgs),
+}
+
+#[derive(Debug, Args)]
+struct HelpArgs {
+    /// Emit the full command reference as Markdown tuned for agent context.
+    #[arg(long)]
+    md: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// List the bundled skills and what each one is for.
+    List,
+    /// Install the bundled skills into a `.claude/skills` directory.
+    ///
+    /// Conservative by default: a skill that already exists with
+    /// different content is reported as a conflict and left untouched.
+    /// Re-running once installed is a no-op; pass `--force` to overwrite
+    /// local edits.
+    Install(SkillsInstallArgs),
+}
+
+#[derive(Debug, Args)]
+struct SkillsInstallArgs {
+    /// Where to install the skills. `project` writes to
+    /// `<cwd>/.claude/skills`; `user` writes to `$HOME/.claude/skills`.
+    #[arg(long, value_enum, default_value_t = SkillsScopeArg::Project)]
+    scope: SkillsScopeArg,
+    /// Show what would be written without touching disk.
+    #[arg(long)]
+    dry_run: bool,
+    /// Overwrite skills that already exist on disk with different content.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SkillsScopeArg {
+    Project,
+    User,
+}
+
+impl From<SkillsScopeArg> for skills::SkillsScope {
+    fn from(value: SkillsScopeArg) -> Self {
+        match value {
+            SkillsScopeArg::Project => Self::Project,
+            SkillsScopeArg::User => Self::User,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -565,7 +634,61 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
         Command::Analyze(sub) => run_analyze(sub),
         Command::Run(args) => run_profile(args),
+        Command::Skills(sub) => run_skills(sub),
+        Command::Help(args) => run_help(args),
     }
+}
+
+/// Print the command reference. `--md` renders the agent-friendly
+/// Markdown document; otherwise we defer to clap's own long help so
+/// `agent-lens help` matches `agent-lens --help`.
+fn run_help(args: HelpArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut command = Cli::command();
+    if args.md {
+        let report = help_md::render(&command);
+        write_stdout_line(&report)
+    } else {
+        write_stdout_line(&command.render_long_help().to_string())
+    }
+}
+
+fn run_skills(cmd: SkillsCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        SkillsCommand::List => write_stdout_line(&skills::render_list()),
+        SkillsCommand::Install(args) => run_skills_install(args),
+    }
+}
+
+/// Diff the bundled skills against the chosen scope and install the
+/// missing (or, with `--force`, the changed) ones. Conflicts are logged
+/// and reflected in the JSON summary so the agent can decide whether to
+/// re-run with `--force`.
+fn run_skills_install(args: SkillsInstallArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let root = skills::resolve_root(args.scope.into(), &cwd)?;
+    let plan = skills::plan(root, args.force)?;
+
+    for conflict in plan.conflicts() {
+        warn!(
+            skill = conflict.name,
+            path = %conflict.path.display(),
+            "skill already exists with different content; re-run with --force to overwrite",
+        );
+    }
+
+    let wrote = if args.dry_run {
+        info!(root = %plan.root.display(), "dry-run: leaving skills untouched");
+        false
+    } else if plan.changed() {
+        skills::apply(&plan)?;
+        info!(root = %plan.root.display(), "installed skills");
+        true
+    } else {
+        info!(root = %plan.root.display(), "skills already installed; nothing to do");
+        false
+    };
+
+    write_stdout_json(&plan.summary(wrote))
 }
 
 fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
@@ -1810,5 +1933,81 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(value["profile"], "audit");
         assert_eq!(value["results"][0]["tool"], "complexity");
         assert_eq!(value["results"][0]["report"]["k"], 1);
+    }
+
+    #[test]
+    fn parses_help_with_and_without_md() {
+        let cli = Cli::try_parse_from(["agent-lens", "help", "--md"]).expect("clean parse");
+        let Command::Help(args) = cli.command else {
+            panic!("expected help");
+        };
+        assert!(args.md);
+
+        let cli = Cli::try_parse_from(["agent-lens", "help"]).expect("clean parse");
+        let Command::Help(args) = cli.command else {
+            panic!("expected help");
+        };
+        assert!(!args.md);
+    }
+
+    #[test]
+    fn parses_skills_list() {
+        let cli = Cli::try_parse_from(["agent-lens", "skills", "list"]).expect("clean parse");
+        assert!(matches!(cli.command, Command::Skills(SkillsCommand::List)));
+    }
+
+    #[test]
+    fn parses_skills_install_with_default_scope() {
+        let cli = Cli::try_parse_from(["agent-lens", "skills", "install"]).expect("clean parse");
+        let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
+            panic!("expected skills install");
+        };
+        assert!(matches!(args.scope, SkillsScopeArg::Project));
+        assert!(!args.dry_run);
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn parses_skills_install_user_scope_with_flags() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "skills",
+            "install",
+            "--scope",
+            "user",
+            "--dry-run",
+            "--force",
+        ])
+        .expect("clean parse");
+        let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
+            panic!("expected skills install");
+        };
+        assert!(matches!(args.scope, SkillsScopeArg::User));
+        assert!(args.dry_run);
+        assert!(args.force);
+    }
+
+    #[test]
+    fn skills_scope_arg_into_scope_round_trip() {
+        let project: skills::SkillsScope = SkillsScopeArg::Project.into();
+        let user: skills::SkillsScope = SkillsScopeArg::User.into();
+        assert!(matches!(project, skills::SkillsScope::Project));
+        assert!(matches!(user, skills::SkillsScope::User));
+    }
+
+    #[test]
+    fn help_md_render_covers_the_whole_command_surface() {
+        // The `help --md` document must reach the deepest analyzer leaves,
+        // not just the top-level command trees.
+        let md = help_md::render(&Cli::command());
+        assert!(md.starts_with("# agent-lens\n"), "got: {md}");
+        assert!(md.contains("## `agent-lens analyze`"), "got: {md}");
+        assert!(
+            md.contains("### `agent-lens analyze similarity`"),
+            "got: {md}",
+        );
+        assert!(md.contains("## `agent-lens skills`"), "got: {md}");
+        // Analyzer-specific options surface in the table.
+        assert!(md.contains("`--threshold <THRESHOLD>`"), "got: {md}");
     }
 }

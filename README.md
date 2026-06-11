@@ -230,7 +230,8 @@ silently ignored.
 
 ### Current command surface
 
-The current binary exposes three top-level command trees plus a `run` command:
+The current binary exposes three top-level command trees plus `run`,
+`skills`, and `help`:
 
 | Command tree | Commands                                                                                                                                  |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -238,6 +239,34 @@ The current binary exposes three top-level command trees plus a `run` command:
 | `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper` |
 | `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `coupling`, `function-graph`, `context-span`, `hotspot`                                |
 | `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                             |
+| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                       |
+| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                        |
+
+`agent-lens help --md` prints the entire command surface — every
+subcommand, its description, and its options — as one dense Markdown
+document, so an agent can read the whole CLI in a single shot instead of
+running `--help` on each branch.
+
+`agent-lens skills install` drops the same skills this repo dogfoods
+(under `.claude/skills/`) into a target project so a fresh checkout gets
+`agent-lens`-aware routing:
+
+```bash
+# Project scope: ./.claude/skills (created if missing)
+agent-lens skills install
+
+# User scope: $HOME/.claude/skills
+agent-lens skills install --scope user
+
+# Preview, then overwrite local edits
+agent-lens skills install --dry-run
+agent-lens skills install --force
+```
+
+Install is conservative and idempotent: a skill that already exists with
+different content is reported as a conflict and left untouched unless
+`--force` is passed. `agent-lens skills list` summarises what ships in the
+binary.
 
 Analyzer commands share `PATH`, `--format json|md`, `--only-tests`,
 `--exclude-tests`, and repeatable `--exclude GLOB`. Directory analyzers walk
