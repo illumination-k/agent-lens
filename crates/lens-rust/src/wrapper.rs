@@ -158,6 +158,10 @@ fn peel_adapters(expr: &Expr) -> (&Expr, Vec<String>) {
                 adapters_outer_to_inner.push("?".to_owned());
                 current = &try_expr.expr;
             }
+            Expr::Await(await_expr) => {
+                adapters_outer_to_inner.push(".await".to_owned());
+                current = &await_expr.base;
+            }
             Expr::Paren(paren) => current = &paren.expr,
             Expr::Group(group) => current = &group.expr,
             Expr::MethodCall(method) if is_trivial_method_call(method) => {
@@ -386,6 +390,31 @@ impl Service {
         "a",
         "b",
         &[".expect()"]
+    )]
+    #[case::await_adapter(
+        "async fn a(x: i32) -> i32 { b(x).await }\n",
+        "a",
+        "b",
+        &[".await"]
+    )]
+    #[case::async_method_delegation(
+        r#"
+struct Client;
+impl Client {
+    pub async fn fetch_articles(&self, pmids: &[&str]) -> Vec<u8> {
+        self.pubmed.fetch_articles(pmids).await
+    }
+}
+"#,
+        "Client::fetch_articles",
+        "self.pubmed.fetch_articles",
+        &[".await"]
+    )]
+    #[case::await_then_try(
+        "async fn a(x: i32) -> Result<i32, E> { b(x).await? }\n",
+        "a",
+        "b",
+        &[".await", "?"]
     )]
     #[case::trait_default_method(
         r#"
