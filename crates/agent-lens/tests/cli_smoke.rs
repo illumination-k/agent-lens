@@ -38,6 +38,76 @@ fn stdout_json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+const SWEEP_RS: &str = r#"
+fn alpha(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn gamma(xs: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in xs {
+        if *x > 0 {
+            total += x;
+        }
+    }
+    total
+}
+fn delta(ys: &[i64]) -> i64 {
+    let mut sum = 0;
+    for y in ys {
+        if *y > 1 {
+            sum += y;
+        }
+    }
+    sum
+}
+"#;
+
+#[test]
+fn analyze_similarity_sweep_clusters_at_floor_and_tags_survival() {
+    // End-to-end through the real binary: the `--sweep` ladder must reach
+    // the analyzer (not be silently dropped) and surface the per-cluster
+    // survival tags in the markdown report.
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_file(dir.path(), "lib.rs", SWEEP_RS);
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            file.to_str().unwrap(),
+            "--format",
+            "md",
+            "--sweep",
+            "0.6,0.75,0.85",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("sweep [0.60, 0.75, 0.85]"), "got: {stdout}");
+    // The verbatim pair survives the top rung; the structural pair only the
+    // middle one. Both tags appearing proves the floor cut surfaced a pair a
+    // plain 0.85 run would have dropped.
+    assert!(stdout.contains("[survives ≥0.85]"), "got: {stdout}");
+    assert!(stdout.contains("[survives ≥0.75]"), "got: {stdout}");
+}
+
 #[test]
 fn analyze_command_prints_report_with_single_trailing_newline() {
     let dir = tempfile::tempdir().unwrap();

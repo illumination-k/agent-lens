@@ -475,6 +475,15 @@ struct AnalyzeSimilarityArgs {
     /// PostToolUse `similarity` hook.
     #[arg(long, visible_alias = "min-score", default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
     threshold: f64,
+    /// Multi-threshold sweep: a comma-separated ascending ladder of
+    /// thresholds, e.g. `--sweep 0.6,0.75,0.85`. Pairs are scored and
+    /// clustered once at the lowest rung, and every reported cluster is
+    /// annotated with the highest rung at which its complete-link structure
+    /// survives intact — a coarse dendrogram in one run that separates
+    /// verbatim clones from merely structural parallels. Supersedes
+    /// `--threshold`, which it conflicts with.
+    #[arg(long, value_delimiter = ',', conflicts_with = "threshold")]
+    sweep: Vec<f64>,
     /// Minimum source line count for a function to be considered.
     /// Functions shorter than this are dropped before pairwise
     /// comparison; keeps trivial getters / one-liners out of the
@@ -706,6 +715,7 @@ fn build_analyze_command(
                 },
                 ranking: AnalyzeRankingArgs { top: opts.top },
                 threshold: opts.threshold.unwrap_or(DEFAULT_SIMILARITY_THRESHOLD),
+                sweep: opts.sweep.unwrap_or_default(),
                 min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
                 method: opts.method.unwrap_or_default(),
             })
@@ -855,8 +865,10 @@ impl AnalyzeCommand {
             }
             Self::Similarity(args) => {
                 let (path, format, path_filter) = args.common.into_parts();
+                let sweep = (!args.sweep.is_empty()).then_some(args.sweep);
                 SimilarityAnalyzer::new()
                     .with_threshold(args.threshold)
+                    .with_sweep(sweep)
                     .with_diff_only(args.diff.diff_only)
                     .with_min_lines(args.min_lines)
                     .with_method(args.method)
@@ -1329,6 +1341,39 @@ mod tests {
             panic!("expected analyze similarity");
         };
         assert_eq!(args.method, SimilarityMethod::Token);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_sweep_ladder() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--sweep",
+            "0.6,0.75,0.85",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.sweep, vec![0.6, 0.75, 0.85]);
+    }
+
+    #[test]
+    fn analyze_similarity_rejects_sweep_with_threshold() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--sweep",
+            "0.6,0.85",
+            "--threshold",
+            "0.7",
+        ])
+        .expect_err("--sweep and --threshold are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
