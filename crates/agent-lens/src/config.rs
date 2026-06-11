@@ -152,6 +152,9 @@ impl ToolName {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SimilarityOptions {
     pub threshold: Option<f64>,
+    /// Multi-threshold sweep ladder. Mirrors the `--sweep` CLI flag; when
+    /// set it supersedes `threshold` as the clustering cut.
+    pub sweep: Option<Vec<f64>>,
     pub min_lines: Option<usize>,
     pub top: Option<usize>,
     /// Body-scoring algorithm: `tsed` (default) or `token`. Mirrors the
@@ -321,6 +324,20 @@ since = "90.days.ago"
             backend.hotspot.as_ref().unwrap().since.as_deref(),
             Some("90.days.ago"),
         );
+    }
+
+    #[test]
+    fn parses_similarity_sweep_ladder() {
+        let config: Config = toml::from_str(
+            "[profile.web]\npath = \"web/\"\ntools = [\"similarity\"]\n\n[profile.web.similarity]\nsweep = [0.6, 0.75, 0.85]\n",
+        )
+        .unwrap();
+        let similarity = config.profile("web").unwrap().similarity.as_ref().unwrap();
+        assert_eq!(
+            similarity.sweep.as_deref(),
+            Some([0.6, 0.75, 0.85].as_slice())
+        );
+        assert_eq!(similarity.threshold, None);
     }
 
     #[test]

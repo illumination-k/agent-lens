@@ -48,6 +48,16 @@ agent-lens analyze wrapper    crates/<name>/src --format md
 - `--threshold 0.75` — catches reshuffled logic. Use this on a small file when the user explicitly wants to find loose duplicates.
 - Default `0.85` — what the `PostToolUse` hook uses, so it matches what the agent will see during edits.
 
+## Sweeping multiple thresholds
+
+When you don't know the right cut — or want to tell verbatim clones apart from structurally parallel implementations in one pass — sweep a ladder instead of guessing a single `--threshold`:
+
+```bash
+agent-lens analyze similarity <path> --format md --sweep 0.6,0.75,0.85
+```
+
+This clusters once at the lowest rung (`0.6`) and tags each cluster with the highest rung at which its complete-link structure survives. A cluster tagged `[survives ≥0.85]` is a near-verbatim clone (extract now); `[survives ≥0.6]` is a structural parallel that needs a shared abstraction rather than a literal extraction. `--sweep` conflicts with `--threshold` (it replaces the single cut). Reach for it when the default run reports _nothing_ between two files you suspect are duplicated — the looser pairs only show up at the lower rungs.
+
 ## Excluding tests
 
 Table-driven tests dominate similarity reports. If a Rust file is mostly tests, add `--exclude-tests`:

@@ -135,6 +135,7 @@ pub struct SimilarityAnalyzer {
     min_lines: usize,
     top: Option<usize>,
     method: SimilarityMethod,
+    sweep: Option<Vec<f64>>,
 }
 
 /// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
@@ -160,6 +161,7 @@ impl SimilarityAnalyzer {
             min_lines: DEFAULT_MIN_LINES,
             top: None,
             method: SimilarityMethod::default(),
+            sweep: None,
         }
     }
 
@@ -200,6 +202,38 @@ impl SimilarityAnalyzer {
         fn with_method, method: SimilarityMethod
     }
 
+    /// Enable multi-threshold sweep mode. Pairs are scored and clustered
+    /// once at the lowest rung of `ladder` (the floor), and every reported
+    /// cluster is annotated with the highest rung at which its complete-link
+    /// structure survives intact. This turns the "run at 0.85, see nothing,
+    /// re-run at 0.75, re-run at 0.6" workflow into a single pass that
+    /// distinguishes verbatim clones from merely structural parallels.
+    ///
+    /// The ladder is sorted ascending and de-duplicated; an empty ladder is
+    /// treated as "no sweep" and leaves the single-`--threshold` behaviour
+    /// untouched. When set, the sweep floor supersedes `--threshold` as the
+    /// clustering cut.
+    pub fn with_sweep(mut self, ladder: Option<Vec<f64>>) -> Self {
+        self.sweep = ladder.and_then(|mut rungs| {
+            rungs.retain(|r| r.is_finite());
+            rungs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            rungs.dedup();
+            (!rungs.is_empty()).then_some(rungs)
+        });
+        self
+    }
+
+    /// Clustering cut for this run: the sweep floor when sweeping, otherwise
+    /// the plain `--threshold`. Candidate generation, scoring, and the
+    /// complete-link cut all key off this single value so sweep mode simply
+    /// lowers the cut and lets the per-cluster annotation carry the rest.
+    fn cluster_threshold(&self) -> f64 {
+        self.sweep
+            .as_deref()
+            .and_then(|ladder| ladder.first().copied())
+            .unwrap_or(self.threshold)
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let started = Instant::now();
@@ -209,9 +243,10 @@ impl SimilarityAnalyzer {
         let report = Report::new(
             path,
             self.method.as_str(),
-            self.threshold,
+            self.cluster_threshold(),
             self.min_lines,
             function_count,
+            self.sweep.as_deref(),
             &clusters,
         );
         debug!(
@@ -236,6 +271,7 @@ impl SimilarityAnalyzer {
         corpus: &'a [OwnedFunction],
     ) -> Result<Vec<ClusterView<'a>>, AnalyzerError> {
         let started = Instant::now();
+        let threshold = self.cluster_threshold();
         let changed_by_file = self.changed_ranges_for_run(corpus);
         // TSED scoring and its cheap candidate filters both run off the
         // tree profiles; the token method needs neither, so skip the work.
@@ -244,7 +280,7 @@ impl SimilarityAnalyzer {
             SimilarityMethod::Token => Vec::new(),
         };
         let candidate_started = Instant::now();
-        let candidate_threshold = body_candidate_threshold(self.threshold);
+        let candidate_threshold = body_candidate_threshold(threshold);
         let candidates = candidate_pairs(
             corpus,
             self.min_lines,
@@ -265,7 +301,7 @@ impl SimilarityAnalyzer {
         )?;
 
         let score_started = Instant::now();
-        let mut score_stats = self.score_pairs(corpus, &profiles, &pairs_to_score);
+        let mut score_stats = self.score_pairs(corpus, &profiles, &pairs_to_score, threshold);
         score_stats.diff_filtered_count = diff_prefiltered_count;
         log_score_stats(&candidates, &score_stats, score_started, self.method);
 
@@ -280,10 +316,13 @@ impl SimilarityAnalyzer {
             .iter()
             .map(|pair| (sorted_pair_key(pair.i, pair.j), pair.components))
             .collect();
-        let clusters: Vec<_> = cluster_similar_pairs(&domain_pairs, self.threshold)
+        let mut clusters: Vec<_> = cluster_similar_pairs(&domain_pairs, threshold)
             .into_iter()
             .map(|c| ClusterView::from_domain(corpus, c, &pair_scores))
             .collect();
+        if let Some(ladder) = self.sweep.as_deref() {
+            report::annotate_sweep_survival(&mut clusters, ladder);
+        }
         debug!(
             target: PROFILE_TARGET,
             matched_pair_count = score_stats.pairs.len(),
@@ -330,14 +369,15 @@ impl SimilarityAnalyzer {
         corpus: &[OwnedFunction],
         profiles: &[TreeProfile],
         pairs: &[(usize, usize)],
+        threshold: f64,
     ) -> ScoreStats {
         match self.method {
             SimilarityMethod::Tsed => {
-                score_candidate_pairs(corpus, profiles, pairs, self.threshold, &self.opts)
+                score_candidate_pairs(corpus, profiles, pairs, threshold, &self.opts)
             }
             SimilarityMethod::Token => {
                 let token_profiles = build_token_profiles(corpus, self.opts.apted.compare_values);
-                score_token_candidate_pairs(corpus, &token_profiles, pairs, self.threshold)
+                score_token_candidate_pairs(corpus, &token_profiles, pairs, threshold)
             }
         }
     }
@@ -1598,6 +1638,122 @@ fn beta(xs: &[i32]) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["cluster_count"], 0);
+    }
+
+    /// A verbatim pair (alpha/beta) and a looser structural pair
+    /// (gamma/delta) sit in different similarity bands. Used by the sweep
+    /// tests so one source string exercises both the high and low rungs.
+    const SWEEP_FUNCTIONS: &str = r#"
+fn alpha(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn beta(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+fn gamma(xs: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in xs {
+        if *x > 0 {
+            total += x;
+        }
+    }
+    total
+}
+fn delta(ys: &[i64]) -> i64 {
+    let mut sum = 0;
+    for y in ys {
+        if *y > 1 {
+            sum += y;
+        }
+    }
+    sum
+}
+"#;
+
+    #[test]
+    fn sweep_annotates_each_cluster_with_its_highest_surviving_rung() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", SWEEP_FUNCTIONS);
+        let json = SimilarityAnalyzer::new()
+            .with_sweep(Some(vec![0.6, 0.75, 0.85]))
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // The floor (lowest rung) is the clustering cut, and the ladder is
+        // echoed back for the consumer.
+        assert!((parsed["threshold"].as_f64().unwrap() - 0.6).abs() < 1e-9);
+        assert_eq!(parsed["sweep"], serde_json::json!([0.6, 0.75, 0.85]));
+        assert_eq!(parsed["cluster_count"], 2);
+
+        // Verbatim clones survive the top rung and sort first; the looser
+        // structural pair only survives the middle rung.
+        let survivals: Vec<f64> = parsed["clusters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["survives_at_threshold"].as_f64().unwrap())
+            .collect();
+        assert_eq!(survivals, vec![0.85, 0.75]);
+    }
+
+    #[test]
+    fn sweep_floor_surfaces_pairs_a_plain_threshold_would_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", SWEEP_FUNCTIONS);
+
+        // At the default 0.85 the structural gamma/delta pair scores below
+        // the cut and vanishes; only the verbatim cluster survives.
+        let strict = SimilarityAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let strict: serde_json::Value = serde_json::from_str(&strict).unwrap();
+        assert_eq!(strict["cluster_count"], 1);
+
+        // Sweeping down to a 0.6 floor recovers it in the same run.
+        let swept = SimilarityAnalyzer::new()
+            .with_sweep(Some(vec![0.6, 0.75, 0.85]))
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let swept: serde_json::Value = serde_json::from_str(&swept).unwrap();
+        assert_eq!(swept["cluster_count"], 2);
+    }
+
+    #[test]
+    fn sweep_markdown_header_lists_the_ladder_and_tags_clusters() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", SWEEP_FUNCTIONS);
+        let md = SimilarityAnalyzer::new()
+            .with_sweep(Some(vec![0.6, 0.75, 0.85]))
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("sweep [0.60, 0.75, 0.85]"), "got {md}");
+        assert!(md.contains("[survives ≥0.85]"), "got {md}");
+        assert!(md.contains("[survives ≥0.75]"), "got {md}");
+    }
+
+    #[test]
+    fn with_sweep_sorts_dedups_and_treats_empty_as_no_sweep() {
+        // Out-of-order, duplicated input: the floor (and thus the
+        // clustering cut) is the smallest distinct rung.
+        let messy = SimilarityAnalyzer::new().with_sweep(Some(vec![0.85, 0.6, 0.75, 0.6]));
+        assert_eq!(messy.sweep.as_deref(), Some([0.6, 0.75, 0.85].as_slice()));
+        assert!((messy.cluster_threshold() - 0.6).abs() < 1e-9);
+
+        // An empty ladder leaves the plain `--threshold` path intact.
+        let none = SimilarityAnalyzer::new()
+            .with_threshold(0.9)
+            .with_sweep(Some(Vec::new()));
+        assert!(none.sweep.is_none());
+        assert!((none.cluster_threshold() - 0.9).abs() < 1e-9);
     }
 
     #[test]
