@@ -115,7 +115,7 @@ fn parse_one(file: &Path, path: ModulePath) -> Result<PythonModule, CouplingErro
     Ok(PythonModule {
         path,
         file: file.to_path_buf(),
-        body: parsed.body,
+        body: parsed.body.into_iter().collect(),
     })
 }
 
