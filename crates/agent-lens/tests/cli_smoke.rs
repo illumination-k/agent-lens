@@ -312,6 +312,28 @@ fn help_md_emits_markdown_reference() {
 }
 
 #[test]
+fn config_schema_emits_profile_and_tool_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(&["config", "schema"], dir.path(), None);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("# agent-lens.toml schema"),
+        "got: {stdout}",
+    );
+    assert!(stdout.contains("## `[profile.<name>]`"), "got: {stdout}");
+    assert!(
+        stdout.contains("### `[profile.<name>.similarity]`"),
+        "got: {stdout}",
+    );
+    assert!(stdout.contains("```toml"), "got: {stdout}");
+}
+
+#[test]
 fn skills_list_names_each_bundled_skill() {
     let dir = tempfile::tempdir().unwrap();
     let output = agent_lens(&["skills", "list"], dir.path(), None);

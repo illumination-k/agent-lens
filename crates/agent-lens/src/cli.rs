@@ -35,7 +35,7 @@ use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
 use agent_lens::hooks::pre_tool_use::{CohesionHook, ComplexityHook};
 use agent_lens::hooks::session_start::SummaryHook as SessionStartSummaryHook;
 use agent_lens::hooks::setup::{self, SettingsScope, SetupSummary};
-use agent_lens::{help_md, skills};
+use agent_lens::{config_schema, help_md, skills};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -84,6 +84,9 @@ enum Command {
     /// `agent-lens`-aware routing.
     #[command(subcommand)]
     Skills(SkillsCommand),
+    /// Inspect the `agent-lens.toml` configuration format.
+    #[command(subcommand)]
+    Config(ConfigCommand),
     /// Print the command reference, optionally as agent-friendly Markdown.
     ///
     /// Without flags this prints the same long help clap renders for
@@ -98,6 +101,18 @@ struct HelpArgs {
     /// Emit the full command reference as Markdown tuned for agent context.
     #[arg(long)]
     md: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Print the `agent-lens.toml` schema as agent-friendly Markdown.
+    ///
+    /// Lists the `[profile.<name>]` keys and every per-tool override
+    /// table — their types, defaults, and meaning — plus a worked
+    /// example. The format lives only in the config structs, so this is
+    /// the canonical reference for writing or auditing an
+    /// `agent-lens.toml` without reading the source.
+    Schema,
 }
 
 #[derive(Debug, Subcommand)]
@@ -644,7 +659,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Analyze(sub) => run_analyze(sub),
         Command::Run(args) => run_profile(args),
         Command::Skills(sub) => run_skills(sub),
+        Command::Config(sub) => run_config(sub),
         Command::Help(args) => run_help(args),
+    }
+}
+
+/// Emit the `agent-lens.toml` schema reference on stdout.
+fn run_config(cmd: ConfigCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        ConfigCommand::Schema => write_stdout_line(&config_schema::render()),
     }
 }
 
@@ -2052,7 +2075,19 @@ fn dispatch(n: i32) -> i32 {
             "got: {md}",
         );
         assert!(md.contains("## `agent-lens skills`"), "got: {md}");
+        assert!(md.contains("## `agent-lens config`"), "got: {md}");
+        assert!(md.contains("### `agent-lens config schema`"), "got: {md}");
         // Analyzer-specific options surface in the table.
         assert!(md.contains("`--threshold <THRESHOLD>`"), "got: {md}");
+    }
+
+    #[test]
+    fn parses_config_schema_subcommand() {
+        let cli = Cli::try_parse_from(["agent-lens", "config", "schema"]).expect("clean parse");
+        assert!(
+            matches!(cli.command, Command::Config(ConfigCommand::Schema)),
+            "unexpected command: {:?}",
+            cli.command,
+        );
     }
 }
