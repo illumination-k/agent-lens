@@ -233,10 +233,15 @@ the directory holding `agent-lens.toml`. Unknown keys — a typo like `entrypont
 or an option set on the wrong tool — are rejected at parse time rather than
 silently ignored.
 
+`agent-lens config schema` prints the full `agent-lens.toml` reference as dense
+Markdown — every `[profile.<name>]` key and per-tool override table, with types,
+defaults, and a worked example — so an agent can author or audit a config
+without reading the source.
+
 ### Current command surface
 
 The current binary exposes three top-level command trees plus `run`,
-`skills`, and `help`:
+`skills`, `config`, and `help`:
 
 | Command tree | Commands                                                                                                                                  |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -245,6 +250,7 @@ The current binary exposes three top-level command trees plus `run`,
 | `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `coupling`, `function-graph`, `context-span`, `hotspot`                                |
 | `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                             |
 | `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                       |
+| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                  |
 | `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                        |
 
 `agent-lens help --md` prints the entire command surface — every

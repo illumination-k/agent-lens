@@ -9,6 +9,8 @@
 //!   (e.g. cohesion reports).
 //! * [`config`] — `agent-lens.toml` parsing: named analysis profiles that
 //!   the `run` subcommand fans out across several analyzers.
+//! * [`config_schema`] — renders the `agent-lens.toml` schema as
+//!   agent-friendly Markdown for `config schema`.
 //! * [`skills`] — the Claude Code skills bundled into the binary plus the
 //!   `skills install` plan/apply logic.
 //! * [`help_md`] — renders the whole command tree as an agent-friendly
@@ -21,6 +23,7 @@
 
 pub mod analyze;
 pub mod config;
+pub mod config_schema;
 pub mod help_md;
 pub mod hooks;
 pub mod skills;
