@@ -117,6 +117,7 @@ fn collect_function_shapes(
                 owner: SyntaxFact::Known(owner_shape),
                 visibility: SyntaxFact::Known(VisibilityShape::Unexported),
                 signature: SyntaxFact::Unknown,
+                doc: crate::parser::docstring_text(func),
                 body: BodyShape {
                     tree: function_body_tree(func),
                 },

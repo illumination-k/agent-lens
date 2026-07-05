@@ -140,6 +140,7 @@ fn function_shape(
         owner: SyntaxFact::Known(owner_shape),
         visibility: SyntaxFact::Known(visibility),
         signature: SyntaxFact::Unknown,
+        doc: crate::parser::doc_comment_text(node, source),
         body: BodyShape {
             tree: crate::parser::function_body_tree(body, source),
         },

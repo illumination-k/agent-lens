@@ -49,6 +49,11 @@ pub(crate) struct FunctionItem<'a> {
     /// skip mandatory boilerplate (`super(...)`) that structurally looks
     /// like a thin forwarding call.
     pub is_constructor: bool,
+    /// Byte offset of the outermost token a leading JSDoc comment would
+    /// attach to — the `export` / `const` / decorator start for wrapped
+    /// declarations, the item itself otherwise. `None` for nested
+    /// closures, which never carry their own doc block.
+    pub doc_attach_start: Option<u32>,
 }
 
 /// Receiver for function-shaped items found by [`walk_program`].
@@ -75,21 +80,23 @@ fn walk_stmt<V: FunctionVisitor>(
     visitor: &mut V,
 ) {
     match stmt {
-        Statement::FunctionDeclaration(f) => visit_function(f, owner, line_index, visitor),
+        Statement::FunctionDeclaration(f) => {
+            visit_function(f, owner, f.span.start, line_index, visitor);
+        }
         Statement::ClassDeclaration(c) => walk_class(c, line_index, visitor),
         Statement::VariableDeclaration(v) => {
             for d in &v.declarations {
-                visit_variable_declarator(d, line_index, visitor);
+                visit_variable_declarator(d, v.span.start, line_index, visitor);
             }
         }
         Statement::ExportNamedDeclaration(e) => {
             if let Some(decl) = &e.declaration {
-                walk_decl(decl, owner, line_index, visitor);
+                walk_decl(decl, owner, e.span.start, line_index, visitor);
             }
         }
         Statement::ExportDefaultDeclaration(e) => match &e.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                visit_function(f, owner, line_index, visitor);
+                visit_function(f, owner, e.span.start, line_index, visitor);
             }
             ExportDefaultDeclarationKind::ClassDeclaration(c) => walk_class(c, line_index, visitor),
             _ => {}
@@ -106,15 +113,18 @@ fn walk_stmt<V: FunctionVisitor>(
 fn walk_decl<V: FunctionVisitor>(
     decl: &Declaration,
     owner: Option<&str>,
+    attach_start: u32,
     line_index: &LineIndex,
     visitor: &mut V,
 ) {
     match decl {
-        Declaration::FunctionDeclaration(f) => visit_function(f, owner, line_index, visitor),
+        Declaration::FunctionDeclaration(f) => {
+            visit_function(f, owner, attach_start, line_index, visitor);
+        }
         Declaration::ClassDeclaration(c) => walk_class(c, line_index, visitor),
         Declaration::VariableDeclaration(v) => {
             for d in &v.declarations {
-                visit_variable_declarator(d, line_index, visitor);
+                visit_variable_declarator(d, attach_start, line_index, visitor);
             }
         }
         Declaration::TSModuleDeclaration(m) => {
@@ -164,6 +174,7 @@ fn walk_class<V: FunctionVisitor>(class: &Class, line_index: &LineIndex, visitor
                 body,
                 params: &m.value.params,
                 is_constructor: matches!(m.kind, MethodDefinitionKind::Constructor),
+                doc_attach_start: Some(m.span.start),
             });
             scan_nested_functions(&qualified, body, line_index, visitor);
         }
@@ -173,6 +184,7 @@ fn walk_class<V: FunctionVisitor>(class: &Class, line_index: &LineIndex, visitor
 fn visit_function<V: FunctionVisitor>(
     func: &Function,
     owner: Option<&str>,
+    attach_start: u32,
     line_index: &LineIndex,
     visitor: &mut V,
 ) {
@@ -193,12 +205,14 @@ fn visit_function<V: FunctionVisitor>(
         body,
         params: &func.params,
         is_constructor: false,
+        doc_attach_start: Some(attach_start),
     });
     scan_nested_functions(&name, body, line_index, visitor);
 }
 
 fn visit_variable_declarator<V: FunctionVisitor>(
     decl: &VariableDeclarator,
+    attach_start: u32,
     line_index: &LineIndex,
     visitor: &mut V,
 ) {
@@ -216,6 +230,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                 body: &arrow.body,
                 params: &arrow.params,
                 is_constructor: false,
+                doc_attach_start: Some(attach_start),
             });
             scan_nested_functions(&name, &arrow.body, line_index, visitor);
         }
@@ -228,6 +243,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                     body,
                     params: &f.params,
                     is_constructor: false,
+                    doc_attach_start: Some(attach_start),
                 });
                 scan_nested_functions(&name, body, line_index, visitor);
             }
@@ -285,6 +301,7 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
             body,
             params,
             is_constructor: false,
+            doc_attach_start: None,
         });
         scan_nested_functions(&name, body, self.line_index, self.visitor);
     }

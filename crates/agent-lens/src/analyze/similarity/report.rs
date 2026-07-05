@@ -151,6 +151,7 @@ fn cluster_pair_views<'a>(
                 signature_similarity: components.signature_similarity,
                 type_overlap: components.type_overlap,
                 identifier_overlap: components.identifier_overlap,
+                doc_overlap: components.doc_overlap,
             });
         }
     }
@@ -199,6 +200,12 @@ struct PairView<'a> {
     type_overlap: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     identifier_overlap: Option<f64>,
+    /// Doc-comment word overlap; diagnostic only, absent unless both
+    /// functions carry doc text. High values flag "same stated intent"
+    /// pairs; low values on high-similarity pairs flag structural
+    /// coincidences that likely should not be merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doc_overlap: Option<f64>,
 }
 
 pub(super) fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
@@ -276,6 +283,7 @@ mod tests {
                 end_line: 5,
                 is_test: false,
                 signature: None,
+                doc: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
             }),
         }
@@ -288,6 +296,7 @@ mod tests {
             signature_similarity: Some(similarity),
             type_overlap: Some(similarity),
             identifier_overlap: Some(similarity),
+            doc_overlap: None,
         }
     }
 

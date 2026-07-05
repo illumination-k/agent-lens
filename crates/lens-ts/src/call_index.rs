@@ -41,6 +41,7 @@ pub fn extract_function_shapes_with_module(
     let mut collector = FunctionShapeCollector {
         module: module.to_owned(),
         out: Vec::new(),
+        jsdoc_by_attach: crate::parser::jsdoc_by_attach_offset(source, &ret.program.comments),
     };
     walk_program(&ret.program, &line_index, &mut collector);
     Ok(collector.out)
@@ -87,12 +88,16 @@ pub fn extract_call_shapes_with_module(
 struct FunctionShapeCollector {
     module: String,
     out: Vec<FunctionShape>,
+    jsdoc_by_attach: std::collections::HashMap<u32, String>,
 }
 
 impl FunctionVisitor for FunctionShapeCollector {
     fn on_function(&mut self, item: FunctionItem<'_>) {
         let (owner, display_name) = split_owner(&item.name);
         let qualified_name = qualify(&self.module, &item.name);
+        let doc = item
+            .doc_attach_start
+            .and_then(|attach| self.jsdoc_by_attach.get(&attach).cloned());
         self.out.push(FunctionShape {
             display_name,
             qualified_name: SyntaxFact::Known(qualified_name),
@@ -103,6 +108,7 @@ impl FunctionVisitor for FunctionShapeCollector {
             })),
             visibility: SyntaxFact::Known(VisibilityShape::Unexported),
             signature: SyntaxFact::Unknown,
+            doc,
             body: BodyShape {
                 tree: function_body_tree(item.body),
             },

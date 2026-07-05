@@ -38,6 +38,11 @@ pub struct FunctionDef {
     /// this as `None` until they have a signature projection; body-only
     /// similarity remains available through [`Self::body_tree`].
     pub signature: Option<FunctionSignature>,
+    /// Documentation attached to the function (Rust `///` / `#[doc]`,
+    /// Python docstring, Go doc comment, TS JSDoc), with comment markers
+    /// stripped. `None` when the function has no doc or the adapter does
+    /// not extract docs for its language.
+    pub doc: Option<String>,
     pub tree: TreeNode,
 }
 
@@ -55,6 +60,7 @@ impl FunctionDef {
     ///     end_line: 10,
     ///     is_test: false,
     ///     signature: None,
+    ///     doc: None,
     ///     tree: TreeNode::leaf("Block"),
     /// };
     /// assert_eq!(f.line_count(), 6);
@@ -621,6 +627,7 @@ mod tests {
             end_line: 10,
             is_test: false,
             signature: None,
+            doc: None,
             tree,
         }
     }
@@ -664,6 +671,7 @@ mod tests {
             end_line: 10,
             is_test: false,
             signature: None,
+            doc: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 6);
@@ -677,6 +685,7 @@ mod tests {
             end_line: 7,
             is_test: false,
             signature: None,
+            doc: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);
@@ -690,6 +699,7 @@ mod tests {
             end_line: 5,
             is_test: false,
             signature: None,
+            doc: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);
@@ -703,6 +713,7 @@ mod tests {
             end_line: 4,
             is_test: false,
             signature: None,
+            doc: None,
             tree: TreeNode::with_children(
                 "Function",
                 "",
@@ -717,6 +728,7 @@ mod tests {
             end_line: 4,
             is_test: false,
             signature: None,
+            doc: None,
             tree: TreeNode::leaf("Body"),
         };
         assert_eq!(body_only.body_tree().label, "Body");

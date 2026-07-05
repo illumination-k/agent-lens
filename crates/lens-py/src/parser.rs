@@ -128,8 +128,23 @@ fn function_def_from(
         end_line,
         is_test,
         signature: None,
+        doc: docstring_text(func),
         tree: function_body_tree(func),
     }
+}
+
+/// PEP 257 docstring: a string-literal expression statement as the first
+/// statement of the body. Implicit concatenation is folded by ruff's AST,
+/// so `to_str` sees the full text. Returns `None` when absent or blank.
+pub(crate) fn docstring_text(func: &StmtFunctionDef) -> Option<String> {
+    let Some(Stmt::Expr(first)) = func.body.first() else {
+        return None;
+    };
+    let Expr::StringLiteral(literal) = first.value.as_ref() else {
+        return None;
+    };
+    let text = literal.value.to_str().trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Lower a function body into a generic [`TreeNode`] rooted at `Block`,
@@ -296,6 +311,22 @@ mod tests {
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = PythonParser::new();
         parser.extract_functions(src).unwrap()
+    }
+
+    #[rstest]
+    #[case::docstring(
+        "def f():\n    \"\"\"Parse the user id.\"\"\"\n    return 1\n",
+        Some("Parse the user id.")
+    )]
+    #[case::multiline_docstring(
+        "def f():\n    \"\"\"Parse the id.\n\n    Returns None on failure.\n    \"\"\"\n    return 1\n",
+        Some("Parse the id.\n\n    Returns None on failure.")
+    )]
+    #[case::no_docstring("def f():\n    return 1\n", None)]
+    #[case::string_not_first("def f():\n    x = 1\n    \"\"\"not a docstring\"\"\"\n", None)]
+    fn extracts_docstring_text(#[case] src: &str, #[case] expected: Option<&str>) {
+        let funcs = parse_functions(src);
+        assert_eq!(funcs[0].doc.as_deref(), expected);
     }
 
     #[test]

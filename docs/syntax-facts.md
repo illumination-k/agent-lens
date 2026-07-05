@@ -28,6 +28,9 @@ analyzers. It carries:
 - class, impl, trait, receiver, namespace, or module owner;
 - visibility/export status;
 - signature facts;
+- doc text (Rust `///` / `#[doc]`, Python docstring, Go doc comment, TS
+  JSDoc) with comment markers stripped, `None` when absent or not
+  extracted;
 - body tree;
 - source span and test classification.
 

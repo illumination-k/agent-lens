@@ -198,27 +198,79 @@ fn extract_with(source: &str, dialect: Dialect) -> Result<Vec<FunctionDef>, TsPa
         ));
     }
     let line_index = LineIndex::new(source);
-    let mut visitor = FunctionDefCollector { out: Vec::new() };
+    let mut visitor = FunctionDefCollector {
+        out: Vec::new(),
+        jsdoc_by_attach: jsdoc_by_attach_offset(source, &ret.program.comments),
+    };
     walk_program(&ret.program, &line_index, &mut visitor);
     Ok(visitor.out)
 }
 
 struct FunctionDefCollector {
     out: Vec<FunctionDef>,
+    /// JSDoc text keyed by the byte offset of the token the comment is
+    /// attached to, matched against [`FunctionItem::doc_attach_start`].
+    jsdoc_by_attach: std::collections::HashMap<u32, String>,
 }
 
 impl FunctionVisitor for FunctionDefCollector {
     fn on_function(&mut self, item: FunctionItem<'_>) {
         let is_test = is_test_item(&item.name);
+        let doc = item
+            .doc_attach_start
+            .and_then(|attach| self.jsdoc_by_attach.get(&attach).cloned());
         self.out.push(FunctionDef {
             name: item.name,
             start_line: item.start_line,
             end_line: item.end_line,
             is_test,
             signature: None,
+            doc,
             tree: function_body_tree(item.body),
         });
     }
+}
+
+/// Index every leading JSDoc block (`/** ... */`) by the byte offset of
+/// the token it attaches to — oxc computes that attachment during
+/// parsing. Multiple JSDoc blocks on one token keep the closest (last)
+/// one, matching how TypeScript tooling resolves stacked doc blocks.
+pub(crate) fn jsdoc_by_attach_offset(
+    source: &str,
+    comments: &[oxc_ast::ast::Comment],
+) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for comment in comments {
+        if !comment.is_jsdoc() {
+            continue;
+        }
+        let span = comment.content_span();
+        let Some(raw) = source.get(span.start as usize..span.end as usize) else {
+            continue;
+        };
+        if let Some(text) = jsdoc_text(raw) {
+            out.insert(comment.attached_to, text);
+        }
+    }
+    out
+}
+
+/// Strip JSDoc decoration from the comment body: the leading `*` that
+/// opens `/**` is already outside `content_span`, so this trims each
+/// line's leading `*` gutter and drops blank edges. Returns `None` when
+/// nothing but decoration remains.
+fn jsdoc_text(raw: &str) -> Option<String> {
+    let text = raw
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            line.strip_prefix('*').map_or(line, str::trim_start)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// True iff a [`FunctionItem`] qualified name belongs to test
@@ -296,6 +348,49 @@ mod tests {
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = TypeScriptParser::new();
         parser.extract_functions(src).unwrap()
+    }
+
+    #[rstest]
+    #[case::function_decl(
+        "/** Parse the user id. */\nfunction f() { let x = 1; }\n",
+        Some("Parse the user id.")
+    )]
+    #[case::multiline_jsdoc(
+        "/**\n * Parse the user id.\n * @returns the id\n */\nfunction f() { let x = 1; }\n",
+        Some("Parse the user id.\n@returns the id")
+    )]
+    #[case::exported_function(
+        "/** Parse the user id. */\nexport function f() { let x = 1; }\n",
+        Some("Parse the user id.")
+    )]
+    #[case::const_arrow(
+        "/** Parse the user id. */\nconst f = () => { let x = 1; };\n",
+        Some("Parse the user id.")
+    )]
+    #[case::line_comment_is_not_jsdoc("// plain comment\nfunction f() { let x = 1; }\n", None)]
+    #[case::plain_block_is_not_jsdoc("/* plain block */\nfunction f() { let x = 1; }\n", None)]
+    #[case::no_comment("function f() { let x = 1; }\n", None)]
+    fn extracts_jsdoc_text(#[case] src: &str, #[case] expected: Option<&str>) {
+        let funcs = parse_functions(src);
+        assert_eq!(funcs[0].doc.as_deref(), expected);
+    }
+
+    #[test]
+    fn extracts_jsdoc_on_class_method_but_not_nested_closure() {
+        let src = r#"
+class Service {
+    /** Handle the request. */
+    handle(req: string) {
+        const inner = () => { return req; };
+        return inner();
+    }
+}
+"#;
+        let funcs = parse_functions(src);
+        assert_eq!(funcs[0].name, "Service::handle");
+        assert_eq!(funcs[0].doc.as_deref(), Some("Handle the request."));
+        assert_eq!(funcs[1].name, "Service::handle::closure#1");
+        assert_eq!(funcs[1].doc, None);
     }
 
     #[test]
