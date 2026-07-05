@@ -75,19 +75,12 @@ impl WrapperAnalyzer {
         let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
         self.filter
             .retain_changed(&mut findings, &file.path, |f| (f.start_line, f.end_line));
-        // Call sites are only used by the reuse-metrics pass, which is
-        // a Rust-only signal today — the TS / Py adapters do not yet
-        // expose a call-site index, so non-Rust files get an empty
-        // list. Wrappers in those files surface with `reuse = None`
-        // (the annotation pass keys off `reuse_eligible`).
-        let (calls, reuse_eligible) = if matches!(lang, SourceLang::Rust) {
-            let calls = lens_rust::extract_call_sites(&source).map_err(|e| {
-                AnalyzerError::Parse(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-            })?;
-            (calls, true)
-        } else {
-            (Vec::new(), false)
-        };
+        // Call references seed the reuse-metrics pass. Every supported
+        // language exposes a call index (Rust via `extract_call_sites`,
+        // the rest via `extract_call_shapes_with_module`), so wrappers
+        // in any language now get reuse metrics in directory mode —
+        // previously this was a Rust-only signal.
+        let calls = extract_calls(lang, &source).map_err(AnalyzerError::Parse)?;
         if findings.is_empty() && calls.is_empty() {
             return Ok(None);
         }
@@ -95,22 +88,81 @@ impl WrapperAnalyzer {
             file: file.display_path.clone(),
             findings,
             calls,
-            reuse_eligible,
         }))
     }
 }
 
-/// Pass-1 row: a file that may carry wrappers, call sites, or both.
+/// Pass-1 row: a file that may carry wrappers, call references, or both.
 /// Files with neither are dropped before the row is built.
 struct PerFile {
     file: String,
     findings: Vec<WrapperFinding>,
-    calls: Vec<lens_rust::CallSite>,
-    /// Whether reuse metrics should be attached to this file's
-    /// findings. False for languages without a call-site visitor (TS /
-    /// Py today) so their findings keep `reuse = None` instead of
-    /// emitting "0 sites" rollups derived from an empty index.
-    reuse_eligible: bool,
+    calls: Vec<CallRef>,
+}
+
+/// Language-neutral projection of a call site: the bare callee name
+/// (last path segment) and the identity of the function the call is
+/// written inside. Both are keyed the same way regardless of source
+/// language so the reuse rollup can merge call indices across a mixed
+/// directory.
+struct CallRef {
+    /// Last path segment of the callee (`foo` for `a::b::foo()`), or
+    /// `None` when the callee isn't a plain named path.
+    callee: Option<String>,
+    /// Identity of the enclosing function, in the same qualified form
+    /// the wrapper detector uses for `WrapperFinding::name` (`Owner::m`
+    /// or a bare name). `None` for calls at module scope.
+    caller: Option<String>,
+}
+
+/// Extract the call index for `source` as language-neutral [`CallRef`]s.
+///
+/// Rust keeps its dedicated `extract_call_sites` visitor (whose
+/// `caller_name` is already the bare-qualified form the wrapper detector
+/// uses). The other adapters go through `extract_call_shapes_with_module`
+/// with an empty module prefix, which makes `caller_qualified_name`
+/// collapse to the same `Owner::method` / bare-name shape as their
+/// wrapper findings — so the self-reference filter and unique-caller
+/// counting line up across languages.
+fn extract_calls(lang: SourceLang, source: &str) -> Result<Vec<CallRef>, BoxedError> {
+    match lang {
+        SourceLang::Rust => {
+            let sites = lens_rust::extract_call_sites(source).map_err(boxed)?;
+            Ok(sites
+                .into_iter()
+                .map(|s| CallRef {
+                    callee: s.callee_name,
+                    caller: s.caller_name,
+                })
+                .collect())
+        }
+        SourceLang::TypeScript(dialect) => {
+            let shapes =
+                lens_ts::extract_call_shapes_with_module(source, dialect, "").map_err(boxed)?;
+            Ok(shapes.into_iter().map(CallRef::from_shape).collect())
+        }
+        SourceLang::Python => {
+            let shapes = lens_py::extract_call_shapes_with_module(source, "").map_err(boxed)?;
+            Ok(shapes.into_iter().map(CallRef::from_shape).collect())
+        }
+        SourceLang::Go => {
+            let shapes = lens_golang::extract_call_shapes_with_module(source, "").map_err(boxed)?;
+            Ok(shapes.into_iter().map(CallRef::from_shape).collect())
+        }
+    }
+}
+
+impl CallRef {
+    fn from_shape(shape: lens_domain::CallShape) -> Self {
+        Self {
+            callee: shape.callee_name().map(str::to_owned),
+            caller: shape.caller_qualified_name().map(str::to_owned),
+        }
+    }
+}
+
+fn boxed(e: impl std::error::Error + Send + Sync + 'static) -> BoxedError {
+    Box::new(e) as BoxedError
 }
 
 impl PerFile {
@@ -130,10 +182,9 @@ impl PerFile {
 }
 
 /// Walk every wrapper finding across `per_files` and populate its
-/// [`ReuseMetrics`] from the merged call-site index. Findings whose
-/// host file is not `reuse_eligible` (non-Rust today) are skipped so
-/// their `reuse` stays at `None` instead of emitting misleading
-/// "0 sites" rollups derived from an empty per-file index.
+/// [`ReuseMetrics`] from the merged call-site index. Every supported
+/// language contributes a call index, so all findings are annotated in
+/// directory mode.
 fn annotate_reuse(per_files: &mut [PerFile]) {
     // callee_name -> Vec<(file_index, caller_name)>. Owned keys so the
     // index doesn't keep `per_files` borrowed when we re-walk to write
@@ -141,20 +192,17 @@ fn annotate_reuse(per_files: &mut [PerFile]) {
     let mut index: HashMap<String, Vec<(usize, Option<String>)>> = HashMap::new();
     for (idx, per) in per_files.iter().enumerate() {
         for site in &per.calls {
-            let Some(name) = site.callee_name.as_deref() else {
+            let Some(name) = site.callee.as_deref() else {
                 continue;
             };
             index
                 .entry(name.to_owned())
                 .or_default()
-                .push((idx, site.caller_name.clone()));
+                .push((idx, site.caller.clone()));
         }
     }
     let file_paths: Vec<String> = per_files.iter().map(|p| p.file.clone()).collect();
     for (idx, per) in per_files.iter_mut().enumerate() {
-        if !per.reuse_eligible {
-            continue;
-        }
         let host_file = file_paths[idx].as_str();
         for finding in &mut per.findings {
             let last_segment = name_last_segment(&finding.name);
@@ -256,8 +304,7 @@ struct WrapperView<'a> {
     adapters: &'a [String],
     statement_count: usize,
     /// Workspace-wide reuse metrics. `null` when the finding came from
-    /// a single-file run, or from a language whose adapter does not
-    /// yet expose a call-site index.
+    /// a single-file run (the call-site universe was not enumerated).
     #[serde(skip_serializing_if = "Option::is_none")]
     reuse: Option<ReuseView>,
 }
@@ -316,8 +363,8 @@ fn format_markdown(report: &Report<'_>) -> String {
                 format!("-> {} [via {}]", w.callee, w.adapters.join(""))
             };
             // Reuse suffix: only attached when the finding had reuse
-            // metrics (directory mode + Rust today). Kept terse so the
-            // line stays scannable at agent-context density.
+            // metrics (directory mode). Kept terse so the line stays
+            // scannable at agent-context density.
             let suffix = match &w.reuse {
                 Some(r) => format!(
                     "  \u{2022} {} site(s), {} caller(s), {}",
@@ -694,6 +741,71 @@ fn meaningful(xs: &[i32]) -> i32 {
         assert_eq!(reuse["call_sites"], 1);
         assert_eq!(reuse["unique_callers"], 1);
         assert_eq!(reuse["same_file_only"], false);
+    }
+
+    #[test]
+    fn directory_mode_populates_reuse_metrics_for_python() {
+        // The reuse pass is no longer Rust-only: a Python wrapper
+        // called from another file must report cross-file reuse.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "wrap.py",
+            "def render(x):\n    return internal_render(x)\n",
+        );
+        write_file(
+            dir.path(),
+            "caller.py",
+            "def consumer():\n    return render(\"hi\")\n",
+        );
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let render = parsed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f["wrappers"].as_array().unwrap())
+            .find(|w| w["name"] == "render")
+            .expect("render wrapper missing");
+        let reuse = &render["reuse"];
+        assert_eq!(reuse["call_sites"], 1, "got {parsed}");
+        assert_eq!(reuse["unique_callers"], 1, "got {parsed}");
+        assert_eq!(reuse["same_file_only"], false, "got {parsed}");
+    }
+
+    #[test]
+    fn directory_mode_populates_reuse_metrics_for_go() {
+        // Same cross-language reuse guarantee for Go.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "wrap.go",
+            "package p\n\nfunc Render(x int) int { return internalRender(x) }\n",
+        );
+        write_file(
+            dir.path(),
+            "caller.go",
+            "package p\n\nfunc consumer() int { return Render(1) }\n",
+        );
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let render = parsed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f["wrappers"].as_array().unwrap())
+            .find(|w| w["name"] == "Render")
+            .expect("Render wrapper missing");
+        let reuse = &render["reuse"];
+        assert_eq!(reuse["call_sites"], 1, "got {parsed}");
+        assert_eq!(reuse["unique_callers"], 1, "got {parsed}");
+        assert_eq!(reuse["same_file_only"], false, "got {parsed}");
     }
 
     #[test]

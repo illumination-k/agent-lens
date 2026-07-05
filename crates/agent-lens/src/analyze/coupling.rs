@@ -192,6 +192,28 @@ fn build_go_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
     })
 }
 
+/// Dispatch on language and compute the raw [`CouplingReport`] for `path`,
+/// or return `None` when `path` is not anchored at a supported root
+/// (e.g. a directory that is neither a Rust crate nor a Go module).
+///
+/// This is the language-agnostic entry point the SessionStart summary
+/// hook needs: it wants the metrics, not the analyzer's JSON/markdown
+/// rendering, and it must not be pinned to a single language the way a
+/// direct `lens_rust::build_module_tree` call would be. `UnsupportedRoot`
+/// is folded into `None` because "this directory isn't the kind of root
+/// we analyze" is not an error worth surfacing at session start.
+pub(crate) fn report_for_path(
+    path: &Path,
+) -> Result<Option<CouplingReport>, CouplingAnalyzerError> {
+    let graph = match build_graph(path) {
+        Ok(graph) => graph,
+        Err(CouplingAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let module_paths: Vec<ModulePath> = graph.modules.iter().map(|m| m.path.clone()).collect();
+    Ok(Some(compute_report(&module_paths, graph.edges)))
+}
+
 #[derive(Debug, Serialize)]
 struct ReportView<'a> {
     crate_root: String,

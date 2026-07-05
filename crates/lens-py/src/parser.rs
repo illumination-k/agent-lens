@@ -1,7 +1,8 @@
 //! ruff-based implementation of [`lens_domain::LanguageParser`] for Python.
 
 use lens_domain::{
-    FunctionDef, LanguageParseError, LanguageParser, TreeNode, qualify as qualify_name,
+    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, ReceiverShape, TreeNode,
+    identifier_tokens, qualify as qualify_name,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
@@ -83,7 +84,13 @@ fn collect_stmt(
             }
             let is_test = owner_is_test || is_test_function(func);
             let qualified = qualify_name(owner, func.name.as_str());
-            out.push(function_def_from(func, &qualified, is_test, lines));
+            out.push(function_def_from(
+                func,
+                &qualified,
+                is_test,
+                owner.is_some(),
+                lines,
+            ));
             // Function bodies are atomic units of analysis: nested `def`s
             // and inner classes contribute to the parent's tree but are
             // not surfaced as their own [`FunctionDef`] entries. Mirrors
@@ -115,6 +122,7 @@ fn function_def_from(
     func: &StmtFunctionDef,
     name: &str,
     is_test: bool,
+    is_method: bool,
     lines: &LineIndex,
 ) -> FunctionDef {
     let start_line = lines.line_of(func.range.start().to_usize());
@@ -127,9 +135,116 @@ fn function_def_from(
         start_line,
         end_line,
         is_test,
-        signature: None,
+        signature: Some(signature_info(func, is_method)),
         doc: docstring_text(func),
         tree: function_body_tree(func),
+    }
+}
+
+/// Project a `def` into the language-neutral [`FunctionSignature`]. A
+/// leading `self` / `cls` on a method is treated as the receiver (and
+/// dropped from the parameter list) so instance methods compare against
+/// each other rather than being skewed by the implicit first argument.
+/// Type annotations are flattened to their head identifiers, mirroring
+/// how the Rust adapter reduces types to path segments.
+fn signature_info(func: &StmtFunctionDef, is_method: bool) -> FunctionSignature {
+    let params = &func.parameters;
+    let mut parameter_names = Vec::new();
+    let mut parameter_type_paths = Vec::new();
+    let mut parameter_count = 0usize;
+    let mut receiver = ReceiverShape::None;
+
+    let mut non_variadic = params.iter_non_variadic_params();
+    if is_method && let Some(first) = non_variadic.next() {
+        let first_name = first.parameter.name.as_str();
+        if first_name == "self" || first_name == "cls" {
+            receiver = ReceiverShape::Value;
+        } else {
+            // Not a conventional receiver — keep it as a real parameter.
+            record_param(
+                first,
+                &mut parameter_count,
+                &mut parameter_names,
+                &mut parameter_type_paths,
+            );
+        }
+    }
+    for param in non_variadic {
+        record_param(
+            param,
+            &mut parameter_count,
+            &mut parameter_names,
+            &mut parameter_type_paths,
+        );
+    }
+    for variadic in [params.vararg.as_deref(), params.kwarg.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        parameter_count += 1;
+        parameter_names.push(variadic.name.as_str().to_owned());
+        if let Some(annotation) = &variadic.annotation {
+            annotation_paths(annotation, &mut parameter_type_paths);
+        }
+    }
+
+    let mut return_type_paths = Vec::new();
+    if let Some(returns) = &func.returns {
+        annotation_paths(returns, &mut return_type_paths);
+    }
+
+    FunctionSignature {
+        name_tokens: identifier_tokens(func.name.as_str()),
+        parameter_count,
+        parameter_names,
+        parameter_type_paths,
+        return_type_paths,
+        // PEP 695 type parameters are not surfaced yet.
+        generics: Vec::new(),
+        receiver,
+    }
+}
+
+fn record_param(
+    param: &ruff_python_ast::ParameterWithDefault,
+    count: &mut usize,
+    names: &mut Vec<String>,
+    type_paths: &mut Vec<String>,
+) {
+    *count += 1;
+    names.push(param.parameter.name.as_str().to_owned());
+    if let Some(annotation) = &param.parameter.annotation {
+        annotation_paths(annotation, type_paths);
+    }
+}
+
+/// Flatten a type annotation to the head identifiers it references:
+/// `list[int]` contributes `list` and `int`, `a.B` contributes `B`,
+/// `X | Y` contributes both. Best-effort — shapes we don't model
+/// contribute nothing rather than raw text.
+fn annotation_paths(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Name(name) => out.push(name.id.as_str().to_owned()),
+        Expr::Attribute(attr) => out.push(attr.attr.as_str().to_owned()),
+        Expr::Subscript(sub) => {
+            annotation_paths(&sub.value, out);
+            annotation_paths(&sub.slice, out);
+        }
+        Expr::Tuple(tuple) => {
+            for elt in &tuple.elts {
+                annotation_paths(elt, out);
+            }
+        }
+        Expr::List(list) => {
+            for elt in &list.elts {
+                annotation_paths(elt, out);
+            }
+        }
+        Expr::BinOp(binop) => {
+            annotation_paths(&binop.left, out);
+            annotation_paths(&binop.right, out);
+        }
+        _ => {}
     }
 }
 
@@ -311,6 +426,59 @@ mod tests {
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = PythonParser::new();
         parser.extract_functions(src).unwrap()
+    }
+
+    #[test]
+    fn free_function_signature_captures_annotations() {
+        let src = "def parse_user(name: str, count: int) -> list[int]:\n    return []\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.name_tokens, vec!["parse".to_owned(), "user".to_owned()]);
+        assert_eq!(sig.parameter_count, 2);
+        assert_eq!(
+            sig.parameter_names,
+            vec!["name".to_owned(), "count".to_owned()],
+        );
+        assert!(sig.parameter_type_paths.contains(&"str".to_owned()));
+        assert!(sig.parameter_type_paths.contains(&"int".to_owned()));
+        assert!(sig.return_type_paths.contains(&"list".to_owned()));
+        assert!(sig.return_type_paths.contains(&"int".to_owned()));
+        assert_eq!(sig.receiver, ReceiverShape::None);
+    }
+
+    #[test]
+    fn method_drops_self_receiver() {
+        let src = "class C:\n    def handle(self, x: int) -> int:\n        return x\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.receiver, ReceiverShape::Value);
+        // `self` is the receiver, not a parameter.
+        assert_eq!(sig.parameter_count, 1);
+        assert_eq!(sig.parameter_names, vec!["x".to_owned()]);
+    }
+
+    #[test]
+    fn staticmethod_without_self_has_no_receiver() {
+        // A method whose first parameter is not self/cls keeps every
+        // parameter and reports no receiver.
+        let src = "class C:\n    def make(value: int) -> int:\n        return value\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.receiver, ReceiverShape::None);
+        assert_eq!(sig.parameter_count, 1);
+        assert_eq!(sig.parameter_names, vec!["value".to_owned()]);
+    }
+
+    #[test]
+    fn variadic_parameters_are_counted() {
+        let src = "def f(a, *args, **kwargs):\n    return a\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.parameter_count, 3);
+        assert_eq!(
+            sig.parameter_names,
+            vec!["a".to_owned(), "args".to_owned(), "kwargs".to_owned()],
+        );
     }
 
     #[rstest]

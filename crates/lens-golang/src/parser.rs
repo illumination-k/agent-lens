@@ -15,7 +15,8 @@
 //! function-shaped at all.
 
 use lens_domain::{
-    FunctionDef, LanguageParseError, LanguageParser, TreeNode, qualify as qualify_name,
+    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, ReceiverShape, TreeNode,
+    identifier_tokens, qualify as qualify_name,
 };
 use tree_sitter::{Node, Parser};
 
@@ -128,10 +129,135 @@ fn function_def_from(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Opti
         start_line,
         end_line,
         is_test,
-        signature: None,
+        signature: Some(signature_info(node, source, raw_name)),
         doc: doc_comment_text(node, source),
         tree,
     })
+}
+
+/// Project a `function_declaration` / `method_declaration` into the
+/// language-neutral [`FunctionSignature`] used by signature-aware
+/// similarity. Parameter and return types are captured as their raw
+/// source text (`[]byte`, `*T`, …) — enough for the within-language
+/// token overlap the scorer computes.
+fn signature_info(node: Node<'_>, source: &[u8], raw_name: &str) -> FunctionSignature {
+    let mut parameter_names = Vec::new();
+    let mut parameter_type_paths = Vec::new();
+    let mut parameter_count = 0usize;
+
+    if let Some(params) = node.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        for decl in params.named_children(&mut cursor) {
+            if !matches!(
+                decl.kind(),
+                "parameter_declaration" | "variadic_parameter_declaration"
+            ) {
+                continue;
+            }
+            let names = declaration_names(decl, source);
+            // An unnamed parameter (`func f(int)`) still occupies one slot.
+            parameter_count += names.len().max(1);
+            if let Some(ty) = decl.child_by_field_name("type") {
+                parameter_type_paths.push(node_text(ty, source));
+            }
+            parameter_names.extend(names);
+        }
+    }
+
+    let mut return_type_paths = Vec::new();
+    if let Some(result) = node.child_by_field_name("result") {
+        collect_result_types(result, source, &mut return_type_paths);
+    }
+
+    FunctionSignature {
+        name_tokens: identifier_tokens(raw_name),
+        parameter_count,
+        parameter_names,
+        parameter_type_paths,
+        return_type_paths,
+        generics: collect_type_parameters(node, source),
+        receiver: receiver_shape(node),
+    }
+}
+
+/// The `name:` identifiers of a parameter / spec declaration, in order.
+/// `func f(a, b int)` yields `["a", "b"]`; an unnamed parameter yields
+/// an empty list.
+fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return names;
+    }
+    loop {
+        if cursor.field_name() == Some("name")
+            && cursor.node().kind() == "identifier"
+            && let Ok(text) = cursor.node().utf8_text(source)
+        {
+            names.push(text.to_owned());
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+    names
+}
+
+/// Collect return type texts from a `result:` node, which is either a
+/// parenthesized `parameter_list` (`(int, error)`) or a single bare type.
+fn collect_result_types(result: Node<'_>, source: &[u8], out: &mut Vec<String>) {
+    if result.kind() == "parameter_list" {
+        let mut cursor = result.walk();
+        for decl in result.named_children(&mut cursor) {
+            if let Some(ty) = decl.child_by_field_name("type") {
+                out.push(node_text(ty, source));
+            }
+        }
+    } else {
+        out.push(node_text(result, source));
+    }
+}
+
+/// Collect generic type-parameter declarations (`[T any]`), if any, as
+/// their raw text.
+fn collect_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let Some(params) = node.child_by_field_name("type_parameters") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = params.walk();
+    for decl in params.named_children(&mut cursor) {
+        if decl.kind() == "type_parameter_declaration" {
+            out.push(node_text(decl, source));
+        }
+    }
+    out
+}
+
+/// Map a method receiver to a [`ReceiverShape`]: a pointer receiver
+/// (`(s *S)`) is a reference, a value receiver (`(s S)`) is by value,
+/// and a free function has no receiver.
+fn receiver_shape(node: Node<'_>) -> ReceiverShape {
+    let Some(receiver) = node.child_by_field_name("receiver") else {
+        return ReceiverShape::None;
+    };
+    let mut cursor = receiver.walk();
+    for decl in receiver.named_children(&mut cursor) {
+        if decl.kind() == "parameter_declaration"
+            && let Some(ty) = decl.child_by_field_name("type")
+        {
+            return if ty.kind() == "pointer_type" {
+                ReceiverShape::Ref
+            } else {
+                ReceiverShape::Value
+            };
+        }
+    }
+    ReceiverShape::None
+}
+
+fn node_text(node: Node<'_>, source: &[u8]) -> String {
+    node.utf8_text(source).unwrap_or_default().to_owned()
 }
 
 /// Godoc-style doc comment: the run of `comment` siblings immediately
@@ -336,6 +462,63 @@ mod tests {
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = GoParser::new();
         parser.extract_functions(src).unwrap()
+    }
+
+    #[test]
+    fn free_function_signature_captures_params_and_returns() {
+        let src = "package p\nfunc Free(a int, b, c string) (int, error) { return 0, nil }\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.name_tokens, vec!["free".to_owned()]);
+        assert_eq!(sig.parameter_count, 3);
+        assert_eq!(
+            sig.parameter_names,
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        );
+        assert!(sig.parameter_type_paths.contains(&"int".to_owned()));
+        assert!(sig.parameter_type_paths.contains(&"string".to_owned()));
+        assert_eq!(
+            sig.return_type_paths,
+            vec!["int".to_owned(), "error".to_owned()],
+        );
+        assert_eq!(sig.receiver, ReceiverShape::None);
+    }
+
+    #[test]
+    fn pointer_method_signature_has_ref_receiver() {
+        let src = "package p\ntype S struct{}\nfunc (s *S) Method(x []byte) *T { return nil }\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.receiver, ReceiverShape::Ref);
+        assert_eq!(sig.parameter_count, 1);
+        assert_eq!(sig.parameter_names, vec!["x".to_owned()]);
+        assert!(sig.parameter_type_paths.contains(&"[]byte".to_owned()));
+    }
+
+    #[test]
+    fn value_method_signature_has_value_receiver() {
+        let src = "package p\ntype S struct{}\nfunc (s S) Read() int { return 0 }\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.receiver, ReceiverShape::Value);
+    }
+
+    #[test]
+    fn generic_function_signature_records_type_parameters() {
+        let src = "package p\nfunc Gen[T any](v T) T { return v }\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.parameter_count, 1);
+        assert!(!sig.generics.is_empty(), "generics: {:?}", sig.generics);
+    }
+
+    #[test]
+    fn unnamed_parameters_still_count() {
+        let src = "package p\nfunc NoNames(int, string) bool { return false }\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.parameter_count, 2);
+        assert!(sig.parameter_names.is_empty());
     }
 
     #[rstest]

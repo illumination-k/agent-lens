@@ -3,7 +3,7 @@
 use lens_domain::{
     BodyShape, FunctionDef, FunctionShape, FunctionSignature, LanguageParseError, LanguageParser,
     OwnerKind, OwnerShape, ReceiverShape, SignatureShape, SourceSpan, SyntaxFact, TreeNode,
-    VisibilityShape, qualify as qualify_name,
+    VisibilityShape, identifier_tokens, qualify as qualify_name,
 };
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -523,32 +523,6 @@ fn generic_summaries(generics: &syn::Generics) -> Vec<String> {
     }
     out.retain(|item| !item.is_empty());
     out
-}
-
-fn identifier_tokens(name: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut prev_is_lower_or_digit = false;
-    for ch in name.chars() {
-        if ch == '_' || !ch.is_alphanumeric() {
-            push_identifier_token(&mut tokens, &mut current);
-            prev_is_lower_or_digit = false;
-            continue;
-        }
-        if ch.is_uppercase() && prev_is_lower_or_digit {
-            push_identifier_token(&mut tokens, &mut current);
-        }
-        current.extend(ch.to_lowercase());
-        prev_is_lower_or_digit = ch.is_lowercase() || ch.is_ascii_digit();
-    }
-    push_identifier_token(&mut tokens, &mut current);
-    tokens
-}
-
-fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
-    if !current.is_empty() {
-        tokens.push(std::mem::take(current));
-    }
 }
 
 fn param_tree(arg: &syn::FnArg) -> TreeNode {
