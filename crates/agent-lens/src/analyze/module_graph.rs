@@ -9,9 +9,11 @@
 //!
 //! What legitimately differs between the two analyzers is *policy*, not
 //! construction, so that part stays at the call site and is spelled out
-//! by [`GraphPolicy`]: `coupling` has no Python module-graph backend and
-//! tolerates an empty Go package list, `context-span` supports Python and
-//! treats an empty package list as an unusable root.
+//! by [`GraphPolicy`]. Both build the same four-language graph; they only
+//! disagree on when a directory that walks to *zero* modules is an empty
+//! graph versus an unusable root. `coupling` tolerates an empty Go module
+//! (a `go.mod` with no packages yet is a real, if trivial, root), while
+//! `context-span` treats it as unusable.
 
 use std::path::{Path, PathBuf};
 
@@ -67,32 +69,36 @@ impl_into_module_file!(
     lens_golang::GoPackage,
 );
 
-/// The two axes on which the analyzers disagree about what counts as a
-/// usable root.
+/// How strictly a backend that *scans a directory* (Go, Python) treats a
+/// walk that finds zero modules. The two axes are per-backend because the
+/// analyzers disagree about Go but agree about Python.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GraphPolicy {
-    /// Whether a Python file or package directory is a supported root.
-    /// `coupling` has no Python module-graph backend and rejects one.
-    python_roots: bool,
-    /// Whether a directory walk that finds zero modules is an error
-    /// rather than an empty graph. Applies to the Python and Go
-    /// backends, the two that scan a directory instead of following a
-    /// declared entry point.
-    empty_walk_is_unsupported: bool,
+    /// Whether an empty Go package walk (a `go.mod` present but no `.go`
+    /// files yet) is an unusable root rather than an empty graph.
+    empty_go_walk_is_unsupported: bool,
+    /// Whether an empty Python walk is an unusable root rather than an
+    /// empty graph. Always strict: a directory is only handed to the
+    /// Python backend as the last-resort fallback (not Go, not a Rust
+    /// crate), so walking it to zero `.py` files means it was never
+    /// Python — a clear "unsupported root" beats a silent empty report.
+    empty_python_walk_is_unsupported: bool,
 }
 
 impl GraphPolicy {
-    /// `analyze coupling`: Rust, TS/JS, and Go roots only.
+    /// `analyze coupling`: all four languages; an empty Go module is a
+    /// tolerated empty graph rather than an error.
     pub(crate) const COUPLING: Self = Self {
-        python_roots: false,
-        empty_walk_is_unsupported: false,
+        empty_go_walk_is_unsupported: false,
+        empty_python_walk_is_unsupported: true,
     };
 
-    /// `analyze context-span`: all four languages, and a root that walks
-    /// to nothing is reported rather than rendered as an empty report.
+    /// `analyze context-span`: all four languages, and any root that
+    /// walks to nothing is reported rather than rendered as an empty
+    /// report.
     pub(crate) const CONTEXT_SPAN: Self = Self {
-        python_roots: true,
-        empty_walk_is_unsupported: true,
+        empty_go_walk_is_unsupported: true,
+        empty_python_walk_is_unsupported: true,
     };
 }
 
@@ -102,8 +108,8 @@ impl GraphPolicy {
 /// directory is probed in order: `go.mod` first (the unambiguous Go
 /// module marker — without this check a Go repo root would fall through
 /// to the Rust crate-root resolver and fail with a confusing "no usable
-/// Rust crate root"), then a Rust crate root, then Python when the
-/// policy allows it.
+/// Rust crate root"), then a Rust crate root, then Python as the
+/// last-resort directory walk.
 pub(crate) fn build_graph(
     path: &Path,
     policy: GraphPolicy,
@@ -113,8 +119,7 @@ pub(crate) fn build_graph(
             SourceLang::Rust => build_rust_graph(path),
             SourceLang::TypeScript(_) => build_ts_graph(path),
             SourceLang::Go => build_go_graph(path, policy),
-            SourceLang::Python if policy.python_roots => build_python_graph(path, policy),
-            SourceLang::Python => Err(unsupported_root(path)),
+            SourceLang::Python => build_python_graph(path, policy),
         };
     }
 
@@ -122,22 +127,15 @@ pub(crate) fn build_graph(
         if path.join("go.mod").is_file() {
             return build_go_graph(path, policy);
         }
-        if policy.python_roots {
-            return match resolve_crate_root(path) {
-                Ok(root) => build_rust_graph(&root),
-                Err(_) => build_python_graph(path, policy),
-            };
-        }
-        return build_rust_graph(path);
+        return match resolve_crate_root(path) {
+            Ok(root) => build_rust_graph(&root),
+            Err(_) => build_python_graph(path, policy),
+        };
     }
 
-    if policy.python_roots {
-        return Err(unsupported_root(path));
-    }
-    // Without a Python fallback there is still one root shape left to
-    // try: a `.rs`-less path that the crate-root resolver may recognise.
-    // It reports `UnsupportedRoot` itself when it cannot.
-    build_rust_graph(path)
+    // A non-directory path with no recognised source extension is not a
+    // root any backend can take.
+    Err(unsupported_root(path))
 }
 
 pub(crate) fn build_rust_graph(path: &Path) -> Result<ModuleGraph, CrateAnalyzerError> {
@@ -155,7 +153,7 @@ pub(crate) fn build_ts_graph(path: &Path) -> Result<ModuleGraph, CrateAnalyzerEr
 
 fn build_python_graph(path: &Path, policy: GraphPolicy) -> Result<ModuleGraph, CrateAnalyzerError> {
     let modules = lens_py::build_module_tree(path)?;
-    if policy.empty_walk_is_unsupported && modules.is_empty() {
+    if policy.empty_python_walk_is_unsupported && modules.is_empty() {
         return Err(unsupported_root(path));
     }
     let edges = lens_py::extract_edges(&modules);
@@ -164,7 +162,7 @@ fn build_python_graph(path: &Path, policy: GraphPolicy) -> Result<ModuleGraph, C
 
 fn build_go_graph(path: &Path, policy: GraphPolicy) -> Result<ModuleGraph, CrateAnalyzerError> {
     let modules = lens_golang::build_module_tree(path)?;
-    if policy.empty_walk_is_unsupported && modules.is_empty() {
+    if policy.empty_go_walk_is_unsupported && modules.is_empty() {
         return Err(unsupported_root(path));
     }
     let edges = lens_golang::extract_edges(&modules);
@@ -200,19 +198,13 @@ mod tests {
         path
     }
 
-    #[test]
-    fn python_file_root_is_unsupported_without_the_python_policy() {
+    #[rstest]
+    #[case(COUPLING)]
+    #[case(CONTEXT_SPAN)]
+    fn python_file_root_builds_under_both_policies(#[case] policy: GraphPolicy) {
         let dir = tempfile::tempdir().unwrap();
         let file = write(dir.path(), "m.py", "import os\n");
-        let err = build_graph(&file, COUPLING).unwrap_err();
-        assert!(matches!(err, CrateAnalyzerError::UnsupportedRoot { .. }));
-    }
-
-    #[test]
-    fn python_file_root_builds_with_the_python_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "m.py", "import os\n");
-        let graph = build_graph(&file, CONTEXT_SPAN).unwrap();
+        let graph = build_graph(&file, policy).unwrap();
         assert_eq!(graph.modules.len(), 1);
     }
 
@@ -257,11 +249,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn python_directory_is_the_last_resort_under_the_python_policy() {
+    #[rstest]
+    #[case(COUPLING)]
+    #[case(CONTEXT_SPAN)]
+    fn python_directory_is_the_last_resort(#[case] policy: GraphPolicy) {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "pkg/m.py", "import os\n");
-        let graph = build_graph(dir.path(), CONTEXT_SPAN).unwrap();
+        let graph = build_graph(dir.path(), policy).unwrap();
         assert!(!graph.modules.is_empty());
     }
 

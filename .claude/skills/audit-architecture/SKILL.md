@@ -1,13 +1,13 @@
 ---
 name: audit-architecture
-description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, layering and level inversions, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `layers`, `context-span`, and `cohesion`. `coupling` works on Rust crates, TypeScript / JavaScript module graphs, and Go modules; `layers`, `context-span`, and `cohesion` additionally support Python.
+description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, layering and level inversions, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `layers`, `context-span`, and `cohesion`, all of which run on Rust crates, TypeScript / JavaScript module graphs, Go modules, and Python packages.
 ---
 
 # Audit module structure with agent-lens
 
 Four analyzers cover the architecture question:
 
-- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), and Go modules (package-granular).
+- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), Go modules (package-granular), and Python packages (file-granular).
 - `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, Python, and Go. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
 - `layers` — inferred Lakos levelization of the call graph: a level per function and per module, the entry-point set, the module cycles that make levelization impossible (with the concrete call sites), and downward calls skipping a level. Needs no crate root or entry file — it walks any directory of Rust, TS/JS, Python, or Go.
 - `cohesion` — per-`impl` (Rust) / per-class (TS, Python, Go) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
@@ -16,7 +16,7 @@ Four analyzers cover the architecture question:
 
 ### 1. Crate-wide / entry-wide coupling
 
-`coupling` takes a Rust crate root (`src/lib.rs` / `src/main.rs`, or a directory containing one), a TypeScript / JavaScript entry file (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` / `.cjs`) whose relative imports define the module graph, or a Go file / module directory (one containing `go.mod`):
+`coupling` takes a Rust crate root (`src/lib.rs` / `src/main.rs`, or a directory containing one), a TypeScript / JavaScript entry file (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` / `.cjs`) whose relative imports define the module graph, a Go file / module directory (one containing `go.mod`), or a Python file / package directory:
 
 ```bash
 # Rust crate
@@ -27,6 +27,9 @@ agent-lens analyze coupling app/src/index.ts --format md
 
 # Go module (directory containing go.mod)
 agent-lens analyze coupling ./cmd/server --format md
+
+# Python file or package directory
+agent-lens analyze coupling pkg/foo --format md
 ```
 
 Look for, in order:
@@ -135,5 +138,4 @@ agent-lens analyze cohesion <path> | jq '.files[].units[] | select(.lcom4 >= 2)'
 - The user wants per-function complexity — that's `complexity`, not `coupling`/`cohesion`.
 - The crate / entry tree is a single file — Fan-In / Fan-Out are degenerate, the report will be empty.
 - The "module structure" question is across Rust crates — `coupling` is intra-crate. For inter-crate dependency questions, `cargo tree` is the right tool.
-- The codebase is Python and the question is about coupling — `coupling` does not parse Python imports. `layers`, `context-span`, and `cohesion` do run on Python.
 - The TS/JS project has no single entry file (e.g. a library exporting many barrels, or a Next.js App Router app) — `coupling` requires one entry, so you'll need to pick a representative one. `context-span` supports merging entries via `--entry-glob`, but `coupling` does not.

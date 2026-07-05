@@ -1,5 +1,6 @@
-//! `analyze coupling` — module-level coupling metrics for a Rust crate
-//! or a TypeScript / JavaScript module graph.
+//! `analyze coupling` — module-level coupling metrics for a Rust crate,
+//! a TypeScript / JavaScript module graph, a Go module, or a Python
+//! package.
 //!
 //! Builds a language-specific module tree, then reports the metrics
 //! derived from the cross-module reference graph: Number of Couplings,
@@ -16,7 +17,11 @@
 //! edges. For TypeScript / JavaScript the entry point is a single
 //! source file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
 //! `.cjs`) and the graph is grown by following relative `import` /
-//! `export … from` specifiers; one source file is one module.
+//! `export … from` specifiers; one source file is one module. Go accepts
+//! a module directory (containing `go.mod`) and models each package as a
+//! node with local imports as edges. Python accepts either a `.py` file
+//! or a package directory and models each discovered source file as a
+//! module.
 //!
 //! Limitations carried over from the underlying extractors:
 //!
@@ -29,6 +34,10 @@
 //! * TypeScript / JavaScript: only relative module specifiers
 //!   (`./` and `../`) are followed. Bare specifiers and TypeScript
 //!   path aliases are not resolved.
+//! * Python: only imports that resolve to a `.py` file inside the
+//!   scanned tree become edges; imports of third-party or stdlib
+//!   packages are dropped. Dynamic imports (`importlib`, `__import__`)
+//!   are invisible.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -839,6 +848,64 @@ mod tests {
                 "func main() { fmt.Println(bar.Stuff) }\n",
             ),
         );
+
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["edge_count"], 0);
+    }
+
+    #[test]
+    fn python_package_directory_reports_local_import_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "pyproject.toml", "[project]\nname = \"proj\"\n");
+        write_file(
+            dir.path(),
+            "main.py",
+            "from util import run\n\ndef start():\n    run()\n",
+        );
+        write_file(dir.path(), "util.py", "def run():\n    pass\n");
+
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(modules.contains(&"crate::main"));
+        assert!(modules.contains(&"crate::util"));
+        assert!(parsed["edge_count"].as_u64().unwrap() >= 1);
+        let util = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["path"] == "crate::util")
+            .expect("util module");
+        // util is depended on by main, so I = 0 (fully stable).
+        assert_eq!(util["instability"].as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn python_entry_file_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = write_file(dir.path(), "main.py", "def start():\n    pass\n");
+        let json = CouplingAnalyzer::new()
+            .analyze(&main, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["module_count"], 1);
+    }
+
+    #[test]
+    fn python_external_imports_do_not_create_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "pyproject.toml", "[project]\nname = \"proj\"\n");
+        write_file(dir.path(), "main.py", "import os\nimport requests\n");
 
         let json = CouplingAnalyzer::new()
             .analyze(dir.path(), OutputFormat::Json)

@@ -41,7 +41,7 @@ If a report is empty, skip it silently — empty diff-only output is the success
 
 ### 3. Crate / entry-level coupling (no `--diff-only`)
 
-`coupling` doesn't have a diff mode; it's a whole-graph metric, and it runs on Rust crates, TS/JS module graphs, and Go modules. Only re-run it if the diff changed module structure — for Rust, added or removed `mod` declarations, `pub use` re-exports, or moved files between modules; for TS/JS, added or removed relative `import` / `export` statements at module scope; for Go, added or removed local `import` statements:
+`coupling` doesn't have a diff mode; it's a whole-graph metric, and it runs on Rust crates, TS/JS module graphs, Go modules, and Python packages. Only re-run it if the diff changed module structure — for Rust, added or removed `mod` declarations, `pub use` re-exports, or moved files between modules; for TS/JS, added or removed relative `import` / `export` statements at module scope; for Go, added or removed local `import` statements; for Python, added or removed `import` / `from ... import` statements:
 
 ```bash
 # Rust
@@ -56,6 +56,10 @@ git diff -U0 -- '*.ts' '*.tsx' '*.js' '*.jsx' \
 # Go — re-run when local imports moved
 git diff -U0 -- '*.go' | grep -qE '^[+-]\s*"' && \
   agent-lens analyze coupling ./cmd/server --format md
+
+# Python — re-run when imports moved
+git diff -U0 -- '*.py' | grep -qE '^[+-]\s*(import |from )' && \
+  agent-lens analyze coupling pkg/foo --format md
 ```
 
 ### 4. Aggregate and decide
