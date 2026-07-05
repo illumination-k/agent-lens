@@ -76,6 +76,8 @@ mod tests {
     #[case::left_missing(None, Some("Parses the config."))]
     #[case::right_missing(Some("Parses the config."), None)]
     #[case::stopwords_only(Some("of the and"), Some("of the and"))]
+    #[case::left_stopwords_only(Some("of the and"), Some("Validate the id."))]
+    #[case::right_stopwords_only(Some("Validate the id."), Some("of the and"))]
     fn doc_overlap_requires_doc_words_on_both_sides(
         #[case] a: Option<&str>,
         #[case] b: Option<&str>,
