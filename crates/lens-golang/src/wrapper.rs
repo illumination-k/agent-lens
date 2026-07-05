@@ -371,6 +371,17 @@ mod tests {
     }
 
     #[test]
+    fn peels_adapter_through_parentheses() {
+        // A parenthesized adapter chain must still be peeled to the inner
+        // forwarding call.
+        let src = "package p\nfunc Wrap(x int) string { return (target(x).String()) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].callee, "target");
+        assert_eq!(got[0].adapters, vec![".String()".to_owned()]);
+    }
+
+    #[test]
     fn rejects_adapter_call_with_arguments() {
         // `.Do(y)` takes an argument, so it is not a trivial adapter —
         // the receiver call is not a pure forward and nothing should be

@@ -515,10 +515,16 @@ func standalone() int {
         let unit = module_unit(&units);
         assert_eq!(unit.type_name, "<module>");
         assert_eq!(unit.methods.len(), 3);
+        // The unit spans the first free function (line 6) to the last
+        // (line 17), pinning the 1-based line arithmetic.
+        assert_eq!(unit.start_line, 6);
+        assert_eq!(unit.end_line, 17);
 
         let inc = unit.methods.iter().find(|m| m.name == "inc").unwrap();
         assert!(inc.fields.contains(&"counter".to_owned()));
         assert!(inc.calls.contains(&"helper".to_owned()));
+        assert_eq!(inc.start_line, 6);
+        assert_eq!(inc.end_line, 9);
 
         let helper = unit.methods.iter().find(|m| m.name == "helper").unwrap();
         assert!(helper.fields.contains(&"counter".to_owned()));
@@ -526,6 +532,37 @@ func standalone() int {
         // `inc`/`helper` are connected (call + shared field); `standalone`
         // touches neither, so it is its own component.
         assert_eq!(unit.components.len(), 2);
+    }
+
+    #[test]
+    fn package_unit_excludes_body_var_shadow_from_fields() {
+        // A `var counter` declared inside the body shadows the package
+        // `counter`; reads of that local must not register as a field
+        // reference on the package unit.
+        let src = r#"
+package p
+
+var counter int
+
+func reads() int {
+    return counter
+}
+
+func shadows() int {
+    var counter = 3
+    return counter
+}
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        let unit = module_unit(&units);
+        let reads = unit.methods.iter().find(|m| m.name == "reads").unwrap();
+        let shadows = unit.methods.iter().find(|m| m.name == "shadows").unwrap();
+        assert!(reads.fields.contains(&"counter".to_owned()));
+        assert!(
+            shadows.fields.is_empty(),
+            "body `var` shadow leaked: {:?}",
+            shadows.fields,
+        );
     }
 
     #[test]
@@ -557,6 +594,31 @@ func b() int {
             b.fields.is_empty(),
             "short-var shadow leaked: {:?}",
             b.fields
+        );
+    }
+
+    #[test]
+    fn package_unit_collects_all_names_from_grouped_var_spec() {
+        // A single `var x, y int` spec declares two fields; both must be
+        // recognised so functions reading either register the reference.
+        let src = r#"
+package p
+
+var x, y int
+
+func usesX() int { return x }
+
+func usesY() int { return y }
+"#;
+        let units = extract_cohesion_units(src).unwrap();
+        let unit = module_unit(&units);
+        let uses_x = unit.methods.iter().find(|m| m.name == "usesX").unwrap();
+        let uses_y = unit.methods.iter().find(|m| m.name == "usesY").unwrap();
+        assert!(uses_x.fields.contains(&"x".to_owned()));
+        assert!(
+            uses_y.fields.contains(&"y".to_owned()),
+            "second name in `var x, y int` was dropped: {:?}",
+            uses_y.fields,
         );
     }
 

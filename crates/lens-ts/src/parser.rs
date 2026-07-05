@@ -511,6 +511,40 @@ mod tests {
     }
 
     #[test]
+    fn ts_type_paths_flatten_union_intersection_paren_and_keyword() {
+        // Each parameter isolates one `ts_type_paths` arm: union
+        // (`UnA`/`UnB`), intersection (`InA`/`InB`), parenthesized
+        // (`ParenT`), and the boolean keyword.
+        let src = "\
+function f(
+  a: UnA | UnB,
+  b: InA & InB,
+  c: (ParenT),
+  d: boolean,
+): void {}
+";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        for expected in ["UnA", "UnB", "InA", "InB", "ParenT", "boolean"] {
+            assert!(
+                sig.parameter_type_paths.contains(&expected.to_owned()),
+                "missing {expected} in {:?}",
+                sig.parameter_type_paths,
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_type_name_uses_rightmost_segment() {
+        // `ns.Thing` should contribute `Thing`, exercising the
+        // `QualifiedName` head.
+        let src = "function f(a: ns.Thing): void {}\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert!(sig.parameter_type_paths.contains(&"Thing".to_owned()));
+    }
+
+    #[test]
     fn rest_parameter_is_counted() {
         let src = "function f(a: number, ...rest: string[]): void {}\n";
         let funcs = parse_functions(src);

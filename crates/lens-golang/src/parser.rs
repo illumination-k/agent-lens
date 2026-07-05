@@ -509,7 +509,9 @@ mod tests {
         let funcs = parse_functions(src);
         let sig = funcs[0].signature.as_ref().expect("signature populated");
         assert_eq!(sig.parameter_count, 1);
-        assert!(!sig.generics.is_empty(), "generics: {:?}", sig.generics);
+        // The raw type-parameter declaration text is captured verbatim so
+        // the content — not just presence — is pinned.
+        assert_eq!(sig.generics, vec!["T any".to_owned()]);
     }
 
     #[test]

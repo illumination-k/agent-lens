@@ -470,6 +470,33 @@ mod tests {
     }
 
     #[test]
+    fn annotation_paths_flatten_qualified_union_and_containers() {
+        // Each parameter isolates one `annotation_paths` arm via unique
+        // type names: attribute (`t.Path`), tuple slice (`KeyT`/`ValT`),
+        // list inside a subscript (`ArgT`), and union (`bytes`/`float`).
+        let src = "\
+def f(
+    a: t.Path,
+    b: dict[KeyT, ValT],
+    c: Callable[[ArgT], RetT],
+) -> bytes | float:
+    return b
+";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        // Attribute arm.
+        assert!(sig.parameter_type_paths.contains(&"Path".to_owned()));
+        // Tuple-slice arm (`KeyT`/`ValT` appear only inside the tuple).
+        assert!(sig.parameter_type_paths.contains(&"KeyT".to_owned()));
+        assert!(sig.parameter_type_paths.contains(&"ValT".to_owned()));
+        // List arm (`ArgT` appears only inside the nested `[...]`).
+        assert!(sig.parameter_type_paths.contains(&"ArgT".to_owned()));
+        // BinOp (union) arm.
+        assert!(sig.return_type_paths.contains(&"bytes".to_owned()));
+        assert!(sig.return_type_paths.contains(&"float".to_owned()));
+    }
+
+    #[test]
     fn variadic_parameters_are_counted() {
         let src = "def f(a, *args, **kwargs):\n    return a\n";
         let funcs = parse_functions(src);
