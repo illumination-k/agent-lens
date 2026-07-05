@@ -43,6 +43,29 @@ pub(crate) fn home_scoped_path(relative: &str) -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(relative))
 }
 
+/// Outcome of computing a setup plan against an existing settings/config
+/// file. `T` is the file's payload representation — parsed JSON for the
+/// Claude Code settings file, raw TOML text for the Codex config — and
+/// the setup modules expose their concrete shape as a `SetupPlan` type
+/// alias.
+#[derive(Debug)]
+pub struct SetupPlan<T> {
+    pub path: PathBuf,
+    pub before: Option<T>,
+    pub after: T,
+    pub added_commands: Vec<String>,
+}
+
+impl<T: PartialEq> SetupPlan<T> {
+    /// Whether applying this plan would change the file on disk.
+    pub fn changed(&self) -> bool {
+        match &self.before {
+            None => true,
+            Some(before) => before != &self.after,
+        }
+    }
+}
+
 /// True when `existing` is the same handler invocation as `wanted`,
 /// modulo trailing arguments.
 ///

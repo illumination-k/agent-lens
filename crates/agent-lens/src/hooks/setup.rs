@@ -100,23 +100,8 @@ pub enum SettingsScope {
 }
 
 /// Outcome of computing a setup plan against an existing settings file.
-#[derive(Debug)]
-pub struct SetupPlan {
-    pub path: PathBuf,
-    pub before: Option<Value>,
-    pub after: Value,
-    pub added_commands: Vec<String>,
-}
-
-impl SetupPlan {
-    /// Whether applying this plan would change the file on disk.
-    pub fn changed(&self) -> bool {
-        match &self.before {
-            None => true,
-            Some(before) => before != &self.after,
-        }
-    }
-}
+/// The payload is the parsed `settings.json` document.
+pub type SetupPlan = setup_common::SetupPlan<Value>;
 
 /// Compact summary of a setup run, suitable for JSON-on-stdout output.
 #[derive(Debug, Serialize)]

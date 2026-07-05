@@ -8,9 +8,7 @@
 
 use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
 
-use crate::hooks::core::{
-    EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError, read_edited_source,
-};
+use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
 
 /// Claude Code's PostToolUse adapter for the engine-agnostic hook
 /// runner.
@@ -44,37 +42,19 @@ pub type SimilarityError = crate::hooks::core::HookError;
 /// Re-exported for compatibility with earlier per-handler error aliases.
 pub type WrapperError = crate::hooks::core::HookError;
 
-/// Tool names whose `tool_input.file_path` points at the file that was
-/// just modified. Anything outside this set is ignored.
-pub(crate) const EDITING_TOOL_NAMES: &[&str] = &["Write", "Edit", "MultiEdit"];
-
 /// Prepare the edited file for a PostToolUse hook to analyse.
 ///
-/// Returns an empty `Vec` for "no opinion" cases — non-editing tools,
-/// missing `file_path`, or an extension the analysers can't handle. The
-/// list is at most one element long; returning a `Vec` lets the engine-
-/// agnostic core treat Claude Code and Codex inputs the same way.
+/// Delegates to [`crate::hooks::prepare_single_edited_source`]; after
+/// the edit the file must exist, so a missing file is a hard error.
 pub(crate) fn prepare_edited_sources(
     input: &PostToolUseInput,
 ) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    if !EDITING_TOOL_NAMES.contains(&input.tool_name.as_str()) {
-        return Ok(Vec::new());
-    }
-    let Some(rel_path) = extract_file_path(&input.tool_input) else {
-        return Ok(Vec::new());
-    };
-    Ok(
-        read_edited_source(&input.context.cwd, rel_path, MissingFilePolicy::Error)?
-            .into_iter()
-            .collect(),
+    crate::hooks::prepare_single_edited_source(
+        &input.tool_name,
+        &input.tool_input,
+        &input.context.cwd,
+        MissingFilePolicy::Error,
     )
-}
-
-fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {
-    tool_input
-        .get("file_path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
 }
 
 #[cfg(test)]

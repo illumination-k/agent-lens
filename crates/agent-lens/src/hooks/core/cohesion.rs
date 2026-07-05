@@ -34,43 +34,24 @@ impl CohesionCore {
     /// callers can treat "no signal" as "no message" without inspecting
     /// the report string.
     pub fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError> {
-        let mut body = String::new();
-        let mut total = 0usize;
-
-        for src in sources {
-            let units = extract_units(src.lang, &src.source)?;
-            let flagged: Vec<&CohesionUnit> =
-                units.iter().filter(|u| u.lcom4 >= LCOM4_FLOOR).collect();
-            if flagged.is_empty() {
-                continue;
-            }
-            total += flagged.len();
-            append_section(&mut body, &src.rel_path, src.lang, &flagged);
-        }
-
-        if total == 0 {
-            return Ok(None);
-        }
-
-        let header = format!("agent-lens cohesion: {total} incohesive unit(s) before edit\n");
-        Ok(Some(format!("{header}{body}")))
+        crate::hooks::core::run_source_report(
+            sources,
+            |total| format!("agent-lens cohesion: {total} incohesive unit(s) before edit\n"),
+            |src, body| {
+                let units = extract_units(src.lang, &src.source)?;
+                let flagged: Vec<&CohesionUnit> =
+                    units.iter().filter(|u| u.lcom4 >= LCOM4_FLOOR).collect();
+                if !flagged.is_empty() {
+                    append_section(body, &src.rel_path, src.lang, &flagged);
+                }
+                Ok(flagged.len())
+            },
+        )
     }
 }
 
 fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, HookError> {
-    match lang {
-        SourceLang::Rust => {
-            lens_rust::extract_cohesion_units(source).map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::TypeScript(dialect) => lens_ts::extract_cohesion_units(source, dialect)
-            .map_err(|e| HookError::Parse(Box::new(e))),
-        SourceLang::Python => {
-            lens_py::extract_cohesion_units(source).map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::Go => {
-            lens_golang::extract_cohesion_units(source).map_err(|e| HookError::Parse(Box::new(e)))
-        }
-    }
+    crate::analyze::dispatch_lens!(lang, source, extract_cohesion_units).map_err(HookError::Parse)
 }
 
 fn append_section(out: &mut String, file_path: &str, lang: SourceLang, units: &[&CohesionUnit]) {

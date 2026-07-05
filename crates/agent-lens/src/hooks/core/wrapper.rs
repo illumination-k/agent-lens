@@ -22,42 +22,22 @@ impl WrapperCore {
     }
 
     pub fn run(&self, sources: &[EditedSource]) -> Result<Option<String>, HookError> {
-        let mut body = String::new();
-        let mut total = 0usize;
-
-        for src in sources {
-            let findings = run_wrappers(src.lang, &src.source)?;
-            if findings.is_empty() {
-                continue;
-            }
-            total += findings.len();
-            append_section(&mut body, &src.rel_path, &findings);
-        }
-
-        if total == 0 {
-            return Ok(None);
-        }
-
-        let header = format!("agent-lens wrapper: {total} thin wrapper(s) detected\n");
-        Ok(Some(format!("{header}{body}")))
+        crate::hooks::core::run_source_report(
+            sources,
+            |total| format!("agent-lens wrapper: {total} thin wrapper(s) detected\n"),
+            |src, body| {
+                let findings = run_wrappers(src.lang, &src.source)?;
+                if !findings.is_empty() {
+                    append_section(body, &src.rel_path, &findings);
+                }
+                Ok(findings.len())
+            },
+        )
     }
 }
 
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, HookError> {
-    match lang {
-        SourceLang::Rust => {
-            lens_rust::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::find_wrappers(source, dialect).map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::Python => {
-            lens_py::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
-        }
-        SourceLang::Go => {
-            lens_golang::find_wrappers(source).map_err(|e| HookError::Parse(Box::new(e)))
-        }
-    }
+    crate::analyze::dispatch_lens!(lang, source, find_wrappers).map_err(HookError::Parse)
 }
 
 fn append_section(out: &mut String, file_path: &str, findings: &[WrapperFinding]) {

@@ -36,6 +36,28 @@ pub struct EditedSource {
     pub source: String,
 }
 
+/// Shared aggregate-report loop for the per-source hook cores (cohesion,
+/// complexity, wrapper): run `section` once per source, letting it append
+/// a block to the report body and return how many findings it wrote, then
+/// wrap the body in the count-carrying `header` — or return `None` when no
+/// source produced a finding. The similarity core keeps its own loop
+/// because it threads per-source profiling spans through the same walk.
+pub(crate) fn run_source_report(
+    sources: &[EditedSource],
+    header: impl FnOnce(usize) -> String,
+    mut section: impl FnMut(&EditedSource, &mut String) -> Result<usize, HookError>,
+) -> Result<Option<String>, HookError> {
+    let mut body = String::new();
+    let mut total = 0usize;
+    for src in sources {
+        total += section(src, &mut body)?;
+    }
+    if total == 0 {
+        return Ok(None);
+    }
+    Ok(Some(format!("{}{body}", header(total))))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum MissingFilePolicy {
     Error,

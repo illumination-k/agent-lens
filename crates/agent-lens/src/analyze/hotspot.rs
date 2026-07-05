@@ -264,21 +264,7 @@ fn source_collection_error(path: &Path, error: AnalyzerError) -> HotspotError {
 /// extension so the caller can keep walking other files.
 fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
     let lang = SourceLang::from_path(file)?;
-    let result: Result<Vec<FunctionComplexity>, Box<dyn std::error::Error>> = match lang {
-        SourceLang::Rust => {
-            lens_rust::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
-        }
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_complexity_units(source, dialect).map_err(|e| Box::new(e) as _)
-        }
-        SourceLang::Python => {
-            lens_py::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
-        }
-        SourceLang::Go => {
-            lens_golang::extract_complexity_units(source).map_err(|e| Box::new(e) as _)
-        }
-    };
-    match result {
+    match super::dispatch_lens!(lang, source, extract_complexity_units) {
         Ok(u) => Some(u),
         Err(err) => {
             warn!(path = %file.display(), error = %err, "skipping file: parse failed");
