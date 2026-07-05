@@ -57,6 +57,9 @@ pub struct FunctionShape {
     pub owner: SyntaxFact<Option<OwnerShape>>,
     pub visibility: SyntaxFact<VisibilityShape>,
     pub signature: SyntaxFact<SignatureShape>,
+    /// Documentation text attached to the definition, comment markers
+    /// stripped. `None` when absent or not extracted by the adapter.
+    pub doc: Option<String>,
     pub body: BodyShape,
     pub span: SourceSpan,
     pub is_test: bool,
@@ -89,6 +92,7 @@ impl From<FunctionDef> for FunctionShape {
                 .signature
                 .map(SignatureShape::from)
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
+            doc: def.doc,
             body: BodyShape { tree: body_tree },
             span: SourceSpan {
                 start_line: def.start_line,
@@ -334,6 +338,7 @@ mod tests {
             owner: SyntaxFact::Known(None),
             visibility: SyntaxFact::Unknown,
             signature: SyntaxFact::Unknown,
+            doc: None,
             body: BodyShape {
                 tree: TreeNode::leaf("Block"),
             },
@@ -353,6 +358,7 @@ mod tests {
             end_line: 8,
             is_test: true,
             signature: Some(signature()),
+            doc: Some("Parse a user from its id.".to_owned()),
             tree: TreeNode::with_children(
                 "Function",
                 "",
@@ -366,6 +372,7 @@ mod tests {
         assert_eq!(shape.span.line_count(), 6);
         assert!(shape.is_test);
         assert_eq!(shape.body_tree().label, "Block");
+        assert_eq!(shape.doc.as_deref(), Some("Parse a user from its id."));
         assert_eq!(
             shape
                 .signature_shape()

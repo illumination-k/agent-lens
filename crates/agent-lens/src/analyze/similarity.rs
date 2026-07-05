@@ -23,6 +23,7 @@ use super::{AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
 
 mod candidates;
 mod corpus;
+mod doc;
 mod extract;
 mod report;
 mod token;
@@ -304,6 +305,7 @@ impl SimilarityAnalyzer {
         let mut score_stats = self.score_pairs(corpus, &profiles, &pairs_to_score, threshold);
         score_stats.diff_filtered_count = diff_prefiltered_count;
         log_score_stats(&candidates, &score_stats, score_started, self.method);
+        annotate_doc_overlap(corpus, &mut score_stats.pairs);
 
         let cluster_started = Instant::now();
         let domain_pairs: Vec<_> = score_stats
@@ -407,6 +409,19 @@ fn build_token_profiles(corpus: &[OwnedFunction], compare_values: bool) -> Vec<T
 
 fn body_candidate_threshold(threshold: f64) -> f64 {
     ((threshold - SIGNATURE_SIMILARITY_WEIGHT) / BODY_SIMILARITY_WEIGHT).clamp(0.0, 1.0)
+}
+
+/// Fill [`SimilarityComponents::doc_overlap`] on the pairs that survived
+/// threshold filtering. Runs outside the scoring hot path: only reported
+/// pairs pay for doc tokenization, so corpora with millions of candidate
+/// pairs see no extra scoring cost.
+fn annotate_doc_overlap(corpus: &[OwnedFunction], pairs: &mut [ScoredPair]) {
+    for pair in pairs {
+        let (Some(a), Some(b)) = (corpus.get(pair.i), corpus.get(pair.j)) else {
+            continue;
+        };
+        pair.components.doc_overlap = doc::doc_overlap(a.doc(), b.doc());
+    }
 }
 
 fn filter_pairs_touching_changes<'a>(
@@ -582,6 +597,7 @@ fn score_candidate_pair(
             signature_similarity: signature.signature_similarity,
             type_overlap: signature.type_overlap,
             identifier_overlap: signature.identifier_overlap,
+            doc_overlap: None,
         },
         exact_match,
     })
@@ -627,6 +643,7 @@ fn score_token_candidate_pair(
             signature_similarity: signature.signature_similarity,
             type_overlap: signature.type_overlap,
             identifier_overlap: signature.identifier_overlap,
+            doc_overlap: None,
         },
         exact_match: body_similarity >= 1.0,
     })
@@ -647,6 +664,12 @@ pub(super) struct SimilarityComponents {
     pub(super) signature_similarity: Option<f64>,
     pub(super) type_overlap: Option<f64>,
     pub(super) identifier_overlap: Option<f64>,
+    /// Word-level overlap of the two functions' doc comments. A
+    /// diagnostic component only — it does not feed `similarity` — and
+    /// filled by [`annotate_doc_overlap`] after threshold filtering so
+    /// the scoring hot path never tokenizes doc prose. `None` unless
+    /// both sides carry doc text.
+    pub(super) doc_overlap: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1038,6 +1061,7 @@ fn delta(xs: &[i32]) -> i32 {
                 end_line,
                 is_test: false,
                 signature: None,
+                doc: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
             }),
         }
@@ -1096,6 +1120,7 @@ fn delta(xs: &[i32]) -> i32 {
                 signature_similarity: None,
                 type_overlap: None,
                 identifier_overlap: None,
+                doc_overlap: None,
             }
         }
 
@@ -1157,6 +1182,7 @@ fn delta(xs: &[i32]) -> i32 {
                     signature_similarity: Some(0.25),
                     type_overlap: Some(0.0),
                     identifier_overlap: Some(0.5),
+                    doc_overlap: None,
                 },
                 exact_match: false,
             },
@@ -1369,6 +1395,7 @@ fn delta(xs: &[i32]) -> i32 {
                         generics: Vec::new(),
                         receiver: lens_domain::ReceiverShape::None,
                     }),
+                    doc: None,
                     tree: left_body,
                 }),
             },
@@ -1390,6 +1417,7 @@ fn delta(xs: &[i32]) -> i32 {
                         generics: Vec::new(),
                         receiver: lens_domain::ReceiverShape::None,
                     }),
+                    doc: None,
                     tree: right_body,
                 }),
             },
@@ -1563,6 +1591,63 @@ fn validate_order_id(id: OrderId) -> bool {
         assert!(signature_similarity < 1.0, "got {pair}");
         assert!(pair["type_overlap"].as_f64().unwrap() < 1.0, "got {pair}");
         assert!(pair["identifier_overlap"].as_f64().is_some());
+        // Neither function is documented, so the diagnostic doc component
+        // must be absent rather than reported as 0.
+        assert!(pair["doc_overlap"].is_null(), "got {pair}");
+    }
+
+    #[test]
+    fn rust_json_pairs_emit_doc_overlap_when_both_sides_documented() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+/// Validate the user id before persisting.
+fn validate_user(id: u64) -> bool {
+    let raw = id;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
+}
+
+/// Validate the order id before persisting.
+fn validate_order(id: u64) -> bool {
+    let raw = id;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.8)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pair = &parsed["clusters"][0]["pairs"][0];
+        let doc_overlap = pair["doc_overlap"].as_f64().unwrap();
+        // Docs differ by exactly one word out of a 7-word union
+        // ({validate, user, order, id, before, persisting} after
+        // stopword removal: user vs order unique, 4 shared → 4/6).
+        assert!(
+            (doc_overlap - 4.0 / 6.0).abs() < 1e-9,
+            "got {doc_overlap}: {pair}"
+        );
+        // The blended similarity must be unaffected by doc text: it is
+        // exactly the body/signature blend, doc_overlap is diagnostic.
+        let similarity = pair["similarity"].as_f64().unwrap();
+        let body = pair["body_similarity"].as_f64().unwrap();
+        let signature = pair["signature_similarity"].as_f64().unwrap();
+        assert!(
+            (similarity
+                - (BODY_SIMILARITY_WEIGHT * body + SIGNATURE_SIMILARITY_WEIGHT * signature))
+                .abs()
+                < 1e-9,
+            "doc text leaked into the blended score: {pair}"
+        );
     }
 
     #[test]
@@ -2376,6 +2461,7 @@ def beta(ys):
                         generics: Vec::new(),
                         receiver: lens_domain::ReceiverShape::None,
                     }),
+                    doc: None,
                     tree: lens_domain::TreeNode::with_children(
                         "Block",
                         "",
@@ -2405,6 +2491,7 @@ def beta(ys):
                         generics: Vec::new(),
                         receiver: lens_domain::ReceiverShape::None,
                     }),
+                    doc: None,
                     tree: lens_domain::TreeNode::with_children(
                         "Block",
                         "",
@@ -2462,6 +2549,7 @@ def beta(ys):
                     end_line: 5,
                     is_test: false,
                     signature: None,
+                    doc: None,
                     tree: body(third),
                 }),
             }

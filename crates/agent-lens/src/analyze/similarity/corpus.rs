@@ -49,6 +49,10 @@ impl OwnedFunction {
     pub(super) fn signature(&self) -> Option<&SignatureShape> {
         self.shape.signature_shape()
     }
+
+    pub(super) fn doc(&self) -> Option<&str> {
+        self.shape.doc.as_deref()
+    }
 }
 
 /// Collect every function under `path` into a flat corpus, tagging each

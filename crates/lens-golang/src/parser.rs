@@ -129,8 +129,49 @@ fn function_def_from(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Opti
         end_line,
         is_test,
         signature: None,
+        doc: doc_comment_text(node, source),
         tree,
     })
+}
+
+/// Godoc-style doc comment: the run of `comment` siblings immediately
+/// above the declaration, with no blank line between the last comment
+/// and the declaration (or between the comments themselves). Comment
+/// markers (`//`, `/* */`) are stripped per line. Returns `None` when
+/// there is no adjacent comment or it is blank.
+pub(crate) fn doc_comment_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut expected_row = node.start_position().row;
+    let mut prev = node.prev_sibling();
+    while let Some(sibling) = prev {
+        if sibling.kind() != "comment" || sibling.end_position().row + 1 != expected_row {
+            break;
+        }
+        let Ok(text) = sibling.utf8_text(source) else {
+            break;
+        };
+        lines.push(strip_comment_markers(text));
+        expected_row = sibling.start_position().row;
+        prev = sibling.prev_sibling();
+    }
+    lines.reverse();
+    let doc = lines.join("\n").trim().to_owned();
+    (!doc.is_empty()).then_some(doc)
+}
+
+/// Strip `//` / `/* */` markers from one comment node's text, trimming
+/// each line so multi-line block comments fold to their prose.
+fn strip_comment_markers(text: &str) -> String {
+    let body = text
+        .strip_prefix("/*")
+        .and_then(|rest| rest.strip_suffix("*/"))
+        .unwrap_or_else(|| text.strip_prefix("//").unwrap_or(text));
+    body.lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
 }
 
 /// Resolve the user-visible name of a `function_declaration` or
@@ -295,6 +336,36 @@ mod tests {
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = GoParser::new();
         parser.extract_functions(src).unwrap()
+    }
+
+    #[rstest]
+    #[case::single_line(
+        "package p\n\n// Sum adds the values.\nfunc Sum(xs []int) int {\n\treturn 0\n}\n",
+        Some("Sum adds the values.")
+    )]
+    #[case::multi_line(
+        "package p\n\n// Sum adds the values.\n// Empty input returns zero.\nfunc Sum(xs []int) int {\n\treturn 0\n}\n",
+        Some("Sum adds the values.\nEmpty input returns zero.")
+    )]
+    #[case::block_comment(
+        "package p\n\n/* Sum adds the values. */\nfunc Sum(xs []int) int {\n\treturn 0\n}\n",
+        Some("Sum adds the values.")
+    )]
+    #[case::blank_line_detaches(
+        "package p\n\n// Stray comment.\n\nfunc Sum(xs []int) int {\n\treturn 0\n}\n",
+        None
+    )]
+    #[case::no_comment("package p\n\nfunc Sum(xs []int) int {\n\treturn 0\n}\n", None)]
+    fn extracts_go_doc_comment(#[case] src: &str, #[case] expected: Option<&str>) {
+        let funcs = parse_functions(src);
+        assert_eq!(funcs[0].doc.as_deref(), expected);
+    }
+
+    #[test]
+    fn extracts_doc_comment_on_method_declaration() {
+        let src = "package p\n\ntype S struct{}\n\n// Get returns the value.\nfunc (s *S) Get() int {\n\treturn 1\n}\n";
+        let funcs = parse_functions(src);
+        assert_eq!(funcs[0].doc.as_deref(), Some("Get returns the value."));
     }
 
     fn parse_tree(src: &str) -> TreeNode {

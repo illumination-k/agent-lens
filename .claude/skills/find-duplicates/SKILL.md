@@ -72,6 +72,7 @@ This drops `#[test]` / `#[rstest]` / `#[<runner>::test]` free functions and ever
 
 - **TSED ≥ 0.95** — almost certainly a clone. Extract a shared helper, or delete one.
 - **TSED 0.85–0.95** — same shape, different specifics. Worth a closer look; sometimes legitimate (e.g. visitor cases that happen to mirror each other), sometimes an extracted parameter away from being one function.
+- **`doc_overlap`** (JSON pairs only, present when both functions have a doc comment / docstring) — word-level overlap of the two docs. It never affects the score; read it as a tiebreaker: high `doc_overlap` on a high-similarity pair means the _stated intent_ matches too (strong merge candidate, often a copy-paste including the doc), while low `doc_overlap` on a high-similarity pair flags a structural coincidence — two functions that happen to share a shape but do different jobs, which usually should not be merged.
 - **wrapper hit, single call site** — inline it.
 - **wrapper hit, many call sites** — keep, but verify the indirection is doing real work (lifetime adjustment, trait dispatch, error mapping). If not, the function is a tax.
 

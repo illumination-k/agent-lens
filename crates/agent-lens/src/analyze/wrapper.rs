@@ -197,14 +197,7 @@ fn name_last_segment(name: &str) -> &str {
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, BoxedError> {
-    match lang {
-        SourceLang::Rust => lens_rust::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::find_wrappers(source, dialect).map_err(|e| Box::new(e) as BoxedError)
-        }
-        SourceLang::Python => lens_py::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
-        SourceLang::Go => lens_golang::find_wrappers(source).map_err(|e| Box::new(e) as BoxedError),
-    }
+    super::dispatch_lens!(lang, source, find_wrappers)
 }
 
 /// Per-file slice of the report. Owns the display path so directory mode

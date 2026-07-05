@@ -85,20 +85,7 @@ impl CohesionAnalyzer {
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, BoxedError> {
-    match lang {
-        SourceLang::Rust => {
-            lens_rust::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
-        }
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_cohesion_units(source, dialect).map_err(|e| Box::new(e) as BoxedError)
-        }
-        SourceLang::Python => {
-            lens_py::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
-        }
-        SourceLang::Go => {
-            lens_golang::extract_cohesion_units(source).map_err(|e| Box::new(e) as BoxedError)
-        }
-    }
+    super::dispatch_lens!(lang, source, extract_cohesion_units)
 }
 
 /// Per-file slice of the report. Owns the display path so directory mode

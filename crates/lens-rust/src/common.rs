@@ -37,6 +37,8 @@ pub(crate) struct FnSite<'a> {
     /// default methods are not trait impl methods.
     pub(crate) is_trait_impl: bool,
     pub(crate) is_test: bool,
+    /// Outer attributes on the fn item, including `#[doc]` lines.
+    pub(crate) attrs: &'a [Attribute],
     pub(crate) sig: &'a Signature,
     pub(crate) block: &'a Block,
 }
@@ -126,6 +128,7 @@ where
         owner: None,
         is_trait_impl: false,
         is_test,
+        attrs: &item_fn.attrs,
         sig: &item_fn.sig,
         block: &item_fn.block,
     });
@@ -156,6 +159,7 @@ where
                 owner: owner.as_deref(),
                 is_trait_impl,
                 is_test,
+                attrs: &method.attrs,
                 sig: &method.sig,
                 block: &method.block,
             });
@@ -178,6 +182,7 @@ where
                 owner: Some(&owner),
                 is_trait_impl: false,
                 is_test,
+                attrs: &method.attrs,
                 sig: &method.sig,
                 block,
             });

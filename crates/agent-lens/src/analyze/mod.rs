@@ -112,6 +112,34 @@ impl SourceLang {
     }
 }
 
+/// Dispatch the per-language lens extractor `$extract` for `$lang` over
+/// `$source`, boxing each adapter's error type into the shared
+/// `Box<dyn Error + Send + Sync>` currency. Every extractor family
+/// (cohesion units, complexity units, wrapper findings, ...) exposes the
+/// same `lens_<lang>::$extract` shape — TypeScript additionally takes its
+/// dialect — so the analyzers and hook cores share this one dispatch
+/// instead of each repeating the four-arm match.
+macro_rules! dispatch_lens {
+    ($lang:expr, $source:expr, $extract:ident) => {{
+        type BoxedError = ::std::boxed::Box<dyn ::std::error::Error + Send + Sync>;
+        match $lang {
+            $crate::analyze::SourceLang::Rust => {
+                ::lens_rust::$extract($source).map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
+            }
+            $crate::analyze::SourceLang::TypeScript(dialect) => {
+                ::lens_ts::$extract($source, dialect)
+                    .map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
+            }
+            $crate::analyze::SourceLang::Python => {
+                ::lens_py::$extract($source).map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
+            }
+            $crate::analyze::SourceLang::Go => ::lens_golang::$extract($source)
+                .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
+        }
+    }};
+}
+pub(crate) use dispatch_lens;
+
 pub(crate) fn relative_display_path(path: &Path, base: &Path) -> String {
     path.strip_prefix(base)
         .unwrap_or(path)

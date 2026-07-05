@@ -18,12 +18,7 @@
 
 use agent_hooks::codex::{CommonHookOutput, PreToolUseInput, PreToolUseOutput};
 
-use crate::hooks::core::{
-    EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError, read_edited_source,
-};
-
-/// Tool name Codex uses for the patch-style edit tool.
-pub(crate) const APPLY_PATCH_TOOL: &str = "apply_patch";
+use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
 
 /// Codex's PreToolUse adapter for the engine-agnostic hook runner.
 pub struct CodexPreToolUse;
@@ -65,30 +60,13 @@ pub type CohesionError = crate::hooks::core::HookError;
 pub(crate) fn prepare_edited_sources(
     input: &PreToolUseInput,
 ) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    if input.tool_name != APPLY_PATCH_TOOL {
-        return Ok(Vec::new());
-    }
-    let Some(command) = extract_patch_command(&input.tool_input) else {
-        return Ok(Vec::new());
-    };
-
-    let rel_paths = parse_pre_edit_paths(&command);
-    let mut out = Vec::with_capacity(rel_paths.len());
-    for rel_path in rel_paths {
-        if let Some(source) =
-            read_edited_source(&input.context.cwd, rel_path, MissingFilePolicy::Skip)?
-        {
-            out.push(source);
-        }
-    }
-    Ok(out)
-}
-
-fn extract_patch_command(tool_input: &serde_json::Value) -> Option<String> {
-    tool_input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+    super::prepare_patched_sources(
+        &input.tool_name,
+        &input.tool_input,
+        &input.context.cwd,
+        parse_pre_edit_paths,
+        MissingFilePolicy::Skip,
+    )
 }
 
 /// Pull `*** Update File: ...` paths out of an `apply_patch` envelope.

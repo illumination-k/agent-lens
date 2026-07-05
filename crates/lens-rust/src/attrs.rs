@@ -47,6 +47,29 @@ fn is_test_attribute(attr: &Attribute) -> bool {
     matches!(last.as_deref(), Some("test" | "rstest"))
 }
 
+/// Collect the doc text carried by `attrs`. `///` and `/** */` comments
+/// both reach syn as `#[doc = "..."]` name-value attributes, one per
+/// line, so joining the trimmed values with `\n` reconstructs the
+/// comment body. Returns `None` when there is no doc or it is blank.
+pub(crate) fn doc_from_attrs(attrs: &[Attribute]) -> Option<String> {
+    let lines: Vec<String> = attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"))
+        .filter_map(|attr| match &attr.meta {
+            Meta::NameValue(nv) => match &nv.value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(text),
+                    ..
+                }) => Some(text.value().trim().to_owned()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let doc = lines.join("\n").trim().to_owned();
+    (!doc.is_empty()).then_some(doc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

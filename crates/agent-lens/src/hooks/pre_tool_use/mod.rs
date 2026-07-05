@@ -14,9 +14,7 @@
 
 use agent_hooks::claude_code::{CommonHookOutput, PreToolUseInput, PreToolUseOutput};
 
-use crate::hooks::core::{
-    EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError, read_edited_source,
-};
+use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
 
 /// Claude Code's PreToolUse adapter for the engine-agnostic hook
 /// runner.
@@ -50,10 +48,6 @@ pub type ComplexityError = crate::hooks::core::HookError;
 /// Re-exported for symmetry with the PostToolUse handlers.
 pub type CohesionError = crate::hooks::core::HookError;
 
-/// Tool names whose `tool_input.file_path` points at the file that is
-/// about to be modified. Anything outside this set is ignored.
-pub(crate) const EDITING_TOOL_NAMES: &[&str] = &["Write", "Edit", "MultiEdit"];
-
 /// Tools where a missing file should be treated as "no current state to
 /// read" rather than an error. `Write` can create a fresh file, in
 /// which case there is nothing on disk yet and the hook simply has no
@@ -64,38 +58,23 @@ const TOLERATE_MISSING_FILE_TOOLS: &[&str] = &["Write"];
 
 /// Prepare the file the agent is about to edit for a PreToolUse hook.
 ///
-/// Returns an empty `Vec` for "no opinion" cases — non-editing tools,
-/// missing `file_path`, an extension the analysers can't handle, or a
-/// `Write` call against a path that does not yet exist (a brand-new
-/// file). The list is at most one element long; returning a `Vec` lets
-/// the engine-agnostic core treat Claude Code and Codex inputs the same
-/// way.
+/// Delegates to [`crate::hooks::prepare_single_edited_source`], with the
+/// missing-file policy relaxed for `Write` calls against a path that
+/// does not yet exist (a brand-new file).
 pub(crate) fn prepare_edited_sources(
     input: &PreToolUseInput,
 ) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    if !EDITING_TOOL_NAMES.contains(&input.tool_name.as_str()) {
-        return Ok(Vec::new());
-    }
-    let Some(rel_path) = extract_file_path(&input.tool_input) else {
-        return Ok(Vec::new());
-    };
     let missing_policy = if TOLERATE_MISSING_FILE_TOOLS.contains(&input.tool_name.as_str()) {
         MissingFilePolicy::Skip
     } else {
         MissingFilePolicy::Error
     };
-    Ok(
-        read_edited_source(&input.context.cwd, rel_path, missing_policy)?
-            .into_iter()
-            .collect(),
+    crate::hooks::prepare_single_edited_source(
+        &input.tool_name,
+        &input.tool_input,
+        &input.context.cwd,
+        missing_policy,
     )
-}
-
-fn extract_file_path(tool_input: &serde_json::Value) -> Option<String> {
-    tool_input
-        .get("file_path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
 }
 
 #[cfg(test)]

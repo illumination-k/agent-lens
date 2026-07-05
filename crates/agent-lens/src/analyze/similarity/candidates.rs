@@ -531,6 +531,7 @@ mod tests {
                 end_line: 5,
                 is_test,
                 signature: None,
+                doc: None,
                 tree: lens_domain::TreeNode::with_children(
                     "Block",
                     "",
@@ -577,6 +578,7 @@ mod tests {
                 end_line: 5,
                 is_test: false,
                 signature: None,
+                doc: None,
                 tree,
             }),
         }

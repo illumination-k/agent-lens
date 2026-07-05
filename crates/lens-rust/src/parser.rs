@@ -92,6 +92,7 @@ impl From<RustFunctionDef> for FunctionShape {
             ),
             visibility: SyntaxFact::Known(def.visibility),
             signature,
+            doc: def.function.doc,
             body: BodyShape { tree: body_tree },
             span: SourceSpan {
                 start_line: def.function.start_line,
@@ -130,6 +131,7 @@ fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, Rus
             end_line: site.block.span().end().line,
             is_test: site.is_test,
             signature: Some(signature_info(site.sig)),
+            doc: crate::attrs::doc_from_attrs(site.attrs),
             tree: function_tree(site.sig, site.block),
         });
     });
@@ -162,6 +164,7 @@ fn extract_item_functions(
                 end_line: item_fn.block.span().end().line,
                 is_test: in_test_context || crate::attrs::is_test_function(&item_fn.attrs),
                 signature: Some(signature_info(&item_fn.sig)),
+                doc: crate::attrs::doc_from_attrs(&item_fn.attrs),
                 tree: function_tree(&item_fn.sig, &item_fn.block),
             };
             out.push(RustFunctionDef {
@@ -221,6 +224,7 @@ fn extract_impl_functions(
             end_line: method.block.span().end().line,
             is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
             signature: Some(signature_info(&method.sig)),
+            doc: crate::attrs::doc_from_attrs(&method.attrs),
             tree: function_tree(&method.sig, &method.block),
         };
         out.push(RustFunctionDef {
@@ -256,6 +260,7 @@ fn extract_trait_functions(
             end_line: block.span().end().line,
             is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
             signature: Some(signature_info(&method.sig)),
+            doc: crate::attrs::doc_from_attrs(&method.attrs),
             tree: function_tree(&method.sig, block),
         };
         out.push(RustFunctionDef {
@@ -1186,6 +1191,51 @@ mod tests {
         assert_eq!(funcs[0].end_line, 1);
         assert_eq!(funcs[1].start_line, 2);
         assert_eq!(funcs[1].end_line, 2);
+    }
+
+    #[rstest]
+    #[case::line_doc(
+        "/// Parse the user id.\n/// Returns None on failure.\nfn f() { let _x = 1; }\n",
+        Some("Parse the user id.\nReturns None on failure.")
+    )]
+    #[case::block_doc(
+        "/** Parse the user id. */\nfn f() { let _x = 1; }\n",
+        Some("Parse the user id.")
+    )]
+    #[case::doc_attr(
+        "#[doc = \"Parse the user id.\"]\nfn f() { let _x = 1; }\n",
+        Some("Parse the user id.")
+    )]
+    #[case::no_doc("fn f() { let _x = 1; }\n", None)]
+    #[case::blank_doc("///\nfn f() { let _x = 1; }\n", None)]
+    fn extracts_doc_comment_text(#[case] src: &str, #[case] expected: Option<&str>) {
+        let funcs = parse_functions(src);
+        assert_eq!(funcs[0].doc.as_deref(), expected);
+    }
+
+    #[test]
+    fn extracts_docs_on_impl_and_trait_methods() {
+        let src = r#"
+struct Foo;
+impl Foo {
+    /// Impl method doc.
+    fn bar(&self) -> i32 { 1 }
+}
+trait T {
+    /// Trait default doc.
+    fn with_default(&self) -> u32 { 42 }
+}
+"#;
+        let funcs = parse_functions(src);
+        let docs: Vec<_> = funcs.iter().map(|f| f.doc.as_deref()).collect();
+        assert_eq!(docs, [Some("Impl method doc."), Some("Trait default doc.")]);
+    }
+
+    #[test]
+    fn module_aware_shapes_carry_doc_text() {
+        let src = "/// Documented free fn.\nfn f() { let _x = 1; }\n";
+        let shapes = extract_function_shapes_with_modules(src, "crate").unwrap();
+        assert_eq!(shapes[0].doc.as_deref(), Some("Documented free fn."));
     }
 
     #[test]
