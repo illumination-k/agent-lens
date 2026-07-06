@@ -1,15 +1,25 @@
 //! tree-sitter-based thin-wrapper detection for Go.
 //!
 //! A wrapper is a top-level function or method whose body is a single
-//! statement that directly forwards all parameters to one call. We keep
-//! the same output shape as the Rust / TS / Python adapters so
-//! `agent-lens analyze wrapper` can dispatch by language without special
-//! handling.
+//! statement that forwards all parameters to one call, optionally behind
+//! a chain of trivial nullary conversion adapters (`.String()`,
+//! `.Error()`, …). We keep the same output shape as the Rust / TS /
+//! Python adapters so `agent-lens analyze wrapper` can dispatch by
+//! language without special handling.
 
 use lens_domain::{WrapperFinding, args_pass_through_by, qualify};
 use tree_sitter::Node;
 
 use crate::parser::{GoParseError, function_name_text, method_receiver_type, parse_tree};
+
+/// Zero-argument method calls that carry no semantic content of their
+/// own — they just re-present the receiver in another form. Peeling them
+/// keeps a wrapper like `func F(x T) string { return g(x).String() }`
+/// visible instead of hiding it behind the conversion. Mirrors the
+/// `TRIVIAL_NULLARY_ADAPTERS` allow-lists in the Rust / TS / Python
+/// adapters; kept deliberately small to avoid swallowing methods that do
+/// real work.
+const TRIVIAL_NULLARY_ADAPTERS: &[&str] = &["String", "Error", "Bytes", "GoString"];
 
 /// Extract wrapper findings from Go source.
 pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, GoParseError> {
@@ -43,7 +53,8 @@ fn analyze_function(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Optio
     let name = qualify(owner, function_name_text(node, source)?);
     let stmt = single_statement(body)?;
     let expr = statement_expr(stmt, source)?;
-    let (callee, args) = core_call(expr, source)?;
+    let (inner, adapters) = peel_adapters(expr, source);
+    let (callee, args) = core_call(inner, source)?;
     let params = collect_param_names(node, source);
 
     if !args_pass_through_by(&args, &params, |n| passthrough_arg_name(*n, source)) {
@@ -55,10 +66,62 @@ fn analyze_function(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Optio
         start_line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
         callee,
-        adapters: Vec::new(),
+        adapters,
         statement_count: 1,
         reuse: None,
     })
+}
+
+/// Strip trivial nullary conversion method calls (`.String()`, …) and
+/// surrounding parentheses from the outside of `expr`, returning the
+/// innermost expression plus the adapter labels in source order
+/// (innermost-applied first, matching the Rust / TS / Python output).
+fn peel_adapters<'a>(expr: Node<'a>, source: &[u8]) -> (Node<'a>, Vec<String>) {
+    let mut current = expr;
+    let mut outer_to_inner = Vec::new();
+    loop {
+        match current.kind() {
+            "parenthesized_expression" => {
+                let Some(inner) = first_named_child(current) else {
+                    break;
+                };
+                current = inner;
+            }
+            "call_expression" => {
+                let Some((receiver, member)) = trivial_adapter_call(current, source) else {
+                    break;
+                };
+                outer_to_inner.push(format!(".{member}()"));
+                current = receiver;
+            }
+            _ => break,
+        }
+    }
+    outer_to_inner.reverse();
+    (current, outer_to_inner)
+}
+
+/// If `call` is a zero-argument method call whose method name is a
+/// trivial adapter (`x.String()`), return the receiver expression and
+/// the method name so the caller can keep peeling. `None` for anything
+/// with arguments, a non-selector callee, or a non-adapter method.
+fn trivial_adapter_call<'a>(call: Node<'a>, source: &[u8]) -> Option<(Node<'a>, String)> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "selector_expression" {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    if args.named_children(&mut cursor).next().is_some() {
+        return None;
+    }
+    let field = func.child_by_field_name("field")?;
+    let member = field.utf8_text(source).ok()?;
+    if !TRIVIAL_NULLARY_ADAPTERS.contains(&member) {
+        return None;
+    }
+    let operand = func.child_by_field_name("operand")?;
+    Some((operand, member.to_owned()))
 }
 
 fn single_statement(block: Node<'_>) -> Option<Node<'_>> {
@@ -266,6 +329,64 @@ mod tests {
     #[test]
     fn rejects_non_thin_callee_chains() {
         let src = "package p\nfunc Wrap(x int) int { return mk().Do(x) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn detects_wrapper_behind_trivial_string_adapter() {
+        // `target(x).String()` forwards `x` and then applies a
+        // semantically-empty conversion. Before adapter peeling this
+        // was invisible because `core_call` required the tail to be a
+        // bare call. The adapter must be recorded on the finding.
+        let src = "package p\nfunc Wrap(x int) string { return target(x).String() }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "Wrap");
+        assert_eq!(got[0].callee, "target");
+        assert_eq!(got[0].adapters, vec![".String()".to_owned()]);
+    }
+
+    #[test]
+    fn detects_wrapper_behind_chained_trivial_adapters() {
+        let src = "package p\nfunc Wrap(x int) string { return target(x).Bytes().String() }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].callee, "target");
+        // Source order: `.Bytes()` applied first, then `.String()`.
+        assert_eq!(
+            got[0].adapters,
+            vec![".Bytes()".to_owned(), ".String()".to_owned()],
+        );
+    }
+
+    #[test]
+    fn empty_adapters_for_bare_forwarding_call() {
+        // A plain forward keeps `adapters` empty — peeling must not
+        // invent labels for a call with no conversion chain.
+        let src = "package p\nfunc Wrap(x int) int { return target(x) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].adapters.is_empty());
+    }
+
+    #[test]
+    fn peels_adapter_through_parentheses() {
+        // A parenthesized adapter chain must still be peeled to the inner
+        // forwarding call.
+        let src = "package p\nfunc Wrap(x int) string { return (target(x).String()) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].callee, "target");
+        assert_eq!(got[0].adapters, vec![".String()".to_owned()]);
+    }
+
+    #[test]
+    fn rejects_adapter_call_with_arguments() {
+        // `.Do(y)` takes an argument, so it is not a trivial adapter —
+        // the receiver call is not a pure forward and nothing should be
+        // peeled or reported.
+        let src = "package p\nfunc Wrap(x int, y int) int { return target(x).Do(y) }\n";
         let got = find_wrappers(src).unwrap();
         assert!(got.is_empty());
     }

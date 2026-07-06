@@ -2,7 +2,8 @@
 //!
 //! Both the Claude Code and Codex SessionStart handlers want to inject
 //! the same payload — a hotspot ranking plus a coupling thumbnail of the
-//! crate the agent is anchored at. The two protocols only differ in how
+//! module graph the agent is anchored at (a Rust crate or a Go module
+//! today). The two protocols only differ in how
 //! that body is shaped into a hook response, so the rendering itself
 //! lives here and the agent-specific modules are thin adapters that wrap
 //! [`render_summary`] in their respective output types.
@@ -10,11 +11,10 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use lens_domain::{CouplingReport, DependencyCycle, ModuleMetrics, PairCoupling, compute_report};
-use lens_rust::{build_module_tree, extract_edges};
+use lens_domain::{CouplingReport, DependencyCycle, ModuleMetrics, PairCoupling};
 use tracing::warn;
 
-use crate::analyze::{HotspotAnalyzer, HotspotError, OutputFormat, resolve_crate_root};
+use crate::analyze::{HotspotAnalyzer, HotspotError, OutputFormat};
 
 /// How many hotspot rows to include in the injected report.
 const HOTSPOT_TOP: usize = 5;
@@ -43,8 +43,8 @@ pub enum SessionSummaryError {
 
 /// Render a hotspot + coupling summary for `cwd`, or return `None` when
 /// neither section produces signal (cwd outside a git working tree and
-/// not anchored at a Rust crate). The header is included so callers can
-/// inject the body verbatim.
+/// not anchored at a Rust crate or Go module). The header is included so
+/// callers can inject the body verbatim.
 pub fn render_summary(cwd: &Path) -> Result<Option<String>, SessionSummaryError> {
     let mut sections: Vec<String> = Vec::new();
     if let Some(s) = render_hotspot_section(cwd)? {
@@ -139,21 +139,21 @@ impl HotspotRow {
     }
 }
 
-/// Build the crate's coupling graph from `cwd` and return a compact
-/// section, or `None` when `cwd` isn't anchored at a Rust crate (no
-/// `src/lib.rs` or `src/main.rs`) — that path is "not for us" rather
-/// than an error worth surfacing.
+/// Build the coupling graph from `cwd` and return a compact section, or
+/// `None` when `cwd` isn't anchored at a root this analyzer recognises
+/// (a Rust crate directory or a Go module directory) — that path is
+/// "not for us" rather than an error worth surfacing.
+///
+/// Routing through the language-dispatching coupling analyzer rather
+/// than calling a single language's `build_module_tree` directly is what
+/// lets Go (and any future directory-detectable language) get a coupling
+/// thumbnail at session start instead of Rust only.
 fn render_coupling_section(cwd: &Path) -> Result<Option<String>, SessionSummaryError> {
-    let root = match resolve_crate_root(cwd) {
-        Ok(p) => p,
-        Err(crate::analyze::CrateAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
+    let report = match crate::analyze::coupling::report_for_path(cwd) {
+        Ok(Some(report)) => report,
+        Ok(None) => return Ok(None),
         Err(e) => return Err(SessionSummaryError::Coupling(e)),
     };
-    let modules = build_module_tree(&root)
-        .map_err(|e| SessionSummaryError::Coupling(crate::analyze::CrateAnalyzerError::from(e)))?;
-    let edges = extract_edges(&modules);
-    let module_paths: Vec<lens_domain::ModulePath> = modules.into_iter().map(|m| m.path).collect();
-    let report = compute_report(&module_paths, edges);
 
     if report.modules.is_empty() {
         return Ok(None);
@@ -238,7 +238,49 @@ fn format_cycle(cycle: &DependencyCycle) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_file;
     use lens_domain::ModulePath;
+
+    #[test]
+    fn coupling_section_renders_for_go_module_directory() {
+        // A Go module (marked by go.mod) with a local import edge must
+        // now produce a coupling thumbnail. Before routing through the
+        // language dispatch this section was Rust-only, so Go repos got
+        // no coupling signal at session start.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "main.go",
+            concat!(
+                "package main\n\n",
+                "import \"github.com/x/proj/pkg/util\"\n\n",
+                "func main() { util.Run() }\n",
+            ),
+        );
+        write_file(
+            dir.path(),
+            "pkg/util/util.go",
+            "package util\n\nfunc Run() {}\n",
+        );
+
+        let section = render_coupling_section(dir.path())
+            .expect("coupling section should not error")
+            .expect("Go module should yield a coupling section");
+        assert!(section.contains("## Coupling"), "got {section}");
+        assert!(section.contains("crate::pkg::util"), "got {section}");
+    }
+
+    #[test]
+    fn coupling_section_absent_for_unsupported_directory() {
+        // A directory that is neither a Rust crate nor a Go module has
+        // no root to anchor on; the section is omitted rather than
+        // surfacing an error.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "README.md", "# not code\n");
+        let section = render_coupling_section(dir.path()).expect("should not error");
+        assert!(section.is_none(), "got {section:?}");
+    }
 
     fn module(path: &str, fan_in: usize, fan_out: usize, ifc: u64) -> ModuleMetrics {
         ModuleMetrics {

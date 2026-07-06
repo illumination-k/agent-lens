@@ -20,7 +20,10 @@
 
 use std::path::Path;
 
-use lens_domain::{FunctionDef, LanguageParseError, LanguageParser, TreeNode};
+use lens_domain::{
+    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, ReceiverShape, TreeNode,
+    identifier_tokens,
+};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
@@ -219,15 +222,124 @@ impl FunctionVisitor for FunctionDefCollector {
         let doc = item
             .doc_attach_start
             .and_then(|attach| self.jsdoc_by_attach.get(&attach).cloned());
+        let signature = signature_info(&item.name, item.params);
         self.out.push(FunctionDef {
             name: item.name,
             start_line: item.start_line,
             end_line: item.end_line,
             is_test,
-            signature: None,
+            signature: Some(signature),
             doc,
             tree: function_body_tree(item.body),
         });
+    }
+}
+
+/// Project a function's parameters into the language-neutral
+/// [`FunctionSignature`]. Return type and generics live on the AST
+/// `Function` node, which the walker does not thread through
+/// [`FunctionItem`]; signature-aware similarity still gets name tokens,
+/// parameter names / count, and parameter type paths. TS/JS have no
+/// syntactic receiver, so [`ReceiverShape::None`] is always correct.
+fn signature_info(name: &str, params: &FormalParameters) -> FunctionSignature {
+    let mut parameter_names = Vec::new();
+    let mut parameter_type_paths = Vec::new();
+    let mut parameter_count = 0usize;
+
+    for param in &params.items {
+        parameter_count += 1;
+        collect_binding_names(&param.pattern, &mut parameter_names);
+        if let Some(annotation) = &param.type_annotation {
+            ts_type_paths(&annotation.type_annotation, &mut parameter_type_paths);
+        }
+    }
+    if let Some(rest) = &params.rest {
+        parameter_count += 1;
+        collect_binding_names(&rest.rest.argument, &mut parameter_names);
+        if let Some(annotation) = &rest.type_annotation {
+            ts_type_paths(&annotation.type_annotation, &mut parameter_type_paths);
+        }
+    }
+
+    FunctionSignature {
+        name_tokens: identifier_tokens(bare_name(name)),
+        parameter_count,
+        parameter_names,
+        parameter_type_paths,
+        return_type_paths: Vec::new(),
+        generics: Vec::new(),
+        receiver: ReceiverShape::None,
+    }
+}
+
+/// Last `::`-separated segment of a qualified name (`Foo::bar` -> `bar`),
+/// so name tokens describe the function itself, not its owner.
+fn bare_name(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(_, last)| last)
+}
+
+/// Collect the binding identifiers introduced by a parameter pattern,
+/// unwinding object / array destructuring and defaults.
+fn collect_binding_names(pat: &BindingPattern, out: &mut Vec<String>) {
+    match pat {
+        BindingPattern::BindingIdentifier(id) => out.push(id.name.to_string()),
+        BindingPattern::ObjectPattern(o) => {
+            for prop in &o.properties {
+                collect_binding_names(&prop.value, out);
+            }
+            if let Some(rest) = &o.rest {
+                collect_binding_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(a) => {
+            for elem in a.elements.iter().flatten() {
+                collect_binding_names(elem, out);
+            }
+            if let Some(rest) = &a.rest {
+                collect_binding_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(a) => collect_binding_names(&a.left, out),
+    }
+}
+
+/// Flatten a TS type annotation to the head identifiers it references
+/// (`Map<string, User>` -> `Map`, `string`, `User`). Shapes we don't
+/// model contribute nothing, mirroring the Rust adapter's path flatten.
+fn ts_type_paths(ty: &TSType, out: &mut Vec<String>) {
+    match ty {
+        TSType::TSTypeReference(r) => {
+            type_name_head(&r.type_name, out);
+            if let Some(args) = &r.type_arguments {
+                for arg in &args.params {
+                    ts_type_paths(arg, out);
+                }
+            }
+        }
+        TSType::TSArrayType(a) => ts_type_paths(&a.element_type, out),
+        TSType::TSUnionType(u) => {
+            for t in &u.types {
+                ts_type_paths(t, out);
+            }
+        }
+        TSType::TSIntersectionType(i) => {
+            for t in &i.types {
+                ts_type_paths(t, out);
+            }
+        }
+        TSType::TSParenthesizedType(p) => ts_type_paths(&p.type_annotation, out),
+        TSType::TSNumberKeyword(_) => out.push("number".to_owned()),
+        TSType::TSStringKeyword(_) => out.push("string".to_owned()),
+        TSType::TSBooleanKeyword(_) => out.push("boolean".to_owned()),
+        _ => {}
+    }
+}
+
+fn type_name_head(name: &TSTypeName, out: &mut Vec<String>) {
+    match name {
+        TSTypeName::IdentifierReference(id) => out.push(id.name.to_string()),
+        TSTypeName::QualifiedName(q) => out.push(q.right.name.to_string()),
+        TSTypeName::ThisExpression(_) => {}
     }
 }
 
@@ -348,6 +460,98 @@ mod tests {
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = TypeScriptParser::new();
         parser.extract_functions(src).unwrap()
+    }
+
+    #[test]
+    fn function_signature_captures_params_and_types() {
+        let src = "function loadUser(id: number, name: string): void {}\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.name_tokens, vec!["load".to_owned(), "user".to_owned()]);
+        assert_eq!(sig.parameter_count, 2);
+        assert_eq!(
+            sig.parameter_names,
+            vec!["id".to_owned(), "name".to_owned()],
+        );
+        assert!(sig.parameter_type_paths.contains(&"number".to_owned()));
+        assert!(sig.parameter_type_paths.contains(&"string".to_owned()));
+        assert_eq!(sig.receiver, ReceiverShape::None);
+    }
+
+    #[test]
+    fn signature_flattens_generic_type_arguments() {
+        let src = "function index(m: Map<string, User>): void {}\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        for expected in ["Map", "string", "User"] {
+            assert!(
+                sig.parameter_type_paths.contains(&expected.to_owned()),
+                "missing {expected} in {:?}",
+                sig.parameter_type_paths,
+            );
+        }
+    }
+
+    #[test]
+    fn method_signature_uses_bare_name_tokens() {
+        // A class method's name is qualified (`Svc::handle`); the name
+        // tokens must describe the method, not the owner.
+        let src = "class Svc { handleRequest(x: number) { return x; } }\n";
+        let funcs = parse_functions(src);
+        let method = funcs
+            .iter()
+            .find(|f| f.name.ends_with("::handleRequest"))
+            .expect("method missing");
+        let sig = method.signature.as_ref().expect("signature populated");
+        assert_eq!(
+            sig.name_tokens,
+            vec!["handle".to_owned(), "request".to_owned()],
+        );
+        assert_eq!(sig.parameter_names, vec!["x".to_owned()]);
+    }
+
+    #[test]
+    fn ts_type_paths_flatten_union_intersection_paren_and_keyword() {
+        // Each parameter isolates one `ts_type_paths` arm: union
+        // (`UnA`/`UnB`), intersection (`InA`/`InB`), parenthesized
+        // (`ParenT`), and the boolean keyword.
+        let src = "\
+function f(
+  a: UnA | UnB,
+  b: InA & InB,
+  c: (ParenT),
+  d: boolean,
+): void {}
+";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        for expected in ["UnA", "UnB", "InA", "InB", "ParenT", "boolean"] {
+            assert!(
+                sig.parameter_type_paths.contains(&expected.to_owned()),
+                "missing {expected} in {:?}",
+                sig.parameter_type_paths,
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_type_name_uses_rightmost_segment() {
+        // `ns.Thing` should contribute `Thing`, exercising the
+        // `QualifiedName` head.
+        let src = "function f(a: ns.Thing): void {}\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert!(sig.parameter_type_paths.contains(&"Thing".to_owned()));
+    }
+
+    #[test]
+    fn rest_parameter_is_counted() {
+        let src = "function f(a: number, ...rest: string[]): void {}\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.parameter_count, 2);
+        assert_eq!(sig.parameter_names, vec!["a".to_owned(), "rest".to_owned()]);
+        assert!(sig.parameter_type_paths.contains(&"string".to_owned()));
     }
 
     #[rstest]

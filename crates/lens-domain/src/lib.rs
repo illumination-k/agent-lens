@@ -75,7 +75,7 @@ pub use function::{
 };
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
-pub use naming::qualify;
+pub use naming::{identifier_tokens, qualify};
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
     OwnerShape, ParameterShape, ReceiverExprKind, ReceiverKind, SignatureShape, SourceSpan,
