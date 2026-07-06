@@ -532,6 +532,47 @@ mod tests {
     }
 
     #[test]
+    fn path_qualified_commands_are_not_reinstalled() {
+        // A settings file that invokes agent-lens through an explicit
+        // binary path (as this repo's own settings.json does for the dev
+        // build) must not have its pre/post handlers duplicated on
+        // re-setup — only the genuinely-absent session-start summary is
+        // queued.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let existing = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": PRE_TOOL_USE_MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook pre-tool-use complexity"},
+                        {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook pre-tool-use cohesion"},
+                    ],
+                }],
+                "PostToolUse": [{
+                    "matcher": POST_TOOL_USE_MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook post-tool-use similarity"},
+                        {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook post-tool-use wrapper"},
+                    ],
+                }],
+            },
+        });
+        fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        let plan = plan(path).unwrap();
+        assert_eq!(
+            plan.added_commands,
+            vec!["agent-lens hook session-start summary".to_string()],
+            "path-qualified pre/post handlers must not be reinstalled",
+        );
+        let pre = plan.after["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "PreToolUse must not gain a duplicate block");
+        let post = plan.after["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 1, "PostToolUse must not gain a duplicate block");
+    }
+
+    #[test]
     fn empty_file_is_treated_as_missing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
