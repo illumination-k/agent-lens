@@ -9,8 +9,12 @@
 //!
 //! The per-tool tables are produced from an exhaustive `match` on
 //! [`ToolName`] (see [`tool_table`]), so adding an analyzer to the config
-//! fails to compile until its schema entry is filled in — the schema
-//! cannot silently drift away from the structs it documents.
+//! fails to compile until its schema entry is filled in. Field-level drift
+//! within a table is not a compile error — the `Field` arrays are literals
+//! decoupled from the structs — but the `schema_keys_match_struct_fields`
+//! parity test reflects each struct's serde field list and fails loudly in
+//! both directions (a struct field missing from the schema, or a schema key
+//! whose struct field was removed).
 
 use std::fmt::Write as _;
 
@@ -100,8 +104,8 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             Field {
                 key: "threshold",
                 ty: "float",
-                presence: "optional",
-                desc: "Similarity cut for clustering.",
+                presence: "default: 0.85",
+                desc: "Similarity cut for clustering. Omitting it applies the default, not \"no cut\".",
             },
             Field {
                 key: "sweep",
@@ -112,8 +116,8 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             Field {
                 key: "min-lines",
                 ty: "int",
-                presence: "optional",
-                desc: "Ignore functions shorter than this many lines.",
+                presence: "default: 5",
+                desc: "Ignore functions shorter than this many lines. Omitting it applies the default, not \"no floor\".",
             },
             Field {
                 key: "top",
@@ -286,9 +290,149 @@ fn render_fields(out: &mut String, fields: &[Field]) {
     }
 }
 
+/// Reflect the serde field names of a `#[derive(Deserialize)]` struct so a
+/// parity test can compare them against the hand-written schema without a
+/// second hand-written list to drift.
+///
+/// serde's derived `Deserialize` hands its (renamed, kebab-case) field list
+/// to `Deserializer::deserialize_struct`. We capture that slice and abort,
+/// so the returned names are exactly what the struct declares — no more, no
+/// less.
+#[cfg(test)]
+mod reflect {
+    use std::fmt;
+
+    use serde::de::{self, Deserialize, Deserializer, Visitor};
+
+    /// Sentinel error: we bail out the instant the field list is captured,
+    /// so a successful deserialize never happens.
+    #[derive(Debug)]
+    struct Captured;
+
+    impl fmt::Display for Captured {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("captured struct fields")
+        }
+    }
+
+    impl std::error::Error for Captured {}
+
+    impl de::Error for Captured {
+        fn custom<T: fmt::Display>(_: T) -> Self {
+            Captured
+        }
+    }
+
+    struct Reflector<'a>(&'a mut Vec<&'static str>);
+
+    impl<'de> Deserializer<'de> for Reflector<'_> {
+        type Error = Captured;
+
+        fn deserialize_struct<V>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            self.0.extend_from_slice(fields);
+            Err(Captured)
+        }
+
+        fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(Captured)
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+
+    /// The serde field names a struct declares, in schema (kebab-case) form.
+    pub fn field_names<'de, T: Deserialize<'de>>() -> Vec<&'static str> {
+        let mut names = Vec::new();
+        let _ = T::deserialize(Reflector(&mut names));
+        names
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+    use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
+    use crate::config::{
+        CohesionOptions, ComplexityOptions, ContextSpanOptions, HotspotOptions, Profile,
+        SimilarityOptions, WrapperOptions,
+    };
+
+    /// Schema keys documented for `tool` must match, exactly, the serde field
+    /// names of its options struct `T`. Catches both drift directions: a new
+    /// struct field missing from the schema, and a schema key whose field was
+    /// removed.
+    fn assert_tool_parity<'de, T: serde::Deserialize<'de>>(tool: ToolName) {
+        let schema: BTreeSet<&str> = tool_table(tool)
+            .unwrap_or_else(|| panic!("{tool:?} should have an options table"))
+            .fields
+            .iter()
+            .map(|f| f.key)
+            .collect();
+        let fields: BTreeSet<&str> = reflect::field_names::<T>().into_iter().collect();
+        assert_eq!(schema, fields, "schema/struct field drift for {tool:?}");
+    }
+
+    #[test]
+    fn schema_keys_match_struct_fields() {
+        assert_tool_parity::<SimilarityOptions>(ToolName::Similarity);
+        assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
+        assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
+        assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
+        assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
+        assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);
+    }
+
+    #[test]
+    fn profile_schema_keys_match_profile_struct_fields() {
+        // The `Profile` struct carries the shared keys plus one field per
+        // option-bearing tool (its nested override table). The schema splits
+        // those apart — shared keys in `PROFILE_FIELDS`, override tables under
+        // their own headings — so reassemble the union before comparing.
+        let schema: BTreeSet<&str> = PROFILE_FIELDS
+            .iter()
+            .map(|f| f.key)
+            .chain(
+                TOOL_ORDER
+                    .into_iter()
+                    .filter(|&t| tool_table(t).is_some())
+                    .map(ToolName::as_str),
+            )
+            .collect();
+        let fields: BTreeSet<&str> = reflect::field_names::<Profile>().into_iter().collect();
+        assert_eq!(schema, fields, "profile schema/struct field drift");
+    }
+
+    #[test]
+    fn similarity_defaults_track_the_constants() {
+        // The effective defaults are documented as literals; if the constants
+        // move, this fails so the schema rows get updated with them.
+        let md = render();
+        assert!(
+            md.contains(&format!("default: {DEFAULT_SIMILARITY_THRESHOLD}")),
+            "threshold default not documented as {DEFAULT_SIMILARITY_THRESHOLD}: {md}",
+        );
+        assert!(
+            md.contains(&format!("default: {DEFAULT_SIMILARITY_MIN_LINES}")),
+            "min-lines default not documented as {DEFAULT_SIMILARITY_MIN_LINES}: {md}",
+        );
+    }
 
     #[test]
     fn render_covers_profile_keys_and_every_tool_table() {
