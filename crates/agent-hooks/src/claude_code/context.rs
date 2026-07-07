@@ -16,6 +16,9 @@ pub struct HookContext {
 }
 
 /// The permission mode the Claude Code session is running under.
+///
+/// `Other` absorbs modes Claude Code introduces after this enum is defined,
+/// so an unrecognized value doesn't hard-fail hook input deserialization.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
@@ -23,6 +26,9 @@ pub enum PermissionMode {
     AcceptEdits,
     BypassPermissions,
     Plan,
+    Auto,
+    #[serde(other)]
+    Other,
 }
 
 /// Output fields shared across every Claude Code hook response.
@@ -72,6 +78,7 @@ mod tests {
             (PermissionMode::AcceptEdits, "acceptEdits"),
             (PermissionMode::BypassPermissions, "bypassPermissions"),
             (PermissionMode::Plan, "plan"),
+            (PermissionMode::Auto, "auto"),
         ] {
             let v = serde_json::to_value(&mode).unwrap();
             assert_eq!(v, json!(expected));
@@ -81,9 +88,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_permission_mode_is_rejected() {
-        let err = serde_json::from_value::<PermissionMode>(json!("yolo")).unwrap_err();
-        assert!(err.to_string().contains("variant"), "{err}");
+    fn unrecognized_permission_mode_falls_back_to_other() {
+        let parsed: PermissionMode = serde_json::from_value(json!("yolo")).unwrap();
+        assert_eq!(parsed, PermissionMode::Other);
     }
 
     #[test]
