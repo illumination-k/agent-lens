@@ -46,6 +46,7 @@ pub mod cohesion;
 pub mod complexity;
 pub mod context_span;
 pub mod coupling;
+pub mod error_shape;
 pub mod function;
 pub mod hotspot;
 pub mod lsh;
@@ -68,6 +69,7 @@ pub use coupling::{
     CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,
     PairCoupling, compute_report,
 };
+pub use error_shape::FunctionErrorShape;
 pub use function::{
     CandidateStrategy, FunctionDef, FunctionSignature, LanguageParseError, LanguageParser,
     ReceiverShape, SimilarCluster, SimilarPair, cluster_similar_pairs, find_similar_functions,

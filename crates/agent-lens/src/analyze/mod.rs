@@ -14,6 +14,7 @@ pub mod coupling;
 mod crate_root;
 mod diff;
 mod error_from;
+pub mod error_shape;
 mod format;
 pub mod function_graph;
 pub mod hotspot;
@@ -31,6 +32,7 @@ pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
+pub use error_shape::ErrorShapeAnalyzer;
 pub use function_graph::FunctionGraphAnalyzer;
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 

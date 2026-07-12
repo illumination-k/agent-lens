@@ -1,6 +1,6 @@
 ---
 name: agent-lens
-description: Use when the user asks to analyze this codebase with agent-lens, or asks which analyzer fits a given question (duplication, complexity, hotspots, coupling, cohesion, forwarding wrappers). Routes to the right `agent-lens analyze` subcommand and explains how to read the output. Prefer the more specific skills (find-duplicates, review-pending-changes, find-refactor-targets, audit-architecture) when one of them clearly fits.
+description: Use when the user asks to analyze this codebase with agent-lens, or asks which analyzer fits a given question (duplication, complexity, hotspots, coupling, cohesion, forwarding wrappers, error-handling shape). Routes to the right `agent-lens analyze` subcommand and explains how to read the output. Prefer the more specific skills (find-duplicates, review-pending-changes, find-refactor-targets, audit-architecture) when one of them clearly fits.
 ---
 
 # agent-lens analyzer dispatcher
@@ -15,12 +15,13 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | Are there forwarding-only functions worth inlining?    | `wrapper`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which classes/`impl` blocks are doing too many things? | `cohesion`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which functions are landmines to edit?                 | `complexity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is error handling overgrown, fragmented, or wrap-only? | `error-shape`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which modules are Fan-In bottlenecks or cyclic?        | `coupling`       | Rust crate / TS/JS entry / Go module              |
 | How many files must I read to understand a module?     | `context-span`   | Rust crate / TS/JS entry / Python / Go            |
 | Who calls this function? What does it call?            | `function-graph` | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Where do churn and complexity collide?                 | `hotspot`        | git-tracked file or directory                     |
 
-`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
+`similarity` / `wrapper` / `cohesion` / `complexity` / `error-shape` / `function-graph` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
 
 ## Output format
 
@@ -30,7 +31,7 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 
 ## Always prefer `--diff-only` for in-progress edits
 
-`similarity`, `wrapper`, `cohesion`, and `complexity` accept `--diff-only`, which restricts the report to functions or `impl` blocks touching unstaged changes (`git diff -U0`). Use this on a hot file rather than dumping the whole report into context.
+`similarity`, `wrapper`, `cohesion`, `complexity`, and `error-shape` accept `--diff-only`, which restricts the report to functions or `impl` blocks touching unstaged changes (`git diff -U0`). Use this on a hot file rather than dumping the whole report into context.
 
 ## One-shot examples
 
@@ -60,6 +61,10 @@ agent-lens analyze context-span app \
 # Static call graph: who calls `Foo::bar`, what does it call?
 agent-lens analyze function-graph crates/lens-rust/src --format md
 
+# Error-handling shape: buried happy paths, fragmented try/catch,
+# rethrow-only handlers, wrap-only propagation chains
+agent-lens analyze error-shape crates/lens-rust/src --format md
+
 # Where is the next refactor likely to pay off?
 agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 ```
@@ -70,6 +75,7 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 - **wrapper**: a hit means the function body, after stripping `?` / `.into()` / `.unwrap()` / `.await`, is just a forwarding call. Either inline it or document why the indirection exists.
 - **cohesion**: `lcom4 == 1` is healthy. `lcom4 >= 2` means the `impl` has disjoint method clusters and is a candidate for splitting.
 - **complexity**: cognitive ≥ 15 is a yellow flag, ≥ 25 is a red flag. Maintainability Index < 65 means the function is hard to maintain regardless of what cyclomatic says.
+- **error-shape**: reports shape, not verdicts — judge against the function's role. High `error_loc_ratio` in a small helper means the happy path is buried; in a boundary function (RPC handler, main loop, retry orchestrator) it's expected. `single_stmt_try_count ≥ 2` or a high `disjoint_try_count` is the "wrap every call individually" smell (consolidate at the function boundary). `rethrow_only` handlers add a layer without handling anything — in TS/Python usually deletable; in Go/Rust wrapping with _new context_ at a module boundary is idiomatic, so flag only redundant same-level rewraps. Many `wrap_only_error_path` functions along one call chain suggest error handling should be consolidated at fewer layers. Functions with no error handling are omitted entirely; `summary.scanned_function_count` shows the denominator.
 - **coupling**: high `fan_in` ⇒ a hub everything depends on (slow to change safely); high `fan_out` ⇒ a module that is hard to test in isolation; non-empty `cycles` is always a smell. Reports Martin's `instability = Ce/(Ca+Ce)` per module too. The module unit differs by language: for Rust it is the crate's `mod` tree, for TS/JS a source file reachable from the entry, for Go a package (directory) in the module.
 - **context-span**: each module's transitive outgoing closure plus the count of distinct source files those modules span. Treat the file count as an "onboarding cost" — a module with span 30 means an agent must open ~30 files to reason about it.
 - **function-graph**: nodes are functions with per-node weights (`fan_in`, `fan_out`, complexity, MI, Halstead). Edges are syntactic call sites with a `resolution` (`resolved` / `unresolved` / `ambiguous` / `anonymous`). Resolution is heuristic — high `unresolved_edge_count` mostly means trait dispatch and external calls, not a bug. Use it to find callers before changing a function (filter edges by `to == <node id>`) or to spot dead-looking functions (`incoming_call_count == 0` outside tests / public API).

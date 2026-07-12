@@ -23,10 +23,11 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 8] = [
+const TOOL_ORDER: [ToolName; 9] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
+    ToolName::ErrorShape,
     ToolName::Hotspot,
     ToolName::ContextSpan,
     ToolName::Wrapper,
@@ -65,7 +66,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, function-graph, hotspot, similarity, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, error-shape, function-graph, hotspot, similarity, wrapper.",
     },
     Field {
         key: "format",
@@ -176,6 +177,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "bool",
                 presence: "default: false",
                 desc: "Restrict analysis to units touched by the working-tree diff.",
+            },
+        ],
+        ToolName::ErrorShape => &[
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the report to the top N results.",
+            },
+            Field {
+                key: "diff-only",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Restrict analysis to functions touched by the working-tree diff.",
             },
         ],
         ToolName::Hotspot => &[
@@ -370,8 +385,8 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        CohesionOptions, ComplexityOptions, ContextSpanOptions, HotspotOptions, Profile,
-        SimilarityOptions, WrapperOptions,
+        CohesionOptions, ComplexityOptions, ContextSpanOptions, ErrorShapeOptions, HotspotOptions,
+        Profile, SimilarityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -394,6 +409,7 @@ mod tests {
         assert_tool_parity::<SimilarityOptions>(ToolName::Similarity);
         assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
+        assert_tool_parity::<ErrorShapeOptions>(ToolName::ErrorShape);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);

@@ -15,6 +15,7 @@ mod cohesion;
 mod common;
 mod complexity;
 mod coupling;
+mod error_shape;
 mod parser;
 mod wrapper;
 
@@ -26,6 +27,7 @@ pub use call_index::{
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use coupling::{CouplingError, CrateModule, build_module_tree, extract_edges};
+pub use error_shape::{ErrorShapeError, extract_error_shapes};
 pub use lens_domain::WrapperFinding;
 pub use parser::{
     RustFunctionDef, RustParseError, RustParser, extract_function_shapes_with_modules,

@@ -102,6 +102,8 @@ pub struct Profile {
     #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
     #[serde(default)]
+    pub error_shape: Option<ErrorShapeOptions>,
+    #[serde(default)]
     pub wrapper: Option<WrapperOptions>,
 }
 
@@ -125,6 +127,7 @@ pub enum ToolName {
     Complexity,
     Coupling,
     ContextSpan,
+    ErrorShape,
     FunctionGraph,
     Hotspot,
     Similarity,
@@ -139,6 +142,7 @@ impl ToolName {
             Self::Complexity => "complexity",
             Self::Coupling => "coupling",
             Self::ContextSpan => "context-span",
+            Self::ErrorShape => "error-shape",
             Self::FunctionGraph => "function-graph",
             Self::Hotspot => "hotspot",
             Self::Similarity => "similarity",
@@ -198,6 +202,15 @@ pub struct HotspotOptions {
 pub struct ContextSpanOptions {
     #[serde(default)]
     pub entry_glob: Vec<String>,
+}
+
+/// `[profile.<name>.error-shape]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ErrorShapeOptions {
+    pub top: Option<usize>,
+    #[serde(default)]
+    pub diff_only: bool,
 }
 
 /// `[profile.<name>.wrapper]` overrides.

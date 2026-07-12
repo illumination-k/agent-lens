@@ -18,9 +18,9 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
-    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
-    FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod,
-    WrapperAnalyzer,
+    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, ErrorShapeAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer,
+    SimilarityMethod, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -407,6 +407,26 @@ enum AnalyzeCommand {
     /// `.cjs`) whose relative imports define the module graph, or a
     /// `.go` file or Go module directory (containing `go.mod`).
     Coupling(AnalyzeCommonArgs),
+    /// Report per-function error-handling shape: how much of each
+    /// function is error handling, how fragmented its try/catch usage
+    /// is, and how many handlers only rethrow or log-and-rethrow.
+    ///
+    /// Signals for the "excessive error branching" anti-pattern family:
+    /// `error_loc_ratio` (share of lines inside catch/except/`Err`-arm
+    /// /`if err != nil` regions), `disjoint_try_count` and
+    /// `single_stmt_try_count` (per-statement try/catch), and
+    /// `rethrow_only` / `log_and_rethrow` handler counts plus a
+    /// `wrap_only_error_path` marker (pure links in a wrap chain).
+    /// Shape only, no verdicts — boundary functions legitimately score
+    /// high. Functions without any error handling are dropped.
+    ///
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep) and groups findings per file. The parser is chosen from
+    /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
+    ErrorShape(AnalyzeErrorShapeArgs),
     /// Emit a static function call graph as visualization-ready data.
     ///
     /// The graph is heuristic and current-source only: nodes are functions,
@@ -529,6 +549,16 @@ struct AnalyzeComplexityArgs {
     /// ranking. JSON output always carries the full list.
     #[arg(long)]
     min_score: Option<u32>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeErrorShapeArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    diff: AnalyzeDiffArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -786,6 +816,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,
         ),
+        (profile.error_shape.is_some(), config::ToolName::ErrorShape),
         (profile.wrapper.is_some(), config::ToolName::Wrapper),
     ]
     .into_iter()
@@ -836,6 +867,16 @@ fn build_analyze_command(
             })
         }
         config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
+        config::ToolName::ErrorShape => {
+            let opts = profile.error_shape.clone().unwrap_or_default();
+            AnalyzeCommand::ErrorShape(AnalyzeErrorShapeArgs {
+                common,
+                diff: AnalyzeDiffArgs {
+                    diff_only: opts.diff_only,
+                },
+                ranking: AnalyzeRankingArgs { top: opts.top },
+            })
+        }
         config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
         config::ToolName::ContextSpan => {
             let opts = profile.context_span.clone().unwrap_or_default();
@@ -937,6 +978,7 @@ impl_with_analyze_path_args!(
     CohesionAnalyzer,
     ComplexityAnalyzer,
     CouplingAnalyzer,
+    ErrorShapeAnalyzer,
     FunctionGraphAnalyzer,
     ContextSpanAnalyzer,
     HotspotAnalyzer,
@@ -985,6 +1027,14 @@ impl AnalyzeCommand {
             Self::Coupling(args) => {
                 let (path, format, path_filter) = args.into_parts();
                 CouplingAnalyzer::new()
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::ErrorShape(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                ErrorShapeAnalyzer::new()
+                    .with_diff_only(args.diff.diff_only)
+                    .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
