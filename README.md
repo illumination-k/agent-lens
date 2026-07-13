@@ -174,6 +174,11 @@ agent-lens analyze error-shape src/foo.rs --format md
 # Error shape only for functions overlapping `git diff -U0` hunks
 agent-lens analyze error-shape src/foo.rs --diff-only
 
+# Wrap chains: maximal caller→callee paths where every function only
+# (possibly wraps and) propagates the error — how many layers an error
+# crosses before anything handles it
+agent-lens analyze error-chain crates/agent-lens --format md --min-depth 3
+
 # Module-level Fan-In / Fan-Out / Henry-Kafura IFC, Instability, and
 # cyclic SCCs for a Rust crate, TS/JS module graph, or Go module
 agent-lens analyze coupling crates/agent-lens
@@ -254,7 +259,7 @@ The current binary exposes three top-level command trees plus `run`,
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper` |
 | `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper` |
-| `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `error-shape`, `coupling`, `function-graph`, `context-span`, `hotspot`                 |
+| `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `error-shape`, `error-chain`, `coupling`, `function-graph`, `context-span`, `hotspot`  |
 | `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                             |
 | `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                       |
 | `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                  |
@@ -298,6 +303,7 @@ Analyzer-specific options today:
 | `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                       |
 | `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                       |
 | `error-shape`    | `--diff-only`, `--top N`                                                                                                                                        |
+| `error-chain`    | `--min-depth N`, `--top N`                                                                                                                                      |
 | `wrapper`        | `--diff-only`                                                                                                                                                   |
 | `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                      |
 | `coupling`       | shared analyzer options only                                                                                                                                    |
@@ -306,9 +312,9 @@ Analyzer-specific options today:
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
-`error-shape`, `wrapper`, `cohesion`, `hotspot`, `function-graph`, and
-`context-span` cover all four language families. `coupling` covers Rust,
-TypeScript / JavaScript, and Go.
+`error-shape`, `error-chain`, `wrapper`, `cohesion`, `hotspot`,
+`function-graph`, and `context-span` cover all four language families.
+`coupling` covers Rust, TypeScript / JavaScript, and Go.
 
 ### As a Claude Code hook
 

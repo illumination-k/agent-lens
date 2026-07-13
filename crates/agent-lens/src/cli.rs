@@ -18,9 +18,9 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
-    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, ErrorShapeAnalyzer,
-    FunctionGraphAnalyzer, FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer,
-    SimilarityMethod, WrapperAnalyzer,
+    DEFAULT_ERROR_CHAIN_MIN_DEPTH, DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD,
+    ErrorChainAnalyzer, ErrorShapeAnalyzer, FunctionGraphAnalyzer, FunctionSelection,
+    HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -407,6 +407,26 @@ enum AnalyzeCommand {
     /// `.cjs`) whose relative imports define the module graph, or a
     /// `.go` file or Go module directory (containing `go.mod`).
     Coupling(AnalyzeCommonArgs),
+    /// Rank wrap-at-every-layer error propagation chains: maximal
+    /// caller→callee paths where every function only (possibly wraps
+    /// and) propagates the error.
+    ///
+    /// Joins the per-function `wrap_only_error_path` marker from
+    /// `analyze error-shape` with the resolved call edges from
+    /// `analyze function-graph`. A deep chain means an error crosses
+    /// that many layers before anything handles it — the signal to
+    /// check whether the middle layers add context or just re-wrap.
+    /// Only edges the heuristic resolver marked `resolved`
+    /// participate, so missing chains are more likely than fabricated
+    /// ones. Mutual recursion collapses into one cyclic link.
+    ///
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep). The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). The JSON format is the
+    /// default machine-readable output; `--format md` emits a compact
+    /// summary tuned for LLM context.
+    ErrorChain(AnalyzeErrorChainArgs),
     /// Report per-function error-handling shape: how much of each
     /// function is error handling, how fragmented its try/catch usage
     /// is, and how many handlers only rethrow or log-and-rethrow.
@@ -549,6 +569,19 @@ struct AnalyzeComplexityArgs {
     /// ranking. JSON output always carries the full list.
     #[arg(long)]
     min_score: Option<u32>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeErrorChainArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    /// Minimum chain depth (number of functions) included in the
+    /// report. Depth 2 is a single hop; the default keeps only chains
+    /// that actually cross layers.
+    #[arg(long, default_value_t = DEFAULT_ERROR_CHAIN_MIN_DEPTH)]
+    min_depth: usize,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -816,6 +849,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,
         ),
+        (profile.error_chain.is_some(), config::ToolName::ErrorChain),
         (profile.error_shape.is_some(), config::ToolName::ErrorShape),
         (profile.wrapper.is_some(), config::ToolName::Wrapper),
     ]
@@ -867,6 +901,14 @@ fn build_analyze_command(
             })
         }
         config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
+        config::ToolName::ErrorChain => {
+            let opts = profile.error_chain.clone().unwrap_or_default();
+            AnalyzeCommand::ErrorChain(AnalyzeErrorChainArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                min_depth: opts.min_depth.unwrap_or(DEFAULT_ERROR_CHAIN_MIN_DEPTH),
+            })
+        }
         config::ToolName::ErrorShape => {
             let opts = profile.error_shape.clone().unwrap_or_default();
             AnalyzeCommand::ErrorShape(AnalyzeErrorShapeArgs {
@@ -978,6 +1020,7 @@ impl_with_analyze_path_args!(
     CohesionAnalyzer,
     ComplexityAnalyzer,
     CouplingAnalyzer,
+    ErrorChainAnalyzer,
     ErrorShapeAnalyzer,
     FunctionGraphAnalyzer,
     ContextSpanAnalyzer,
@@ -1027,6 +1070,14 @@ impl AnalyzeCommand {
             Self::Coupling(args) => {
                 let (path, format, path_filter) = args.into_parts();
                 CouplingAnalyzer::new()
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::ErrorChain(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                ErrorChainAnalyzer::new()
+                    .with_min_depth(Some(args.min_depth))
+                    .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }

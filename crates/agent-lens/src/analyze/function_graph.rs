@@ -55,6 +55,19 @@ impl FunctionGraphAnalyzer {
     }
 
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+        let report = Report::build(path, self.build_model(path)?);
+        match format {
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
+            }
+            OutputFormat::Md => Ok(format_markdown(&report)),
+        }
+    }
+
+    /// Build the resolved node/edge model without rendering a report.
+    /// Shared with the error-chain analyzer, which joins these edges
+    /// against per-function error shapes.
+    pub(super) fn build_model(&self, path: &Path) -> Result<GraphModel, AnalyzerError> {
         let collection_filter = if self.only_tests {
             self.path_filter.clone().with_only_tests(false)
         } else {
@@ -78,13 +91,22 @@ impl FunctionGraphAnalyzer {
             let path_is_test = filter.is_test_path(&source_file.path);
             files.push(self.scan_file(path, &source_file, path_is_test, &mut crate_cache)?);
         }
-        let report = Report::build(path, files);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report)),
-        }
+        let language = graph_language_label(&files);
+        let mut nodes = build_nodes(&files);
+        let mut edges = build_edges(&files, &nodes);
+        apply_static_degrees(&mut nodes, &edges);
+        edges.sort_by(|a, b| {
+            a.from
+                .cmp(&b.from)
+                .then_with(|| a.to.cmp(&b.to))
+                .then_with(|| a.callee_name.cmp(&b.callee_name))
+                .then_with(|| a.resolution.cmp(&b.resolution))
+        });
+        Ok(GraphModel {
+            language,
+            nodes,
+            edges,
+        })
     }
 
     fn scan_file(
@@ -248,22 +270,17 @@ struct Report {
 }
 
 impl Report {
-    fn build(root: &Path, files: Vec<FileGraphInput>) -> Self {
-        let mut nodes = build_nodes(&files);
-        let mut edges = build_edges(&files, &nodes);
-        apply_static_degrees(&mut nodes, &edges);
-        edges.sort_by(|a, b| {
-            a.from
-                .cmp(&b.from)
-                .then_with(|| a.to.cmp(&b.to))
-                .then_with(|| a.callee_name.cmp(&b.callee_name))
-                .then_with(|| a.resolution.cmp(&b.resolution))
-        });
+    fn build(root: &Path, model: GraphModel) -> Self {
+        let GraphModel {
+            language,
+            nodes,
+            edges,
+        } = model;
         let summary = SummaryView::new(&edges);
         Self {
             schema_version: SCHEMA_VERSION,
             root: root.display().to_string(),
-            language: graph_language_label(&files),
+            language,
             node_count: nodes.len(),
             edge_count: edges.len(),
             nodes,
@@ -273,16 +290,24 @@ impl Report {
     }
 }
 
+/// Resolved call-graph model shared between the function-graph report
+/// and the error-chain analyzer.
+pub(super) struct GraphModel {
+    pub(super) language: &'static str,
+    pub(super) nodes: Vec<NodeView>,
+    pub(super) edges: Vec<EdgeView>,
+}
+
 #[derive(Debug, Clone, Serialize)]
-struct NodeView {
-    id: String,
-    name: String,
+pub(super) struct NodeView {
+    pub(super) id: String,
+    pub(super) name: String,
     qualified_name: String,
-    file: String,
+    pub(super) file: String,
     module: String,
-    impl_owner: Option<String>,
-    start_line: usize,
-    end_line: usize,
+    pub(super) impl_owner: Option<String>,
+    pub(super) start_line: usize,
+    pub(super) end_line: usize,
     is_test: bool,
     weights: NodeWeights,
 }
@@ -305,11 +330,11 @@ struct NodeWeights {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct EdgeView {
-    from: Option<String>,
-    to: Option<String>,
+pub(super) struct EdgeView {
+    pub(super) from: Option<String>,
+    pub(super) to: Option<String>,
     callee_name: Option<String>,
-    resolution: Resolution,
+    pub(super) resolution: Resolution,
     call_count: usize,
     call_lines: Vec<usize>,
     weights: EdgeWeights,
@@ -324,7 +349,7 @@ struct EdgeWeights {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Resolution {
+pub(super) enum Resolution {
     Resolved,
     Unresolved,
     Ambiguous,
