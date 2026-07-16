@@ -17,7 +17,7 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, VisibilityShape,
+    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport};
@@ -115,7 +115,9 @@ fn collect_function_shapes(
                 qualified_name: SyntaxFact::Known(qualified),
                 module_path: SyntaxFact::Known(module.to_owned()),
                 owner: SyntaxFact::Known(owner_shape),
-                visibility: SyntaxFact::Known(VisibilityShape::Unexported),
+                // Export status is not extracted yet, so stay honest
+                // with `Unknown` instead of hardcoding `Unexported`.
+                visibility: SyntaxFact::Unknown,
                 signature: SyntaxFact::Unknown,
                 doc: crate::parser::docstring_text(func),
                 body: BodyShape {

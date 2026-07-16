@@ -40,3 +40,7 @@ tempfile = "3"
 [[bench]]
 name = "similarity"
 harness = false
+
+[[bench]]
+name = "function_graph"
+harness = false

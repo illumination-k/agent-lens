@@ -1,5 +1,28 @@
 export type Resolution = "resolved" | "unresolved" | "ambiguous" | "anonymous";
 
+export type NodeVisibility =
+  | "public"
+  | "restricted"
+  | "private"
+  | "exported"
+  | "unexported"
+  | "unknown";
+
+export type ResolutionMethod =
+  | "lexical"
+  | "self_method"
+  | "last_segment"
+  | "path_suffix"
+  | "crate_narrowed";
+
+/** Call-site counts bucketed by resolution outcome (schema_version 2). */
+export interface ResolutionCallCounts {
+  resolved_call_count: number;
+  unresolved_call_count: number;
+  ambiguous_call_count: number;
+  anonymous_call_count: number;
+}
+
 export interface FunctionGraphReport {
   schema_version: number;
   root: string;
@@ -21,7 +44,11 @@ export interface GraphNode {
   start_line: number;
   end_line: number;
   is_test: boolean;
+  /** schema_version 2; correct for Rust/Go, "unknown" for TS/Python. */
+  visibility?: NodeVisibility;
   weights: NodeWeights;
+  /** schema_version 2. */
+  outgoing_calls?: ResolutionCallCounts;
 }
 
 export interface NodeWeights {
@@ -45,6 +72,10 @@ export interface GraphEdge {
   to: string | null;
   callee_name: string | null;
   resolution: Resolution;
+  /** schema_version 2: candidate node ids on ambiguous edges. */
+  candidates?: string[];
+  /** schema_version 2: resolver provenance on resolved/ambiguous edges. */
+  resolution_method?: ResolutionMethod;
   call_count: number;
   call_lines: number[];
   weights: {
@@ -60,6 +91,13 @@ export interface GraphSummary {
   ambiguous_edge_count: number;
   anonymous_edge_count: number;
   total_static_call_count: number;
+  /** schema_version 2: per-module call-site resolution counts. */
+  modules?: ModuleResolutionSummary[];
+}
+
+export interface ModuleResolutionSummary extends ResolutionCallCounts {
+  module: string;
+  total_call_count: number;
 }
 
 export type NodeMetric = "fan_in" | "fan_out" | "calls" | "complexity" | "loc" | "maintainability";
