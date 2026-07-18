@@ -11,7 +11,8 @@
 //! expansion, cross-crate resolution, runtime timing, or git history
 //! traversal is attempted here.
 
-#[allow(dead_code)] // Exercised by tests; consumed by the upcoming analyzer family (#316).
+#[allow(dead_code)]
+// bfs/reverse_bfs are exercised by tests; consumed by upcoming analyzers (impact, layers).
 pub(crate) mod algo;
 pub(crate) mod model;
 pub(crate) mod module_path;
@@ -68,7 +69,6 @@ impl CallGraph {
     }
 
     /// Map node ids to their index in `nodes`.
-    #[allow(dead_code)] // Exercised by tests; consumed by the upcoming analyzer family (#316).
     pub(crate) fn node_index_by_id(&self) -> HashMap<&str, usize> {
         self.nodes
             .iter()
@@ -84,7 +84,6 @@ impl CallGraph {
     /// [`CallGraphNode::outgoing_calls`] and
     /// [`CallGraph::module_summary`] for how much of the graph that
     /// hides.
-    #[allow(dead_code)] // Exercised by tests; consumed by the upcoming analyzer family (#316).
     pub(crate) fn resolved_adjacency(&self) -> Vec<Vec<usize>> {
         let index_by_id = self.node_index_by_id();
         let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];

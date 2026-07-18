@@ -13,6 +13,7 @@ pub mod complexity;
 pub mod context_span;
 pub mod coupling;
 mod crate_root;
+pub mod cycles;
 mod diff;
 mod error_from;
 mod format;
@@ -32,6 +33,7 @@ pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
+pub use cycles::CyclesAnalyzer;
 pub use function_graph::FunctionGraphAnalyzer;
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 

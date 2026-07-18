@@ -111,6 +111,100 @@ pub(crate) fn condense(adjacency: &[Vec<usize>]) -> Condensation {
     }
 }
 
+/// A weighted directed edge handed to [`greedy_feedback_arcs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WeightedEdge {
+    pub(crate) from: usize,
+    pub(crate) to: usize,
+    pub(crate) weight: usize,
+}
+
+/// Approximate minimum-weight feedback arc set via the Eades–Lin–Smyth
+/// greedy vertex-ordering heuristic (GR), weighted.
+///
+/// Builds a linear arrangement by repeatedly peeling weighted sinks to
+/// the back, weighted sources to the front, and otherwise the vertex
+/// with the largest `out_weight - in_weight`, then returns the indices
+/// into `edges` of every edge pointing backwards in that arrangement.
+/// Removing the returned edges from the graph is guaranteed to leave it
+/// acyclic (self-edges excepted: they are ignored throughout and never
+/// returned). The result is deterministic — ties are broken by the
+/// lowest vertex index — and advisory: a cheapest edge by weight can
+/// still be load-bearing in the design.
+pub(crate) fn greedy_feedback_arcs(node_count: usize, edges: &[WeightedEdge]) -> Vec<usize> {
+    let n = node_count;
+    let mut out_edges: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+    let mut in_edges: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+    let mut out_weight = vec![0isize; n];
+    let mut in_weight = vec![0isize; n];
+    for edge in edges {
+        if edge.from == edge.to {
+            continue;
+        }
+        out_edges[edge.from].push((edge.to, edge.weight));
+        in_edges[edge.to].push((edge.from, edge.weight));
+        out_weight[edge.from] += edge.weight as isize;
+        in_weight[edge.to] += edge.weight as isize;
+    }
+
+    let mut removed = vec![false; n];
+    let mut remaining = n;
+    let mut front: Vec<usize> = Vec::new();
+    let mut back: Vec<usize> = Vec::new();
+    let remove = |v: usize,
+                  removed: &mut Vec<bool>,
+                  out_weight: &mut Vec<isize>,
+                  in_weight: &mut Vec<isize>| {
+        removed[v] = true;
+        for &(to, w) in &out_edges[v] {
+            if !removed[to] {
+                in_weight[to] -= w as isize;
+            }
+        }
+        for &(from, w) in &in_edges[v] {
+            if !removed[from] {
+                out_weight[from] -= w as isize;
+            }
+        }
+    };
+
+    while remaining > 0 {
+        while let Some(v) = (0..n).find(|&v| !removed[v] && out_weight[v] == 0) {
+            remove(v, &mut removed, &mut out_weight, &mut in_weight);
+            remaining -= 1;
+            back.push(v);
+        }
+        while let Some(v) = (0..n).find(|&v| !removed[v] && in_weight[v] == 0) {
+            remove(v, &mut removed, &mut out_weight, &mut in_weight);
+            remaining -= 1;
+            front.push(v);
+        }
+        if remaining > 0 {
+            // max_by_key keeps the last max on ties, so Reverse(v)
+            // makes the lowest vertex index win deterministically.
+            if let Some(v) = (0..n)
+                .filter(|&v| !removed[v])
+                .max_by_key(|&v| (out_weight[v] - in_weight[v], std::cmp::Reverse(v)))
+            {
+                remove(v, &mut removed, &mut out_weight, &mut in_weight);
+                remaining -= 1;
+                front.push(v);
+            }
+        }
+    }
+
+    let mut position = vec![0usize; n];
+    for (pos, &v) in front.iter().chain(back.iter().rev()).enumerate() {
+        position[v] = pos;
+    }
+    edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.from != e.to && position[e.from] > position[e.to])
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
 /// One node reached by a breadth-first traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BfsVisit {
@@ -280,6 +374,93 @@ mod tests {
         assert_eq!(visits, expected);
     }
 
+    fn weighted(edges: &[(usize, usize, usize)]) -> Vec<WeightedEdge> {
+        edges
+            .iter()
+            .map(|&(from, to, weight)| WeightedEdge { from, to, weight })
+            .collect()
+    }
+
+    #[rstest]
+    #[case::empty(0, vec![], vec![])]
+    #[case::acyclic_chain_keeps_all_edges(3, vec![(0, 1, 1), (1, 2, 1)], vec![])]
+    #[case::two_cycle_cuts_one_edge(2, vec![(0, 1, 1), (1, 0, 1)], vec![1])]
+    #[case::two_cycle_cuts_the_cheaper_edge(2, vec![(0, 1, 3), (1, 0, 1)], vec![1])]
+    #[case::two_cycle_cheaper_edge_wins_regardless_of_order(2, vec![(0, 1, 1), (1, 0, 3)], vec![0])]
+    #[case::three_cycle_cuts_one_edge(3, vec![(0, 1, 1), (1, 2, 1), (2, 0, 1)], vec![2])]
+    #[case::self_edge_is_never_cut(1, vec![(0, 0, 5)], vec![])]
+    fn greedy_feedback_arcs_finds_known_cuts(
+        #[case] node_count: usize,
+        #[case] edges: Vec<(usize, usize, usize)>,
+        #[case] expected: Vec<usize>,
+    ) {
+        assert_eq!(
+            greedy_feedback_arcs(node_count, &weighted(&edges)),
+            expected
+        );
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_source_peeling_updates_downstream_in_weights() {
+        // 0 is a source feeding the 1 <-> 2 cycle with a heavy edge.
+        // Peeling it must subtract that weight from node 1's in-weight,
+        // or the greedy pick flips to node 2 and cuts the heavy
+        // 1 -> 2 edge instead of the cheap 2 -> 1 one.
+        let edges = weighted(&[(0, 1, 10), (1, 2, 5), (2, 1, 1)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![2]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_sink_peeling_updates_upstream_out_weights() {
+        // 0 is a sink fed by node 1 with a heavy edge. Peeling it must
+        // subtract that weight from node 1's out-weight, or node 1's
+        // inflated degree wins the greedy pick and the 1 <-> 2 cycle
+        // is cut at the expensive 2 -> 1 edge instead of 1 -> 2.
+        let edges = weighted(&[(1, 0, 6), (1, 2, 2), (2, 1, 3)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![1]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_in_weight_updates_subtract_exactly() {
+        // Peeling source 0 must drop node 1's in-weight from 12 to 8
+        // (subtracting the peeled edge). An inexact update that leaves
+        // it near 3 flips the greedy pick to node 1 and cuts the
+        // heavier 2 -> 1 edge instead of 1 -> 2.
+        let edges = weighted(&[(0, 1, 4), (1, 2, 6), (2, 1, 8)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![1]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_out_weight_updates_subtract_exactly() {
+        // Peeling sink 0 must drop node 1's out-weight from 12 to 10
+        // (subtracting the peeled edge). An inexact update that leaves
+        // it near 6 flips the greedy pick to node 2 and cuts the
+        // heavier 1 -> 2 edge instead of 2 -> 1.
+        let edges = weighted(&[(1, 0, 2), (1, 2, 10), (2, 1, 9)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![2]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_ranks_vertices_by_weight_difference() {
+        // Node 1 has the largest out - in difference (10 - 8 = 2) and
+        // must be ordered first; ranking by ratio instead of
+        // difference would pick node 0 (2 / 1) and reverse a
+        // different edge set.
+        let edges = weighted(&[(0, 1, 2), (1, 0, 1), (1, 2, 9), (2, 1, 6)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![0, 3]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_prefers_cutting_light_edges() {
+        // 0 -> 1 -> 2 -> 0 is a heavy cycle (weight 5 each) crossed by
+        // a light back-edge 2 -> 1. The heuristic must not pay for a
+        // heavy edge when reversing lighter ones suffices.
+        let edges = weighted(&[(0, 1, 5), (1, 2, 5), (2, 0, 5), (2, 1, 1)]);
+        let arcs = greedy_feedback_arcs(3, &edges);
+        let cut_weight: usize = arcs.iter().map(|&i| edges[i].weight).sum();
+        assert!(cut_weight <= 6, "cut {arcs:?} weighs {cut_weight}");
+    }
+
     #[test]
     fn reverse_bfs_walks_callers() {
         // 0 -> 1 -> 2: reverse traversal from 2 reaches its transitive
@@ -334,6 +515,34 @@ mod tests {
                     // back edges.
                     prop_assert!(to < from);
                 }
+            }
+        }
+
+        #[test]
+        fn greedy_feedback_arcs_always_break_every_cycle(
+            (node_count, edges) in (1usize..12).prop_flat_map(|n| {
+                (
+                    Just(n),
+                    proptest::collection::vec((0..n, 0..n, 1usize..10), 0..40),
+                )
+            }),
+        ) {
+            let edges = weighted(&edges);
+            let arcs = greedy_feedback_arcs(node_count, &edges);
+            let cut: std::collections::HashSet<usize> = arcs.iter().copied().collect();
+            let mut adjacency = vec![Vec::new(); node_count];
+            for (idx, edge) in edges.iter().enumerate() {
+                if !cut.contains(&idx) && edge.from != edge.to {
+                    adjacency[edge.from].push(edge.to);
+                }
+            }
+            let condensation = condense(&adjacency);
+            for component in &condensation.components {
+                prop_assert_eq!(
+                    component.len(),
+                    1,
+                    "removing the feedback arcs must leave the graph acyclic",
+                );
             }
         }
 

@@ -17,7 +17,7 @@ use agent_hooks::Hook;
 use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
-    CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
+    CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
     FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod,
     WrapperAnalyzer,
@@ -407,6 +407,26 @@ enum AnalyzeCommand {
     /// `.cjs`) whose relative imports define the module graph, or a
     /// `.go` file or Go module directory (containing `go.mod`).
     Coupling(AnalyzeCommonArgs),
+    /// Report function-level call cycles: groups of 2+ functions that
+    /// call each other, directly or transitively, with advisory
+    /// cheapest-cut suggestions for breaking each group.
+    ///
+    /// Builds the same heuristic static call graph as `analyze
+    /// function-graph` and reports its strongly connected components
+    /// over resolved call edges only. Each tangle lists its members
+    /// with file:line, whether it stays inside one file (likely
+    /// intentional mutual recursion — parsers, tree walkers — and
+    /// ranked below cross-file tangles), its internal call-site count,
+    /// and the number of nearby ambiguous edges as a confidence
+    /// warning. Break suggestions name the cheapest internal edges (by
+    /// static call-site count, greedy feedback-arc heuristic) whose
+    /// removal would break the cycle, with call lines as evidence —
+    /// advisory only, since a cheap edge can still be load-bearing.
+    /// The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` emits a
+    /// compact summary tuned for LLM context.
+    Cycles(AnalyzeCommonArgs),
     /// Emit a static function call graph as visualization-ready data.
     ///
     /// The graph is heuristic and current-source only: nodes are functions,
@@ -836,6 +856,7 @@ fn build_analyze_command(
             })
         }
         config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
+        config::ToolName::Cycles => AnalyzeCommand::Cycles(common),
         config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
         config::ToolName::ContextSpan => {
             let opts = profile.context_span.clone().unwrap_or_default();
@@ -937,6 +958,7 @@ impl_with_analyze_path_args!(
     CohesionAnalyzer,
     ComplexityAnalyzer,
     CouplingAnalyzer,
+    CyclesAnalyzer,
     FunctionGraphAnalyzer,
     ContextSpanAnalyzer,
     HotspotAnalyzer,
@@ -985,6 +1007,12 @@ impl AnalyzeCommand {
             Self::Coupling(args) => {
                 let (path, format, path_filter) = args.into_parts();
                 CouplingAnalyzer::new()
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Cycles(args) => {
+                let (path, format, path_filter) = args.into_parts();
+                CyclesAnalyzer::new()
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
@@ -1645,6 +1673,37 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.path, PathBuf::from("."));
         assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_cycles_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "cycles", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Cycles(args)) = cli.command else {
+            panic!("expected analyze cycles");
+        };
+        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_cycles_with_md_format_and_exclude_tests() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "cycles",
+            "src",
+            "--format",
+            "md",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Cycles(args)) = cli.command else {
+            panic!("expected analyze cycles");
+        };
+        assert_eq!(args.path, PathBuf::from("src"));
+        assert_eq!(args.format, OutputFormat::Md);
+        assert!(args.path_filter.exclude_tests);
     }
 
     #[test]

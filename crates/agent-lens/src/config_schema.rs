@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 8] = [
+const TOOL_ORDER: [ToolName; 9] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
@@ -32,6 +32,7 @@ const TOOL_ORDER: [ToolName; 8] = [
     ToolName::Wrapper,
     ToolName::Coupling,
     ToolName::FunctionGraph,
+    ToolName::Cycles,
 ];
 
 /// One configuration key: its TOML spelling, value type, whether it is
@@ -65,7 +66,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, function-graph, hotspot, similarity, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, hotspot, similarity, wrapper.",
     },
     Field {
         key: "format",
@@ -206,7 +207,7 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
         }],
         // Analyzers that take no per-tool overrides. Declaring a
         // `[profile.<name>.coupling]` table is a parse error.
-        ToolName::Coupling | ToolName::FunctionGraph => return None,
+        ToolName::Coupling | ToolName::Cycles | ToolName::FunctionGraph => return None,
     };
     Some(ToolTable { fields })
 }
@@ -472,10 +473,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_table_marks_only_coupling_and_function_graph_as_optionless() {
+    fn tool_table_marks_only_coupling_cycles_and_function_graph_as_optionless() {
         for tool in TOOL_ORDER {
             let has_table = tool_table(tool).is_some();
-            let expect_table = !matches!(tool, ToolName::Coupling | ToolName::FunctionGraph);
+            let expect_table = !matches!(
+                tool,
+                ToolName::Coupling | ToolName::Cycles | ToolName::FunctionGraph
+            );
             assert_eq!(has_table, expect_table, "mismatch for {tool:?}");
         }
     }
