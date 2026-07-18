@@ -3,234 +3,73 @@
 //! This report is intentionally machine-facing JSON for downstream
 //! visualization tools. It is static and heuristic: no type inference,
 //! macro expansion, cross-crate resolution, runtime timing, or git history
-//! traversal is attempted here.
+//! traversal is attempted here. Graph construction lives in
+//! [`super::call_graph`]; this module is the serialization surface.
+//!
+//! # Schema history
+//!
+//! * `schema_version: 2`
+//!   - nodes carry `visibility` (correct for Rust/Go, `unknown` for
+//!     TypeScript/Python) and `outgoing_calls` (call-site counts by
+//!     resolution — the per-node confidence signal).
+//!   - ambiguous edges carry `candidates`, the sorted node-id set the
+//!     resolver could not pick between (`to` stays `null`).
+//!   - resolved and ambiguous edges carry `resolution_method`
+//!     provenance (`lexical`, `self_method`, `last_segment`,
+//!     `path_suffix`, `crate_narrowed`). Grouped call sites that
+//!     reached the same target through different heuristics keep the
+//!     most direct one. Ambiguous edges with different candidate sets
+//!     no longer collapse into one edge.
+//!   - `summary.modules` breaks the global resolution counts down per
+//!     module as call-site counts (graph-confidence calibration).
+//! * `schema_version: 1` — initial shape.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::{CallShape, FunctionComplexity, FunctionShape, ReceiverExprKind, SyntaxFact};
-use lens_rust::CallIndexOptions;
 use serde::Serialize;
 
-use super::cargo_meta::{CrateInfo, CrateNameCache, FALLBACK_CRATE_NAME};
-use super::{
-    AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, SourceLang, collect_source_files,
-    read_source,
-};
+use super::call_graph::model::{CallGraphEdge, CallGraphNode, ModuleResolutionSummary, Resolution};
+use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::{AnalyzerError, OutputFormat};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Default, Clone)]
 pub struct FunctionGraphAnalyzer {
-    only_tests: bool,
-    exclude_tests: bool,
-    path_filter: AnalyzePathFilter,
+    builder: CallGraphBuilder,
 }
 
 impl FunctionGraphAnalyzer {
     pub fn new() -> Self {
         Self {
-            only_tests: false,
-            exclude_tests: false,
-            path_filter: AnalyzePathFilter::new(),
+            builder: CallGraphBuilder::new(),
         }
     }
 
     pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.only_tests = only_tests;
-        self.path_filter = self.path_filter.with_only_tests(only_tests);
+        self.builder = self.builder.with_only_tests(only_tests);
         self
     }
 
     pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.exclude_tests = exclude_tests;
-        self.path_filter = self.path_filter.with_exclude_tests(exclude_tests);
+        self.builder = self.builder.with_exclude_tests(exclude_tests);
         self
     }
 
     pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.path_filter = self.path_filter.with_exclude_patterns(exclude);
+        self.builder = self.builder.with_exclude_patterns(exclude);
         self
     }
 
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let collection_filter = if self.only_tests {
-            self.path_filter.clone().with_only_tests(false)
-        } else {
-            self.path_filter.clone()
-        };
-        let filter = collection_filter.compile(path)?;
-        let mut files = Vec::new();
-        let mut crate_cache = CrateNameCache::new();
-        for source_file in collect_source_files(path, &filter)? {
-            if !matches!(
-                SourceLang::from_path(&source_file.path),
-                Some(
-                    SourceLang::Rust
-                        | SourceLang::TypeScript(_)
-                        | SourceLang::Python
-                        | SourceLang::Go
-                )
-            ) {
-                continue;
-            }
-            let path_is_test = filter.is_test_path(&source_file.path);
-            files.push(self.scan_file(path, &source_file, path_is_test, &mut crate_cache)?);
-        }
-        let report = Report::build(path, files);
+        let graph = self.builder.build(path)?;
+        let report = Report::build(path, graph);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&report)),
-        }
-    }
-
-    fn scan_file(
-        &self,
-        root: &Path,
-        file: &SourceFile,
-        path_is_test: bool,
-        crate_cache: &mut CrateNameCache,
-    ) -> Result<FileGraphInput, AnalyzerError> {
-        let (lang, source) = read_source(&file.path)?;
-        let crate_info = match lang {
-            SourceLang::Rust => Some(crate_cache.lookup(&file.path)),
-            _ => None,
-        };
-        let module = module_path_for(root, file, lang, crate_info.as_ref(), &source);
-        let mut functions = extract_function_shapes(lang, &source, &module)?;
-        functions.retain(|f| self.includes_function(f, path_is_test));
-        let calls = extract_call_shapes(lang, &source, &module, !self.exclude_tests)?;
-        let complexity = extract_complexity(lang, &source)?;
-
-        Ok(FileGraphInput {
-            file: file.display_path.clone(),
-            language: lang.graph_language(),
-            path_is_test,
-            functions,
-            calls,
-            complexity,
-        })
-    }
-
-    fn includes_function(&self, f: &FunctionShape, path_is_test: bool) -> bool {
-        let is_test = f.is_test || path_is_test;
-        if self.only_tests {
-            return is_test;
-        }
-        if self.exclude_tests {
-            return !is_test;
-        }
-        true
-    }
-}
-
-fn parse_err<E>(e: E) -> AnalyzerError
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    AnalyzerError::Parse(Box::new(e))
-}
-
-fn extract_function_shapes(
-    lang: SourceLang,
-    source: &str,
-    module: &str,
-) -> Result<Vec<FunctionShape>, AnalyzerError> {
-    match lang {
-        SourceLang::Rust => {
-            lens_rust::extract_function_shapes_with_modules(source, module).map_err(parse_err)
-        }
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_function_shapes_with_module(source, dialect, module).map_err(parse_err)
-        }
-        SourceLang::Python => {
-            lens_py::extract_function_shapes_with_module(source, module).map_err(parse_err)
-        }
-        SourceLang::Go => {
-            lens_golang::extract_function_shapes_with_module(source, module).map_err(parse_err)
-        }
-    }
-}
-
-fn extract_call_shapes(
-    lang: SourceLang,
-    source: &str,
-    module: &str,
-    include_cfg_test_blocks: bool,
-) -> Result<Vec<CallShape>, AnalyzerError> {
-    match lang {
-        SourceLang::Rust => lens_rust::extract_call_shapes_with_options_and_base_module(
-            source,
-            CallIndexOptions {
-                include_cfg_test_blocks,
-            },
-            module,
-        )
-        .map_err(parse_err),
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_call_shapes_with_module(source, dialect, module).map_err(parse_err)
-        }
-        SourceLang::Python => {
-            lens_py::extract_call_shapes_with_module(source, module).map_err(parse_err)
-        }
-        SourceLang::Go => {
-            lens_golang::extract_call_shapes_with_module(source, module).map_err(parse_err)
-        }
-    }
-}
-
-fn extract_complexity(
-    lang: SourceLang,
-    source: &str,
-) -> Result<Vec<FunctionComplexity>, AnalyzerError> {
-    match lang {
-        SourceLang::Rust => lens_rust::extract_complexity_units(source).map_err(parse_err),
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_complexity_units(source, dialect).map_err(parse_err)
-        }
-        SourceLang::Python => lens_py::extract_complexity_units(source).map_err(parse_err),
-        SourceLang::Go => lens_golang::extract_complexity_units(source).map_err(parse_err),
-    }
-}
-
-struct FileGraphInput {
-    file: String,
-    language: GraphLanguage,
-    path_is_test: bool,
-    functions: Vec<FunctionShape>,
-    calls: Vec<CallShape>,
-    complexity: Vec<FunctionComplexity>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GraphLanguage {
-    Rust,
-    TypeScript,
-    Python,
-    Go,
-}
-
-impl GraphLanguage {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Rust => "rust",
-            Self::TypeScript => "typescript",
-            Self::Python => "python",
-            Self::Go => "go",
-        }
-    }
-}
-
-impl SourceLang {
-    fn graph_language(self) -> GraphLanguage {
-        match self {
-            Self::Rust => GraphLanguage::Rust,
-            Self::TypeScript(_) => GraphLanguage::TypeScript,
-            Self::Python => GraphLanguage::Python,
-            Self::Go => GraphLanguage::Go,
         }
     }
 }
@@ -242,93 +81,25 @@ struct Report {
     language: &'static str,
     node_count: usize,
     edge_count: usize,
-    nodes: Vec<NodeView>,
-    edges: Vec<EdgeView>,
+    nodes: Vec<CallGraphNode>,
+    edges: Vec<CallGraphEdge>,
     summary: SummaryView,
 }
 
 impl Report {
-    fn build(root: &Path, files: Vec<FileGraphInput>) -> Self {
-        let mut nodes = build_nodes(&files);
-        let mut edges = build_edges(&files, &nodes);
-        apply_static_degrees(&mut nodes, &edges);
-        edges.sort_by(|a, b| {
-            a.from
-                .cmp(&b.from)
-                .then_with(|| a.to.cmp(&b.to))
-                .then_with(|| a.callee_name.cmp(&b.callee_name))
-                .then_with(|| a.resolution.cmp(&b.resolution))
-        });
-        let summary = SummaryView::new(&edges);
+    fn build(root: &Path, graph: CallGraph) -> Self {
+        let summary = SummaryView::new(&graph.edges, graph.module_summary);
         Self {
             schema_version: SCHEMA_VERSION,
             root: root.display().to_string(),
-            language: graph_language_label(&files),
-            node_count: nodes.len(),
-            edge_count: edges.len(),
-            nodes,
-            edges,
+            language: graph.language,
+            node_count: graph.nodes.len(),
+            edge_count: graph.edges.len(),
+            nodes: graph.nodes,
+            edges: graph.edges,
             summary,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct NodeView {
-    id: String,
-    name: String,
-    qualified_name: String,
-    file: String,
-    module: String,
-    impl_owner: Option<String>,
-    start_line: usize,
-    end_line: usize,
-    is_test: bool,
-    weights: NodeWeights,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-struct NodeWeights {
-    incoming_call_count: usize,
-    outgoing_call_count: usize,
-    fan_in: usize,
-    fan_out: usize,
-    loc: usize,
-    cyclomatic_complexity: Option<u32>,
-    cognitive_complexity: Option<u32>,
-    max_nesting: Option<u32>,
-    maintainability_index: Option<f64>,
-    halstead_volume: Option<f64>,
-    total_time_ms: Option<f64>,
-    self_time_ms: Option<f64>,
-    error_count: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EdgeView {
-    from: Option<String>,
-    to: Option<String>,
-    callee_name: Option<String>,
-    resolution: Resolution,
-    call_count: usize,
-    call_lines: Vec<usize>,
-    weights: EdgeWeights,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-struct EdgeWeights {
-    call_count: usize,
-    total_transition_time_ms: Option<f64>,
-    error_count: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Resolution {
-    Resolved,
-    Unresolved,
-    Ambiguous,
-    Anonymous,
 }
 
 #[derive(Debug, Serialize)]
@@ -338,10 +109,14 @@ struct SummaryView {
     ambiguous_edge_count: usize,
     anonymous_edge_count: usize,
     total_static_call_count: usize,
+    /// Per-module call-site resolution counts — the calibration layer:
+    /// a module whose edges are mostly unresolved should have its
+    /// graph-derived results read as lower bounds.
+    modules: Vec<ModuleResolutionSummary>,
 }
 
 impl SummaryView {
-    fn new(edges: &[EdgeView]) -> Self {
+    fn new(edges: &[CallGraphEdge], modules: Vec<ModuleResolutionSummary>) -> Self {
         Self {
             resolved_edge_count: edges
                 .iter()
@@ -360,707 +135,9 @@ impl SummaryView {
                 .filter(|e| e.resolution == Resolution::Anonymous)
                 .count(),
             total_static_call_count: edges.iter().map(|e| e.call_count).sum(),
+            modules,
         }
     }
-}
-
-fn build_nodes(files: &[FileGraphInput]) -> Vec<NodeView> {
-    let mut nodes = Vec::new();
-    for file in files {
-        let complexity = ComplexityIndex::new(&file.complexity);
-        for f in &file.functions {
-            let metrics = complexity.get(f);
-            nodes.push(NodeView {
-                id: node_id(&file.file, f),
-                name: f.display_name.clone(),
-                qualified_name: f
-                    .qualified_name
-                    .known_value()
-                    .cloned()
-                    .unwrap_or_else(|| f.display_name.clone()),
-                file: file.file.clone(),
-                module: f.module_path.known_value().cloned().unwrap_or_default(),
-                impl_owner: f
-                    .owner
-                    .known_value()
-                    .and_then(|owner| owner.as_ref())
-                    .map(|owner| owner.display_name.clone()),
-                start_line: f.span.start_line,
-                end_line: f.span.end_line,
-                is_test: f.is_test || file.path_is_test,
-                weights: NodeWeights {
-                    loc: f.line_count(),
-                    cyclomatic_complexity: metrics.map(|m| m.cyclomatic),
-                    cognitive_complexity: metrics.map(|m| m.cognitive),
-                    max_nesting: metrics.map(|m| m.max_nesting),
-                    maintainability_index: metrics
-                        .and_then(FunctionComplexity::maintainability_index),
-                    halstead_volume: metrics.and_then(|m| m.halstead.volume()),
-                    ..NodeWeights::default()
-                },
-            });
-        }
-    }
-    nodes.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then_with(|| a.start_line.cmp(&b.start_line))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    nodes
-}
-
-struct ComplexityIndex<'a> {
-    by_exact: HashMap<(&'a str, usize, usize), &'a FunctionComplexity>,
-}
-
-impl<'a> ComplexityIndex<'a> {
-    fn new(metrics: &'a [FunctionComplexity]) -> Self {
-        let by_exact = metrics
-            .iter()
-            .map(|m| ((m.name.as_str(), m.start_line, m.end_line), m))
-            .collect();
-        Self { by_exact }
-    }
-
-    fn get(&self, f: &FunctionShape) -> Option<&'a FunctionComplexity> {
-        self.by_exact
-            .get(&(
-                node_local_name(f).as_str(),
-                f.span.start_line,
-                f.span.end_line,
-            ))
-            .copied()
-    }
-}
-
-fn build_edges(files: &[FileGraphInput], nodes: &[NodeView]) -> Vec<EdgeView> {
-    let resolver = Resolver::new(nodes);
-    let caller_index = CallerIndex::new(nodes);
-    let mut grouped: BTreeMap<EdgeKey, EdgeView> = BTreeMap::new();
-
-    for file in files {
-        for site in &file.calls {
-            let from = site
-                .caller_qualified_name()
-                .and_then(|caller| caller_index.resolve_in_file(&file.file, caller));
-            if site.caller_qualified_name().is_some() && from.is_none() {
-                continue;
-            }
-            let (to, resolution) = resolver.resolve(site);
-            let key = EdgeKey {
-                from: from.clone(),
-                to: to.clone(),
-                callee_name: site.callee_name().map(ToOwned::to_owned),
-                resolution,
-            };
-            let entry = grouped.entry(key).or_insert_with(|| EdgeView {
-                from,
-                to,
-                callee_name: site.callee_name().map(ToOwned::to_owned),
-                resolution,
-                call_count: 0,
-                call_lines: Vec::new(),
-                weights: EdgeWeights::default(),
-            });
-            entry.call_count += 1;
-            entry.weights.call_count += 1;
-            entry.call_lines.push(site.line);
-        }
-    }
-
-    grouped
-        .into_values()
-        .map(|mut edge| {
-            edge.call_lines.sort_unstable();
-            edge.call_lines.dedup();
-            edge
-        })
-        .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct EdgeKey {
-    from: Option<String>,
-    to: Option<String>,
-    callee_name: Option<String>,
-    resolution: Resolution,
-}
-
-struct CallerIndex {
-    by_file_and_qualified_name: HashMap<(String, String), Vec<String>>,
-}
-
-impl CallerIndex {
-    fn new(nodes: &[NodeView]) -> Self {
-        let mut by_file_and_qualified_name: HashMap<(String, String), Vec<String>> = HashMap::new();
-        for node in nodes {
-            by_file_and_qualified_name
-                .entry((node.file.clone(), node.qualified_name.clone()))
-                .or_default()
-                .push(node.id.clone());
-        }
-        Self {
-            by_file_and_qualified_name,
-        }
-    }
-
-    fn resolve_in_file(&self, file: &str, qualified_name: &str) -> Option<String> {
-        let ids = self
-            .by_file_and_qualified_name
-            .get(&(file.to_owned(), qualified_name.to_owned()))?;
-        if ids.len() == 1 {
-            return ids.first().cloned();
-        }
-        None
-    }
-}
-
-struct Resolver {
-    qualified: HashMap<String, Vec<String>>,
-    last_segment: HashMap<String, Vec<String>>,
-    id_to_qualified: HashMap<String, String>,
-}
-
-impl Resolver {
-    fn new(nodes: &[NodeView]) -> Self {
-        let mut qualified: HashMap<String, Vec<String>> = HashMap::new();
-        let mut last_segment: HashMap<String, Vec<String>> = HashMap::new();
-        let mut id_to_qualified: HashMap<String, String> = HashMap::new();
-        for node in nodes {
-            qualified
-                .entry(node.qualified_name.clone())
-                .or_default()
-                .push(node.id.clone());
-            last_segment
-                .entry(name_last_segment(&node.qualified_name).to_owned())
-                .or_default()
-                .push(node.id.clone());
-            id_to_qualified.insert(node.id.clone(), node.qualified_name.clone());
-        }
-        Self {
-            qualified,
-            last_segment,
-            id_to_qualified,
-        }
-    }
-
-    fn resolve(&self, site: &CallShape) -> (Option<String>, Resolution) {
-        let Some(callee_name) = site.callee_name() else {
-            return (None, Resolution::Anonymous);
-        };
-        // `self.method()` — receiver is exactly `self`, so the callee must
-        // be a method on the impl/trait owner. Resolve lexically to
-        // `Owner::method` in the caller's module without type inference.
-        if matches!(
-            site.receiver_expr_kind,
-            SyntaxFact::Known(ReceiverExprKind::SelfValue)
-        ) {
-            return self.resolve_self_method(site, callee_name);
-        }
-        if site.has_receiver_expression() {
-            return self.resolve_receiver_method(site, callee_name);
-        }
-        for candidate in lexical_candidates(site) {
-            if let Some(ids) = self.qualified.get(&candidate) {
-                return resolve_ids(ids);
-            }
-        }
-        let Some(ids) = self.last_segment.get(callee_name) else {
-            return (None, Resolution::Unresolved);
-        };
-        // When the callee was written as a multi-segment path like
-        // `Foo::new`, restrict the fallback to candidates whose
-        // qualified name ends with that path. Catches calls reaching a
-        // type through a glob import, and avoids mislabeling external
-        // calls like `String::new()` as ambiguous against unrelated
-        // workspace `new` methods.
-        if let Some(callee_path) = site.callee_path()
-            && callee_path.contains("::")
-        {
-            let narrowed = self.narrow_by_path_suffix(ids, &callee_path);
-            return if narrowed.is_empty() {
-                (None, Resolution::Unresolved)
-            } else {
-                resolve_ids(&narrowed)
-            };
-        }
-        resolve_ids(ids)
-    }
-
-    fn resolve_self_method(
-        &self,
-        site: &CallShape,
-        callee_name: &str,
-    ) -> (Option<String>, Resolution) {
-        let Some(module) = site.caller_module() else {
-            return (None, Resolution::Unresolved);
-        };
-        let Some(owner) = site.caller_owner() else {
-            return (None, Resolution::Unresolved);
-        };
-        let candidate = qualify_module(module, &format!("{owner}::{callee_name}"));
-        if let Some(ids) = self.qualified.get(&candidate) {
-            return resolve_ids(ids);
-        }
-        (None, Resolution::Unresolved)
-    }
-
-    /// Receiver method calls (`obj.foo()`) cannot be type-inferred
-    /// without semantic analysis, so we resolve heuristically by
-    /// last-segment match, then narrow ambiguous matches to the
-    /// caller's crate.
-    ///
-    /// * 0 candidates → [`Resolution::Unresolved`] (likely external/std).
-    /// * 1 candidate → [`Resolution::Resolved`].
-    /// * Many candidates with exactly one in the caller's crate →
-    ///   [`Resolution::Resolved`] for that crate-local match.
-    /// * Otherwise → [`Resolution::Ambiguous`].
-    ///
-    /// False-positive risk is real: a call on `String` whose method
-    /// happens to share a name with a unique workspace function would
-    /// resolve to the workspace match. The crate narrowing keeps this
-    /// risk bounded to the caller's crate when multiple candidates
-    /// exist; users who want precision should prefer typed paths.
-    fn resolve_receiver_method(
-        &self,
-        site: &CallShape,
-        callee_name: &str,
-    ) -> (Option<String>, Resolution) {
-        let Some(ids) = self.last_segment.get(callee_name) else {
-            return (None, Resolution::Unresolved);
-        };
-        self.resolve_with_crate_narrowing(ids, site)
-    }
-
-    fn resolve_with_crate_narrowing(
-        &self,
-        ids: &[String],
-        site: &CallShape,
-    ) -> (Option<String>, Resolution) {
-        if ids.len() == 1 {
-            return (ids.first().cloned(), Resolution::Resolved);
-        }
-        let Some(caller_crate) = caller_crate_segment(site) else {
-            return (None, Resolution::Ambiguous);
-        };
-        let local: Vec<String> = ids
-            .iter()
-            .filter(|id| self.node_in_crate(id, caller_crate))
-            .cloned()
-            .collect();
-        if local.len() == 1 {
-            return (local.first().cloned(), Resolution::Resolved);
-        }
-        (None, Resolution::Ambiguous)
-    }
-
-    fn node_in_crate(&self, id: &str, crate_name: &str) -> bool {
-        self.id_to_qualified
-            .get(id)
-            .is_some_and(|qualified| qualified_in_crate(qualified, crate_name))
-    }
-
-    fn narrow_by_path_suffix(&self, ids: &[String], callee_path: &str) -> Vec<String> {
-        let suffix = format!("::{callee_path}");
-        ids.iter()
-            .filter(|id| {
-                self.id_to_qualified
-                    .get(id.as_str())
-                    .is_some_and(|qualified| {
-                        qualified == callee_path || qualified.ends_with(&suffix)
-                    })
-            })
-            .cloned()
-            .collect()
-    }
-}
-
-fn lexical_candidates(site: &CallShape) -> Vec<String> {
-    let Some(callee_name) = site.callee_name() else {
-        return Vec::new();
-    };
-    let Some(module) = site.caller_module() else {
-        return Vec::new();
-    };
-    let Some(callee_path) = site.callee_path() else {
-        return vec![qualify_module(module, callee_name)];
-    };
-    let segments: Vec<&str> = callee_path.split("::").collect();
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    let mut candidates = Vec::new();
-    match segments[0] {
-        "crate" => candidates.push(callee_path.to_owned()),
-        "self" => {
-            if let Some(path) = prefix_with_tail(module_segments(module), &segments, 1) {
-                candidates.push(path);
-            }
-        }
-        "super" => {
-            if let Some(path) = resolve_super_path(module, &segments) {
-                candidates.push(path);
-            }
-        }
-        "Self" => {
-            if let Some(owner) = site.caller_owner()
-                && let Some(tail) = join_tail(&segments, 1)
-            {
-                candidates.push(qualify_module(module, &format!("{owner}::{tail}")));
-            }
-        }
-        _ => {
-            if segments.len() == 1 {
-                candidates.push(qualify_module(module, callee_name));
-            } else {
-                candidates.push(qualify_module(module, &callee_path));
-            }
-            if let Some(alias_target) = alias_target(site, segments[0])
-                && let Some(path) = prefix_with_tail(
-                    alias_target.split("::").map(ToOwned::to_owned).collect(),
-                    &segments,
-                    1,
-                )
-            {
-                candidates.push(path);
-            }
-        }
-    }
-    if segments.len() == 1
-        && let Some(alias_target) = alias_target(site, segments[0])
-    {
-        candidates.push(alias_target.to_owned());
-    }
-    dedupe_preserving_order(candidates)
-}
-
-fn alias_target<'a>(site: &'a CallShape, alias: &str) -> Option<&'a str> {
-    site.visible_imports
-        .iter()
-        .rev()
-        .find(|entry| {
-            matches!(
-                &entry.local_alias,
-                SyntaxFact::Known(Some(local_alias)) if local_alias == alias
-            )
-        })
-        .and_then(|entry| entry.imported_module.known_value())
-        .map(String::as_str)
-}
-
-fn module_segments(module: &str) -> Vec<String> {
-    module.split("::").map(ToOwned::to_owned).collect()
-}
-
-fn prefix_with_tail(
-    mut prefix: Vec<String>,
-    segments: &[&str],
-    tail_start: usize,
-) -> Option<String> {
-    if tail_start > segments.len() {
-        return None;
-    }
-    prefix.extend(segments.iter().skip(tail_start).map(|s| (*s).to_owned()));
-    Some(prefix.join("::"))
-}
-
-fn resolve_super_path(module: &str, segments: &[&str]) -> Option<String> {
-    let mut absolute = module_segments(module);
-    for segment in segments {
-        if *segment == "super" {
-            if absolute.len() <= 1 {
-                return None;
-            }
-            absolute.pop();
-        } else {
-            absolute.push((*segment).to_owned());
-        }
-    }
-    Some(absolute.join("::"))
-}
-
-fn join_tail(segments: &[&str], start: usize) -> Option<String> {
-    if start >= segments.len() {
-        None
-    } else {
-        Some(segments[start..].join("::"))
-    }
-}
-
-fn qualify_module(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{module}::{name}")
-    }
-}
-
-fn dedupe_preserving_order(items: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for item in items {
-        if seen.insert(item.clone()) {
-            out.push(item);
-        }
-    }
-    out
-}
-
-fn resolve_ids(ids: &[String]) -> (Option<String>, Resolution) {
-    if ids.len() == 1 {
-        (ids.first().cloned(), Resolution::Resolved)
-    } else {
-        (None, Resolution::Ambiguous)
-    }
-}
-
-fn apply_static_degrees(nodes: &mut [NodeView], edges: &[EdgeView]) {
-    let mut by_id: HashMap<String, usize> = HashMap::new();
-    let mut fan_in: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut fan_out: HashMap<String, HashSet<String>> = HashMap::new();
-    for (idx, node) in nodes.iter().enumerate() {
-        by_id.insert(node.id.clone(), idx);
-    }
-    for edge in edges {
-        if let Some(from) = edge.from.as_deref()
-            && let Some(idx) = by_id.get(from).copied()
-        {
-            nodes[idx].weights.outgoing_call_count += edge.call_count;
-        }
-        if let Some(to) = edge.to.as_deref()
-            && let Some(idx) = by_id.get(to).copied()
-        {
-            nodes[idx].weights.incoming_call_count += edge.call_count;
-        }
-        if let (Some(from), Some(to), Resolution::Resolved) =
-            (edge.from.as_deref(), edge.to.as_deref(), edge.resolution)
-        {
-            fan_out
-                .entry(from.to_owned())
-                .or_default()
-                .insert(to.to_owned());
-            fan_in
-                .entry(to.to_owned())
-                .or_default()
-                .insert(from.to_owned());
-        }
-    }
-    for node in nodes {
-        node.weights.fan_in = fan_in.get(&node.id).map_or(0, HashSet::len);
-        node.weights.fan_out = fan_out.get(&node.id).map_or(0, HashSet::len);
-    }
-}
-
-fn node_id(file: &str, f: &FunctionShape) -> String {
-    format!("{}:{}:{}", file, node_local_name(f), f.span.start_line)
-}
-
-fn node_local_name(f: &FunctionShape) -> String {
-    f.owner
-        .known_value()
-        .and_then(|owner| owner.as_ref())
-        .map_or_else(
-            || f.display_name.clone(),
-            |owner| format!("{}::{}", owner.display_name, f.display_name),
-        )
-}
-
-fn name_last_segment(name: &str) -> &str {
-    name.rsplit_once("::").map_or(name, |(_, last)| last)
-}
-
-/// First segment of the call site's lexical module — the crate that
-/// owns the caller. `None` when the module is unknown or empty.
-fn caller_crate_segment(site: &CallShape) -> Option<&str> {
-    site.caller_module()
-        .and_then(|module| module.split("::").next())
-        .filter(|s| !s.is_empty())
-}
-
-fn qualified_in_crate(qualified: &str, crate_name: &str) -> bool {
-    qualified == crate_name
-        || qualified
-            .strip_prefix(crate_name)
-            .is_some_and(|rest| rest.starts_with("::"))
-}
-
-fn graph_language_label(files: &[FileGraphInput]) -> &'static str {
-    let mut langs = files.iter().map(|file| file.language);
-    let Some(first) = langs.next() else {
-        return "unknown";
-    };
-    if langs.all(|lang| lang == first) {
-        first.label()
-    } else {
-        "mixed"
-    }
-}
-
-fn module_path_for(
-    root: &Path,
-    file: &SourceFile,
-    lang: SourceLang,
-    crate_info: Option<&CrateInfo>,
-    source: &str,
-) -> String {
-    if !root.is_dir() {
-        return match lang {
-            SourceLang::Rust => crate_info
-                .map(|info| info.crate_name.clone())
-                .unwrap_or_else(|| FALLBACK_CRATE_NAME.to_owned()),
-            SourceLang::TypeScript(_) => "module".to_owned(),
-            SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
-            SourceLang::Go => go_module_path_from_file(&file.display_path, source),
-        };
-    }
-    match lang {
-        SourceLang::Rust => rust_module_path_for_file(file, crate_info),
-        SourceLang::TypeScript(_) => ts_module_path_from_relative_file(&file.display_path),
-        SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
-        SourceLang::Go => go_module_path_from_file(&file.display_path, source),
-    }
-}
-
-/// Compute the absolute Rust module path for `file`. When the
-/// surrounding `Cargo.toml` is known, qualify with the real crate
-/// name and resolve the file relative to `<crate_root>/src/` so
-/// workspace analyses no longer collapse every crate under literal
-/// `crate::` (which made same-named items collide).
-///
-/// Falls back to the legacy display-path heuristic with a literal
-/// `crate` prefix when no manifest was found, preserving behaviour
-/// for single-file analyses and tests that build a synthetic tree
-/// without a `Cargo.toml`.
-fn rust_module_path_for_file(file: &SourceFile, crate_info: Option<&CrateInfo>) -> String {
-    let Some(info) = crate_info else {
-        return rust_module_path_from_relative_file(&file.display_path);
-    };
-    let Some(crate_root) = info.crate_root.as_deref() else {
-        return rust_module_path_from_relative_file(&file.display_path);
-    };
-    let src_root = crate_root.join("src");
-    let relative = file
-        .path
-        .strip_prefix(&src_root)
-        .ok()
-        .map(|p| p.display().to_string().replace('\\', "/"))
-        .unwrap_or_else(|| file.display_path.replace('\\', "/"));
-    qualify_rust_module_segments(&relative, &info.crate_name)
-}
-
-fn rust_module_path_from_relative_file(file: &str) -> String {
-    let mut rel = file.replace('\\', "/");
-    if let Some(stripped) = rel.strip_prefix("src/") {
-        rel = stripped.to_owned();
-    }
-    qualify_rust_module_segments(&rel, FALLBACK_CRATE_NAME)
-}
-
-fn qualify_rust_module_segments(rel: &str, crate_name: &str) -> String {
-    if rel == "lib.rs" || rel == "main.rs" {
-        return crate_name.to_owned();
-    }
-    let trimmed = if let Some(stripped) = rel.strip_suffix("/mod.rs") {
-        stripped
-    } else if let Some(stripped) = rel.strip_suffix(".rs") {
-        stripped
-    } else {
-        rel
-    };
-    let module = trimmed
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join("::");
-    if module.is_empty() {
-        crate_name.to_owned()
-    } else {
-        format!("{crate_name}::{module}")
-    }
-}
-
-fn ts_module_path_from_relative_file(file: &str) -> String {
-    let mut rel = file.replace('\\', "/");
-    for ext in [".tsx", ".ts", ".jsx", ".js", ".mts", ".cts", ".mjs", ".cjs"] {
-        if let Some(stripped) = rel.strip_suffix(ext) {
-            rel = stripped.to_owned();
-            break;
-        }
-    }
-    let module = rel
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join("::");
-    if module.is_empty() {
-        "module".to_owned()
-    } else {
-        module
-    }
-}
-
-fn python_module_path_from_relative_file(file: &str) -> String {
-    let mut rel = file.replace('\\', "/");
-    if let Some(stripped) = rel.strip_suffix(".py") {
-        rel = stripped.to_owned();
-    }
-    let mut segments: Vec<&str> = rel
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    if segments.last() == Some(&"__init__") {
-        segments.pop();
-    }
-    if segments.is_empty() {
-        "module".to_owned()
-    } else {
-        segments.join("::")
-    }
-}
-
-/// Go's compilation unit is a *package* (directory), not a single file,
-/// so two `.go` files sharing a directory must collapse to the same
-/// module path. Use the parent-directory segments when the file lives
-/// in a subdirectory; for files that sit directly at the analyzer's
-/// root, peek at the `package` clause and use the declared package
-/// name. That keeps a one-file project's qualified names stable
-/// (`main::caller` rather than the `module::caller` placeholder a bare
-/// path-based heuristic would produce).
-fn go_module_path_from_file(file: &str, source: &str) -> String {
-    let rel = file.replace('\\', "/");
-    let segments: Vec<&str> = rel
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    if segments.len() > 1 {
-        return segments[..segments.len() - 1].join("::");
-    }
-    extract_go_package_name(source).unwrap_or_else(|| "module".to_owned())
-}
-
-/// Pluck the package name out of the first `package <name>` line.
-/// Skips line comments and blank lines; ignores `package` keywords
-/// that appear inside block comments because the simple scan can't
-/// see the comment boundaries — that's acceptable since `gofmt`-clean
-/// Go always declares its package on the first non-comment line.
-fn extract_go_package_name(source: &str) -> Option<String> {
-    for raw in source.lines() {
-        let line = raw.trim_start();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("package")
-            && let Some(first) = rest.split_whitespace().next()
-        {
-            return Some(first.to_owned());
-        }
-        // First non-comment, non-blank line that wasn't a package
-        // clause: bail out — anything else means we wandered past the
-        // header and the file is malformed for our purposes.
-        return None;
-    }
-    None
 }
 
 fn format_markdown(report: &Report) -> String {
@@ -1084,9 +161,9 @@ fn format_markdown(report: &Report) -> String {
 mod tests {
     use super::*;
     use crate::test_support::write_file;
-    use lens_domain::{ImportShape, ReceiverExprKind};
-    use rstest::rstest;
     use serde_json::Value;
+
+    use rstest::rstest;
 
     fn analyze_json(path: &Path) -> Value {
         let json = FunctionGraphAnalyzer::new()
@@ -1115,60 +192,6 @@ mod tests {
             .unwrap()
     }
 
-    fn site(path: &str) -> CallShape {
-        CallShape {
-            callee_display_name: SyntaxFact::Known(path.rsplit("::").next().map(ToOwned::to_owned)),
-            callee_path_segments: SyntaxFact::Known(
-                path.split("::").map(ToOwned::to_owned).collect(),
-            ),
-            caller_module: SyntaxFact::Known("crate::m".to_owned()),
-            caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),
-            caller_owner: SyntaxFact::Known(Some("S".to_owned())),
-            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
-            lexical_resolution: lens_domain::LexicalResolutionStatus::NotAttempted,
-            visible_imports: vec![
-                ImportShape {
-                    local_alias: SyntaxFact::Known(Some("parse".to_owned())),
-                    imported_module: SyntaxFact::Known("crate::a::parse".to_owned()),
-                    exported_symbol: SyntaxFact::Unknown,
-                },
-                ImportShape {
-                    local_alias: SyntaxFact::Known(Some("a".to_owned())),
-                    imported_module: SyntaxFact::Known("crate::a".to_owned()),
-                    exported_symbol: SyntaxFact::Unknown,
-                },
-            ],
-            line: 1,
-        }
-    }
-
-    #[rstest]
-    #[case::absolute("crate::a::parse", &["crate::a::parse"])]
-    #[case::self_relative("self::parse", &["crate::m::parse"])]
-    #[case::super_relative("super::parse", &["crate::parse"])]
-    #[case::self_type("Self::helper", &["crate::m::S::helper"])]
-    #[case::local_type("S::helper", &["crate::m::S::helper"])]
-    #[case::imported_module_alias("a::parse", &["crate::m::a::parse", "crate::a::parse"])]
-    #[case::imported_function_alias("parse", &["crate::m::parse", "crate::a::parse"])]
-    fn lexical_candidate_generation_is_ordered(#[case] path: &str, #[case] expected: &[&str]) {
-        assert_eq!(lexical_candidates(&site(path)), expected);
-    }
-
-    #[test]
-    fn lexical_path_helpers_handle_boundaries() {
-        assert_eq!(
-            prefix_with_tail(vec!["crate".to_owned(), "m".to_owned()], &["self"], 1).as_deref(),
-            Some("crate::m"),
-        );
-        assert_eq!(resolve_super_path("crate", &["super", "parse"]), None);
-        assert_eq!(
-            resolve_super_path("crate::a::b", &["super", "super", "parse"]).as_deref(),
-            Some("crate::parse"),
-        );
-        assert_eq!(join_tail(&["Self"], 1), None);
-        assert_eq!(join_tail(&["Self", "parse"], 1).as_deref(), Some("parse"));
-    }
-
     #[test]
     fn emits_nodes_with_stable_ids_and_runtime_placeholders() {
         let dir = tempfile::tempdir().unwrap();
@@ -1180,13 +203,14 @@ mod tests {
 
         let report = analyze_json(dir.path());
         let nodes = report["nodes"].as_array().unwrap();
-        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["schema_version"], 2);
         assert_eq!(report["language"], "rust");
         assert_eq!(nodes[0]["id"], "src/lib.rs:helper:1");
         assert_eq!(nodes[0]["name"], "helper");
         assert_eq!(nodes[0]["qualified_name"], "crate::helper");
         assert_eq!(nodes[0]["module"], "crate");
         assert_eq!(nodes[0]["impl_owner"], Value::Null);
+        assert_eq!(nodes[0]["visibility"], "private");
         assert_eq!(nodes[0]["weights"]["loc"], 1);
         assert_eq!(nodes[0]["weights"]["fan_in"], 1);
         assert_eq!(nodes[0]["weights"]["fan_out"], 0);
@@ -1198,6 +222,9 @@ mod tests {
         assert_eq!(nodes[0]["weights"]["total_time_ms"], Value::Null);
         assert_eq!(nodes[0]["weights"]["self_time_ms"], Value::Null);
         assert_eq!(nodes[0]["weights"]["error_count"], Value::Null);
+        assert_eq!(nodes[0]["outgoing_calls"]["resolved_call_count"], 0);
+        assert_eq!(nodes[1]["outgoing_calls"]["resolved_call_count"], 1);
+        assert_eq!(nodes[1]["outgoing_calls"]["unresolved_call_count"], 0);
     }
 
     #[test]
@@ -1235,6 +262,8 @@ mod tests {
         assert_eq!(edges[0]["to"], "src/lib.rs:helper:1");
         assert_eq!(edges[0]["callee_name"], "helper");
         assert_eq!(edges[0]["resolution"], "resolved");
+        assert_eq!(edges[0]["resolution_method"], "lexical");
+        assert_eq!(edges[0].get("candidates"), None);
         assert_eq!(edges[0]["call_count"], 2);
         assert_eq!(edges[0]["weights"]["call_count"], 2);
         assert_eq!(edges[0]["weights"]["total_transition_time_ms"], Value::Null);
@@ -1246,6 +275,38 @@ mod tests {
         assert_eq!(caller["weights"]["fan_out"], 1);
         assert_eq!(helper["weights"]["incoming_call_count"], 2);
         assert_eq!(helper["weights"]["fan_in"], 1);
+    }
+
+    #[rstest]
+    #[case::rust_public("pub_fn.rs", "pub fn exported() {}\n", "exported", "public")]
+    #[case::rust_private("priv_fn.rs", "fn hidden() {}\n", "hidden", "private")]
+    #[case::rust_restricted(
+        "restricted_fn.rs",
+        "pub(crate) fn scoped() {}\n",
+        "scoped",
+        "restricted"
+    )]
+    #[case::typescript_unknown("app.ts", "export function render() {}\n", "render", "unknown")]
+    #[case::python_unknown("app.py", "def handler():\n    return 1\n", "handler", "unknown")]
+    #[case::go_exported("app.go", "package app\n\nfunc Run() {}\n", "Run", "exported")]
+    #[case::go_unexported("app.go", "package app\n\nfunc run() {}\n", "run", "unexported")]
+    fn node_visibility_reflects_language_rules(
+        #[case] file: &str,
+        #[case] source: &str,
+        #[case] name: &str,
+        #[case] expected: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), file, source);
+
+        let report = analyze_json(dir.path());
+        let node = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == name)
+            .unwrap();
+        assert_eq!(node["visibility"], expected);
     }
 
     #[test]
@@ -1261,6 +322,7 @@ mod tests {
         let edge = edge_by_callee(&report, "helper");
         assert_eq!(edge["from"], "src/lib.rs:S::caller:4");
         assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(edge["resolution_method"], "self_method");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
             Some("crate::S::helper"),
@@ -1283,6 +345,7 @@ mod tests {
         let report = analyze_json(dir.path());
         let edge = edge_by_callee(&report, "helper");
         assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(edge["resolution_method"], "last_segment");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
             Some("crate::Inner::helper"),
@@ -1305,6 +368,8 @@ mod tests {
         let edge = edge_by_callee(&report, "len");
         assert_eq!(edge["resolution"], "unresolved");
         assert_eq!(edge["to"], Value::Null);
+        assert_eq!(edge.get("resolution_method"), None);
+        assert_eq!(edge.get("candidates"), None);
     }
 
     #[test]
@@ -1344,6 +409,7 @@ mod tests {
         let report = analyze_json(dir.path());
         let edge = edge_by_callee(&report, "parse");
         assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(edge["resolution_method"], "crate_narrowed");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
             Some("agent_a::Foo::parse"),
@@ -1354,7 +420,7 @@ mod tests {
     fn receiver_method_with_multiple_candidates_in_callers_crate_is_ambiguous() {
         // Two methods named `parse` live in the caller's crate.
         // Crate narrowing cannot tiebreak, so the call goes ambiguous
-        // (still better signal than the previous blanket Unresolved).
+        // and reports both candidates.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -1368,6 +434,18 @@ mod tests {
         let edge = edge_by_callee(&report, "parse");
         assert_eq!(edge["resolution"], "ambiguous");
         assert_eq!(edge["to"], Value::Null);
+        assert_eq!(edge["resolution_method"], "crate_narrowed");
+        let candidates: Vec<&str> = edge["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            candidates,
+            ["src/lib.rs:Bar::parse:2", "src/lib.rs:Foo::parse:1"],
+            "candidates must be sorted node ids",
+        );
     }
 
     #[rstest]
@@ -1459,6 +537,7 @@ mod tests {
         let report = analyze_json(dir.path());
         let edge = edge_by_callee(&report, "new");
         assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(edge["resolution_method"], "path_suffix");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
             Some("crate::a::Foo::new"),
@@ -1496,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_callee_names_are_ambiguous() {
+    fn duplicate_callee_names_are_ambiguous_with_candidates() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -1508,6 +587,47 @@ mod tests {
         let edge = &report["edges"].as_array().unwrap()[0];
         assert_eq!(edge["to"], Value::Null);
         assert_eq!(edge["resolution"], "ambiguous");
+        assert_eq!(edge["resolution_method"], "last_segment");
+        let candidates: Vec<&str> = edge["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(candidates, ["src/lib.rs:same:1", "src/lib.rs:same:2"]);
+        let node_ids: Vec<&str> = report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        for candidate in candidates {
+            assert!(node_ids.contains(&candidate), "unknown candidate id");
+        }
+    }
+
+    #[test]
+    fn summary_breaks_resolution_counts_down_by_module() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub fn known() {} fn caller() { known(); external(); } }\n\
+             mod b { fn caller() { crate::a::known(); } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let modules = report["summary"]["modules"].as_array().unwrap();
+        assert_eq!(modules.len(), 2);
+        assert_eq!(modules[0]["module"], "crate::a");
+        assert_eq!(modules[0]["resolved_call_count"], 1);
+        assert_eq!(modules[0]["unresolved_call_count"], 1);
+        assert_eq!(modules[0]["ambiguous_call_count"], 0);
+        assert_eq!(modules[0]["anonymous_call_count"], 0);
+        assert_eq!(modules[0]["total_call_count"], 2);
+        assert_eq!(modules[1]["module"], "crate::b");
+        assert_eq!(modules[1]["resolved_call_count"], 1);
+        assert_eq!(modules[1]["total_call_count"], 1);
     }
 
     #[test]
@@ -1530,11 +650,14 @@ mod tests {
         assert_eq!(helper["module"], "my_pkg");
 
         // Both bare and `crate::`-prefixed calls land on the same
-        // resolved node, so they aggregate into one edge.
+        // resolved node, so they aggregate into one edge. The bare
+        // call resolves lexically, the prefixed one via path suffix;
+        // the merged edge keeps the most direct method.
         let edges = report["edges"].as_array().unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["resolution"], "resolved");
         assert_eq!(edges[0]["call_count"], 2);
+        assert_eq!(edges[0]["resolution_method"], "lexical");
     }
 
     #[test]
@@ -1629,6 +752,7 @@ mod tests {
         let report = analyze_json(dir.path());
         let edge = edge_by_callee(&report, "parse");
         assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(edge["resolution_method"], "lexical");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
             Some(expected)
@@ -1976,60 +1100,6 @@ mod tests {
             .unwrap();
         assert!(md.contains("# Function graph:"));
         assert!(md.contains("resolved edges: 1"));
-    }
-
-    #[test]
-    fn module_paths_handle_crate_roots_nested_files_and_empty_relative_paths() {
-        assert_eq!(rust_module_path_from_relative_file("lib.rs"), "crate");
-        assert_eq!(rust_module_path_from_relative_file("main.rs"), "crate");
-        assert_eq!(
-            rust_module_path_from_relative_file("src/analyze/function_graph.rs"),
-            "crate::analyze::function_graph"
-        );
-        assert_eq!(
-            rust_module_path_from_relative_file("src/analyze/mod.rs"),
-            "crate::analyze"
-        );
-        assert_eq!(rust_module_path_from_relative_file(""), "crate");
-        assert_eq!(
-            ts_module_path_from_relative_file("routes/index.tsx"),
-            "routes::index"
-        );
-        assert_eq!(ts_module_path_from_relative_file("main.ts"), "main");
-        assert_eq!(python_module_path_from_relative_file("main.py"), "main");
-        assert_eq!(
-            python_module_path_from_relative_file("pkg/sub/main.py"),
-            "pkg::sub::main"
-        );
-        assert_eq!(
-            python_module_path_from_relative_file("pkg/__init__.py"),
-            "pkg"
-        );
-        assert_eq!(python_module_path_from_relative_file(""), "module");
-
-        assert_eq!(
-            go_module_path_from_file("main.go", "package main\n\nfunc main() {}\n"),
-            "main",
-        );
-        assert_eq!(
-            go_module_path_from_file("pkg/util/util.go", "package util\n"),
-            "pkg::util",
-        );
-        // No trailing parent and a missing package clause fall back to
-        // the placeholder so qualified names stay non-empty.
-        assert_eq!(
-            go_module_path_from_file("loose.go", "// pkg-less\n"),
-            "module"
-        );
-        // The package-name scanner must skip *both* blank lines and
-        // line comments (the `||` between the two checks). With `||`
-        // flipped to `&&`, the comment line would not be skipped, the
-        // function would bail on the first comment, and the package
-        // clause below would never be reached.
-        assert_eq!(
-            go_module_path_from_file("solo.go", "// header\n\npackage solo\nfunc f() {}\n"),
-            "solo",
-        );
     }
 
     #[test]

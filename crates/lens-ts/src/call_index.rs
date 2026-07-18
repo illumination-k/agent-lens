@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, VisibilityShape,
+    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -106,7 +106,9 @@ impl FunctionVisitor for FunctionShapeCollector {
                 display_name: owner,
                 kind: OwnerKind::Class,
             })),
-            visibility: SyntaxFact::Known(VisibilityShape::Unexported),
+            // Export status is not extracted yet, so stay honest with
+            // `Unknown` instead of hardcoding `Unexported`.
+            visibility: SyntaxFact::Unknown,
             signature: SyntaxFact::Unknown,
             doc,
             body: BodyShape {
