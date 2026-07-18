@@ -421,6 +421,26 @@ mod tests {
     }
 
     #[test]
+    fn greedy_feedback_arcs_in_weight_updates_subtract_exactly() {
+        // Peeling source 0 must drop node 1's in-weight from 12 to 8
+        // (subtracting the peeled edge). An inexact update that leaves
+        // it near 3 flips the greedy pick to node 1 and cuts the
+        // heavier 2 -> 1 edge instead of 1 -> 2.
+        let edges = weighted(&[(0, 1, 4), (1, 2, 6), (2, 1, 8)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![1]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_out_weight_updates_subtract_exactly() {
+        // Peeling sink 0 must drop node 1's out-weight from 12 to 10
+        // (subtracting the peeled edge). An inexact update that leaves
+        // it near 6 flips the greedy pick to node 2 and cuts the
+        // heavier 1 -> 2 edge instead of 2 -> 1.
+        let edges = weighted(&[(1, 0, 2), (1, 2, 10), (2, 1, 9)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![2]);
+    }
+
+    #[test]
     fn greedy_feedback_arcs_ranks_vertices_by_weight_difference() {
         // Node 1 has the largest out - in difference (10 - 8 = 2) and
         // must be ordered first; ranking by ratio instead of
