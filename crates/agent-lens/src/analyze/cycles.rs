@@ -521,6 +521,91 @@ mod tests {
     }
 
     #[test]
+    fn resolved_edges_leaving_a_tangle_are_not_internal() {
+        // `a` participates in the cycle and also calls `leaf`, which is
+        // outside it. The outgoing edge must not inflate the internal
+        // call-site count or the break-suggestion subgraph.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn a() { b(); leaf(); }\nfn b() { a(); }\nfn leaf() {}\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["summary"]["scc_count"], 1);
+        let scc = &report["sccs"][0];
+        assert_eq!(scc["size"], 2);
+        assert_eq!(scc["internal_call_sites"], 2);
+        let member_ids: Vec<&str> = scc["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        for suggestion in scc["break_suggestions"].as_array().unwrap() {
+            for endpoint in ["from", "to"] {
+                assert!(
+                    member_ids.contains(&suggestion[endpoint].as_str().unwrap()),
+                    "suggestion endpoint outside the tangle: {suggestion}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_tests_restricts_cycles_to_test_functions() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn a() { b(); }\nfn b() { a(); }\n\
+             #[cfg(test)]\nmod tests {\n    fn ta() { tb(); }\n    fn tb() { ta(); }\n}\n",
+        );
+
+        assert_eq!(analyze_json(dir.path())["summary"]["scc_count"], 2);
+
+        let json = CyclesAnalyzer::new()
+            .with_only_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let only: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(only["summary"]["scc_count"], 1);
+        let member_ids: Vec<&str> = only["sccs"][0]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(member_ids, ["src/lib.rs:ta:5", "src/lib.rs:tb:6"]);
+    }
+
+    #[test]
+    fn exclude_patterns_drop_matching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/keep.rs",
+            "fn a() { b(); }\nfn b() { a(); }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/generated.rs",
+            "fn ga() { gb(); }\nfn gb() { ga(); }\n",
+        );
+
+        assert_eq!(analyze_json(dir.path())["summary"]["scc_count"], 2);
+
+        let json = CyclesAnalyzer::new()
+            .with_exclude_patterns(vec!["generated.rs".to_owned()])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let excluded: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(excluded["summary"]["scc_count"], 1);
+        assert_eq!(excluded["sccs"][0]["members"][0]["file"], "src/keep.rs");
+    }
+
+    #[test]
     fn three_cycle_break_suggestions_break_the_whole_cycle() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
@@ -594,6 +679,25 @@ mod tests {
             md.contains("src/lib.rs:odd:2 → src/lib.rs:even:1"),
             "got: {md}"
         );
+        // No ambiguity in this fixture, so the warning line must be
+        // absent rather than rendered with a zero count.
+        assert!(!md.contains("ambiguous edges nearby"), "got: {md}");
+    }
+
+    #[test]
+    fn markdown_reports_nearby_ambiguity_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod x { pub fn same() {} }\nmod y { pub fn same() {} }\n\
+             fn a() { b(); same(); }\nfn b() { a(); }\n",
+        );
+
+        let md = CyclesAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("ambiguous edges nearby: 1"), "got: {md}");
     }
 
     #[test]

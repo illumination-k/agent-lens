@@ -401,6 +401,36 @@ mod tests {
     }
 
     #[test]
+    fn greedy_feedback_arcs_source_peeling_updates_downstream_in_weights() {
+        // 0 is a source feeding the 1 <-> 2 cycle with a heavy edge.
+        // Peeling it must subtract that weight from node 1's in-weight,
+        // or the greedy pick flips to node 2 and cuts the heavy
+        // 1 -> 2 edge instead of the cheap 2 -> 1 one.
+        let edges = weighted(&[(0, 1, 10), (1, 2, 5), (2, 1, 1)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![2]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_sink_peeling_updates_upstream_out_weights() {
+        // 0 is a sink fed by node 1 with a heavy edge. Peeling it must
+        // subtract that weight from node 1's out-weight, or node 1's
+        // inflated degree wins the greedy pick and the 1 <-> 2 cycle
+        // is cut at the expensive 2 -> 1 edge instead of 1 -> 2.
+        let edges = weighted(&[(1, 0, 6), (1, 2, 2), (2, 1, 3)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![1]);
+    }
+
+    #[test]
+    fn greedy_feedback_arcs_ranks_vertices_by_weight_difference() {
+        // Node 1 has the largest out - in difference (10 - 8 = 2) and
+        // must be ordered first; ranking by ratio instead of
+        // difference would pick node 0 (2 / 1) and reverse a
+        // different edge set.
+        let edges = weighted(&[(0, 1, 2), (1, 0, 1), (1, 2, 9), (2, 1, 6)]);
+        assert_eq!(greedy_feedback_arcs(3, &edges), vec![0, 3]);
+    }
+
+    #[test]
     fn greedy_feedback_arcs_prefers_cutting_light_edges() {
         // 0 -> 1 -> 2 -> 0 is a heavy cycle (weight 5 each) crossed by
         // a light back-edge 2 -> 1. The heuristic must not pay for a
