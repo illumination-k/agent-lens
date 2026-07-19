@@ -1120,6 +1120,88 @@ mod tests {
     }
 
     #[test]
+    fn neighborhood_excludes_seed_and_respects_depth_cap() {
+        // A five-function chain: w -> x -> y -> z -> q. The seed (x)
+        // must not appear in its own ego graph, and depth 2 must admit
+        // z but not q.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn q() {}\nfn z() { q(); }\nfn y() { z(); }\nfn x() { y(); }\nfn w() { x(); }\n",
+        );
+
+        let report = analyze_json(
+            &GraphQueryAnalyzer::new(GraphQueryKind::Neighborhood, "x").with_depth(Some(2)),
+            dir.path(),
+        );
+        let rows: Vec<(&str, u64, &str)> = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["qualified_name"].as_str().unwrap(),
+                    row["depth"].as_u64().unwrap(),
+                    row["direction"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("crate::y", 1, "out"),
+                ("crate::w", 1, "in"),
+                ("crate::z", 2, "out"),
+            ],
+            "got {rows:?}"
+        );
+    }
+
+    #[rstest]
+    #[case::limit_below_matches(1, true, 1)]
+    #[case::limit_equal_to_matches(2, false, 2)]
+    fn ambiguous_candidate_list_truncates_only_beyond_limit(
+        #[case] limit: usize,
+        #[case] truncated: bool,
+        #[case] listed: usize,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub fn dup() {} }\nmod b { pub fn dup() {} }\n",
+        );
+
+        let report = analyze_json(
+            &GraphQueryAnalyzer::new(GraphQueryKind::Callers, "dup").with_limit(Some(limit)),
+            dir.path(),
+        );
+        assert_eq!(report["status"], "symbol_ambiguous");
+        assert_eq!(report["candidate_count"], 2);
+        assert_eq!(report["truncated"], truncated);
+        assert_eq!(report["candidates"].as_array().unwrap().len(), listed);
+    }
+
+    #[test]
+    fn limit_equal_to_reachable_count_is_not_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = String::from("fn sink() {}\n");
+        for i in 0..5 {
+            src.push_str(&format!("fn caller_{i}() {{ sink(); }}\n"));
+        }
+        write_file(dir.path(), "src/lib.rs", &src);
+
+        let report = analyze_json(
+            &GraphQueryAnalyzer::new(GraphQueryKind::Callers, "sink").with_limit(Some(5)),
+            dir.path(),
+        );
+        assert_eq!(report["reachable_count"], 5);
+        assert_eq!(report["truncated"], false);
+        assert_eq!(report["results"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
     fn node_limit_caps_results_and_reports_truncation() {
         let dir = tempfile::tempdir().unwrap();
         let mut src = String::from("fn sink() {}\n");
@@ -1307,10 +1389,23 @@ mod tests {
         let md = GraphQueryAnalyzer::new(GraphQueryKind::Callers, "dup")
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
-        assert!(md.contains("matches 2 function(s)"), "got: {md}");
+        assert!(md.contains("`dup` matches 2 function(s)"), "got: {md}");
         assert!(md.contains("Not guessing"), "got: {md}");
         assert!(md.contains("id `src/lib.rs:dup:1`"), "got: {md}");
         assert!(md.contains("id `src/lib.rs:dup:2`"), "got: {md}");
+    }
+
+    #[test]
+    fn markdown_neighborhood_names_direction_in_header_and_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", DIAMOND);
+
+        let md = GraphQueryAnalyzer::new(GraphQueryKind::Neighborhood, "helper_a")
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("direction both, "), "got: {md}");
+        assert!(md.contains("depth 1 out,"), "got: {md}");
+        assert!(md.contains("depth 1 in,"), "got: {md}");
     }
 
     #[test]

@@ -574,7 +574,8 @@ mod tests {
     #[case::same_endpoint(vec![vec![1], vec![]], 0, 0, None, Some(vec![0]))]
     #[case::unreachable(vec![vec![], vec![0]], 0, 1, None, None)]
     #[case::wrong_direction(vec![vec![1], vec![]], 1, 0, None, None)]
-    #[case::out_of_range_endpoint(vec![vec![]], 0, 7, None, None)]
+    #[case::out_of_range_target(vec![vec![]], 0, 7, None, None)]
+    #[case::out_of_range_source(vec![vec![]], 7, 0, None, None)]
     #[case::depth_cap_blocks_long_chain(vec![vec![1], vec![2], vec![]], 0, 2, Some(1), None)]
     #[case::depth_cap_admits_exact_length(vec![vec![1], vec![2], vec![]], 0, 2, Some(2), Some(vec![0, 1, 2]))]
     #[case::shortcut_beats_detour(
