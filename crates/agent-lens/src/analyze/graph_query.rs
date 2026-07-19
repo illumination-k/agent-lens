@@ -1158,6 +1158,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn neighborhood_direction_tags_ignore_beyond_cap_reachability() {
+        // Cycle x -> y -> a -> x. Within depth 1, y is only x's callee
+        // and a only its caller; the depth-2 paths around the cycle
+        // (y reaches x via a, a is reached via y) must not smear the
+        // tags into `both`.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn x() { y(); }\nfn y() { a(); }\nfn a() { x(); }\n",
+        );
+
+        let report = analyze_json(
+            &GraphQueryAnalyzer::new(GraphQueryKind::Neighborhood, "x"),
+            dir.path(),
+        );
+        let rows: Vec<(&str, u64, &str)> = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["qualified_name"].as_str().unwrap(),
+                    row["depth"].as_u64().unwrap(),
+                    row["direction"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [("crate::y", 1, "out"), ("crate::a", 1, "in")],
+            "got {rows:?}"
+        );
+    }
+
     #[rstest]
     #[case::limit_below_matches(1, true, 1)]
     #[case::limit_equal_to_matches(2, false, 2)]
