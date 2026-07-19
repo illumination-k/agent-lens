@@ -250,6 +250,45 @@ fn run_profile_emits_combined_json_report() {
 }
 
 #[test]
+fn run_profile_drives_graph_query_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "fn sink() {}\nfn caller() { sink(); }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.trace]\npath = \"src\"\ntools = [\"graph-query\"]\n\n\
+         [profile.trace.graph-query]\nquery = \"callers\"\nsymbol = \"sink\"\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "trace"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "graph-query");
+    let report = &json["results"][0]["report"];
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["results"][0]["qualified_name"], "crate::caller");
+}
+
+#[test]
+fn run_profile_rejects_graph_query_without_options_table() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.trace]\npath = \"src\"\ntools = [\"graph-query\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "trace"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("graph-query"), "got: {stderr}");
+}
+
+#[test]
 fn run_resolves_target_relative_to_explicit_config_dir() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
