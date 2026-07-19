@@ -19,6 +19,7 @@ mod error_from;
 mod format;
 pub mod function_graph;
 pub mod hotspot;
+pub mod hubs;
 mod path_filter;
 mod runner;
 pub mod similarity;
@@ -36,6 +37,7 @@ pub use coupling::CouplingAnalyzer;
 pub use cycles::CyclesAnalyzer;
 pub use function_graph::FunctionGraphAnalyzer;
 pub use hotspot::{HotspotAnalyzer, HotspotError};
+pub use hubs::HubsAnalyzer;
 
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
 pub type CouplingAnalyzerError = CrateAnalyzerError;

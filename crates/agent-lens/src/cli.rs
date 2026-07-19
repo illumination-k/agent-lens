@@ -19,8 +19,8 @@ use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
-    FunctionSelection, HotspotAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod,
-    WrapperAnalyzer,
+    FunctionSelection, HotspotAnalyzer, HubsAnalyzer, OutputFormat, SimilarityAnalyzer,
+    SimilarityMethod, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -453,6 +453,26 @@ enum AnalyzeCommand {
     /// must be a directory and the patterns are evaluated relative to
     /// it.
     ContextSpan(AnalyzeContextSpanArgs),
+    /// Report hub smells on the static function call graph: god
+    /// functions, load-bearing utilities, bottlenecks, and misplaced
+    /// functions.
+    ///
+    /// Builds the same call graph as `function-graph` and flags, per
+    /// function: outlier fan-out (god functions, defect-prone), outlier
+    /// fan-in (load-bearing blast-radius signal — check callers before
+    /// editing, not a defect), Henry-Kafura information-flow spikes
+    /// (`loc × (fan_in × fan_out)²`), and cross-module pull (most
+    /// resolved call traffic lands in a different module). Fan-in is
+    /// split into prod vs test callers, and each function carries a
+    /// deterministic PageRank-importance percentile (damping 0.85,
+    /// fixed 100 iterations, call-count weights). Outliers are chosen
+    /// by a robust quartile rule on log-scaled metrics, never absolute
+    /// thresholds. Degrees count resolved edges only, so they are
+    /// lower bounds; the report cites per-module resolution confidence.
+    /// The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). JSON is the default;
+    /// `--format md` emits ranked lists capped at `--top` (default 20).
+    Hubs(AnalyzeHubsArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for supported source files (Rust,
@@ -549,6 +569,14 @@ struct AnalyzeComplexityArgs {
     /// ranking. JSON output always carries the full list.
     #[arg(long)]
     min_score: Option<u32>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeHubsArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -802,6 +830,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.complexity.is_some(), config::ToolName::Complexity),
         (profile.cohesion.is_some(), config::ToolName::Cohesion),
         (profile.hotspot.is_some(), config::ToolName::Hotspot),
+        (profile.hubs.is_some(), config::ToolName::Hubs),
         (
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,
@@ -871,6 +900,13 @@ fn build_analyze_command(
                 common,
                 ranking: AnalyzeRankingArgs { top: opts.top },
                 since: opts.since,
+            })
+        }
+        config::ToolName::Hubs => {
+            let opts = profile.hubs.clone().unwrap_or_default();
+            AnalyzeCommand::Hubs(AnalyzeHubsArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
             })
         }
         config::ToolName::Similarity => {
@@ -962,6 +998,7 @@ impl_with_analyze_path_args!(
     FunctionGraphAnalyzer,
     ContextSpanAnalyzer,
     HotspotAnalyzer,
+    HubsAnalyzer,
     WrapperAnalyzer,
 );
 
@@ -1027,6 +1064,13 @@ impl AnalyzeCommand {
                 ContextSpanAnalyzer::new()
                     .with_analyze_path_args(path_filter)
                     .with_entry_globs(args.entry_glob)
+                    .analyze(&path, format)?
+            }
+            Self::Hubs(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                HubsAnalyzer::new()
+                    .with_top(args.ranking.top)
+                    .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
             Self::Hotspot(args) => {
@@ -1665,6 +1709,29 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_hubs_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "hubs",
+            "crates",
+            "--top",
+            "10",
+            "--format",
+            "md",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Hubs(args)) = cli.command else {
+            panic!("expected analyze hubs");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(10));
+        assert!(args.common.path_filter.exclude_tests);
+    }
+
+    #[test]
     fn parses_analyze_coupling_default_format_is_json() {
         let cli =
             Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
@@ -1993,6 +2060,23 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.ranking.top, None);
         assert_eq!(args.method, SimilarityMethod::Tsed);
         assert!(!args.diff.diff_only);
+    }
+
+    #[test]
+    fn build_analyze_command_maps_hubs_options() {
+        let profile: config::Profile =
+            toml::from_str("path = \"crates\"\ntools = [\"hubs\"]\n\n[hubs]\ntop = 7\n").unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Hubs,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        );
+        let AnalyzeCommand::Hubs(args) = cmd else {
+            panic!("expected analyze hubs");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(7));
     }
 
     #[test]

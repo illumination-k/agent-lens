@@ -100,6 +100,8 @@ pub struct Profile {
     #[serde(default)]
     pub hotspot: Option<HotspotOptions>,
     #[serde(default)]
+    pub hubs: Option<HubsOptions>,
+    #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
     #[serde(default)]
     pub wrapper: Option<WrapperOptions>,
@@ -128,6 +130,7 @@ pub enum ToolName {
     Cycles,
     FunctionGraph,
     Hotspot,
+    Hubs,
     Similarity,
     Wrapper,
 }
@@ -143,6 +146,7 @@ impl ToolName {
             Self::Cycles => "cycles",
             Self::FunctionGraph => "function-graph",
             Self::Hotspot => "hotspot",
+            Self::Hubs => "hubs",
             Self::Similarity => "similarity",
             Self::Wrapper => "wrapper",
         }
@@ -191,6 +195,13 @@ pub struct CohesionOptions {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HotspotOptions {
     pub since: Option<String>,
+    pub top: Option<usize>,
+}
+
+/// `[profile.<name>.hubs]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct HubsOptions {
     pub top: Option<usize>,
 }
 

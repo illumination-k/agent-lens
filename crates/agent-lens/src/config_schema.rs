@@ -23,11 +23,12 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 9] = [
+const TOOL_ORDER: [ToolName; 10] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
     ToolName::Hotspot,
+    ToolName::Hubs,
     ToolName::ContextSpan,
     ToolName::Wrapper,
     ToolName::Coupling,
@@ -66,7 +67,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, hotspot, similarity, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, hotspot, hubs, similarity, wrapper.",
     },
     Field {
         key: "format",
@@ -193,6 +194,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap the report to the top N results.",
             },
         ],
+        ToolName::Hubs => &[Field {
+            key: "top",
+            ty: "int",
+            presence: "optional",
+            desc: "Cap each markdown ranking to the top N results.",
+        }],
         ToolName::ContextSpan => &[Field {
             key: "entry-glob",
             ty: "array<string> (globs)",
@@ -371,8 +378,8 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        CohesionOptions, ComplexityOptions, ContextSpanOptions, HotspotOptions, Profile,
-        SimilarityOptions, WrapperOptions,
+        CohesionOptions, ComplexityOptions, ContextSpanOptions, HotspotOptions, HubsOptions,
+        Profile, SimilarityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -396,6 +403,7 @@ mod tests {
         assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
+        assert_tool_parity::<HubsOptions>(ToolName::Hubs);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);
     }
