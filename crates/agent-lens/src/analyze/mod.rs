@@ -18,6 +18,7 @@ mod diff;
 mod error_from;
 mod format;
 pub mod function_graph;
+pub mod graph_query;
 pub mod hotspot;
 pub mod hubs;
 mod path_filter;
@@ -36,6 +37,10 @@ pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
 pub use cycles::CyclesAnalyzer;
 pub use function_graph::FunctionGraphAnalyzer;
+pub use graph_query::{
+    DEFAULT_GRAPH_QUERY_DEPTH, DEFAULT_GRAPH_QUERY_LIMIT, GraphDirection, GraphQueryAnalyzer,
+    GraphQueryKind,
+};
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use hubs::HubsAnalyzer;
 
@@ -184,6 +189,8 @@ pub enum AnalyzerError {
     },
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error("invalid graph query: {message}")]
+    InvalidQuery { message: String },
 }
 
 /// Errors raised by analyzers that walk a Rust crate from a `.rs` root

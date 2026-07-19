@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::analyze::{OutputFormat, SimilarityMethod};
+use crate::analyze::{GraphDirection, GraphQueryKind, OutputFormat, SimilarityMethod};
 
 /// File name searched for when discovering a project config.
 pub const CONFIG_FILE_NAME: &str = "agent-lens.toml";
@@ -61,6 +61,14 @@ impl Config {
                 return Err(ConfigError::Invalid {
                     name: name.clone(),
                     message: "`only-tests` and `exclude-tests` are mutually exclusive".to_owned(),
+                });
+            }
+            if profile.tools.contains(&ToolName::GraphQuery) && profile.graph_query.is_none() {
+                return Err(ConfigError::Invalid {
+                    name: name.clone(),
+                    message: "listing `graph-query` in `tools` requires a \
+                              `[profile.<name>.graph-query]` table declaring `query` and `symbol`"
+                        .to_owned(),
                 });
             }
         }
@@ -102,6 +110,8 @@ pub struct Profile {
     #[serde(default)]
     pub hubs: Option<HubsOptions>,
     #[serde(default)]
+    pub graph_query: Option<GraphQueryOptions>,
+    #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
     #[serde(default)]
     pub wrapper: Option<WrapperOptions>,
@@ -129,6 +139,7 @@ pub enum ToolName {
     ContextSpan,
     Cycles,
     FunctionGraph,
+    GraphQuery,
     Hotspot,
     Hubs,
     Similarity,
@@ -145,6 +156,7 @@ impl ToolName {
             Self::ContextSpan => "context-span",
             Self::Cycles => "cycles",
             Self::FunctionGraph => "function-graph",
+            Self::GraphQuery => "graph-query",
             Self::Hotspot => "hotspot",
             Self::Hubs => "hubs",
             Self::Similarity => "similarity",
@@ -203,6 +215,23 @@ pub struct HotspotOptions {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HubsOptions {
     pub top: Option<usize>,
+}
+
+/// `[profile.<name>.graph-query]` overrides. Unlike the other tool
+/// tables this one is mandatory when `graph-query` is listed in
+/// `tools` — a traversal without a verb and a start symbol has no
+/// meaning, so `query` and `symbol` are required keys and
+/// [`Config::validate`] rejects a profile that lists the tool without
+/// this table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct GraphQueryOptions {
+    pub query: GraphQueryKind,
+    pub symbol: String,
+    pub to: Option<String>,
+    pub depth: Option<usize>,
+    pub direction: Option<GraphDirection>,
+    pub limit: Option<usize>,
 }
 
 /// `[profile.<name>.context-span]` overrides.
@@ -267,6 +296,8 @@ pub enum ConfigError {
     },
     #[error("profile {name:?} is invalid: {message}")]
     Invalid { name: String, message: String },
+    #[error("tool `{tool}` needs a `[profile.<name>.{tool}]` options table to run")]
+    MissingToolOptions { tool: &'static str },
 }
 
 #[cfg(test)]
@@ -381,10 +412,51 @@ since = "90.days.ago"
         );
     }
 
+    #[test]
+    fn parses_graph_query_options() {
+        let config: Config = toml::from_str(
+            "[profile.trace]\npath = \"src/\"\ntools = [\"graph-query\"]\n\n\
+             [profile.trace.graph-query]\nquery = \"neighborhood\"\nsymbol = \"resolve\"\n\
+             direction = \"in\"\ndepth = 2\nlimit = 25\n",
+        )
+        .unwrap();
+        let opts = config
+            .profile("trace")
+            .unwrap()
+            .graph_query
+            .as_ref()
+            .unwrap();
+        assert_eq!(opts.query, GraphQueryKind::Neighborhood);
+        assert_eq!(opts.symbol, "resolve");
+        assert_eq!(opts.to, None);
+        assert_eq!(opts.direction, Some(GraphDirection::In));
+        assert_eq!(opts.depth, Some(2));
+        assert_eq!(opts.limit, Some(25));
+    }
+
+    #[test]
+    fn load_rejects_graph_query_tool_without_its_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            "[profile.trace]\npath = \"src/\"\ntools = [\"graph-query\"]\n",
+        );
+        let err = load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }), "got: {err:?}");
+        assert!(err.to_string().contains("graph-query"), "got: {err}");
+    }
+
     #[rstest]
     #[case::missing_path("[profile.web]\ntools = [\"similarity\"]\n")]
     #[case::missing_tools("[profile.web]\npath = \"web/\"\n")]
     #[case::unknown_tool_name("[profile.web]\npath = \"web/\"\ntools = [\"lint\"]\n")]
+    #[case::graph_query_without_symbol(
+        "[profile.web]\npath = \"web/\"\ntools = [\"graph-query\"]\n\n[profile.web.graph-query]\nquery = \"callers\"\n"
+    )]
+    #[case::graph_query_without_query(
+        "[profile.web]\npath = \"web/\"\ntools = [\"graph-query\"]\n\n[profile.web.graph-query]\nsymbol = \"foo\"\n"
+    )]
     fn rejects_invalid_profiles(#[case] toml_src: &str) {
         assert!(
             toml::from_str::<Config>(toml_src).is_err(),

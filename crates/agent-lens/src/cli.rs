@@ -19,8 +19,8 @@ use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
-    FunctionSelection, HotspotAnalyzer, HubsAnalyzer, OutputFormat, SimilarityAnalyzer,
-    SimilarityMethod, WrapperAnalyzer,
+    FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer,
+    HubsAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -436,6 +436,28 @@ enum AnalyzeCommand {
     /// Python, or Go); other extensions are ignored silently. JSON is the
     /// default; `--format md` emits a compact sanity summary.
     FunctionGraph(AnalyzeCommonArgs),
+    /// Run one canned traversal on the static function call graph:
+    /// callers, callees, neighborhood, or path.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and answers one structural question per invocation. `--query
+    /// callers|callees|neighborhood` walks resolved call edges from the
+    /// function named by `--symbol` up to `--depth` (default 1;
+    /// `--direction in|out|both` picks the neighborhood orientation).
+    /// `--query path` reports the shortest call chain from `--symbol`
+    /// to `--to`, with the call lines of every hop as evidence.
+    /// Symbols match by `::`-segment suffix on the qualified name
+    /// (e.g. `Resolver::resolve`) or an exact node id; ambiguous
+    /// matches are listed, never guessed. Traversal follows resolved
+    /// edges only, so results are lower bounds — every row carries the
+    /// node's unresolved/ambiguous outgoing call-site counts — and the
+    /// result set is capped by node count (`--limit`, default 50). The
+    /// parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` renders
+    /// span and module detail for small result sets and compact id
+    /// rows for larger ones.
+    GraphQuery(AnalyzeGraphQueryArgs),
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
     ///
@@ -577,6 +599,35 @@ struct AnalyzeHubsArgs {
     common: AnalyzeCommonArgs,
     #[command(flatten)]
     ranking: AnalyzeRankingArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeGraphQueryArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    /// Traversal verb to run.
+    #[arg(long, value_enum)]
+    query: GraphQueryKind,
+    /// Function to start from: a `::`-segment suffix of its qualified
+    /// name (e.g. `foo`, `module::foo`, `Owner::method`) or an exact
+    /// node id (`file:name:line`, as listed on ambiguity).
+    #[arg(long)]
+    symbol: String,
+    /// Destination symbol for `--query path` (same matching rules as
+    /// `--symbol`).
+    #[arg(long)]
+    to: Option<String>,
+    /// Traversal depth cap in call hops. Defaults to 1 for
+    /// callers/callees/neighborhood; for `path` it caps the search
+    /// (default unbounded).
+    #[arg(long)]
+    depth: Option<usize>,
+    /// Traversal direction for `--query neighborhood` (default both).
+    #[arg(long, value_enum)]
+    direction: Option<GraphDirection>,
+    /// Cap the result set by node count (default 50).
+    #[arg(long)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -814,7 +865,7 @@ fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             );
             continue;
         }
-        let report = build_analyze_command(tool, profile, &target, format).run()?;
+        let report = build_analyze_command(tool, profile, &target, format)?.run()?;
         sections.push((tool, report));
     }
 
@@ -831,6 +882,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.cohesion.is_some(), config::ToolName::Cohesion),
         (profile.hotspot.is_some(), config::ToolName::Hotspot),
         (profile.hubs.is_some(), config::ToolName::Hubs),
+        (profile.graph_query.is_some(), config::ToolName::GraphQuery),
         (
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,
@@ -845,13 +897,16 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
 
 /// Translate one profile tool entry into the [`AnalyzeCommand`] the
 /// `analyze` subcommand would build for the same options. Per-tool tables
-/// that are absent fall back to the analyzer's CLI defaults.
+/// that are absent fall back to the analyzer's CLI defaults; `graph-query`
+/// has no defaults to fall back to (its `query` and `symbol` are
+/// required), so a missing table is an error — [`config::load`] already
+/// rejects such profiles, this is the seam-level guard.
 fn build_analyze_command(
     tool: config::ToolName,
     profile: &config::Profile,
     target: &Path,
     format: OutputFormat,
-) -> AnalyzeCommand {
+) -> Result<AnalyzeCommand, ConfigError> {
     let common = AnalyzeCommonArgs {
         path: target.to_path_buf(),
         format,
@@ -861,7 +916,7 @@ fn build_analyze_command(
             exclude: profile.exclude.clone(),
         },
     };
-    match tool {
+    Ok(match tool {
         config::ToolName::Cohesion => {
             let opts = profile.cohesion.clone().unwrap_or_default();
             AnalyzeCommand::Cohesion(AnalyzeCohesionArgs {
@@ -887,6 +942,23 @@ fn build_analyze_command(
         config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
         config::ToolName::Cycles => AnalyzeCommand::Cycles(common),
         config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
+        config::ToolName::GraphQuery => {
+            let opts = profile
+                .graph_query
+                .clone()
+                .ok_or(ConfigError::MissingToolOptions {
+                    tool: config::ToolName::GraphQuery.as_str(),
+                })?;
+            AnalyzeCommand::GraphQuery(AnalyzeGraphQueryArgs {
+                common,
+                query: opts.query,
+                symbol: opts.symbol,
+                to: opts.to,
+                depth: opts.depth,
+                direction: opts.direction,
+                limit: opts.limit,
+            })
+        }
         config::ToolName::ContextSpan => {
             let opts = profile.context_span.clone().unwrap_or_default();
             AnalyzeCommand::ContextSpan(AnalyzeContextSpanArgs {
@@ -932,7 +1004,7 @@ fn build_analyze_command(
                 },
             })
         }
-    }
+    })
 }
 
 /// Render the per-tool reports as one document: stacked `## <tool>`
@@ -996,6 +1068,7 @@ impl_with_analyze_path_args!(
     CouplingAnalyzer,
     CyclesAnalyzer,
     FunctionGraphAnalyzer,
+    GraphQueryAnalyzer,
     ContextSpanAnalyzer,
     HotspotAnalyzer,
     HubsAnalyzer,
@@ -1056,6 +1129,16 @@ impl AnalyzeCommand {
             Self::FunctionGraph(args) => {
                 let (path, format, path_filter) = args.into_parts();
                 FunctionGraphAnalyzer::new()
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::GraphQuery(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                GraphQueryAnalyzer::new(args.query, args.symbol)
+                    .with_to(args.to)
+                    .with_depth(args.depth)
+                    .with_direction(args.direction)
+                    .with_limit(args.limit)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
@@ -1709,6 +1792,66 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_graph_query_with_flags() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "graph-query",
+            ".",
+            "--query",
+            "path",
+            "--symbol",
+            "handler",
+            "--to",
+            "db_write",
+            "--depth",
+            "4",
+            "--limit",
+            "10",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
+            panic!("expected analyze graph-query");
+        };
+        assert_eq!(args.query, GraphQueryKind::Path);
+        assert_eq!(args.symbol, "handler");
+        assert_eq!(args.to.as_deref(), Some("db_write"));
+        assert_eq!(args.depth, Some(4));
+        assert_eq!(args.direction, None);
+        assert_eq!(args.limit, Some(10));
+        assert_eq!(args.common.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_graph_query_direction() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "graph-query",
+            ".",
+            "--query",
+            "neighborhood",
+            "--symbol",
+            "resolve",
+            "--direction",
+            "in",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
+            panic!("expected analyze graph-query");
+        };
+        assert_eq!(args.query, GraphQueryKind::Neighborhood);
+        assert_eq!(args.direction, Some(GraphDirection::In));
+    }
+
+    #[test]
+    fn analyze_graph_query_requires_query_and_symbol() {
+        let err = Cli::try_parse_from(["agent-lens", "analyze", "graph-query", "."])
+            .expect_err("missing required flags");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
     fn parses_analyze_hubs_with_top() {
         let cli = Cli::try_parse_from([
             "agent-lens",
@@ -2029,7 +2172,8 @@ fn dispatch(n: i32) -> i32 {
             &profile,
             Path::new("/repo/web"),
             OutputFormat::Md,
-        );
+        )
+        .unwrap();
         let AnalyzeCommand::Similarity(args) = cmd else {
             panic!("expected analyze similarity");
         };
@@ -2051,7 +2195,8 @@ fn dispatch(n: i32) -> i32 {
             &profile,
             Path::new("web"),
             OutputFormat::Json,
-        );
+        )
+        .unwrap();
         let AnalyzeCommand::Similarity(args) = cmd else {
             panic!("expected analyze similarity");
         };
@@ -2071,12 +2216,64 @@ fn dispatch(n: i32) -> i32 {
             &profile,
             Path::new("crates"),
             OutputFormat::Md,
-        );
+        )
+        .unwrap();
         let AnalyzeCommand::Hubs(args) = cmd else {
             panic!("expected analyze hubs");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.ranking.top, Some(7));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_graph_query_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"graph-query\"]\n\n\
+             [graph-query]\nquery = \"path\"\nsymbol = \"handler\"\nto = \"db_write\"\n\
+             depth = 3\nlimit = 10\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::GraphQuery,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::GraphQuery(args) = cmd else {
+            panic!("expected analyze graph-query");
+        };
+        assert_eq!(args.query, GraphQueryKind::Path);
+        assert_eq!(args.symbol, "handler");
+        assert_eq!(args.to.as_deref(), Some("db_write"));
+        assert_eq!(args.depth, Some(3));
+        assert_eq!(args.direction, None);
+        assert_eq!(args.limit, Some(10));
+        assert_eq!(args.common.format, OutputFormat::Md);
+    }
+
+    #[test]
+    fn build_analyze_command_rejects_graph_query_without_table() {
+        // `toml::from_str` skips `Config::validate`, so the seam-level
+        // guard in `build_analyze_command` is what stands here.
+        let profile: config::Profile =
+            toml::from_str("path = \"crates\"\ntools = [\"graph-query\"]\n").unwrap();
+        let err = build_analyze_command(
+            config::ToolName::GraphQuery,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Json,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::MissingToolOptions {
+                    tool: "graph-query"
+                }
+            ),
+            "got: {err:?}",
+        );
     }
 
     #[test]
@@ -2090,7 +2287,8 @@ fn dispatch(n: i32) -> i32 {
             &profile,
             Path::new("web"),
             OutputFormat::Json,
-        );
+        )
+        .unwrap();
         let AnalyzeCommand::Coupling(args) = cmd else {
             panic!("expected analyze coupling");
         };

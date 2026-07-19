@@ -254,6 +254,61 @@ pub(crate) fn reverse_bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<Bfs
     bfs(&reverse_adjacency(adjacency), starts)
 }
 
+/// Deterministic shortest path from `from` to `to` following edges
+/// forward, returned as the full node chain including both endpoints.
+///
+/// BFS with parent tracking: levels are expanded in ascending node
+/// order and the first parent assigned to a node is kept, so among
+/// equal-length chains the witness threads through the smallest node
+/// indices — deterministic regardless of the adjacency's neighbor
+/// order. `max_depth` caps the number of edges explored (`None` is
+/// unbounded); returns `None` when no chain exists within the cap or an
+/// endpoint is out of range. `from == to` yields the single-node chain.
+pub(crate) fn shortest_path(
+    adjacency: &[Vec<usize>],
+    from: usize,
+    to: usize,
+    max_depth: Option<usize>,
+) -> Option<Vec<usize>> {
+    let n = adjacency.len();
+    if from >= n || to >= n {
+        return None;
+    }
+    if from == to {
+        return Some(vec![from]);
+    }
+    let mut parent = vec![UNVISITED; n];
+    parent[from] = from;
+    let mut level = vec![from];
+    let mut depth = 0usize;
+    while !level.is_empty() && max_depth.is_none_or(|cap| depth < cap) {
+        let mut next: Vec<usize> = Vec::new();
+        for &v in &level {
+            for &w in &adjacency[v] {
+                if parent[w] != UNVISITED {
+                    continue;
+                }
+                parent[w] = v;
+                if w == to {
+                    let mut chain = vec![to];
+                    let mut cursor = to;
+                    while cursor != from {
+                        cursor = parent[cursor];
+                        chain.push(cursor);
+                    }
+                    chain.reverse();
+                    return Some(chain);
+                }
+                next.push(w);
+            }
+        }
+        next.sort_unstable();
+        level = next;
+        depth += 1;
+    }
+    None
+}
+
 /// Weighted PageRank with a fixed iteration count.
 ///
 /// `weighted_adjacency[u]` lists `(v, weight)` out-edges; rank flows
@@ -511,6 +566,74 @@ mod tests {
         let arcs = greedy_feedback_arcs(3, &edges);
         let cut_weight: usize = arcs.iter().map(|&i| edges[i].weight).sum();
         assert!(cut_weight <= 6, "cut {arcs:?} weighs {cut_weight}");
+    }
+
+    #[rstest]
+    #[case::direct_edge(vec![vec![1], vec![]], 0, 1, None, Some(vec![0, 1]))]
+    #[case::two_hop_chain(vec![vec![1], vec![2], vec![]], 0, 2, None, Some(vec![0, 1, 2]))]
+    #[case::same_endpoint(vec![vec![1], vec![]], 0, 0, None, Some(vec![0]))]
+    #[case::unreachable(vec![vec![], vec![0]], 0, 1, None, None)]
+    #[case::wrong_direction(vec![vec![1], vec![]], 1, 0, None, None)]
+    #[case::out_of_range_endpoint(vec![vec![]], 0, 7, None, None)]
+    #[case::depth_cap_blocks_long_chain(vec![vec![1], vec![2], vec![]], 0, 2, Some(1), None)]
+    #[case::depth_cap_admits_exact_length(vec![vec![1], vec![2], vec![]], 0, 2, Some(2), Some(vec![0, 1, 2]))]
+    #[case::shortcut_beats_detour(
+        vec![vec![1, 2], vec![3], vec![3], vec![]],
+        0,
+        3,
+        None,
+        Some(vec![0, 1, 3])
+    )]
+    #[case::cycle_does_not_loop(vec![vec![1], vec![0, 2], vec![]], 0, 2, None, Some(vec![0, 1, 2]))]
+    fn shortest_path_finds_known_chains(
+        #[case] adjacency: Vec<Vec<usize>>,
+        #[case] from: usize,
+        #[case] to: usize,
+        #[case] max_depth: Option<usize>,
+        #[case] expected: Option<Vec<usize>>,
+    ) {
+        assert_eq!(shortest_path(&adjacency, from, to, max_depth), expected);
+    }
+
+    #[test]
+    fn shortest_path_witness_is_deterministic_on_ties() {
+        // Two equal-length chains 0 -> 1 -> 3 and 0 -> 2 -> 3; the
+        // witness must thread through the smaller intermediate node
+        // regardless of neighbor order in the adjacency.
+        let adjacency = vec![vec![2, 1], vec![3], vec![3], vec![]];
+        assert_eq!(shortest_path(&adjacency, 0, 3, None), Some(vec![0, 1, 3]));
+    }
+
+    proptest! {
+        #[test]
+        fn shortest_path_matches_bfs_distance(
+            adjacency in arb_graph(),
+            from in 0usize..20,
+            to in 0usize..20,
+        ) {
+            prop_assume!(from < adjacency.len() && to < adjacency.len());
+            let chain = shortest_path(&adjacency, from, to, None);
+            let expected = naive_distances(&adjacency, &[from])[to];
+            match (chain, expected) {
+                (Some(chain), Some(dist)) => {
+                    prop_assert_eq!(chain.len(), dist + 1, "chain must be shortest");
+                    prop_assert_eq!(chain[0], from);
+                    prop_assert_eq!(*chain.last().unwrap(), to);
+                    for pair in chain.windows(2) {
+                        prop_assert!(
+                            adjacency[pair[0]].contains(&pair[1]),
+                            "chain step {} -> {} is not an edge",
+                            pair[0],
+                            pair[1],
+                        );
+                    }
+                }
+                (None, None) => {}
+                (chain, expected) => {
+                    prop_assert!(false, "chain {chain:?} vs distance {expected:?}");
+                }
+            }
+        }
     }
 
     #[test]
