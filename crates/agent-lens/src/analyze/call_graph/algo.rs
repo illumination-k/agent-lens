@@ -254,6 +254,58 @@ pub(crate) fn reverse_bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<Bfs
     bfs(&reverse_adjacency(adjacency), starts)
 }
 
+/// Weighted PageRank with a fixed iteration count.
+///
+/// `weighted_adjacency[u]` lists `(v, weight)` out-edges; rank flows
+/// along edge direction, so on a call graph (caller → callee edges)
+/// mass accumulates at heavily-depended-upon callees — the Aider
+/// repo-map orientation. Weights must be positive; a node whose
+/// out-weight sums to zero is dangling and its rank is redistributed
+/// uniformly each round.
+///
+/// Determinism: no epsilon-based early exit — exactly `iterations`
+/// rounds run, and every accumulation walks nodes and edge lists in
+/// index order, so the same graph yields bit-identical scores on every
+/// run. Scores sum to ~1.0 (floating-point error aside).
+pub(crate) fn pagerank(
+    weighted_adjacency: &[Vec<(usize, f64)>],
+    damping: f64,
+    iterations: usize,
+) -> Vec<f64> {
+    let n = weighted_adjacency.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let n_f = n as f64;
+    let out_weight: Vec<f64> = weighted_adjacency
+        .iter()
+        .map(|edges| edges.iter().map(|&(_, w)| w).sum())
+        .collect();
+    let mut rank = vec![1.0 / n_f; n];
+    let mut next = vec![0.0; n];
+    for _ in 0..iterations {
+        let dangling: f64 = rank
+            .iter()
+            .zip(&out_weight)
+            .filter(|&(_, &w)| w <= 0.0)
+            .map(|(r, _)| r)
+            .sum();
+        let base = (1.0 - damping) / n_f + damping * dangling / n_f;
+        next.fill(base);
+        for (u, edges) in weighted_adjacency.iter().enumerate() {
+            if out_weight[u] <= 0.0 {
+                continue;
+            }
+            let share = damping * rank[u] / out_weight[u];
+            for &(v, w) in edges {
+                next[v] += share * w;
+            }
+        }
+        std::mem::swap(&mut rank, &mut next);
+    }
+    rank
+}
+
 /// Reverse every edge, keeping neighbor lists sorted.
 pub(crate) fn reverse_adjacency(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let mut reversed: Vec<Vec<usize>> = vec![Vec::new(); adjacency.len()];
@@ -471,6 +523,68 @@ mod tests {
             .map(|v| (v.node, v.depth))
             .collect();
         assert_eq!(visits, vec![(2, 0), (1, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn pagerank_on_empty_graph_is_empty() {
+        assert!(pagerank(&[], 0.85, 100).is_empty());
+    }
+
+    #[test]
+    fn pagerank_accumulates_at_heavily_called_nodes() {
+        // 0, 1, 2 all call 3; 3 calls nothing (dangling).
+        let graph = vec![vec![(3, 1.0)], vec![(3, 1.0)], vec![(3, 1.0)], vec![]];
+        let scores = pagerank(&graph, 0.85, 100);
+        assert!(
+            scores[3] > scores[0] && scores[3] > scores[1] && scores[3] > scores[2],
+            "callee must outrank its callers, got {scores:?}",
+        );
+        let total: f64 = scores.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "scores must sum to 1, got {total}"
+        );
+    }
+
+    #[test]
+    fn pagerank_respects_edge_weights() {
+        // Node 0 calls 1 nine times and 2 once: 1 must outrank 2.
+        let graph = vec![vec![(1, 9.0), (2, 1.0)], vec![], vec![]];
+        let scores = pagerank(&graph, 0.85, 100);
+        assert!(scores[1] > scores[2], "got {scores:?}");
+    }
+
+    #[test]
+    fn pagerank_is_deterministic_across_runs() {
+        let graph = vec![
+            vec![(1, 2.0), (2, 1.0)],
+            vec![(2, 3.0)],
+            vec![(0, 1.0)],
+            vec![(0, 5.0), (1, 1.0)],
+        ];
+        let a = pagerank(&graph, 0.85, 100);
+        let b = pagerank(&graph, 0.85, 100);
+        assert_eq!(a, b, "fixed-iteration PageRank must be bit-stable");
+    }
+
+    fn arb_weighted_graph() -> impl Strategy<Value = Vec<Vec<(usize, f64)>>> {
+        (1usize..12).prop_flat_map(|n| {
+            proptest::collection::vec(proptest::collection::vec((0..n, 1.0f64..10.0), 0..=n), n)
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn pagerank_scores_are_a_probability_distribution(
+            graph in arb_weighted_graph(),
+        ) {
+            let scores = pagerank(&graph, 0.85, 100);
+            let total: f64 = scores.iter().sum();
+            prop_assert!((total - 1.0).abs() < 1e-6, "sum {total}");
+            for &s in &scores {
+                prop_assert!(s > 0.0, "teleport keeps every score positive, got {s}");
+            }
+        }
     }
 
     proptest! {
