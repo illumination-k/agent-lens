@@ -281,7 +281,14 @@ pub(crate) fn shortest_path(
     parent[from] = from;
     let mut level = vec![from];
     let mut depth = 0usize;
-    while !level.is_empty() && max_depth.is_none_or(|cap| depth < cap) {
+    while !level.is_empty() {
+        // Checked inside the loop (rather than in the `while`
+        // condition) so the loop is bounded by `level` draining alone:
+        // every conceivable slip in the cap comparison then produces a
+        // wrong result, never a hang.
+        if max_depth.is_some_and(|cap| depth >= cap) {
+            return None;
+        }
         let mut next: Vec<usize> = Vec::new();
         for &v in &level {
             for &w in &adjacency[v] {
