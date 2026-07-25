@@ -33,7 +33,9 @@ pub fn extract_function_shapes_with_module(
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
-            ret.diagnostics.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         ));
     }
 
@@ -57,7 +59,9 @@ pub fn extract_call_shapes_with_module(
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
-            ret.diagnostics.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         ));
     }
 

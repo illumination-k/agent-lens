@@ -69,7 +69,9 @@ pub fn extract_cohesion_units(
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.diagnostics.is_empty() {
         return Err(CohesionError::Parse(TsParseError::from_diagnostics(
-            ret.diagnostics.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         )));
     }
     let line_index = LineIndex::new(source);

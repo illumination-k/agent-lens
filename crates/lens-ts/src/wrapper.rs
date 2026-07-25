@@ -40,7 +40,9 @@ pub fn find_wrappers(source: &str, dialect: Dialect) -> Result<Vec<WrapperFindin
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
-            ret.diagnostics.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         ));
     }
     let line_index = LineIndex::new(source);

@@ -175,7 +175,9 @@ impl LanguageParser for TypeScriptParser {
         let ret = Parser::new(&alloc, source, self.dialect.source_type()).parse();
         if !ret.diagnostics.is_empty() {
             let err = TsParseError::from_diagnostics(
-                ret.diagnostics.iter().map(|e| e.message.as_ref().to_owned()),
+                ret.diagnostics
+                    .iter()
+                    .map(|e| e.message.as_ref().to_owned()),
             );
             return Err(LanguageParseError::new(self.language(), err));
         }
@@ -197,7 +199,9 @@ fn extract_with(source: &str, dialect: Dialect) -> Result<Vec<FunctionDef>, TsPa
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
-            ret.diagnostics.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         ));
     }
     let line_index = LineIndex::new(source);
