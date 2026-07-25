@@ -31,9 +31,11 @@ pub fn extract_function_shapes_with_module(
 ) -> Result<Vec<FunctionShape>, TsParseError> {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
-            ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         ));
     }
 
@@ -55,9 +57,11 @@ pub fn extract_call_shapes_with_module(
 ) -> Result<Vec<CallShape>, TsParseError> {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
-            ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         ));
     }
 

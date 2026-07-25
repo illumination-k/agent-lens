@@ -130,9 +130,11 @@ struct ImportLink {
 fn parse_links(source: &str, dialect: Dialect) -> Result<Vec<ImportLink>, TsParseError> {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
-            ret.errors.iter().map(|e| e.message.as_ref().to_owned()),
+            ret.diagnostics
+                .iter()
+                .map(|e| e.message.as_ref().to_owned()),
         ));
     }
 
