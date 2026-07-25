@@ -18,11 +18,13 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | Which modules are Fan-In bottlenecks or cyclic?        | `coupling`       | Rust crate / TS/JS entry / Go module              |
 | Which functions call each other in a cycle?            | `cycles`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | How many files must I read to understand a module?     | `context-span`   | Rust crate / TS/JS entry / Python / Go            |
-| Who calls this function? What does it call?            | `function-graph` | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Who calls this function? What does it call?            | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is there a call chain from A to B?                     | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| I need the whole call graph as data                    | `function-graph` | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which functions are hubs I should read/handle first?   | `hubs`           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Where do churn and complexity collide?                 | `hotspot`        | git-tracked file or directory                     |
 
-`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `cycles` / `hubs` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
+`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
 
 ## Output format
 
@@ -59,7 +61,19 @@ agent-lens analyze context-span crates/agent-lens --format md
 agent-lens analyze context-span app \
   --entry-glob 'app/**/page.tsx' --entry-glob 'app/**/route.ts' --format md
 
-# Static call graph: who calls `Foo::bar`, what does it call?
+# Who calls `Resolver::resolve` (direct callers only)?
+agent-lens analyze graph-query crates/agent-lens/src \
+  --query callers --symbol 'Resolver::resolve' --format md
+
+# Blast radius: everything that transitively reaches `resolve`
+agent-lens analyze graph-query crates/agent-lens/src \
+  --query callers --symbol 'Resolver::resolve' --depth 10 --format md
+
+# Shortest call chain from a handler to a sink
+agent-lens analyze graph-query crates/agent-lens/src \
+  --query path --symbol run_analyze --to write_stdout_line --format md
+
+# Full call graph as data (prefer graph-query for point questions)
 agent-lens analyze function-graph crates/lens-rust/src --format md
 
 # God functions, load-bearing utilities, bottlenecks, misplaced functions
@@ -78,7 +92,8 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 - **coupling**: high `fan_in` ⇒ a hub everything depends on (slow to change safely); high `fan_out` ⇒ a module that is hard to test in isolation; non-empty `cycles` is always a smell. Reports Martin's `instability = Ce/(Ca+Ce)` per module too. The module unit differs by language: for Rust it is the crate's `mod` tree, for TS/JS a source file reachable from the entry, for Go a package (directory) in the module.
 - **cycles**: each entry is a group of 2+ functions that call each other (directly or transitively) over resolved call edges — they must be understood, tested, and changed as one unit. `same_file: true` usually means intentional mutual recursion (parsers, tree walkers) and is ranked below cross-file tangles. `break_suggestions` name the cheapest internal edges (by static call-site count) whose removal breaks the cycle — advisory: check the listed `call_lines` before acting, a cheap edge can still be load-bearing. A high `ambiguous_edge_count_nearby` means the tangle's true extent is uncertain.
 - **context-span**: each module's transitive outgoing closure plus the count of distinct source files those modules span. Treat the file count as an "onboarding cost" — a module with span 30 means an agent must open ~30 files to reason about it.
-- **function-graph**: nodes are functions with per-node weights (`fan_in`, `fan_out`, complexity, MI, Halstead). Edges are syntactic call sites with a `resolution` (`resolved` / `unresolved` / `ambiguous` / `anonymous`). Resolution is heuristic — high `unresolved_edge_count` mostly means trait dispatch and external calls, not a bug. Use it to find callers before changing a function (filter edges by `to == <node id>`) or to spot dead-looking functions (`incoming_call_count == 0` outside tests / public API).
+- **function-graph**: nodes are functions with per-node weights (`fan_in`, `fan_out`, complexity, MI, Halstead). Edges are syntactic call sites with a `resolution` (`resolved` / `unresolved` / `ambiguous` / `anonymous`). Resolution is heuristic — high `unresolved_edge_count` mostly means trait dispatch and external calls, not a bug. Prefer `graph-query` for point questions; use the full dump for visualization or offline processing.
+- **graph-query**: one canned traversal per run — `--query callers|callees|neighborhood` from `--symbol` (depth 1 by default, `--direction in|out|both` for neighborhood), or `--query path --symbol A --to B` for the shortest call chain with per-hop call lines. Symbols match by `::`-segment suffix (`foo`, `module::foo`, `Owner::method`) or exact node id; on ambiguity the tool lists the candidates instead of guessing — re-run with one of the listed ids. Traversal follows resolved edges only, so results are lower bounds: a row with high `unres`/`ambig` counts has outgoing calls the resolver could not follow (trait dispatch, externals). Output is capped by node count (`--limit`, default 50).
 - **hubs**: four ranked lists on the resolved call graph. God functions (outlier fan-out) are refactor candidates; load-bearing functions (outlier fan-in) are a blast-radius signal, not a defect — check their callers before editing them; bottlenecks spike Henry-Kafura `loc × (fan_in × fan_out)²` (size-confounded, read next to `loc`); "misplaced?" entries send most resolved call traffic to one foreign module. Degrees count resolved edges only, so they are lower bounds — the `fallback` share and the resolution-confidence section say how much to trust each number. `PR` is a deterministic PageRank-importance percentile.
 - **hotspot**: rows are sorted by `commits × cognitive_max`. The top of the list is where bugs concentrate; refactor budget is best spent there first.
 

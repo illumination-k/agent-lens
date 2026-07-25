@@ -23,12 +23,13 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 10] = [
+const TOOL_ORDER: [ToolName; 11] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
     ToolName::Hotspot,
     ToolName::Hubs,
+    ToolName::GraphQuery,
     ToolName::ContextSpan,
     ToolName::Wrapper,
     ToolName::Coupling,
@@ -67,7 +68,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, hotspot, hubs, similarity, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, graph-query, hotspot, hubs, similarity, wrapper.",
     },
     Field {
         key: "format",
@@ -200,6 +201,46 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             presence: "optional",
             desc: "Cap each markdown ranking to the top N results.",
         }],
+        // The only tool whose options table is mandatory when the tool
+        // is listed: a traversal needs a verb and a start symbol.
+        ToolName::GraphQuery => &[
+            Field {
+                key: "query",
+                ty: "\"callers\" / \"callees\" / \"neighborhood\" / \"path\"",
+                presence: "required",
+                desc: "Traversal verb to run.",
+            },
+            Field {
+                key: "symbol",
+                ty: "string",
+                presence: "required",
+                desc: "Function to start from: a `::`-segment suffix of its qualified name, or an exact node id.",
+            },
+            Field {
+                key: "to",
+                ty: "string",
+                presence: "optional",
+                desc: "Destination symbol. Required by the path query, invalid for the others.",
+            },
+            Field {
+                key: "depth",
+                ty: "int",
+                presence: "default: 1 (path: unbounded)",
+                desc: "Traversal depth cap in call hops.",
+            },
+            Field {
+                key: "direction",
+                ty: "\"in\" / \"out\" / \"both\"",
+                presence: "default: both",
+                desc: "Traversal direction. Only valid for the neighborhood query.",
+            },
+            Field {
+                key: "limit",
+                ty: "int",
+                presence: "default: 50",
+                desc: "Cap the result set by node count.",
+            },
+        ],
         ToolName::ContextSpan => &[Field {
             key: "entry-glob",
             ty: "array<string> (globs)",
@@ -378,8 +419,8 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        CohesionOptions, ComplexityOptions, ContextSpanOptions, HotspotOptions, HubsOptions,
-        Profile, SimilarityOptions, WrapperOptions,
+        CohesionOptions, ComplexityOptions, ContextSpanOptions, GraphQueryOptions, HotspotOptions,
+        HubsOptions, Profile, SimilarityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -404,6 +445,7 @@ mod tests {
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
+        assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);
     }
