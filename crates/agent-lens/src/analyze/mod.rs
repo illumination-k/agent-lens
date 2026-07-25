@@ -21,6 +21,7 @@ pub mod function_graph;
 pub mod graph_query;
 pub mod hotspot;
 pub mod hubs;
+pub mod impact;
 mod path_filter;
 mod runner;
 pub mod similarity;
@@ -43,6 +44,7 @@ pub use graph_query::{
 };
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use hubs::HubsAnalyzer;
+pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
 
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
 pub type CouplingAnalyzerError = CrateAnalyzerError;

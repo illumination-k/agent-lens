@@ -20,7 +20,8 @@ use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
     FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer,
-    HubsAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod, WrapperAnalyzer,
+    HubsAnalyzer, ImpactAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod,
+    WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -495,6 +496,30 @@ enum AnalyzeCommand {
     /// TypeScript/JavaScript, Python, or Go). JSON is the default;
     /// `--format md` emits ranked lists capped at `--top` (default 20).
     Hubs(AnalyzeHubsArgs),
+    /// Report the blast radius of a change: which functions
+    /// transitively call the changed ones, which tests reach them, and
+    /// where the impact concentrates.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and walks callers backwards from each seed over resolved call
+    /// edges, on the SCC condensation (a call cycle counts as one hop),
+    /// up to `--depth` hops (default 5). Seeds default to the functions
+    /// whose spans intersect the unstaged working-tree diff (`git diff
+    /// -U0`); pass `--function <symbol>` (repeatable) to query a
+    /// planned edit before making it. Symbols match by `::`-segment
+    /// suffix on the qualified name or an exact node id; ambiguous
+    /// matches are listed, never guessed. Per changed function the
+    /// report lists direct callers verbatim, folds deeper callers to
+    /// per-depth per-module counts, lists reachable test functions as a
+    /// verification checklist, and states the caller total (VFI) with
+    /// modules spanned. Counts follow resolved edges only and are
+    /// labeled as bounds: ambiguous and caller-unattributed call sites
+    /// are excluded and their counts reported. The parser is chosen
+    /// from each file extension (Rust, TypeScript/JavaScript, Python,
+    /// or Go); other extensions are ignored silently. JSON is the
+    /// default; `--format md` caps caller and test lists at `--top`
+    /// (default 20).
+    Impact(AnalyzeImpactArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for supported source files (Rust,
@@ -628,6 +653,24 @@ struct AnalyzeGraphQueryArgs {
     /// Cap the result set by node count (default 50).
     #[arg(long)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeImpactArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    /// Seed the query from this function instead of the working-tree
+    /// diff: a `::`-segment suffix of its qualified name (e.g. `foo`,
+    /// `module::foo`, `Owner::method`) or an exact node id
+    /// (`file:name:line`, as listed on ambiguity). Repeatable.
+    #[arg(long = "function", value_name = "SYMBOL")]
+    function: Vec<String>,
+    /// Reverse-traversal depth cap in call hops (cycles count as one).
+    /// Callers beyond the cap are counted, not listed.
+    #[arg(long)]
+    depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -882,6 +925,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.cohesion.is_some(), config::ToolName::Cohesion),
         (profile.hotspot.is_some(), config::ToolName::Hotspot),
         (profile.hubs.is_some(), config::ToolName::Hubs),
+        (profile.impact.is_some(), config::ToolName::Impact),
         (profile.graph_query.is_some(), config::ToolName::GraphQuery),
         (
             profile.context_span.is_some(),
@@ -981,6 +1025,15 @@ fn build_analyze_command(
                 ranking: AnalyzeRankingArgs { top: opts.top },
             })
         }
+        config::ToolName::Impact => {
+            let opts = profile.impact.clone().unwrap_or_default();
+            AnalyzeCommand::Impact(AnalyzeImpactArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                function: opts.function,
+                depth: opts.depth,
+            })
+        }
         config::ToolName::Similarity => {
             let opts = profile.similarity.clone().unwrap_or_default();
             AnalyzeCommand::Similarity(AnalyzeSimilarityArgs {
@@ -1072,6 +1125,7 @@ impl_with_analyze_path_args!(
     ContextSpanAnalyzer,
     HotspotAnalyzer,
     HubsAnalyzer,
+    ImpactAnalyzer,
     WrapperAnalyzer,
 );
 
@@ -1152,6 +1206,15 @@ impl AnalyzeCommand {
             Self::Hubs(args) => {
                 let (path, format, path_filter) = args.common.into_parts();
                 HubsAnalyzer::new()
+                    .with_top(args.ranking.top)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Impact(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                ImpactAnalyzer::new()
+                    .with_functions(args.function)
+                    .with_depth(args.depth)
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -1852,6 +1915,43 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_impact_with_flags() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "impact",
+            ".",
+            "--function",
+            "Resolver::resolve",
+            "--function",
+            "helper",
+            "--depth",
+            "3",
+            "--top",
+            "5",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Impact(args)) = cli.command else {
+            panic!("expected analyze impact");
+        };
+        assert_eq!(args.function, ["Resolver::resolve", "helper"]);
+        assert_eq!(args.depth, Some(3));
+        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.common.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_impact_without_flags_as_diff_mode() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "impact", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Impact(args)) = cli.command else {
+            panic!("expected analyze impact");
+        };
+        assert!(args.function.is_empty());
+        assert_eq!(args.depth, None);
+    }
+
+    #[test]
     fn parses_analyze_hubs_with_top() {
         let cli = Cli::try_parse_from([
             "agent-lens",
@@ -2223,6 +2323,47 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.ranking.top, Some(7));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_impact_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"impact\"]\n\n\
+             [impact]\nfunction = [\"Resolver::resolve\"]\ndepth = 3\ntop = 5\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Impact,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::Impact(args) = cmd else {
+            panic!("expected analyze impact");
+        };
+        assert_eq!(args.function, ["Resolver::resolve"]);
+        assert_eq!(args.depth, Some(3));
+        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.common.format, OutputFormat::Md);
+    }
+
+    #[test]
+    fn build_analyze_command_defaults_impact_to_diff_mode() {
+        let profile: config::Profile =
+            toml::from_str("path = \"crates\"\ntools = [\"impact\"]\n").unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Impact,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Json,
+        )
+        .unwrap();
+        let AnalyzeCommand::Impact(args) = cmd else {
+            panic!("expected analyze impact");
+        };
+        assert!(args.function.is_empty());
+        assert_eq!(args.depth, None);
     }
 
     #[test]

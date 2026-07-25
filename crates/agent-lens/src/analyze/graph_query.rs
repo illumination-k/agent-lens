@@ -40,7 +40,7 @@ use serde::Serialize;
 
 use super::call_graph::algo::{self, BfsVisit};
 use super::call_graph::model::{CallGraphNode, Resolution};
-use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::call_graph::{CallGraph, CallGraphBuilder, match_symbol};
 use super::{AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -536,25 +536,6 @@ impl Report {
             })
             .collect();
     }
-}
-
-/// Match a symbol against the graph: an exact node id wins outright
-/// (ids are unique — the escape hatch out of any ambiguity); otherwise
-/// every node whose `qualified_name` equals the symbol or ends with
-/// `::<symbol>` matches. Matching on segment boundaries keeps `foo`
-/// from matching `crate::buffoo`.
-fn match_symbol(graph: &CallGraph, symbol: &str) -> Vec<usize> {
-    if let Some(idx) = graph.nodes.iter().position(|node| node.id == symbol) {
-        return vec![idx];
-    }
-    let suffix = format!("::{symbol}");
-    graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| node.qualified_name == symbol || node.qualified_name.ends_with(&suffix))
-        .map(|(idx, _)| idx)
-        .collect()
 }
 
 /// Call-site lines of every resolved edge `from_id -> to_id`, merged

@@ -11,8 +11,6 @@
 //! expansion, cross-crate resolution, runtime timing, or git history
 //! traversal is attempted here.
 
-#[allow(dead_code)]
-// bfs/reverse_bfs are exercised by tests; consumed by upcoming analyzers (impact, layers).
 pub(crate) mod algo;
 pub(crate) mod model;
 pub(crate) mod module_path;
@@ -26,7 +24,8 @@ use lens_rust::CallIndexOptions;
 
 use super::cargo_meta::CrateNameCache;
 use super::{
-    AnalyzePathFilter, AnalyzerError, SourceFile, SourceLang, collect_source_files, read_source,
+    AnalyzePathFilter, AnalyzerError, LineRange, SourceFile, SourceLang, changed_line_ranges,
+    collect_source_files, read_source,
 };
 use model::{
     CallGraphEdge, CallGraphNode, EdgeWeights, ModuleResolutionSummary, NodeVisibility,
@@ -105,6 +104,26 @@ impl CallGraph {
     }
 }
 
+/// Match a symbol against the graph: an exact node id wins outright
+/// (ids are unique — the escape hatch out of any ambiguity); otherwise
+/// every node whose `qualified_name` equals the symbol or ends with
+/// `::<symbol>` matches. Matching on segment boundaries keeps `foo`
+/// from matching `crate::buffoo`. Shared by every analyzer that takes a
+/// `--symbol` / `--function` flag so the matching rules never diverge.
+pub(crate) fn match_symbol(graph: &CallGraph, symbol: &str) -> Vec<usize> {
+    if let Some(idx) = graph.nodes.iter().position(|node| node.id == symbol) {
+        return vec![idx];
+    }
+    let suffix = format!("::{symbol}");
+    graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.qualified_name == symbol || node.qualified_name.ends_with(&suffix))
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
 /// Scans source trees into [`FileGraphInput`]s and assembles the
 /// [`CallGraph`]. Shared by `analyze function-graph` and the analyzer
 /// family so test/path filtering semantics stay identical everywhere.
@@ -141,13 +160,40 @@ impl CallGraphBuilder {
         self
     }
 
-    pub(crate) fn build(&self, path: &Path) -> Result<CallGraph, AnalyzerError> {
-        let collection_filter = if self.only_tests {
+    /// File-collection variant of the path filter: with `--only-tests`
+    /// the path-level test filter is disabled here so non-test files
+    /// containing test functions are still scanned, and the test
+    /// restriction is applied per function instead.
+    fn collection_filter(&self) -> AnalyzePathFilter {
+        if self.only_tests {
             self.path_filter.clone().with_only_tests(false)
         } else {
             self.path_filter.clone()
-        };
-        let filter = collection_filter.compile(path)?;
+        }
+    }
+
+    /// Unstaged changed line ranges (`git diff -U0`) for every source
+    /// file the graph would scan, keyed by the display path used in
+    /// [`CallGraphNode::file`]. Files with no unstaged changes are
+    /// absent. Uses the same collection filter as [`Self::build`] so
+    /// diff-seeded analyzers see exactly the graph's file set.
+    pub(crate) fn changed_line_ranges_by_display_path(
+        &self,
+        path: &Path,
+    ) -> Result<BTreeMap<String, Vec<LineRange>>, AnalyzerError> {
+        let filter = self.collection_filter().compile(path)?;
+        let mut out = BTreeMap::new();
+        for source_file in collect_source_files(path, &filter)? {
+            let ranges = changed_line_ranges(&source_file.path);
+            if !ranges.is_empty() {
+                out.insert(source_file.display_path, ranges);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn build(&self, path: &Path) -> Result<CallGraph, AnalyzerError> {
+        let filter = self.collection_filter().compile(path)?;
         let mut files = Vec::new();
         let mut crate_cache = CrateNameCache::new();
         for source_file in collect_source_files(path, &filter)? {
