@@ -23,9 +23,11 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | I need the whole call graph as data                     | `function-graph` | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which functions are hubs I should read/handle first?    | `hubs`           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | What could my current edit break? Which tests cover it? | `impact`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Where does this new function belong vertically?         | `layers`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is it OK for this module to call that one?              | `layers`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Where do churn and complexity collide?                  | `hotspot`        | git-tracked file or directory                     |
 
-`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
+`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
 
 ## Output format
 
@@ -87,6 +89,9 @@ agent-lens analyze impact crates/agent-lens/src --format md
 agent-lens analyze impact crates/agent-lens/src \
   --function 'Resolver::resolve' --format md
 
+# Inferred layer map: function/module levels, module cycles, skip-level calls
+agent-lens analyze layers crates/agent-lens/src --exclude-tests --format md
+
 # Where is the next refactor likely to pay off?
 agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 ```
@@ -104,6 +109,7 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 - **graph-query**: one canned traversal per run — `--query callers|callees|neighborhood` from `--symbol` (depth 1 by default, `--direction in|out|both` for neighborhood), or `--query path --symbol A --to B` for the shortest call chain with per-hop call lines. Symbols match by `::`-segment suffix (`foo`, `module::foo`, `Owner::method`) or exact node id; on ambiguity the tool lists the candidates instead of guessing — re-run with one of the listed ids. Traversal follows resolved edges only, so results are lower bounds: a row with high `unres`/`ambig` counts has outgoing calls the resolver could not follow (trait dispatch, externals). Output is capped by node count (`--limit`, default 50).
 - **hubs**: four ranked lists on the resolved call graph. God functions (outlier fan-out) are refactor candidates; load-bearing functions (outlier fan-in) are a blast-radius signal, not a defect — check their callers before editing them; bottlenecks spike Henry-Kafura `loc × (fan_in × fan_out)²` (size-confounded, read next to `loc`); "misplaced?" entries send most resolved call traffic to one foreign module. Degrees count resolved edges only, so they are lower bounds — the `fallback` share and the resolution-confidence section say how much to trust each number. `PR` is a deterministic PageRank-importance percentile.
 - **impact**: one entry per changed function (seeded from the unstaged diff, or `--function` for a pre-edit query). `direct_callers` are verbatim; deeper callers fold to per-depth per-module counts; `reachable_tests` is the verification checklist — run those. `vfi` is the transitive caller count within `--depth` (default 5, cycles count as one hop); `beyond_depth_count` says what the cap hid. Counts follow resolved edges only and are bounds in both directions: `excluded_ambiguous_edge_count` and `unattributed_caller_edge_count` quantify would-be callers the resolver could not attribute. `impact_explosion` flags depth-2 fan-out ≥ 3× depth-1 — a hidden shotgun-surgery signal.
+- **layers**: two inferred layerings. `L` is a function level (`1 + max(level of its callees)`, call cycles collapsed to one node), `M` the same computation on the module graph — a module's level need not match its members' levels, since a leaf-heavy module can still hold one high-level caller. Read `entry_points` first, then the level buckets top-down. `module_cycles` is the actionable part: those modules are mutually dependent, so no ordering exists between them, and each listed call site is where the cycle is realised. `skip_calls` are downward calls jumping over an intermediate module level — expected for shared leaf utilities, worth a look when a skipped level owns the same concern. A module with a wide `member_level_span` mixes leaf helpers with orchestration. None of these are errors: callbacks and DI shape the graph the same way. Ignore rows marked `name-fallback` first — the resolver guessed those targets by last segment.
 - **hotspot**: rows are sorted by `commits × cognitive_max`. The top of the list is where bugs concentrate; refactor budget is best spent there first.
 
 ## Don't reach for it when

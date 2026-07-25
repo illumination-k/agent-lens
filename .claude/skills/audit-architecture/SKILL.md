@@ -1,14 +1,15 @@
 ---
 name: audit-architecture
-description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `context-span`, and `cohesion`. `coupling` works on Rust crates, TypeScript / JavaScript module graphs, and Go modules; `context-span` and `cohesion` additionally support Python.
+description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, layering and level inversions, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `layers`, `context-span`, and `cohesion`. `coupling` works on Rust crates, TypeScript / JavaScript module graphs, and Go modules; `layers`, `context-span`, and `cohesion` additionally support Python.
 ---
 
 # Audit module structure with agent-lens
 
-Three analyzers cover the architecture question:
+Four analyzers cover the architecture question:
 
 - `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), and Go modules (package-granular).
 - `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, Python, and Go. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
+- `layers` — inferred Lakos levelization of the call graph: a level per function and per module, the entry-point set, the module cycles that make levelization impossible (with the concrete call sites), and downward calls skipping a level. Needs no crate root or entry file — it walks any directory of Rust, TS/JS, Python, or Go.
 - `cohesion` — per-`impl` (Rust) / per-class (TS, Python, Go) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
 
 ## Workflow
@@ -35,7 +36,24 @@ Look for, in order:
 3. **High Fan-Out**. A module that depends on too many others is hard to test in isolation. Often a sign the module is doing orchestration that should be pushed up.
 4. **High Instability with high Fan-In**. Martin's diagnostic: stable hubs (low Instability) are good; unstable hubs (high Instability) are fragile.
 
-### 2. Module read-cost (context span)
+### 2. Vertical shape (layers)
+
+`coupling` needs a crate root or a single entry file; `layers` does not — it derives the module graph from call edges, so it also answers the layering question for Python and for trees `coupling` can't take:
+
+```bash
+agent-lens analyze layers crates/agent-lens/src --exclude-tests --format md
+```
+
+Read it in this order:
+
+1. **Entry points** — the orientation set. Start the top-down read here.
+2. **Module cycles** — the same finding as `coupling`'s `cycles`, but derived from calls rather than imports, and with the exact call sites that realise each cycle. Those call lines are the cut candidates.
+3. **Wide member spans** — a module whose members straddle many function levels mixes leaf helpers with orchestration. Pair with `cohesion` on that module.
+4. **Skip-level calls** — normal for shared leaf utilities; suspicious when the skipped level owns the same concern.
+
+Nothing here is an error by itself: callbacks, dependency injection, and trait-object dispatch all produce the same shapes, and the call facts cannot tell them apart. Rows marked `name-fallback` had their target guessed by last segment — discount those first.
+
+### 3. Module read-cost (context span)
 
 Pair `coupling` with `context-span` to estimate how much of the crate an agent must hold in context to safely change a given module:
 
@@ -64,9 +82,9 @@ agent-lens analyze context-span app \
 
 A module with a large `files` count is expensive to onboard onto. If a hub from step 1 also has a wide span, splitting the hub gives an outsized win (smaller change, smaller blast radius).
 
-### 3. Per-`impl` / per-class cohesion
+### 4. Per-`impl` / per-class cohesion
 
-For the worst-offending modules from step 1 — and any `impl` block or class the user is about to extend — run `cohesion`:
+For the worst-offending modules from steps 1-2 — and any `impl` block or class the user is about to extend — run `cohesion`:
 
 ```bash
 agent-lens analyze cohesion crates/lens-rust/src/coupling.rs --format md
@@ -82,9 +100,9 @@ agent-lens analyze cohesion <path> --diff-only --format md
 
 …catches the case "I just added a method that uses none of the fields the others use".
 
-### 4. Cross-reference
+### 5. Cross-reference
 
-The two analyzers tell different stories that often line up:
+The analyzers tell different stories that often line up:
 
 | Coupling signal                  | Cohesion signal              | Diagnosis                                                                                   |
 | -------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------- |
@@ -93,6 +111,7 @@ The two analyzers tell different stories that often line up:
 | Cycle between A and B            | —                            | Move the shared abstraction into a third module both depend on.                             |
 | Instability ≈ 1 on a leaf module | —                            | Fine. Leaves are supposed to be unstable.                                                   |
 | Instability ≈ 0 with high churn  | —                            | Stable hub that keeps changing. Either it's miscategorised or the hub abstraction is wrong. |
+| `layers` wide member span        | One `impl` has LCOM4 ≥ 2     | The module holds two layers _and_ two responsibilities — split along the level boundary.    |
 
 ## Reading the JSON when `--format md` isn't enough
 
@@ -116,5 +135,5 @@ agent-lens analyze cohesion <path> | jq '.files[].units[] | select(.lcom4 >= 2)'
 - The user wants per-function complexity — that's `complexity`, not `coupling`/`cohesion`.
 - The crate / entry tree is a single file — Fan-In / Fan-Out are degenerate, the report will be empty.
 - The "module structure" question is across Rust crates — `coupling` is intra-crate. For inter-crate dependency questions, `cargo tree` is the right tool.
-- The codebase is Python and the question is about coupling — `coupling` does not parse Python imports. `context-span` and `cohesion` do run on Python.
+- The codebase is Python and the question is about coupling — `coupling` does not parse Python imports. `layers`, `context-span`, and `cohesion` do run on Python.
 - The TS/JS project has no single entry file (e.g. a library exporting many barrels, or a Next.js App Router app) — `coupling` requires one entry, so you'll need to pick a representative one. `context-span` supports merging entries via `--entry-glob`, but `coupling` does not.

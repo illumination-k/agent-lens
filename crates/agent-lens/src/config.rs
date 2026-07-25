@@ -112,6 +112,8 @@ pub struct Profile {
     #[serde(default)]
     pub impact: Option<ImpactOptions>,
     #[serde(default)]
+    pub layers: Option<LayersOptions>,
+    #[serde(default)]
     pub graph_query: Option<GraphQueryOptions>,
     #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
@@ -145,6 +147,7 @@ pub enum ToolName {
     Hotspot,
     Hubs,
     Impact,
+    Layers,
     Similarity,
     Wrapper,
 }
@@ -163,6 +166,7 @@ impl ToolName {
             Self::Hotspot => "hotspot",
             Self::Hubs => "hubs",
             Self::Impact => "impact",
+            Self::Layers => "layers",
             Self::Similarity => "similarity",
             Self::Wrapper => "wrapper",
         }
@@ -229,6 +233,13 @@ pub struct ImpactOptions {
     #[serde(default)]
     pub function: Vec<String>,
     pub depth: Option<usize>,
+    pub top: Option<usize>,
+}
+
+/// `[profile.<name>.layers]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct LayersOptions {
     pub top: Option<usize>,
 }
 
