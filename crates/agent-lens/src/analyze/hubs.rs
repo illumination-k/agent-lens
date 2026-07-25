@@ -425,7 +425,7 @@ impl NodeMetrics {
             accumulator.test_caller_nodes.dedup();
             accumulator.callee_nodes.sort_unstable();
             accumulator.callee_nodes.dedup();
-            edges.sort_by(|a, b| a.0.cmp(&b.0));
+            edges.sort_by_key(|edge| edge.0);
         }
 
         let scores = pagerank(&weighted_adjacency, PAGERANK_DAMPING, PAGERANK_ITERATIONS);
