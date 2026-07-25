@@ -1,0 +1,45 @@
+name: Nix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+      - ".github/workflows/nix.yml"
+  # nixpkgs moves under the flake even when this repo is idle; a weekly run
+  # catches breakage before someone hits it with `nix run`.
+  schedule:
+    - cron: "17 4 * * 1"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
+
+      # Builds packages.default (which runs the full workspace test suite in
+      # the sandbox) and evaluates devShells and the overlay.
+      - name: Flake check
+        run: nix flake check --print-build-logs
+
+      - name: Smoke-test the built binary
+        run: nix run . -- --version

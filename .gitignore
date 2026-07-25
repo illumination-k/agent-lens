@@ -27,6 +27,11 @@ web/.vite/
 *.tsbuildinfo
 web/public/function-graph.json
 
+# Nix
+result
+result-*
+.direnv/
+
 # cargo-mutants
 mutants.out/
 mutants.out.old/

@@ -107,6 +107,39 @@ excludes GitHub prereleases by default.
 mise auto-detects the right asset for your OS / arch from the
 `agent-lens-<target>.tar.gz` artifacts published by the release workflow.
 
+### Nix (flake)
+
+The repo is a flake, so no release artifact is involved — `agent-lens` is
+built from source and pinned by `flake.lock`:
+
+```bash
+# run without installing
+nix run github:illumination-k/agent-lens -- --version
+
+# install into your profile
+nix profile install github:illumination-k/agent-lens
+
+# pin a tag or commit
+nix profile install github:illumination-k/agent-lens/v0.1.0
+```
+
+To consume it from another flake, either take `packages.default` directly or
+apply `overlays.default` to get `pkgs.agent-lens`:
+
+```nix
+{
+  inputs.agent-lens.url = "github:illumination-k/agent-lens";
+
+  outputs = { nixpkgs, agent-lens, ... }: {
+    # ...
+    environment.systemPackages = [ agent-lens.packages.x86_64-linux.default ];
+  };
+}
+```
+
+Linux and macOS, x86_64 and aarch64, are wired up; only `x86_64-linux` is
+exercised in CI.
+
 ### From source
 
 Requires a recent Rust toolchain (the workspace is on `edition = "2024"`, so
@@ -563,6 +596,25 @@ mise run mutants  # cargo-mutants (slow; not in CI by default)
 mise run mutants:rust:diff [base]  # mutation-test Rust changes vs base
 ```
 
+On NixOS — or anywhere mise's pre-built tool binaries won't run — `nix develop`
+provides the same toolchain from nixpkgs instead:
+
+```bash
+nix develop        # rust, cargo-nextest/deny/audit/mutants/llvm-cov, dprint,
+                   # shfmt, shellcheck, actionlint, zizmor, node, pnpm, uv
+
+nix build          # build the CLI (runs the workspace tests in the sandbox)
+nix flake check    # build + evaluate every flake output
+nix fmt            # format the .nix files (nixfmt)
+```
+
+The shell ships the tools, not mise, so run the underlying commands directly
+(`cargo clippy --all-targets --all-features -- -D warnings`, `cargo nextest run
+--locked --all-features`, `dprint check`, …) rather than `mise run`. Versions
+track nixpkgs rather than the `mise.*.toml` pins, so mise and `ci_rust.yml`
+remain the source of truth for exact tool versions. direnv users can drop
+`use flake` into a local (git-ignored) `.envrc`.
+
 When adding or changing tests, prefer `rstest` for parameterized cases and
 fixture-style setup. Use property-based tests when regression risk is high,
 especially around core logic.
@@ -575,7 +627,8 @@ the result was.
 
 CI (`.github/workflows/`) runs Rust lint/test (`ci_rust.yml`), the base
 toolchain lints (`lint_base.yml`), GitHub Actions lint (`lint_gha.yml`),
-CodeQL, dependency review, Trivy, TruffleHog, SBOM generation, and PR-diff mutation testing
+CodeQL, dependency review, Trivy, TruffleHog, SBOM generation, the flake build
+(`nix.yml` — on nix/lockfile changes plus a weekly run), and PR-diff mutation testing
 (`mutants.yml` — full runs are available via `workflow_dispatch`).
 
 ## Design principles
