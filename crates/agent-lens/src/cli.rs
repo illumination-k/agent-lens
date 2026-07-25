@@ -20,8 +20,8 @@ use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
     FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer,
-    HubsAnalyzer, ImpactAnalyzer, OutputFormat, SimilarityAnalyzer, SimilarityMethod,
-    WrapperAnalyzer,
+    HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, SimilarityAnalyzer,
+    SimilarityMethod, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -520,6 +520,40 @@ enum AnalyzeCommand {
     /// default; `--format md` caps caller and test lists at `--top`
     /// (default 20).
     Impact(AnalyzeImpactArgs),
+    /// Report an inferred layer map: what level each function and module
+    /// sits on, which modules are mutually dependent, and which
+    /// cross-module calls skip a level.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and levelizes it Lakos-style over resolved call edges, at two
+    /// granularities. A function level (`L`) is
+    /// `1 + max(level of its callees)`, computed on the SCC condensation
+    /// so a call cycle collapses to one node and its members share a
+    /// level. A module level (`M`) is the same computation on the module
+    /// graph induced by cross-module calls — levelizing that graph
+    /// directly, rather than averaging its members' function levels,
+    /// keeps module levels consistent with module edges, so a module's
+    /// level need not match its members'. Level 1 is leaf code that
+    /// calls nothing; the highest level is the entry side. Nothing is
+    /// declared — both layerings are inferred from the code. The
+    /// listings are structural facts, not errors, since callbacks and
+    /// dependency injection shape the graph the same way: module cycles
+    /// (mutually dependent modules, with the concrete call sites that
+    /// realise each cycle), skip-level calls (a downward call passing
+    /// over at least one module level), and modules whose members span
+    /// many function levels (a vertical cohesion smell). Zero-fan-in
+    /// `main`/exported functions are reported as the entry-point
+    /// orientation set; visibility is only extracted for Rust and Go, so
+    /// TypeScript and Python entries rest on zero fan-in alone. Levels
+    /// follow resolved edges only, so they are lower bounds and one
+    /// mis-resolved edge can lift a whole chain — per-level function and
+    /// edge counts, name-fallback provenance per call site, and
+    /// per-module resolution confidence are reported alongside. The
+    /// parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` caps each
+    /// listing at `--top` (default 20).
+    Layers(AnalyzeLayersArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for supported source files (Rust,
@@ -671,6 +705,14 @@ struct AnalyzeImpactArgs {
     /// Callers beyond the cap are counted, not listed.
     #[arg(long)]
     depth: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeLayersArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -926,6 +968,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.hotspot.is_some(), config::ToolName::Hotspot),
         (profile.hubs.is_some(), config::ToolName::Hubs),
         (profile.impact.is_some(), config::ToolName::Impact),
+        (profile.layers.is_some(), config::ToolName::Layers),
         (profile.graph_query.is_some(), config::ToolName::GraphQuery),
         (
             profile.context_span.is_some(),
@@ -1034,6 +1077,13 @@ fn build_analyze_command(
                 depth: opts.depth,
             })
         }
+        config::ToolName::Layers => {
+            let opts = profile.layers.clone().unwrap_or_default();
+            AnalyzeCommand::Layers(AnalyzeLayersArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+            })
+        }
         config::ToolName::Similarity => {
             let opts = profile.similarity.clone().unwrap_or_default();
             AnalyzeCommand::Similarity(AnalyzeSimilarityArgs {
@@ -1126,6 +1176,7 @@ impl_with_analyze_path_args!(
     HotspotAnalyzer,
     HubsAnalyzer,
     ImpactAnalyzer,
+    LayersAnalyzer,
     WrapperAnalyzer,
 );
 
@@ -1215,6 +1266,13 @@ impl AnalyzeCommand {
                 ImpactAnalyzer::new()
                     .with_functions(args.function)
                     .with_depth(args.depth)
+                    .with_top(args.ranking.top)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Layers(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                LayersAnalyzer::new()
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -1975,6 +2033,41 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_layers_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "layers",
+            "crates",
+            "--top",
+            "8",
+            "--format",
+            "md",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Layers(args)) = cli.command else {
+            panic!("expected analyze layers");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(8));
+        assert!(args.common.path_filter.exclude_tests);
+    }
+
+    #[test]
+    fn parses_analyze_layers_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "layers", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Layers(args)) = cli.command else {
+            panic!("expected analyze layers");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+    }
+
+    #[test]
     fn parses_analyze_coupling_default_format_is_json() {
         let cli =
             Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
@@ -2323,6 +2416,25 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.ranking.top, Some(7));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_layers_options() {
+        let profile: config::Profile =
+            toml::from_str("path = \"crates\"\ntools = [\"layers\"]\n\n[layers]\ntop = 9\n")
+                .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Layers,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::Layers(args) = cmd else {
+            panic!("expected analyze layers");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(9));
     }
 
     #[test]

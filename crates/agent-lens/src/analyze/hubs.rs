@@ -38,6 +38,7 @@ use super::call_graph::model::{
     CallGraphNode, ModuleResolutionSummary, Resolution, ResolutionMethod,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::format::render_module_confidence;
 use super::{AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -629,7 +630,12 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         )
     });
 
-    render_module_confidence(&mut out, &report.modules);
+    render_module_confidence(
+        &mut out,
+        &report.modules,
+        "Hub metrics in these modules are the most undercounted; treat their \
+         degrees as loose lower bounds.",
+    );
     out
 }
 
@@ -658,44 +664,6 @@ fn render_entries(
 
 fn format_fraction(fraction: Option<f64>) -> String {
     fraction.map_or_else(|| "-".to_owned(), |f| format!("{:.0}%", f * 100.0))
-}
-
-/// Cite the graph-confidence calibration: the modules whose call sites
-/// resolved worst, i.e. where hub metrics are most undercounted.
-fn render_module_confidence(out: &mut String, modules: &[ModuleResolutionSummary]) {
-    const TOP_MODULES: usize = 5;
-    let mut worst: Vec<&ModuleResolutionSummary> = modules
-        .iter()
-        .filter(|m| m.total_call_count > 0 && m.calls.resolved_call_count < m.total_call_count)
-        .collect();
-    if worst.is_empty() {
-        return;
-    }
-    let unresolved_share = |m: &ModuleResolutionSummary| {
-        (m.total_call_count - m.calls.resolved_call_count) as f64 / m.total_call_count as f64
-    };
-    worst.sort_by(|a, b| {
-        unresolved_share(b)
-            .total_cmp(&unresolved_share(a))
-            .then_with(|| b.total_call_count.cmp(&a.total_call_count))
-            .then_with(|| a.module.cmp(&b.module))
-    });
-    out.push_str(
-        "\n## Resolution confidence (worst modules)\n\
-         \nHub metrics in these modules are the most undercounted; treat their \
-         degrees as loose lower bounds.\n\n",
-    );
-    for m in worst.iter().take(TOP_MODULES) {
-        let unresolved = m.total_call_count - m.calls.resolved_call_count;
-        let _ = writeln!(
-            out,
-            "- `{}`: {}/{} call sites not resolved ({:.0}%)",
-            m.module,
-            unresolved,
-            m.total_call_count,
-            unresolved_share(m) * 100.0,
-        );
-    }
 }
 
 #[cfg(test)]
