@@ -23,12 +23,13 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 11] = [
+const TOOL_ORDER: [ToolName; 12] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
     ToolName::Hotspot,
     ToolName::Hubs,
+    ToolName::Impact,
     ToolName::GraphQuery,
     ToolName::ContextSpan,
     ToolName::Wrapper,
@@ -68,7 +69,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, graph-query, hotspot, hubs, similarity, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, graph-query, hotspot, hubs, impact, similarity, wrapper.",
     },
     Field {
         key: "format",
@@ -201,6 +202,26 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             presence: "optional",
             desc: "Cap each markdown ranking to the top N results.",
         }],
+        ToolName::Impact => &[
+            Field {
+                key: "function",
+                ty: "array<string>",
+                presence: "default: []",
+                desc: "Seed symbols (qualified-name suffix or exact node id). When empty, seeds come from the unstaged working-tree diff.",
+            },
+            Field {
+                key: "depth",
+                ty: "int",
+                presence: "default: 5",
+                desc: "Reverse-traversal depth cap in call hops (cycles count as one).",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown caller and test lists to the top N rows.",
+            },
+        ],
         // The only tool whose options table is mandatory when the tool
         // is listed: a traversal needs a verb and a start symbol.
         ToolName::GraphQuery => &[
@@ -420,7 +441,7 @@ mod tests {
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
         CohesionOptions, ComplexityOptions, ContextSpanOptions, GraphQueryOptions, HotspotOptions,
-        HubsOptions, Profile, SimilarityOptions, WrapperOptions,
+        HubsOptions, ImpactOptions, Profile, SimilarityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -445,6 +466,7 @@ mod tests {
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
+        assert_tool_parity::<ImpactOptions>(ToolName::Impact);
         assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);

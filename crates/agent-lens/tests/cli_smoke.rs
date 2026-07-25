@@ -273,6 +273,32 @@ fn run_profile_drives_graph_query_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_impact_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "fn sink() {}\nfn caller() { sink(); }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.blast]\npath = \"src\"\ntools = [\"impact\"]\n\n\
+         [profile.blast.impact]\nfunction = [\"sink\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "blast"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "impact");
+    let report = &json["results"][0]["report"];
+    assert_eq!(report["status"], "ok");
+    assert_eq!(
+        report["changed"][0]["direct_callers"][0]["qualified_name"],
+        "crate::caller",
+    );
+}
+
+#[test]
 fn run_profile_rejects_graph_query_without_options_table() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);

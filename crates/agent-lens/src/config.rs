@@ -110,6 +110,8 @@ pub struct Profile {
     #[serde(default)]
     pub hubs: Option<HubsOptions>,
     #[serde(default)]
+    pub impact: Option<ImpactOptions>,
+    #[serde(default)]
     pub graph_query: Option<GraphQueryOptions>,
     #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
@@ -142,6 +144,7 @@ pub enum ToolName {
     GraphQuery,
     Hotspot,
     Hubs,
+    Impact,
     Similarity,
     Wrapper,
 }
@@ -159,6 +162,7 @@ impl ToolName {
             Self::GraphQuery => "graph-query",
             Self::Hotspot => "hotspot",
             Self::Hubs => "hubs",
+            Self::Impact => "impact",
             Self::Similarity => "similarity",
             Self::Wrapper => "wrapper",
         }
@@ -214,6 +218,17 @@ pub struct HotspotOptions {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HubsOptions {
+    pub top: Option<usize>,
+}
+
+/// `[profile.<name>.impact]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ImpactOptions {
+    /// Seed symbols. When empty, seeds come from the unstaged diff.
+    #[serde(default)]
+    pub function: Vec<String>,
+    pub depth: Option<usize>,
     pub top: Option<usize>,
 }
 
@@ -410,6 +425,30 @@ since = "90.days.ago"
             toml::from_str::<Config>(toml_src).is_err(),
             "expected a parse error for: {toml_src}",
         );
+    }
+
+    #[test]
+    fn parses_impact_options() {
+        let config: Config = toml::from_str(
+            "[profile.blast]\npath = \"src/\"\ntools = [\"impact\"]\n\n\
+             [profile.blast.impact]\nfunction = [\"resolve\", \"helper\"]\ndepth = 3\ntop = 10\n",
+        )
+        .unwrap();
+        let opts = config.profile("blast").unwrap().impact.as_ref().unwrap();
+        assert_eq!(opts.function, ["resolve", "helper"]);
+        assert_eq!(opts.depth, Some(3));
+        assert_eq!(opts.top, Some(10));
+    }
+
+    #[test]
+    fn impact_options_default_to_diff_seeding() {
+        let config: Config = toml::from_str(
+            "[profile.blast]\npath = \"src/\"\ntools = [\"impact\"]\n\n[profile.blast.impact]\ndepth = 2\n",
+        )
+        .unwrap();
+        let opts = config.profile("blast").unwrap().impact.as_ref().unwrap();
+        assert!(opts.function.is_empty());
+        assert_eq!(opts.top, None);
     }
 
     #[test]

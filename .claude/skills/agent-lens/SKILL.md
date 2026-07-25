@@ -9,22 +9,23 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 
 ## Pick the analyzer
 
-| Question                                               | Subcommand       | Path argument                                     |
-| ------------------------------------------------------ | ---------------- | ------------------------------------------------- |
-| Are there near-duplicate functions?                    | `similarity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Are there forwarding-only functions worth inlining?    | `wrapper`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which classes/`impl` blocks are doing too many things? | `cohesion`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which functions are landmines to edit?                 | `complexity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which modules are Fan-In bottlenecks or cyclic?        | `coupling`       | Rust crate / TS/JS entry / Go module              |
-| Which functions call each other in a cycle?            | `cycles`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| How many files must I read to understand a module?     | `context-span`   | Rust crate / TS/JS entry / Python / Go            |
-| Who calls this function? What does it call?            | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Is there a call chain from A to B?                     | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| I need the whole call graph as data                    | `function-graph` | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which functions are hubs I should read/handle first?   | `hubs`           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Where do churn and complexity collide?                 | `hotspot`        | git-tracked file or directory                     |
+| Question                                                | Subcommand       | Path argument                                     |
+| ------------------------------------------------------- | ---------------- | ------------------------------------------------- |
+| Are there near-duplicate functions?                     | `similarity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Are there forwarding-only functions worth inlining?     | `wrapper`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which classes/`impl` blocks are doing too many things?  | `cohesion`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which functions are landmines to edit?                  | `complexity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which modules are Fan-In bottlenecks or cyclic?         | `coupling`       | Rust crate / TS/JS entry / Go module              |
+| Which functions call each other in a cycle?             | `cycles`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| How many files must I read to understand a module?      | `context-span`   | Rust crate / TS/JS entry / Python / Go            |
+| Who calls this function? What does it call?             | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is there a call chain from A to B?                      | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| I need the whole call graph as data                     | `function-graph` | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which functions are hubs I should read/handle first?    | `hubs`           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| What could my current edit break? Which tests cover it? | `impact`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Where do churn and complexity collide?                  | `hotspot`        | git-tracked file or directory                     |
 
-`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
+`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
 
 ## Output format
 
@@ -79,6 +80,13 @@ agent-lens analyze function-graph crates/lens-rust/src --format md
 # God functions, load-bearing utilities, bottlenecks, misplaced functions
 agent-lens analyze hubs crates/agent-lens/src --exclude-tests --format md
 
+# Blast radius of my unstaged edits, with the tests that reach them
+agent-lens analyze impact crates/agent-lens/src --format md
+
+# Blast radius of a planned edit, before making it
+agent-lens analyze impact crates/agent-lens/src \
+  --function 'Resolver::resolve' --format md
+
 # Where is the next refactor likely to pay off?
 agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 ```
@@ -95,6 +103,7 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 - **function-graph**: nodes are functions with per-node weights (`fan_in`, `fan_out`, complexity, MI, Halstead). Edges are syntactic call sites with a `resolution` (`resolved` / `unresolved` / `ambiguous` / `anonymous`). Resolution is heuristic — high `unresolved_edge_count` mostly means trait dispatch and external calls, not a bug. Prefer `graph-query` for point questions; use the full dump for visualization or offline processing.
 - **graph-query**: one canned traversal per run — `--query callers|callees|neighborhood` from `--symbol` (depth 1 by default, `--direction in|out|both` for neighborhood), or `--query path --symbol A --to B` for the shortest call chain with per-hop call lines. Symbols match by `::`-segment suffix (`foo`, `module::foo`, `Owner::method`) or exact node id; on ambiguity the tool lists the candidates instead of guessing — re-run with one of the listed ids. Traversal follows resolved edges only, so results are lower bounds: a row with high `unres`/`ambig` counts has outgoing calls the resolver could not follow (trait dispatch, externals). Output is capped by node count (`--limit`, default 50).
 - **hubs**: four ranked lists on the resolved call graph. God functions (outlier fan-out) are refactor candidates; load-bearing functions (outlier fan-in) are a blast-radius signal, not a defect — check their callers before editing them; bottlenecks spike Henry-Kafura `loc × (fan_in × fan_out)²` (size-confounded, read next to `loc`); "misplaced?" entries send most resolved call traffic to one foreign module. Degrees count resolved edges only, so they are lower bounds — the `fallback` share and the resolution-confidence section say how much to trust each number. `PR` is a deterministic PageRank-importance percentile.
+- **impact**: one entry per changed function (seeded from the unstaged diff, or `--function` for a pre-edit query). `direct_callers` are verbatim; deeper callers fold to per-depth per-module counts; `reachable_tests` is the verification checklist — run those. `vfi` is the transitive caller count within `--depth` (default 5, cycles count as one hop); `beyond_depth_count` says what the cap hid. Counts follow resolved edges only and are bounds in both directions: `excluded_ambiguous_edge_count` and `unattributed_caller_edge_count` quantify would-be callers the resolver could not attribute. `impact_explosion` flags depth-2 fan-out ≥ 3× depth-1 — a hidden shotgun-surgery signal.
 - **hotspot**: rows are sorted by `commits × cognitive_max`. The top of the list is where bugs concentrate; refactor budget is best spent there first.
 
 ## Don't reach for it when
