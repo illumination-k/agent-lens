@@ -73,6 +73,30 @@ then fold language-specific lexical rules into `Resolved`, `Unresolved`, or
 symbol when the language exposes them. Rust currently maps visible `use` aliases
 into this shape for function graph lexical resolution.
 
+## Ubiquitous method names
+
+A receiver call (`recv.foo()`) carries no type, so the only fact the call-graph
+resolver has to work with is the callee name. That is enough for a name a
+workspace invented and worthless for one the standard library defines on nearly
+every value — `.clone()`, `.map()`, `.append()`, `.String()` — where a name match
+against a workspace function produces a phantom edge rather than a lucky hit.
+
+Each adapter therefore exports `UBIQUITOUS_METHOD_NAMES`, a
+`lens_domain::UbiquitousMethodNames` table of the names in its language that
+carry no attribution evidence. The resolver consults the table of the language
+the call site was extracted from, and leaves such receiver calls `Unresolved`.
+The tables belong next to the adapters because the conventions are per-grammar;
+`lens_domain` owns only the lookup shape.
+
+The table gates receiver calls only. A call whose syntax carries the owner —
+a typed path (`Foo::clone(x)`, `W.map(w)`) or `self.method()` — resolves
+normally, since the evidence is in the call site rather than in the name.
+
+An entry belongs in a table when the language's standard library defines the
+name on several unrelated types. Names a project might plausibly own stay out:
+dropping them costs real edges, and the resolver's true positives come almost
+entirely from workspace-specific names.
+
 ## Adapter migration
 
 Current migration state:

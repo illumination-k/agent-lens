@@ -183,6 +183,15 @@ mod tests {
             .map(ToOwned::to_owned)
     }
 
+    fn node_by_qualified_name<'a>(report: &'a Value, qualified_name: &str) -> &'a Value {
+        report["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["qualified_name"] == qualified_name)
+            .unwrap()
+    }
+
     fn edge_by_callee<'a>(report: &'a Value, callee: &str) -> &'a Value {
         report["edges"]
             .as_array()
@@ -373,11 +382,39 @@ mod tests {
     }
 
     #[test]
+    fn receiver_method_call_on_ubiquitous_name_stays_unresolved() {
+        // `v.clone()` targets std's `Clone`, but the workspace happens
+        // to declare a unique `CoreHook::clone`. Uniqueness is not
+        // evidence here: with `clone` on the ubiquitous-name table the
+        // call must stay unresolved rather than becoming an in-edge on
+        // the workspace method.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub struct CoreHook;\nimpl CoreHook { pub fn clone(&self) -> CoreHook { CoreHook } }\n\
+             pub fn caller(v: &Vec<u8>) -> Vec<u8> { v.clone() }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "clone");
+        assert_eq!(edge["resolution"], "unresolved");
+        assert_eq!(edge["to"], Value::Null);
+        assert_eq!(edge.get("resolution_method"), None);
+        assert_eq!(edge.get("candidates"), None);
+        let hook = node_by_qualified_name(&report, "crate::CoreHook::clone");
+        assert_eq!(hook["weights"]["fan_in"], 0);
+    }
+
+    #[test]
     fn receiver_method_narrows_ambiguous_match_to_callers_crate() {
-        // Two workspace crates each declare a method named `parse`.
-        // A bare receiver call from `agent_a` cannot pick either via
-        // last-segment alone, but crate narrowing keeps the
-        // same-crate match.
+        // Two workspace crates each declare a method named
+        // `parse_header`. A bare receiver call from `agent_a` cannot
+        // pick either via last-segment alone, but crate narrowing keeps
+        // the same-crate match. The name has to be one `std` does not
+        // define, or the ubiquitous-name table would (correctly) refuse
+        // the whole fallback — see `receive_method_call_on_ubiquitous_
+        // name_stays_unresolved`.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -392,8 +429,8 @@ mod tests {
         write_file(
             dir.path(),
             "crates/agent-a/src/lib.rs",
-            "pub struct Foo;\nimpl Foo { pub fn parse(&self) {} }\n\
-             pub fn caller(f: Foo) { f.parse(); }\n",
+            "pub struct Foo;\nimpl Foo { pub fn parse_header(&self) {} }\n\
+             pub fn caller(f: Foo) { f.parse_header(); }\n",
         );
         write_file(
             dir.path(),
@@ -403,35 +440,35 @@ mod tests {
         write_file(
             dir.path(),
             "crates/agent-b/src/lib.rs",
-            "pub struct Bar;\nimpl Bar { pub fn parse(&self) {} }\n",
+            "pub struct Bar;\nimpl Bar { pub fn parse_header(&self) {} }\n",
         );
 
         let report = analyze_json(dir.path());
-        let edge = edge_by_callee(&report, "parse");
+        let edge = edge_by_callee(&report, "parse_header");
         assert_eq!(edge["resolution"], "resolved");
         assert_eq!(edge["resolution_method"], "crate_narrowed");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
-            Some("agent_a::Foo::parse"),
+            Some("agent_a::Foo::parse_header"),
         );
     }
 
     #[test]
     fn receiver_method_with_multiple_candidates_in_callers_crate_is_ambiguous() {
-        // Two methods named `parse` live in the caller's crate.
+        // Two methods named `parse_header` live in the caller's crate.
         // Crate narrowing cannot tiebreak, so the call goes ambiguous
         // and reports both candidates.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
             "src/lib.rs",
-            "mod a { pub struct Foo; impl Foo { pub fn parse(&self) {} } }\n\
-             mod b { pub struct Bar; impl Bar { pub fn parse(&self) {} } }\n\
-             fn caller(x: crate::a::Foo) { x.parse(); }\n",
+            "mod a { pub struct Foo; impl Foo { pub fn parse_header(&self) {} } }\n\
+             mod b { pub struct Bar; impl Bar { pub fn parse_header(&self) {} } }\n\
+             fn caller(x: crate::a::Foo) { x.parse_header(); }\n",
         );
 
         let report = analyze_json(dir.path());
-        let edge = edge_by_callee(&report, "parse");
+        let edge = edge_by_callee(&report, "parse_header");
         assert_eq!(edge["resolution"], "ambiguous");
         assert_eq!(edge["to"], Value::Null);
         assert_eq!(edge["resolution_method"], "crate_narrowed");
@@ -443,7 +480,10 @@ mod tests {
             .collect();
         assert_eq!(
             candidates,
-            ["src/lib.rs:Bar::parse:2", "src/lib.rs:Foo::parse:1"],
+            [
+                "src/lib.rs:Bar::parse_header:2",
+                "src/lib.rs:Foo::parse_header:1"
+            ],
             "candidates must be sorted node ids",
         );
     }
