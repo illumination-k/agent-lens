@@ -376,6 +376,72 @@ fn help_md_emits_markdown_reference() {
     assert!(stdout.contains("## `agent-lens skills`"), "got: {stdout}");
 }
 
+#[rstest]
+#[case::index("## Command index")]
+#[case::index_row("| `agent-lens analyze hotspot` |")]
+#[case::routing("Pick an analyzer by question:")]
+#[case::conventions("Reports go to stdout")]
+#[case::root_example("    agent-lens help --md")]
+#[case::analyzer_example(
+    "    agent-lens analyze similarity src/ --sweep 0.6,0.75,0.85 --format md"
+)]
+#[case::setup_example("    agent-lens hook setup --scope user")]
+fn help_md_carries_routing_index_and_examples(#[case] needle: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(&["help", "--md"], dir.path(), None);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(needle), "missing {needle}\ngot: {stdout}");
+}
+
+/// The routing table and conventions block are the payload of the plain
+/// `--help` / `help` output, and `analyze --help` is the other place the
+/// "which analyzer?" choice gets made, so all three must carry them.
+#[rstest]
+#[case::flag(&["--help"])]
+#[case::subcommand(&["help"])]
+#[case::analyze_group(&["analyze", "--help"])]
+fn long_help_carries_the_analyzer_routing_table(#[case] args: &[&str]) {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(args, dir.path(), None);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Pick an analyzer by question:"),
+        "got: {stdout}",
+    );
+    assert!(
+        stdout.contains("what breaks if I change this?"),
+        "got: {stdout}",
+    );
+    assert!(stdout.contains("Reports go to stdout"), "got: {stdout}");
+}
+
+/// The root help is the only place that can point an agent at the full
+/// Markdown reference, so it must.
+#[rstest]
+#[case::flag(&["--help"])]
+#[case::subcommand(&["help"])]
+fn root_long_help_points_at_the_markdown_reference(#[case] args: &[&str]) {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(args, dir.path(), None);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("agent-lens help --md"), "got: {stdout}");
+}
+
+/// An analyzer's example block has to survive clap's own rendering, not
+/// just be attached to the command. Coverage that *every* analyzer has a
+/// block lives in the `cli` unit tests, which need no process spawn.
+#[test]
+fn analyzer_long_help_ends_with_a_worked_invocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(&["analyze", "impact", "--help"], dir.path(), None);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Examples:"), "got: {stdout}");
+    assert!(
+        stdout.contains("    agent-lens analyze impact src/ --function Resolver::resolve"),
+        "got: {stdout}",
+    );
+}
+
 #[test]
 fn config_schema_emits_profile_and_tool_tables() {
     let dir = tempfile::tempdir().unwrap();

@@ -290,10 +290,15 @@ The current binary exposes three top-level command trees plus `run`,
 | `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                        |
 | `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                              |
 
-`agent-lens help --md` prints the entire command surface — every
-subcommand, its description, and its options — as one dense Markdown
-document, so an agent can read the whole CLI in a single shot instead of
-running `--help` on each branch.
+`agent-lens --help` opens with a question-to-analyzer routing table
+("what breaks if I change this?" → `analyze impact`) plus the output
+conventions that hold for every analyzer, and each subcommand's
+`--help` ends with worked invocations rather than prose alone.
+
+`agent-lens help --md` prints the entire command surface — a flat
+command index, then every subcommand with its description, options, and
+examples — as one dense Markdown document, so an agent can read the
+whole CLI in a single shot instead of running `--help` on each branch.
 
 `agent-lens skills install` drops the same skills this repo dogfoods
 (under `.claude/skills/`) into a target project so a fresh checkout gets
