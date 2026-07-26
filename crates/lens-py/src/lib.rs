@@ -16,6 +16,7 @@ mod complexity;
 mod context_span;
 mod coupling;
 mod line_index;
+mod method_names;
 mod parser;
 mod wrapper;
 
@@ -24,5 +25,6 @@ pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::{build_context_span_report, extract_context_spans};
 pub use coupling::{CouplingError, PythonModule, build_module_tree, extract_edges};
+pub use method_names::UBIQUITOUS_METHOD_NAMES;
 pub use parser::{PythonParseError, PythonParser};
 pub use wrapper::{WrapperError, find_wrappers};

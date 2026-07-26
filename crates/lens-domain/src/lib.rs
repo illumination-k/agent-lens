@@ -34,6 +34,11 @@
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
+//! * [`method_names`] — the [`UbiquitousMethodNames`] lookup shape.
+//!   Adapters own the actual name tables (`.clone()`, `.map()`,
+//!   `.append()`, …); the call-graph resolver consults them to avoid
+//!   attributing a receiver call to a workspace function that merely
+//!   shares a standard-library method name.
 //! * [`wrapper`] — thin-wrapper finding shape. Adapters decide what
 //!   counts as a trivial adapter in their grammar; the result type is
 //!   shared so `agent-lens` can dispatch on language without per-adapter
@@ -49,6 +54,7 @@ pub mod coupling;
 pub mod function;
 pub mod hotspot;
 pub mod lsh;
+pub mod method_names;
 pub mod naming;
 pub mod syntax;
 pub mod tree;
@@ -75,6 +81,7 @@ pub use function::{
 };
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
+pub use method_names::UbiquitousMethodNames;
 pub use naming::{identifier_tokens, qualify};
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,

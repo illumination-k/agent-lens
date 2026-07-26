@@ -28,8 +28,8 @@ use super::{
     collect_source_files, read_source,
 };
 use model::{
-    CallGraphEdge, CallGraphNode, EdgeWeights, ModuleResolutionSummary, NodeVisibility,
-    NodeWeights, Resolution, ResolutionCallCounts, node_id, node_local_name,
+    CallGraphEdge, CallGraphNode, EdgeWeights, GraphLanguage, ModuleResolutionSummary,
+    NodeVisibility, NodeWeights, Resolution, ResolutionCallCounts, node_id, node_local_name,
 };
 use resolve::{CallerIndex, Resolver};
 
@@ -337,25 +337,6 @@ pub(crate) struct FileGraphInput {
     pub(crate) complexity: Vec<FunctionComplexity>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GraphLanguage {
-    Rust,
-    TypeScript,
-    Python,
-    Go,
-}
-
-impl GraphLanguage {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Rust => "rust",
-            Self::TypeScript => "typescript",
-            Self::Python => "python",
-            Self::Go => "go",
-        }
-    }
-}
-
 impl SourceLang {
     pub(crate) fn graph_language(self) -> GraphLanguage {
         match self {
@@ -468,7 +449,7 @@ fn build_edges(
             if site.caller_qualified_name().is_some() && from.is_none() {
                 continue;
             }
-            let resolved = resolver.resolve(site);
+            let resolved = resolver.resolve(site, file.language);
             let module = site
                 .caller_module()
                 .unwrap_or(file.module.as_str())
@@ -582,6 +563,193 @@ fn apply_static_degrees(nodes: &mut [CallGraphNode], edges: &[CallGraphEdge]) {
 mod tests {
     use super::*;
     use crate::test_support::write_file;
+    use model::CallGraphEdge;
+    use rstest::rstest;
+
+    /// One language's worth of the receiver-resolution contract: a
+    /// receiver call on a name the standard library owns, a receiver
+    /// call on a name only the workspace owns, and a typed path call on
+    /// the standard-library name. All three name the same workspace
+    /// methods, so only the *form* of the call site differs.
+    #[derive(Debug, Clone, Copy)]
+    struct ReceiverFixture {
+        file: &'static str,
+        source: &'static str,
+        /// Caller of `recv.<ubiquitous>()`, which must not resolve.
+        ubiquitous_caller: &'static str,
+        ubiquitous_callee: &'static str,
+        /// Caller of `recv.<specific>()`, which must resolve.
+        specific_caller: &'static str,
+        specific_callee: &'static str,
+        /// Caller of `W.<ubiquitous>(recv)`, which must resolve: the
+        /// path carries the owner the receiver form lacks.
+        path_caller: &'static str,
+    }
+
+    const RUST_FIXTURE: ReceiverFixture = ReceiverFixture {
+        file: "src/lib.rs",
+        source: "pub struct W;\n\
+                 impl W {\n\
+                 pub fn clone(&self) -> W { W }\n\
+                 pub fn with_children(&self) -> usize { 0 }\n\
+                 }\n\
+                 pub fn ubiquitous_receiver(v: &Vec<u8>) -> Vec<u8> { v.clone() }\n\
+                 pub fn specific_receiver(w: &W) -> usize { w.with_children() }\n\
+                 pub fn path_call(w: &W) -> W { W::clone(w) }\n",
+        ubiquitous_caller: "ubiquitous_receiver",
+        ubiquitous_callee: "clone",
+        specific_caller: "specific_receiver",
+        specific_callee: "with_children",
+        path_caller: "path_call",
+    };
+
+    const TYPESCRIPT_FIXTURE: ReceiverFixture = ReceiverFixture {
+        file: "src/lib.ts",
+        source: "export class W {\n\
+                 static map(w: W): number { return 0; }\n\
+                 withChildren(): number { return 1; }\n\
+                 }\n\
+                 export function ubiquitousReceiver(xs: number[]): number[] { return xs.map(id); }\n\
+                 export function specificReceiver(w: W): number { return w.withChildren(); }\n\
+                 export function pathCall(w: W): number { return W.map(w); }\n",
+        ubiquitous_caller: "ubiquitousReceiver",
+        ubiquitous_callee: "map",
+        specific_caller: "specificReceiver",
+        specific_callee: "withChildren",
+        path_caller: "pathCall",
+    };
+
+    const PYTHON_FIXTURE: ReceiverFixture = ReceiverFixture {
+        file: "src/lib.py",
+        source: "class W:\n\
+                 \x20   def get(self):\n\
+                 \x20       return 0\n\
+                 \x20   def with_children(self):\n\
+                 \x20       return 1\n\
+                 \n\
+                 def ubiquitous_receiver(values):\n\
+                 \x20   return values.get(\"k\")\n\
+                 \n\
+                 def specific_receiver(w):\n\
+                 \x20   return w.with_children()\n\
+                 \n\
+                 def path_call(w):\n\
+                 \x20   return W.get(w)\n",
+        ubiquitous_caller: "ubiquitous_receiver",
+        ubiquitous_callee: "get",
+        specific_caller: "specific_receiver",
+        specific_callee: "with_children",
+        path_caller: "path_call",
+    };
+
+    const GO_FIXTURE: ReceiverFixture = ReceiverFixture {
+        file: "src/lib.go",
+        source: "package lib\n\
+                 \n\
+                 type W struct{}\n\
+                 \n\
+                 type builder struct{}\n\
+                 \n\
+                 func (w W) String() string { return \"\" }\n\
+                 \n\
+                 func (w W) WithChildren() int { return 0 }\n\
+                 \n\
+                 func UbiquitousReceiver(b builder) string { return b.String() }\n\
+                 \n\
+                 func SpecificReceiver(w W) int { return w.WithChildren() }\n\
+                 \n\
+                 func PathCall(w W) string { return W.String(w) }\n",
+        ubiquitous_caller: "UbiquitousReceiver",
+        ubiquitous_callee: "String",
+        specific_caller: "SpecificReceiver",
+        specific_callee: "WithChildren",
+        path_caller: "PathCall",
+    };
+
+    /// The one edge leaving the function named `caller` for a call
+    /// named `callee`, as `(resolution, target qualified name)`.
+    fn call_outcome<'a>(
+        graph: &'a CallGraph,
+        caller: &str,
+        callee: &str,
+    ) -> (Resolution, Option<&'a str>) {
+        let by_id: HashMap<&str, &CallGraphNode> =
+            graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let matched: Vec<&CallGraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.callee_name.as_deref() == Some(callee)
+                    && edge
+                        .from
+                        .as_deref()
+                        .and_then(|id| by_id.get(id))
+                        .is_some_and(|node| node.name == caller)
+            })
+            .collect();
+        assert_eq!(
+            matched.len(),
+            1,
+            "expected exactly one {caller} -> {callee} edge, got {matched:?}"
+        );
+        let edge = matched[0];
+        (
+            edge.resolution,
+            edge.to
+                .as_deref()
+                .and_then(|id| by_id.get(id))
+                .map(|node| node.qualified_name.as_str()),
+        )
+    }
+
+    /// Regression for the over-resolution that made every `.clone()` an
+    /// edge into a workspace `W::clone`: a receiver call on a
+    /// standard-library method name carries no evidence, so it must
+    /// stay unresolved — while the same workspace, reached by a
+    /// workspace-specific name or by a typed path, still resolves.
+    #[rstest]
+    #[case::rust(RUST_FIXTURE)]
+    #[case::typescript(TYPESCRIPT_FIXTURE)]
+    #[case::python(PYTHON_FIXTURE)]
+    #[case::go(GO_FIXTURE)]
+    fn receiver_calls_on_ubiquitous_names_do_not_become_workspace_edges(
+        #[case] fixture: ReceiverFixture,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), fixture.file, fixture.source);
+        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+
+        assert_eq!(
+            call_outcome(&graph, fixture.ubiquitous_caller, fixture.ubiquitous_callee),
+            (Resolution::Unresolved, None),
+            "receiver call on the ubiquitous name {}",
+            fixture.ubiquitous_callee,
+        );
+
+        assert_resolves_to_method(
+            call_outcome(&graph, fixture.specific_caller, fixture.specific_callee),
+            fixture.specific_callee,
+            "receiver call on a workspace-specific name",
+        );
+        assert_resolves_to_method(
+            call_outcome(&graph, fixture.path_caller, fixture.ubiquitous_callee),
+            fixture.ubiquitous_callee,
+            "typed path call on a ubiquitous name",
+        );
+    }
+
+    /// Asserts a [`call_outcome`] landed on `W::<method>` — the target
+    /// is checked by suffix because the module prefix differs per
+    /// language.
+    fn assert_resolves_to_method(outcome: (Resolution, Option<&str>), method: &str, context: &str) {
+        let (resolution, target) = outcome;
+        assert_eq!(resolution, Resolution::Resolved, "{context}: {method}");
+        let expected_suffix = format!("W::{method}");
+        assert!(
+            target.is_some_and(|t| t.ends_with(&expected_suffix)),
+            "{context}: expected a target ending in {expected_suffix}, got {target:?}"
+        );
+    }
 
     /// End-to-end substrate check: build the graph from source, take
     /// the resolved adjacency, and run the traversal algorithms the

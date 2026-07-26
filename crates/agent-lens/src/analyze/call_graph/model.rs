@@ -7,7 +7,7 @@
 //! `analyze function-graph`, so field names and ordering here are
 //! part of the JSON schema.
 
-use lens_domain::{FunctionShape, SyntaxFact, VisibilityShape};
+use lens_domain::{FunctionShape, SyntaxFact, UbiquitousMethodNames, VisibilityShape};
 use serde::Serialize;
 
 /// One function definition in the call graph.
@@ -198,4 +198,39 @@ pub(crate) fn node_local_name(f: &FunctionShape) -> String {
 
 pub(crate) fn name_last_segment(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
+}
+
+/// Source language of one graph input file. Selects the per-language
+/// conventions the shared pipeline cannot infer from the shapes alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphLanguage {
+    Rust,
+    TypeScript,
+    Python,
+    Go,
+}
+
+impl GraphLanguage {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+            Self::Python => "python",
+            Self::Go => "go",
+        }
+    }
+
+    /// Method names whose presence in the workspace is no evidence that
+    /// a receiver call targets them, owned by each language adapter so
+    /// the conventions stay next to the grammar that produced them. See
+    /// [`super::resolve::Resolver::resolve`] for where this gates
+    /// resolution.
+    pub(crate) fn ubiquitous_method_names(self) -> UbiquitousMethodNames {
+        match self {
+            Self::Rust => lens_rust::UBIQUITOUS_METHOD_NAMES,
+            Self::TypeScript => lens_ts::UBIQUITOUS_METHOD_NAMES,
+            Self::Python => lens_py::UBIQUITOUS_METHOD_NAMES,
+            Self::Go => lens_golang::UBIQUITOUS_METHOD_NAMES,
+        }
+    }
 }

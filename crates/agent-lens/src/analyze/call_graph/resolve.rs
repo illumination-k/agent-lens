@@ -6,12 +6,21 @@
 //! provenance ([`ResolutionMethod`]) and, when ambiguous, the full
 //! candidate node-id set so downstream analyzers can widen traversals
 //! instead of dropping the edge.
+//!
+//! The one place the name fallback is switched off is a receiver call
+//! (`recv.foo()`) on a name the language's standard library defines on
+//! nearly every value — see
+//! [`GraphLanguage::ubiquitous_method_names`][super::model::GraphLanguage::ubiquitous_method_names].
+//! There the name is the only evidence available and it is worthless,
+//! so the site stays [`Resolution::Unresolved`] rather than becoming a
+//! phantom edge into whichever workspace function happens to share the
+//! name.
 
 use std::collections::{HashMap, HashSet};
 
 use lens_domain::{CallShape, ReceiverExprKind, SyntaxFact};
 
-use super::model::{CallGraphNode, Resolution, ResolutionMethod, name_last_segment};
+use super::model::{CallGraphNode, GraphLanguage, Resolution, ResolutionMethod, name_last_segment};
 
 /// Outcome of resolving one call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +136,10 @@ impl Resolver {
         }
     }
 
-    pub(crate) fn resolve(&self, site: &CallShape) -> ResolvedCall {
+    /// `language` is the language of the file the call site lives in;
+    /// it selects the ubiquitous-method-name table consulted for
+    /// receiver calls.
+    pub(crate) fn resolve(&self, site: &CallShape, language: GraphLanguage) -> ResolvedCall {
         let Some(callee_name) = site.callee_name() else {
             return ResolvedCall::anonymous();
         };
@@ -141,7 +153,7 @@ impl Resolver {
             return self.resolve_self_method(site, callee_name);
         }
         if site.has_receiver_expression() {
-            return self.resolve_receiver_method(site, callee_name);
+            return self.resolve_receiver_method(site, callee_name, language);
         }
         for candidate in lexical_candidates(site) {
             if let Some(ids) = self.qualified.get(&candidate) {
@@ -189,6 +201,11 @@ impl Resolver {
     /// last-segment match, then narrow ambiguous matches to the
     /// caller's crate.
     ///
+    /// * Ubiquitous method name → [`Resolution::Unresolved`], whatever
+    ///   the candidates. The name is the only evidence a receiver call
+    ///   offers, and for `.clone()` / `.get()` / `.map()` it says
+    ///   nothing: nearly every such site targets std, so a workspace
+    ///   match is a phantom edge rather than a lucky hit.
     /// * 0 candidates → [`Resolution::Unresolved`] (likely external/std).
     /// * 1 candidate → [`Resolution::Resolved`].
     /// * Many candidates with exactly one in the caller's crate →
@@ -196,12 +213,21 @@ impl Resolver {
     /// * Otherwise → [`Resolution::Ambiguous`], carrying the narrowest
     ///   candidate set the heuristics reached.
     ///
-    /// False-positive risk is real: a call on `String` whose method
-    /// happens to share a name with a unique workspace function would
-    /// resolve to the workspace match. The crate narrowing keeps this
-    /// risk bounded to the caller's crate when multiple candidates
-    /// exist; users who want precision should prefer typed paths.
-    fn resolve_receiver_method(&self, site: &CallShape, callee_name: &str) -> ResolvedCall {
+    /// Residual false-positive risk is a workspace-specific name whose
+    /// unique match is not the real callee. The crate narrowing keeps
+    /// that bounded to the caller's crate when multiple candidates
+    /// exist; users who want precision should prefer typed paths, which
+    /// carry the owner in the path and so bypass this method entirely —
+    /// including for ubiquitous names (`Foo::clone(x)` still resolves).
+    fn resolve_receiver_method(
+        &self,
+        site: &CallShape,
+        callee_name: &str,
+        language: GraphLanguage,
+    ) -> ResolvedCall {
+        if language.ubiquitous_method_names().contains(callee_name) {
+            return ResolvedCall::unresolved();
+        }
         let Some(ids) = self.last_segment.get(callee_name) else {
             return ResolvedCall::unresolved();
         };
@@ -404,6 +430,7 @@ fn qualified_in_crate(qualified: &str, crate_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::{NodeVisibility, NodeWeights, ResolutionCallCounts};
     use super::*;
     use lens_domain::{ImportShape, ReceiverExprKind};
     use rstest::rstest;
@@ -460,6 +487,107 @@ mod tests {
         );
         assert_eq!(join_tail(&["Self"], 1), None);
         assert_eq!(join_tail(&["Self", "parse"], 1).as_deref(), Some("parse"));
+    }
+
+    fn receiver_site(name: &str) -> CallShape {
+        CallShape {
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::Expression),
+            ..site(name)
+        }
+    }
+
+    fn node(qualified_name: &str) -> CallGraphNode {
+        CallGraphNode {
+            id: format!("src/lib.rs:{qualified_name}:1"),
+            name: name_last_segment(qualified_name).to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            file: "src/lib.rs".to_owned(),
+            module: "crate::m".to_owned(),
+            impl_owner: None,
+            start_line: 1,
+            end_line: 2,
+            is_test: false,
+            visibility: NodeVisibility::Unknown,
+            weights: NodeWeights::default(),
+            outgoing_calls: ResolutionCallCounts::default(),
+        }
+    }
+
+    /// The name tables are per-language, so the same workspace and the
+    /// same call site resolve differently depending on which adapter
+    /// produced the call: `clone` is a `std` method in Rust and an
+    /// ordinary identifier everywhere else.
+    #[rstest]
+    #[case::rust_denies_clone(GraphLanguage::Rust, "clone", Resolution::Unresolved)]
+    #[case::rust_allows_workspace_name(GraphLanguage::Rust, "with_children", Resolution::Resolved)]
+    #[case::typescript_denies_map(GraphLanguage::TypeScript, "map", Resolution::Unresolved)]
+    #[case::typescript_allows_rust_name(GraphLanguage::TypeScript, "clone", Resolution::Resolved)]
+    #[case::python_denies_append(GraphLanguage::Python, "append", Resolution::Unresolved)]
+    #[case::python_allows_rust_name(GraphLanguage::Python, "clone", Resolution::Resolved)]
+    #[case::go_denies_string(GraphLanguage::Go, "String", Resolution::Unresolved)]
+    #[case::go_allows_rust_name(GraphLanguage::Go, "clone", Resolution::Resolved)]
+    fn receiver_calls_on_ubiquitous_names_stay_unresolved_per_language(
+        #[case] language: GraphLanguage,
+        #[case] callee: &str,
+        #[case] expected: Resolution,
+    ) {
+        let nodes: Vec<CallGraphNode> = ["clone", "with_children", "map", "append", "String"]
+            .into_iter()
+            .map(|name| node(&format!("crate::m::W::{name}")))
+            .collect();
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&receiver_site(callee), language);
+
+        assert_eq!(call.resolution, expected, "{callee} under {language:?}");
+        assert_eq!(call.to.is_some(), expected == Resolution::Resolved);
+    }
+
+    /// A path call carries the owner, so the table must not touch it —
+    /// this is the evidence the receiver form lacks.
+    #[rstest]
+    #[case::typed_path("W::clone")]
+    #[case::self_type_path("Self::clone")]
+    fn typed_path_calls_on_ubiquitous_names_still_resolve(#[case] path: &str) {
+        let nodes = vec![node("crate::m::W::clone"), node("crate::m::S::clone")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&site(path), GraphLanguage::Rust);
+
+        assert_eq!(call.resolution, Resolution::Resolved, "{path}");
+        assert!(call.to.is_some(), "{path}");
+    }
+
+    /// `self.clone()` is not a bare name match: the caller's own `impl`
+    /// owner supplies the type, so the table leaves it alone.
+    #[test]
+    fn self_method_calls_on_ubiquitous_names_still_resolve() {
+        let nodes = vec![node("crate::m::S::clone")];
+        let resolver = Resolver::new(&nodes);
+        let self_site = CallShape {
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::SelfValue),
+            ..site("clone")
+        };
+
+        let call = resolver.resolve(&self_site, GraphLanguage::Rust);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+        assert_eq!(call.method, Some(ResolutionMethod::SelfMethod));
+    }
+
+    /// Crate narrowing must not become a back door: several candidates
+    /// with one in the caller's crate is still no evidence for a name
+    /// `std` defines on everything.
+    #[test]
+    fn crate_narrowing_does_not_rescue_ubiquitous_receiver_names() {
+        let nodes = vec![node("crate::m::W::clone"), node("other::W::clone")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&receiver_site("clone"), GraphLanguage::Rust);
+
+        assert_eq!(call.resolution, Resolution::Unresolved);
+        assert!(call.candidates.is_empty());
+        assert_eq!(call.method, None);
     }
 
     #[test]
