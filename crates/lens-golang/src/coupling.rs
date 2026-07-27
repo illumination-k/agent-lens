@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
 use tree_sitter::Node;
 
+use crate::node_text::node_str;
 use crate::parser::{GoParseError, parse_tree, unquote_go_string_literal};
 
 /// Failures raised while building Go package nodes.
@@ -242,7 +243,7 @@ fn collect_import_specs(node: Node<'_>, source: &[u8], out: &mut Vec<String>) {
 
 fn import_spec_path(spec: Node<'_>, source: &[u8]) -> Option<String> {
     let path = spec.child_by_field_name("path")?;
-    let text = path.utf8_text(source).ok()?;
+    let text = node_str(path, source)?;
     Some(unquote_go_string_literal(text))
 }
 
@@ -281,14 +282,27 @@ fn resolve_import(import: &str, go_to_module: &HashMap<String, ModulePath>) -> O
 /// workspace root) and pluck the `module ...` line out of it. Returns
 /// `None` when no `go.mod` is found, the file can't be read, or the
 /// file is missing the `module` declaration entirely.
+///
+/// Losing the prefix is not fatal — [`go_path_for`] falls back to
+/// relative paths — but it does degrade import resolution across the
+/// whole scan, so a `go.mod` that exists and can't be read is logged.
+/// A missing one is the normal single-file / test case and stays quiet.
 fn read_go_module_prefix(packages: &[GoPackage]) -> Option<String> {
     let mut roots: BTreeSet<&Path> = packages.iter().map(|p| p.file.as_path()).collect();
     while let Some(dir) = roots.pop_first() {
         let go_mod = dir.join("go.mod");
-        if let Ok(text) = std::fs::read_to_string(&go_mod)
-            && let Some(prefix) = parse_module_directive(&text)
-        {
-            return Some(prefix);
+        match std::fs::read_to_string(&go_mod) {
+            Ok(text) => {
+                if let Some(prefix) = parse_module_directive(&text) {
+                    return Some(prefix);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                path = %go_mod.display(),
+                %error,
+                "go: cannot read go.mod; import paths will resolve without the module prefix",
+            ),
         }
         if let Some(parent) = dir.parent() {
             roots.insert(parent);
@@ -378,6 +392,50 @@ mod tests {
                 .any(|m| m.path.as_str() == "crate::pkg::util")
         );
         assert_eq!(edges, vec![edge("crate", "crate::pkg::util", "util")]);
+    }
+
+    /// An unreadable `go.mod` costs every import in the scan its module
+    /// prefix, so the whole run silently resolves fewer edges. The
+    /// fallback stays (a partial graph beats no graph), but it has to
+    /// be announced. A `go.mod` that simply isn't there is the ordinary
+    /// single-file case and must stay quiet.
+    #[test]
+    fn unreadable_go_mod_is_reported_while_a_missing_one_is_not() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // A directory named `go.mod` reads back as an error that is not
+        // `NotFound`, on every platform and regardless of the test
+        // process's uid.
+        std::fs::create_dir(root.path().join("go.mod")).expect("go.mod dir");
+        let packages = vec![GoPackage {
+            path: ModulePath::new("crate"),
+            file: root.path().to_path_buf(),
+            imports: Vec::new(),
+        }];
+
+        let (prefix, logs) = crate::test_support::capture_logs(|| read_go_module_prefix(&packages));
+
+        assert_eq!(prefix, None);
+        assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
+        assert!(
+            logs.contains("cannot read go.mod"),
+            "expected the go.mod diagnostic, got: {logs}"
+        );
+
+        let quiet_root = tempfile::tempdir().expect("tempdir");
+        let quiet_packages = vec![GoPackage {
+            path: ModulePath::new("crate"),
+            file: quiet_root.path().to_path_buf(),
+            imports: Vec::new(),
+        }];
+
+        let (prefix, logs) =
+            crate::test_support::capture_logs(|| read_go_module_prefix(&quiet_packages));
+
+        assert_eq!(prefix, None);
+        assert!(
+            !logs.contains("cannot read go.mod"),
+            "a missing go.mod must not warn, got: {logs}"
+        );
     }
 
     #[test]

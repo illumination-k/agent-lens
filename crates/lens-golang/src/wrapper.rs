@@ -10,6 +10,7 @@
 use lens_domain::{WrapperFinding, args_pass_through_by, qualify};
 use tree_sitter::Node;
 
+use crate::node_text::node_str;
 use crate::parser::{GoParseError, function_name_text, method_receiver_type, parse_tree};
 
 /// Zero-argument method calls that carry no semantic content of their
@@ -116,7 +117,7 @@ fn trivial_adapter_call<'a>(call: Node<'a>, source: &[u8]) -> Option<(Node<'a>, 
         return None;
     }
     let field = func.child_by_field_name("field")?;
-    let member = field.utf8_text(source).ok()?;
+    let member = node_str(field, source)?;
     if !TRIVIAL_NULLARY_ADAPTERS.contains(&member) {
         return None;
     }
@@ -192,7 +193,7 @@ fn all_blank_identifiers(expr_list: Node<'_>, source: &[u8]) -> bool {
     let mut any = false;
     for child in expr_list.named_children(&mut cursor) {
         any = true;
-        if child.kind() != "identifier" || child.utf8_text(source).ok() != Some("_") {
+        if child.kind() != "identifier" || node_str(child, source) != Some("_") {
             return false;
         }
     }
@@ -210,7 +211,7 @@ fn core_call<'a>(expr: Node<'a>, source: &'a [u8]) -> Option<(String, Vec<Node<'
     let args_node = expr.child_by_field_name("arguments")?;
     let mut cursor = args_node.walk();
     let args: Vec<Node<'_>> = args_node.named_children(&mut cursor).collect();
-    Some((node_text(callee, source), args))
+    Some((node_str(callee, source)?.to_owned(), args))
 }
 
 fn collect_param_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
@@ -228,14 +229,15 @@ fn collect_param_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
 fn collect_param_decl_names(node: Node<'_>, source: &[u8], out: &mut Vec<String>) {
     if let Some(name) = node.child_by_field_name("name")
         && name.kind() == "identifier"
+        && let Some(text) = node_str(name, source)
     {
-        out.push(node_text(name, source));
+        out.push(text.to_owned());
     }
 }
 
 fn passthrough_arg_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "identifier" => node.utf8_text(source).ok().map(str::to_owned),
+        "identifier" => node_str(node, source).map(str::to_owned),
         "composite_literal" => {
             let body = node.child_by_field_name("body")?;
             single_literal_value_name(body, source)
@@ -276,10 +278,6 @@ fn is_thin_callee(node: Node<'_>) -> bool {
             .is_some_and(is_thin_callee),
         _ => false,
     }
-}
-
-fn node_text(node: Node<'_>, source: &[u8]) -> String {
-    node.utf8_text(source).unwrap_or_default().to_owned()
 }
 
 fn first_named_child(node: Node<'_>) -> Option<Node<'_>> {

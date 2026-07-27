@@ -10,9 +10,11 @@ workspace = true
 [dependencies]
 lens-domain = { path = "../lens-domain", version = "0.1.0" }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 tree-sitter = "0.26"
 tree-sitter-go = "0.25"
 
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = "3"
+tracing-subscriber = { workspace = true }

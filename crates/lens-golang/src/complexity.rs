@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use lens_domain::{FunctionComplexity, HalsteadCounts, qualify};
 use tree_sitter::Node;
 
+use crate::node_text::node_str;
 use crate::parser::{GoParseError, function_name_text, method_receiver_type, parse_tree};
 
 /// Extract one [`FunctionComplexity`] per function-shaped item in
@@ -256,7 +257,7 @@ impl<'a> ComplexityVisitor<'a> {
     }
 
     fn record_operand_text(&mut self, node: Node<'_>) {
-        if let Ok(text) = node.utf8_text(self.source) {
+        if let Some(text) = node_str(node, self.source) {
             self.halstead.operand(text);
         }
     }
@@ -298,7 +299,7 @@ fn logical_operator_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .filter(|child| !child.is_named())
-        .filter_map(|child| child.utf8_text(source).ok())
+        .filter_map(|child| node_str(child, source))
         .find(|text| matches!(*text, "&&" | "||"))
 }
 

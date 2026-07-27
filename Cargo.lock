@@ -710,6 +710,8 @@ dependencies = [
  "rstest",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-go",
 ]
