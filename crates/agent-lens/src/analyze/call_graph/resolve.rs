@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lens_domain::{CallShape, ReceiverExprKind, SyntaxFact};
+use lens_domain::{CallShape, ReceiverExprKind, SyntaxFact, qualify_module};
 
 use super::model::{CallGraphNode, GraphLanguage, Resolution, ResolutionMethod, name_last_segment};
 
@@ -391,14 +391,6 @@ fn join_tail(segments: &[&str], start: usize) -> Option<String> {
         None
     } else {
         Some(segments[start..].join("::"))
-    }
-}
-
-fn qualify_module(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{module}::{name}")
     }
 }
 

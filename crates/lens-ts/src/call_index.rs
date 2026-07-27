@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact,
+    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -98,7 +98,7 @@ struct FunctionShapeCollector {
 impl FunctionVisitor for FunctionShapeCollector {
     fn on_function(&mut self, item: FunctionItem<'_>) {
         let (owner, display_name) = split_owner(&item.name);
-        let qualified_name = qualify(&self.module, &item.name);
+        let qualified_name = qualify_module(&self.module, &item.name);
         let doc = item
             .doc_attach_start
             .and_then(|attach| self.jsdoc_by_attach.get(&attach).cloned());
@@ -138,7 +138,7 @@ struct CallShapeCollector<'a> {
 impl FunctionVisitor for CallShapeCollector<'_> {
     fn on_function(&mut self, item: FunctionItem<'_>) {
         let (owner, _) = split_owner(&item.name);
-        let caller = qualify(&self.module, &item.name);
+        let caller = qualify_module(&self.module, &item.name);
         let mut visitor = FunctionBodyCallVisitor {
             module: &self.module,
             caller_qualified_name: caller,
@@ -289,7 +289,7 @@ fn collect_imports(program: &Program, module: &str) -> Vec<ImportShape> {
                     let local = specifier.local.name.to_string();
                     let target = imported.as_deref().map_or_else(
                         || target_module.clone(),
-                        |name| qualify(&target_module, name),
+                        |name| qualify_module(&target_module, name),
                     );
                     out.push(import_shape(
                         Some(local),
@@ -368,26 +368,11 @@ fn strip_ts_extension(segment: &str) -> &str {
     segment
 }
 
-fn qualify(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{module}::{name}")
-    }
-}
-
 fn split_owner(name: &str) -> (Option<String>, String) {
     name.rsplit_once("::").map_or_else(
         || (None, name.to_owned()),
         |(owner, name)| (Some(owner.to_owned()), name.to_owned()),
     )
-}
-
-fn starts_uppercase(value: &str) -> bool {
-    value
-        .chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_uppercase())
 }
 
 #[cfg(test)]

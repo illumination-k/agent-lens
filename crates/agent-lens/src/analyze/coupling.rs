@@ -31,7 +31,7 @@
 //!   path aliases are not resolved.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lens_domain::{
     CouplingEdge, CouplingReport, DependencyCycle, ModuleMetrics, ModulePath, PairCoupling,
@@ -39,10 +39,8 @@ use lens_domain::{
 };
 use serde::Serialize;
 
-use super::{
-    AnalyzePathFilter, CouplingAnalyzerError, OutputFormat, SourceLang, format_optional_f64,
-    resolve_crate_root,
-};
+use super::module_graph::{GraphPolicy, build_graph, module_paths};
+use super::{AnalyzePathFilter, CouplingAnalyzerError, OutputFormat, format_optional_f64};
 
 /// Stateless analyzer entry point. Kept as a struct so per-run
 /// configuration (filters, thresholds) can be added later without
@@ -83,7 +81,7 @@ impl CouplingAnalyzer {
         path: &Path,
         format: OutputFormat,
     ) -> Result<String, CouplingAnalyzerError> {
-        let mut graph = build_graph(path)?;
+        let mut graph = build_graph(path, GraphPolicy::COUPLING)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: std::collections::HashSet<&ModulePath> =
@@ -91,8 +89,7 @@ impl CouplingAnalyzer {
         graph
             .edges
             .retain(|e| kept.contains(&e.from) && kept.contains(&e.to));
-        let module_paths: Vec<ModulePath> = graph.modules.iter().map(|m| m.path.clone()).collect();
-        let report = compute_report(&module_paths, graph.edges);
+        let report = compute_report(&module_paths(&graph), graph.edges);
         let view = ReportView::new(&graph.root, &report);
         match format {
             OutputFormat::Json => {
@@ -101,95 +98,6 @@ impl CouplingAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&view)),
         }
     }
-}
-
-#[derive(Debug)]
-struct ModuleFile {
-    path: ModulePath,
-    file: PathBuf,
-}
-
-#[derive(Debug)]
-struct ModuleGraph {
-    root: PathBuf,
-    modules: Vec<ModuleFile>,
-    edges: Vec<CouplingEdge>,
-}
-
-fn build_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
-    if let Some(lang) = SourceLang::from_path(path) {
-        return match lang {
-            SourceLang::TypeScript(_) => build_ts_graph(path),
-            SourceLang::Go => build_go_graph(path),
-            SourceLang::Rust => build_rust_graph(path),
-            SourceLang::Python => Err(CouplingAnalyzerError::UnsupportedRoot {
-                path: path.to_path_buf(),
-            }),
-        };
-    }
-    if path.is_dir() && has_go_workspace_marker(path) {
-        return build_go_graph(path);
-    }
-    build_rust_graph(path)
-}
-
-/// `go.mod` is the unambiguous signal that a directory is a Go module
-/// root. Without it we'd fall through to the Rust crate-root resolver,
-/// which would then fail with a confusing "no usable Rust crate root"
-/// error on a Go project. Checking for `go.mod` first is cheap and lets
-/// the analyzer accept a directory like `analyze coupling .` from a Go
-/// repo's root.
-fn has_go_workspace_marker(path: &Path) -> bool {
-    path.join("go.mod").is_file()
-}
-
-fn build_rust_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
-    let root = resolve_crate_root(path)?;
-    let modules = lens_rust::build_module_tree(&root)?;
-    let edges = lens_rust::extract_edges(&modules);
-    Ok(ModuleGraph {
-        root,
-        modules: modules
-            .into_iter()
-            .map(|m| ModuleFile {
-                path: m.path,
-                file: m.file,
-            })
-            .collect(),
-        edges,
-    })
-}
-
-fn build_ts_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
-    let modules = lens_ts::build_module_tree(path)?;
-    let edges = lens_ts::extract_edges(&modules);
-    Ok(ModuleGraph {
-        root: path.to_path_buf(),
-        modules: modules
-            .into_iter()
-            .map(|m| ModuleFile {
-                path: m.path,
-                file: m.file,
-            })
-            .collect(),
-        edges,
-    })
-}
-
-fn build_go_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
-    let modules = lens_golang::build_module_tree(path)?;
-    let edges = lens_golang::extract_edges(&modules);
-    Ok(ModuleGraph {
-        root: path.to_path_buf(),
-        modules: modules
-            .into_iter()
-            .map(|m| ModuleFile {
-                path: m.path,
-                file: m.file,
-            })
-            .collect(),
-        edges,
-    })
 }
 
 /// Dispatch on language and compute the raw [`CouplingReport`] for `path`,
@@ -205,13 +113,12 @@ fn build_go_graph(path: &Path) -> Result<ModuleGraph, CouplingAnalyzerError> {
 pub(crate) fn report_for_path(
     path: &Path,
 ) -> Result<Option<CouplingReport>, CouplingAnalyzerError> {
-    let graph = match build_graph(path) {
+    let graph = match build_graph(path, GraphPolicy::COUPLING) {
         Ok(graph) => graph,
         Err(CouplingAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
         Err(e) => return Err(e),
     };
-    let module_paths: Vec<ModulePath> = graph.modules.iter().map(|m| m.path.clone()).collect();
-    Ok(Some(compute_report(&module_paths, graph.edges)))
+    Ok(Some(compute_report(&module_paths(&graph), graph.edges)))
 }
 
 #[derive(Debug, Serialize)]

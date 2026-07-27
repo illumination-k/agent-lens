@@ -17,7 +17,7 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact,
+    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport};
@@ -101,8 +101,8 @@ fn collect_function_shapes(
             }
             let display_name = func.name.as_str().to_owned();
             let qualified = match owner {
-                Some(class) => qualify(module, &format!("{class}::{display_name}")),
-                None => qualify(module, &display_name),
+                Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
+                None => qualify_module(module, &display_name),
             };
             let owner_shape = owner.map(|class_name| OwnerShape {
                 display_name: class_name.to_owned(),
@@ -160,8 +160,8 @@ fn collect_call_shapes(
             }
             let display_name = func.name.as_str();
             let caller_qualified = match owner {
-                Some(class) => qualify(module, &format!("{class}::{display_name}")),
-                None => qualify(module, display_name),
+                Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
+                None => qualify_module(module, display_name),
             };
             let mut visitor = FunctionBodyCallVisitor {
                 module,
@@ -402,21 +402,6 @@ fn dotted_to_module_path(dotted: &str) -> String {
 
 fn top_segment(dotted: &str) -> &str {
     dotted.split('.').next().unwrap_or(dotted)
-}
-
-fn qualify(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{module}::{name}")
-    }
-}
-
-fn starts_uppercase(value: &str) -> bool {
-    value
-        .chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_uppercase())
 }
 
 fn function_span(func: &StmtFunctionDef, lines: &LineIndex) -> SourceSpan {

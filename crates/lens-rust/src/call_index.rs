@@ -26,9 +26,8 @@ use std::collections::BTreeMap;
 
 use lens_domain::{
     CallShape, ImportShape, LexicalResolutionStatus, ReceiverExprKind, SyntaxFact, qualify,
+    qualify_module,
 };
-use proc_macro2::TokenStream;
-use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
@@ -36,7 +35,7 @@ use syn::{
 };
 
 use crate::attrs::has_cfg_test;
-use crate::common::type_path_last_ident;
+use crate::common::{render_tokens, type_path_last_ident};
 use crate::parser::RustParseError;
 
 /// One call-site occurrence inside a Rust source file.
@@ -535,14 +534,6 @@ fn module_segments(module: &str) -> Vec<String> {
     module.split("::").map(ToOwned::to_owned).collect()
 }
 
-fn qualify_module(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{module}::{name}")
-    }
-}
-
 /// First segment of `current_module`, treated as the absolute crate
 /// prefix the caller threaded in. Used to rewrite the literal `crate`
 /// keyword in callee paths and `use` targets so the function-graph
@@ -591,16 +582,6 @@ fn path_call_path(expr: &Expr) -> Option<String> {
         Expr::Group(g) => path_call_path(&g.expr),
         _ => None,
     }
-}
-
-fn render_tokens<T: ToTokens>(node: &T) -> String {
-    let mut stream = TokenStream::new();
-    node.to_tokens(&mut stream);
-    let raw = stream.to_string();
-    raw.replace(" :: ", "::")
-        .replace(" . ", ".")
-        .replace(" ;", ";")
-        .replace("& ", "&")
 }
 
 #[cfg(test)]
