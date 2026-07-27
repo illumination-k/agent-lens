@@ -25,6 +25,7 @@ pub fn qualify(owner: Option<&str>, method: &str) -> String {
 /// The module-tree walkers thread a `&str` module path down the AST and
 /// use `""` for the crate/file root, so they'd otherwise each repeat the
 /// `is_empty` check before formatting.
+#[inline]
 pub fn qualify_module(module: &str, name: &str) -> String {
     qualify((!module.is_empty()).then_some(module), name)
 }
@@ -36,6 +37,7 @@ pub fn qualify_module(module: &str, name: &str) -> String {
 /// a constructor. ASCII-only on purpose: it is a naming-convention probe,
 /// not a Unicode case query, and `Ａ`-style full-width identifiers should
 /// not be treated as type names.
+#[inline]
 pub fn starts_uppercase(value: &str) -> bool {
     value
         .chars()
