@@ -41,10 +41,13 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod examples;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "agent-lens",
     about = "Hook handlers and analyzers that give coding agents a sharper view of the codebase.",
+    after_long_help = examples::ROOT,
     version,
     propagate_version = true,
     // We ship our own `help` subcommand (with `--md`), so turn off clap's
@@ -66,7 +69,7 @@ enum Command {
     #[command(subcommand)]
     CodexHook(CodexHookCommand),
     /// Run an on-demand analyzer that emits LLM-friendly context.
-    #[command(subcommand)]
+    #[command(subcommand, after_long_help = examples::ANALYZE)]
     Analyze(AnalyzeCommand),
     /// Run every analyzer in a named `agent-lens.toml` profile.
     ///
@@ -76,6 +79,7 @@ enum Command {
     /// at with `--config`); each analyzer runs through the same path as
     /// `agent-lens analyze`, and the per-tool reports are emitted as one
     /// combined document.
+    #[command(after_long_help = examples::RUN)]
     Run(RunArgs),
     /// List or install the Claude Code skills bundled with this binary.
     ///
@@ -83,10 +87,10 @@ enum Command {
     /// question, so installing them into a project's `.claude/skills`
     /// (or `$HOME/.claude/skills`) is how a fresh checkout gets
     /// `agent-lens`-aware routing.
-    #[command(subcommand)]
+    #[command(subcommand, after_long_help = examples::SKILLS)]
     Skills(SkillsCommand),
     /// Inspect the `agent-lens.toml` configuration format.
-    #[command(subcommand)]
+    #[command(subcommand, after_long_help = examples::CONFIG)]
     Config(ConfigCommand),
     /// Print the command reference, optionally as agent-friendly Markdown.
     ///
@@ -94,6 +98,7 @@ enum Command {
     /// `--help`. With `--md` it emits a dense Markdown document covering
     /// every subcommand, its description, and its options in one place —
     /// tuned for dropping into an LLM context.
+    #[command(after_long_help = examples::HELP)]
     Help(HelpArgs),
 }
 
@@ -186,6 +191,7 @@ enum HookCommand {
     /// new block is appended only with the commands that aren't already
     /// wired up. Re-running the command is a no-op once every handler
     /// is installed.
+    #[command(after_long_help = examples::HOOK_SETUP)]
     Setup(SetupArgs),
 }
 
@@ -285,6 +291,7 @@ enum CodexHookCommand {
     /// and `[[hooks.PostToolUse]]` blocks are appended only for handlers
     /// that aren't already wired up. Re-running the
     /// command is a no-op once every handler is installed.
+    #[command(after_long_help = examples::CODEX_HOOK_SETUP)]
     Setup(CodexSetupArgs),
 }
 
@@ -383,6 +390,7 @@ enum AnalyzeCommand {
     /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
+    #[command(after_long_help = examples::COHESION)]
     Cohesion(AnalyzeCohesionArgs),
     /// Report per-function complexity metrics (Cyclomatic, Cognitive,
     /// Max Nesting, Halstead Volume, Maintainability Index).
@@ -394,6 +402,7 @@ enum AnalyzeCommand {
     /// file extension (Rust, TypeScript/JavaScript, Python, or Go).
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
+    #[command(after_long_help = examples::COMPLEXITY)]
     Complexity(AnalyzeComplexityArgs),
     /// Report module-level coupling metrics for a Rust crate, a
     /// TypeScript / JavaScript module graph, or a Go module.
@@ -407,6 +416,7 @@ enum AnalyzeCommand {
     /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
     /// `.cjs`) whose relative imports define the module graph, or a
     /// `.go` file or Go module directory (containing `go.mod`).
+    #[command(after_long_help = examples::COUPLING)]
     Coupling(AnalyzeCommonArgs),
     /// Report function-level call cycles: groups of 2+ functions that
     /// call each other, directly or transitively, with advisory
@@ -427,6 +437,7 @@ enum AnalyzeCommand {
     /// TypeScript/JavaScript, Python, or Go); other extensions are
     /// ignored silently. JSON is the default; `--format md` emits a
     /// compact summary tuned for LLM context.
+    #[command(after_long_help = examples::CYCLES)]
     Cycles(AnalyzeCommonArgs),
     /// Emit a static function call graph as visualization-ready data.
     ///
@@ -436,6 +447,7 @@ enum AnalyzeCommand {
     /// chosen from each file extension (Rust, TypeScript/JavaScript,
     /// Python, or Go); other extensions are ignored silently. JSON is the
     /// default; `--format md` emits a compact sanity summary.
+    #[command(after_long_help = examples::FUNCTION_GRAPH)]
     FunctionGraph(AnalyzeCommonArgs),
     /// Run one canned traversal on the static function call graph:
     /// callers, callees, neighborhood, or path.
@@ -458,6 +470,7 @@ enum AnalyzeCommand {
     /// ignored silently. JSON is the default; `--format md` renders
     /// span and module detail for small result sets and compact id
     /// rows for larger ones.
+    #[command(after_long_help = examples::GRAPH_QUERY)]
     GraphQuery(AnalyzeGraphQueryArgs),
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
@@ -475,6 +488,7 @@ enum AnalyzeCommand {
     /// several TS/JS entry trees into one report; in that mode `path`
     /// must be a directory and the patterns are evaluated relative to
     /// it.
+    #[command(after_long_help = examples::CONTEXT_SPAN)]
     ContextSpan(AnalyzeContextSpanArgs),
     /// Report hub smells on the static function call graph: god
     /// functions, load-bearing utilities, bottlenecks, and misplaced
@@ -495,6 +509,7 @@ enum AnalyzeCommand {
     /// The parser is chosen from each file extension (Rust,
     /// TypeScript/JavaScript, Python, or Go). JSON is the default;
     /// `--format md` emits ranked lists capped at `--top` (default 20).
+    #[command(after_long_help = examples::HUBS)]
     Hubs(AnalyzeHubsArgs),
     /// Report the blast radius of a change: which functions
     /// transitively call the changed ones, which tests reach them, and
@@ -519,6 +534,7 @@ enum AnalyzeCommand {
     /// or Go); other extensions are ignored silently. JSON is the
     /// default; `--format md` caps caller and test lists at `--top`
     /// (default 20).
+    #[command(after_long_help = examples::IMPACT)]
     Impact(AnalyzeImpactArgs),
     /// Report an inferred layer map: what level each function and module
     /// sits on, which modules are mutually dependent, and which
@@ -553,6 +569,7 @@ enum AnalyzeCommand {
     /// TypeScript/JavaScript, Python, or Go); other extensions are
     /// ignored silently. JSON is the default; `--format md` caps each
     /// listing at `--top` (default 20).
+    #[command(after_long_help = examples::LAYERS)]
     Layers(AnalyzeLayersArgs),
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
@@ -564,6 +581,7 @@ enum AnalyzeCommand {
     /// "frequently changed *and* complex" code — where bugs concentrate
     /// and where a refactor is most likely to pay off. `path` must be
     /// inside a git working tree.
+    #[command(after_long_help = examples::HOTSPOT)]
     Hotspot(AnalyzeHotspotArgs),
     /// Report clusters of near-duplicate functions.
     ///
@@ -573,10 +591,17 @@ enum AnalyzeCommand {
     /// Function bodies are compared via TSED on their normalised AST;
     /// pairs scoring at or above `--threshold` are folded into complete-link
     /// clusters where every member is similar to every other (no chaining
-    /// through weaker links). The parser is chosen from each file extension
+    /// through weaker links). Each reported pair also carries diagnostic
+    /// components that never feed the score, among them `doc_overlap` —
+    /// the word-level overlap of the two doc comments, which separates
+    /// "same stated intent" clones from functions that merely share a
+    /// shape. The parser is chosen from each file extension
     /// (Rust, TypeScript/JavaScript, Python, or Go). The JSON format is
-    /// the default machine-readable output; `--format md` emits a
-    /// compact summary tuned for LLM context.
+    /// the default machine-readable output and always carries the
+    /// per-pair components; `--format md` emits a compact summary tuned
+    /// for LLM context, with the doc overlap rolled in under
+    /// `--doc-overlap`.
+    #[command(after_long_help = examples::SIMILARITY)]
     Similarity(AnalyzeSimilarityArgs),
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
@@ -587,6 +612,7 @@ enum AnalyzeCommand {
     /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
+    #[command(after_long_help = examples::WRAPPER)]
     Wrapper(AnalyzeWrapperArgs),
 }
 
@@ -765,6 +791,17 @@ struct AnalyzeSimilarityArgs {
     /// comparable.
     #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
     method: SimilarityMethod,
+    /// Roll the per-pair doc-comment overlap up into the markdown
+    /// report, as a range plus how many of the cluster's pairs carried
+    /// doc text on both sides. Diagnostic only — it never feeds the
+    /// similarity score. High overlap on a high-similarity cluster means
+    /// the *stated intent* matches too (a strong merge candidate, often
+    /// a copy-paste that took the doc with it); low overlap flags a
+    /// structural coincidence that usually should not be merged. JSON
+    /// output always carries the per-pair values, with or without this
+    /// flag.
+    #[arg(long)]
+    doc_overlap: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1096,6 +1133,7 @@ fn build_analyze_command(
                 sweep: opts.sweep.unwrap_or_default(),
                 min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
                 method: opts.method.unwrap_or_default(),
+                doc_overlap: opts.doc_overlap,
             })
         }
         config::ToolName::Wrapper => {
@@ -1294,6 +1332,7 @@ impl AnalyzeCommand {
                     .with_diff_only(args.diff.diff_only)
                     .with_min_lines(args.min_lines)
                     .with_method(args.method)
+                    .with_doc_overlap(args.doc_overlap)
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -1746,6 +1785,24 @@ mod tests {
         assert_eq!(args.ranking.top, Some(3));
         // `--method` is omitted above, so it defaults to TSED.
         assert_eq!(args.method, SimilarityMethod::Tsed);
+        // `--doc-overlap` is omitted above; the markdown rollup is opt-in.
+        assert!(!args.doc_overlap);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_doc_overlap() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--doc-overlap",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert!(args.doc_overlap);
     }
 
     #[test]
@@ -2357,7 +2414,7 @@ fn dispatch(n: i32) -> i32 {
     #[test]
     fn build_analyze_command_maps_similarity_options() {
         let profile: config::Profile = toml::from_str(
-            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\nmethod = \"token\"\ndiff-only = true\n",
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\nmethod = \"token\"\ndoc-overlap = true\ndiff-only = true\n",
         )
         .unwrap();
         let cmd = build_analyze_command(
@@ -2376,6 +2433,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.min_lines, 9);
         assert_eq!(args.ranking.top, Some(4));
         assert_eq!(args.method, SimilarityMethod::Token);
+        assert!(args.doc_overlap);
         assert!(args.diff.diff_only);
     }
 
@@ -2397,6 +2455,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.min_lines, DEFAULT_SIMILARITY_MIN_LINES);
         assert_eq!(args.ranking.top, None);
         assert_eq!(args.method, SimilarityMethod::Tsed);
+        assert!(!args.doc_overlap);
         assert!(!args.diff.diff_only);
     }
 
@@ -2673,6 +2732,61 @@ fn dispatch(n: i32) -> i32 {
         assert!(md.contains("### `agent-lens config schema`"), "got: {md}");
         // Analyzer-specific options surface in the table.
         assert!(md.contains("`--threshold <THRESHOLD>`"), "got: {md}");
+    }
+
+    /// The routing table is hand-written, so it can drift the moment a new
+    /// analyzer lands. Pin it to the actual subcommand list in both
+    /// directions: every analyzer is routable, and the table never names
+    /// one that no longer exists.
+    #[test]
+    fn routing_table_names_exactly_the_analyze_subcommands() {
+        let command = Cli::command();
+        let analyze = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "analyze")
+            .expect("analyze subcommand");
+
+        // Routing rows are `<question>  analyze <name>`, indented to read
+        // as a code block; the surrounding prose has no such row.
+        let mut routed: Vec<&str> = examples::ANALYZE
+            .lines()
+            .filter(|line| line.starts_with("    "))
+            .filter_map(|line| line.rsplit_once(" analyze "))
+            .map(|(_, name)| name.trim())
+            .collect();
+        routed.sort_unstable();
+
+        let mut declared: Vec<&str> = analyze
+            .get_subcommands()
+            .map(|sub| sub.get_name())
+            .collect();
+        declared.sort_unstable();
+
+        assert_eq!(routed, declared);
+    }
+
+    /// Each analyzer's help ends with a worked invocation of *that*
+    /// analyzer — a copy-pasted example block would otherwise go unnoticed.
+    #[test]
+    fn every_analyze_subcommand_has_its_own_example_block() {
+        let command = Cli::command();
+        let analyze = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "analyze")
+            .expect("analyze subcommand");
+
+        for sub in analyze.get_subcommands() {
+            let epilogue = sub
+                .get_after_long_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let invocation = format!("    agent-lens analyze {} ", sub.get_name());
+            assert!(
+                epilogue.contains(&invocation),
+                "`analyze {}` help is missing an example of itself: {epilogue}",
+                sub.get_name(),
+            );
+        }
     }
 
     #[test]

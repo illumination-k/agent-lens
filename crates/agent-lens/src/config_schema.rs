@@ -137,6 +137,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Body-scoring algorithm: tsed (tree-edit distance, default) or token (k-gram overlap).",
             },
             Field {
+                key: "doc-overlap",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Roll the per-pair doc-comment overlap up into the markdown report. Diagnostic only; it never feeds the similarity score, and JSON output carries the per-pair values either way.",
+            },
+            Field {
                 key: "diff-only",
                 ty: "bool",
                 presence: "default: false",

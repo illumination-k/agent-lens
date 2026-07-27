@@ -186,6 +186,11 @@ pub struct SimilarityOptions {
     /// Body-scoring algorithm: `tsed` (default) or `token`. Mirrors the
     /// `--method` CLI flag.
     pub method: Option<SimilarityMethod>,
+    /// Roll the per-pair doc-comment overlap up into the markdown
+    /// report. Mirrors the `--doc-overlap` CLI flag; JSON output carries
+    /// the per-pair values either way.
+    #[serde(default)]
+    pub doc_overlap: bool,
     #[serde(default)]
     pub diff_only: bool,
 }
@@ -344,6 +349,7 @@ tools = ["similarity", "complexity", "cohesion"]
 threshold = 0.9
 min-lines = 8
 top = 20
+doc-overlap = true
 diff-only = false
 
 [profile.web.complexity]
@@ -381,6 +387,7 @@ since = "90.days.ago"
         assert_eq!(similarity.threshold, Some(0.9));
         assert_eq!(similarity.min_lines, Some(8));
         assert_eq!(similarity.top, Some(20));
+        assert!(similarity.doc_overlap);
         assert!(!similarity.diff_only);
 
         let complexity = web.complexity.as_ref().unwrap();
@@ -408,6 +415,9 @@ since = "90.days.ago"
             Some([0.6, 0.75, 0.85].as_slice())
         );
         assert_eq!(similarity.threshold, None);
+        // Absent `doc-overlap` is off, not "unset" — the markdown rollup
+        // is opt-in from both the CLI and the config file.
+        assert!(!similarity.doc_overlap);
     }
 
     #[test]

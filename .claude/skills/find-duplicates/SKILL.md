@@ -72,7 +72,13 @@ This drops `#[test]` / `#[rstest]` / `#[<runner>::test]` free functions and ever
 
 - **TSED ≥ 0.95** — almost certainly a clone. Extract a shared helper, or delete one.
 - **TSED 0.85–0.95** — same shape, different specifics. Worth a closer look; sometimes legitimate (e.g. visitor cases that happen to mirror each other), sometimes an extracted parameter away from being one function.
-- **`doc_overlap`** (JSON pairs only, present when both functions have a doc comment / docstring) — word-level overlap of the two docs. It never affects the score; read it as a tiebreaker: high `doc_overlap` on a high-similarity pair means the _stated intent_ matches too (strong merge candidate, often a copy-paste including the doc), while low `doc_overlap` on a high-similarity pair flags a structural coincidence — two functions that happen to share a shape but do different jobs, which usually should not be merged.
+- **`doc_overlap`** (per pair in JSON, present when both functions have a doc comment / docstring; add `--doc-overlap` to roll it up per cluster in `--format md`) — word-level overlap of the two docs. It never affects the score; read it as a tiebreaker: high `doc_overlap` on a high-similarity pair means the _stated intent_ matches too (strong merge candidate, often a copy-paste including the doc), while low `doc_overlap` on a high-similarity pair flags a structural coincidence — two functions that happen to share a shape but do different jobs, which usually should not be merged.
+
+  ```bash
+  agent-lens analyze similarity crates/<name>/src --format md --doc-overlap
+  ```
+
+  The markdown rollup reads `doc overlap 20–80% (3/3 pairs documented)`: the range across the cluster's pairs, then how many of them had doc text on both sides. `n/a (0/N pairs documented)` means nothing in the cluster is documented — the tiebreaker is unavailable, not zero.
 - **wrapper hit, single call site** — inline it.
 - **wrapper hit, many call sites** — keep, but verify the indirection is doing real work (lifetime adjustment, trait dispatch, error mapping). If not, the function is a tax.
 

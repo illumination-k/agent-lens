@@ -13,7 +13,7 @@
 
 use std::fmt::Write as _;
 
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
 
 /// Render `root` and every nested subcommand as one Markdown document.
 pub fn render(root: &Command) -> String {
@@ -27,10 +27,39 @@ pub fn render(root: &Command) -> String {
         let _ = writeln!(out, "\n{about}");
     }
     render_options(&mut out, root);
+    render_epilogue(&mut out, root);
+    render_index(&mut out, root);
     for sub in visible_subcommands(root) {
         render_command(&mut out, sub, &[name]);
     }
     out
+}
+
+/// A flat index of every command with its one-line purpose, so an agent
+/// can scan the whole surface before deciding which section to read. The
+/// per-command sections below carry the full prose.
+fn render_index(out: &mut String, root: &Command) {
+    let mut rows = Vec::new();
+    collect_index(&mut rows, root, &[root.get_name()]);
+    if rows.is_empty() {
+        return;
+    }
+
+    out.push_str("\n## Command index\n\n| Command | Purpose |\n| --- | --- |\n");
+    for (path, summary) in rows {
+        let _ = writeln!(out, "| `{path}` | {summary} |");
+    }
+}
+
+/// Depth-first walk collecting `(command path, one-line summary)` in the
+/// same order the document lists the sections.
+fn collect_index(rows: &mut Vec<(String, String)>, cmd: &Command, parent_path: &[&str]) {
+    for sub in visible_subcommands(cmd) {
+        let mut path = parent_path.to_vec();
+        path.push(sub.get_name());
+        rows.push((path.join(" "), summarize(sub)));
+        collect_index(rows, sub, &path);
+    }
 }
 
 /// Emit one command's section, then recurse into its visible
@@ -46,10 +75,27 @@ fn render_command(out: &mut String, cmd: &Command, parent_path: &[&str]) {
         let _ = writeln!(out, "\n{about}");
     }
     render_options(out, cmd);
+    render_epilogue(out, cmd);
 
     for sub in visible_subcommands(cmd) {
         render_command(out, sub, &path);
     }
+}
+
+/// Append the command's `after_long_help` block — the worked examples.
+/// Those blocks are authored as Markdown-compatible text (prose plus
+/// four-space-indented command listings), so they pass through verbatim.
+fn render_epilogue(out: &mut String, cmd: &Command) {
+    let Some(epilogue) = cmd
+        .get_after_long_help()
+        .or_else(|| cmd.get_after_help())
+        .map(|help| help.to_string())
+        .map(|help| help.trim_end().to_string())
+        .filter(|help| !help.is_empty())
+    else {
+        return;
+    };
+    let _ = writeln!(out, "\n{epilogue}");
 }
 
 /// Render the command's arguments as a Markdown table, skipping the
@@ -110,29 +156,7 @@ fn arg_description(arg: &Arg) -> String {
     desc = desc.split_whitespace().collect::<Vec<_>>().join(" ");
     desc = desc.replace('|', "\\|");
 
-    // Only value-taking options have meaningful accepted-values and
-    // default annotations; for boolean flags the `true`/`false` pair and
-    // the implicit `false` default are noise, so skip them.
-    let mut extra: Vec<String> = Vec::new();
-    if arg.get_action().takes_values() {
-        let values: Vec<String> = arg
-            .get_possible_values()
-            .iter()
-            .map(|value| value.get_name().to_string())
-            .collect();
-        if !values.is_empty() {
-            extra.push(format!("values: {}", values.join(", ")));
-        }
-        let defaults: Vec<String> = arg
-            .get_default_values()
-            .iter()
-            .map(|value| value.to_string_lossy().into_owned())
-            .collect();
-        if !defaults.is_empty() {
-            extra.push(format!("default: {}", defaults.join(", ")));
-        }
-    }
-
+    let extra = arg_annotations(arg);
     if extra.is_empty() {
         desc
     } else if desc.is_empty() {
@@ -140,6 +164,79 @@ fn arg_description(arg: &Arg) -> String {
     } else {
         format!("{desc} ({})", extra.join("; "))
     }
+}
+
+/// The parenthesised annotations trailing an argument's help text: the
+/// facts an agent needs to build a valid invocation but which clap only
+/// exposes structurally — whether the argument must be supplied, what it
+/// accepts, what it defaults to, whether it can repeat, and what else it
+/// answers to.
+fn arg_annotations(arg: &Arg) -> Vec<String> {
+    let mut extra: Vec<String> = Vec::new();
+    if arg.is_required_set() {
+        extra.push("required".to_string());
+    }
+    // Only value-taking options have meaningful accepted-values and
+    // default annotations; for boolean flags the `true`/`false` pair and
+    // the implicit `false` default are noise, so skip them.
+    if arg.get_action().takes_values() {
+        extra.extend(labelled(
+            "values",
+            arg.get_possible_values().iter(),
+            |value| value.get_name().to_string(),
+        ));
+        extra.extend(labelled(
+            "default",
+            arg.get_default_values().iter(),
+            |value| value.to_string_lossy().into_owned(),
+        ));
+    }
+    if matches!(arg.get_action(), ArgAction::Append) {
+        extra.push("repeatable".to_string());
+    }
+    extra.extend(labelled(
+        "alias",
+        arg.get_visible_aliases().unwrap_or_default().iter(),
+        |alias| format!("--{alias}"),
+    ));
+    extra
+}
+
+/// `Some("label: a, b")` for a non-empty list of rendered items, nothing
+/// at all for an empty one — an empty annotation is noise, not a fact.
+fn labelled<T>(
+    label: &str,
+    items: impl Iterator<Item = T>,
+    render: impl Fn(T) -> String,
+) -> Option<String> {
+    let rendered: Vec<String> = items.map(render).collect();
+    (!rendered.is_empty()).then(|| format!("{label}: {}", rendered.join(", ")))
+}
+
+/// The command's one-line purpose for the index: its short `about`, or
+/// the first paragraph of the long one folded onto a single line. Pipes
+/// are escaped so the summary survives the Markdown table.
+fn summarize(cmd: &Command) -> String {
+    let text = cmd
+        .get_about()
+        .map(|about| about.to_string())
+        .or_else(|| {
+            cmd.get_long_about()
+                .map(|about| about.to_string())
+                .map(|about| {
+                    about
+                        .split("\n\n")
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                })
+        })
+        .unwrap_or_default();
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('|', "\\|")
 }
 
 /// Prefer a command's long description over its short one, trimmed and
@@ -162,15 +259,19 @@ fn visible_subcommands(cmd: &Command) -> impl Iterator<Item = &Command> {
 mod tests {
     use super::*;
     use clap::{Arg, ArgAction, Command};
+    use rstest::rstest;
 
     fn sample() -> Command {
         Command::new("demo")
             .version("1.2.3")
             .about("Demo about line.")
+            .after_long_help("Examples:\n\n    demo analyze .\n")
             .subcommand(
                 Command::new("analyze")
+                    .about("Analyze about line.")
                     .long_about("Run an analyzer.\nSecond paragraph.")
-                    .arg(Arg::new("path").help("Path to analyze."))
+                    .after_long_help("Examples:\n\n    demo analyze src/ --format md\n")
+                    .arg(Arg::new("path").required(true).help("Path to analyze."))
                     .arg(
                         Arg::new("format")
                             .long("format")
@@ -183,6 +284,19 @@ mod tests {
                             .long("diff-only")
                             .action(ArgAction::SetTrue)
                             .help("Restrict to the diff."),
+                    )
+                    .arg(
+                        Arg::new("exclude")
+                            .long("exclude")
+                            .value_name("GLOB")
+                            .action(ArgAction::Append)
+                            .help("Exclude a glob."),
+                    )
+                    .arg(
+                        Arg::new("threshold")
+                            .long("threshold")
+                            .visible_alias("min-score")
+                            .help("Similarity threshold."),
                     )
                     .subcommand(Command::new("nested").about("A nested command.")),
             )
@@ -210,20 +324,15 @@ mod tests {
         assert!(md.contains("Second paragraph."), "got: {md}");
     }
 
-    #[test]
-    fn render_documents_positionals_options_and_flags() {
+    #[rstest]
+    #[case::positional("| `<PATH>` | Path to analyze. (required) |")]
+    #[case::valued("| `--format <FORMAT>` | Output format. (values: json, md; default: json) |")]
+    #[case::flag("| `--diff-only` | Restrict to the diff. |")]
+    #[case::appended("| `--exclude <GLOB>` | Exclude a glob. (repeatable) |")]
+    #[case::aliased("| `--threshold <THRESHOLD>` | Similarity threshold. (alias: --min-score) |")]
+    fn render_documents_positionals_options_and_flags(#[case] row: &str) {
         let md = render(&sample());
-        assert!(md.contains("| `<PATH>` | Path to analyze. |"), "got: {md}");
-        assert!(
-            md.contains(
-                "| `--format <FORMAT>` | Output format. (values: json, md; default: json) |"
-            ),
-            "got: {md}",
-        );
-        assert!(
-            md.contains("| `--diff-only` | Restrict to the diff. |"),
-            "got: {md}",
-        );
+        assert!(md.contains(row), "missing {row}\ngot: {md}");
     }
 
     #[test]
@@ -231,6 +340,38 @@ mod tests {
         let md = render(&sample());
         assert!(!md.contains("--help"), "got: {md}");
         assert!(!md.contains("Print help"), "got: {md}");
+    }
+
+    #[rstest]
+    #[case("    demo analyze .")]
+    #[case("    demo analyze src/ --format md")]
+    fn render_includes_after_long_help_examples(#[case] line: &str) {
+        let md = render(&sample());
+        assert!(md.contains(line), "missing {line}\ngot: {md}");
+    }
+
+    #[rstest]
+    #[case("## Command index")]
+    #[case("| `demo analyze` | Analyze about line. |")]
+    #[case("| `demo analyze nested` | A nested command. |")]
+    fn render_opens_with_a_command_index(#[case] row: &str) {
+        let md = render(&sample());
+        let index = md.find("## Command index").expect("index heading");
+        let first_section = md.find("## `demo analyze`").expect("first section");
+        assert!(index < first_section, "index must precede sections: {md}");
+        assert!(md.contains(row), "missing {row}\ngot: {md}");
+    }
+
+    #[test]
+    fn index_summary_falls_back_to_the_first_long_about_paragraph() {
+        let cmd = Command::new("x").long_about("First line.\n\nSecond paragraph.");
+        assert_eq!(summarize(&cmd), "First line.");
+    }
+
+    #[test]
+    fn index_summary_escapes_pipes() {
+        let cmd = Command::new("x").about("a | b");
+        assert_eq!(summarize(&cmd), "a \\| b");
     }
 
     #[test]

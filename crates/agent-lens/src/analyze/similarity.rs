@@ -137,6 +137,7 @@ pub struct SimilarityAnalyzer {
     top: Option<usize>,
     method: SimilarityMethod,
     sweep: Option<Vec<f64>>,
+    doc_overlap: bool,
 }
 
 /// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
@@ -163,6 +164,7 @@ impl SimilarityAnalyzer {
             top: None,
             method: SimilarityMethod::default(),
             sweep: None,
+            doc_overlap: false,
         }
     }
 
@@ -201,6 +203,14 @@ impl SimilarityAnalyzer {
         /// [`SimilarityMethod::Tsed`]; [`SimilarityMethod::Token`] swaps
         /// in the cheaper token k-gram score.
         fn with_method, method: SimilarityMethod
+    }
+
+    with_setter! {
+        /// Surface the doc-comment overlap in the markdown report. It is
+        /// a diagnostic component that never feeds `similarity`, and the
+        /// JSON report always carries it per pair, so this only controls
+        /// whether markdown rolls it up per cluster.
+        fn with_doc_overlap, doc_overlap: bool
     }
 
     /// Enable multi-threshold sweep mode. Pairs are scored and clustered
@@ -258,7 +268,9 @@ impl SimilarityAnalyzer {
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "analyze similarity finished"
         );
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_report(&report, format, || {
+            format_markdown(&report, self.top, self.doc_overlap)
+        })
     }
 
     /// Pairwise scoring over the corpus (TSED or token, per
@@ -873,6 +885,31 @@ fn beta(x: i32) -> i32 {
     let c = b - 3;
     let d = c + 4;
     d
+}
+"#;
+
+    /// Two structurally identical functions whose doc comments differ by
+    /// exactly one word. Drives the `doc_overlap` checks on both the JSON
+    /// and the markdown side so a single source pins the expected 4/6.
+    const DOCUMENTED_PAIR: &str = r#"
+/// Validate the user id before persisting.
+fn validate_user(id: u64) -> bool {
+    let raw = id;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
+}
+
+/// Validate the order id before persisting.
+fn validate_order(id: u64) -> bool {
+    let raw = id;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
 }
 "#;
 
@@ -1599,28 +1636,7 @@ fn validate_order_id(id: OrderId) -> bool {
     #[test]
     fn rust_json_pairs_emit_doc_overlap_when_both_sides_documented() {
         let dir = tempfile::tempdir().unwrap();
-        let src = r#"
-/// Validate the user id before persisting.
-fn validate_user(id: u64) -> bool {
-    let raw = id;
-    if raw == 0 {
-        false
-    } else {
-        raw > 10
-    }
-}
-
-/// Validate the order id before persisting.
-fn validate_order(id: u64) -> bool {
-    let raw = id;
-    if raw == 0 {
-        false
-    } else {
-        raw > 10
-    }
-}
-"#;
-        let file = write_file(dir.path(), "lib.rs", src);
+        let file = write_file(dir.path(), "lib.rs", DOCUMENTED_PAIR);
 
         let json = SimilarityAnalyzer::new()
             .with_threshold(0.8)
@@ -1647,6 +1663,63 @@ fn validate_order(id: u64) -> bool {
                 .abs()
                 < 1e-9,
             "doc text leaked into the blended score: {pair}"
+        );
+    }
+
+    /// Markdown stays silent about the doc component until asked, while
+    /// JSON carries it either way — the flag controls rendering, not
+    /// computation.
+    #[test]
+    fn markdown_reports_doc_overlap_only_under_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", DOCUMENTED_PAIR);
+
+        let plain = SimilarityAnalyzer::new()
+            .with_threshold(0.8)
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(!plain.contains("doc overlap"), "got: {plain}");
+
+        let annotated = SimilarityAnalyzer::new()
+            .with_threshold(0.8)
+            .with_doc_overlap(true)
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        // 4/6 shared doc words, on the cluster's single pair.
+        assert!(
+            annotated.contains("doc overlap 67–67% (1/1 pairs documented)"),
+            "got: {annotated}",
+        );
+
+        // The flag is markdown-only: JSON is byte-identical with and
+        // without it, and already carries the per-pair value.
+        let with = SimilarityAnalyzer::new()
+            .with_threshold(0.8)
+            .with_doc_overlap(true)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let without = SimilarityAnalyzer::new()
+            .with_threshold(0.8)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        assert_eq!(with, without);
+    }
+
+    /// An undocumented cluster must say so rather than silently omit the
+    /// annotation the caller explicitly asked for — "no doc text" and
+    /// "flag not set" are different facts.
+    #[test]
+    fn markdown_doc_overlap_marks_undocumented_clusters() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
+
+        let md = SimilarityAnalyzer::new()
+            .with_doc_overlap(true)
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("doc overlap n/a (0/1 pairs documented)"),
+            "got: {md}",
         );
     }
 
