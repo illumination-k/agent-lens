@@ -1,20 +1,48 @@
 #!/usr/bin/env bash
 # Install agent-lens from the GitHub Releases pre-built binaries.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash -s -- --tag rolling --dir "$HOME/.local/bin"
-#
-# Environment variables:
-#   AGENT_LENS_TAG    Release tag to install (default: latest stable release).
-#   AGENT_LENS_DIR    Install directory (default: $HOME/.local/bin).
-#   AGENT_LENS_REPO   GitHub repo (default: illumination-k/agent-lens).
+# Flags, environment variables, and the invocation forms live in the
+# `usage()` heredoc below — the single source of truth, so that
+# `--help` works identically when the script is piped into bash.
 
 set -euo pipefail
 
 REPO="${AGENT_LENS_REPO:-illumination-k/agent-lens}"
 TAG="${AGENT_LENS_TAG:-latest}"
 INSTALL_DIR="${AGENT_LENS_DIR:-$HOME/.local/bin}"
+VERIFY=1
+if [ "${AGENT_LENS_NO_VERIFY:-0}" = "1" ]; then
+	VERIFY=0
+fi
+
+# Printed by --help. Kept as a heredoc rather than sed'ing the header out
+# of "$0": under the documented `curl … | bash -s -- --help` invocation
+# "$0" is the bash binary, not this script.
+usage() {
+	cat <<'EOF'
+Install agent-lens from the GitHub Releases pre-built binaries.
+
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash -s -- --tag rolling --dir "$HOME/.local/bin"
+
+Options:
+  --tag TAG         Release tag to install (default: latest stable release).
+  --dir DIR         Install directory (default: $HOME/.local/bin).
+  --repo OWNER/NAME GitHub repo (default: illumination-k/agent-lens).
+  --no-verify       Skip SHA-256 verification of the downloaded archive.
+                    Verification is mandatory otherwise: a missing
+                    checksum asset or a missing sha256sum/shasum aborts
+                    the install rather than proceeding unverified.
+  -h, --help        Print this help and exit.
+
+Environment variables:
+  AGENT_LENS_TAG        Same as --tag.
+  AGENT_LENS_DIR        Same as --dir.
+  AGENT_LENS_REPO       Same as --repo.
+  AGENT_LENS_NO_VERIFY  Set to 1 for the same effect as --no-verify.
+EOF
+}
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -30,8 +58,12 @@ while [ $# -gt 0 ]; do
 		REPO="$2"
 		shift 2
 		;;
+	--no-verify)
+		VERIFY=0
+		shift
+		;;
 	-h | --help)
-		sed -n '2,12p' "$0"
+		usage
 		exit 0
 		;;
 	*)
@@ -65,18 +97,21 @@ fetch() {
 	url="$1"
 	out="$2"
 	if [ "$FETCH" = "curl" ]; then
-		curl -fsSL --retry 3 -o "$out" "$url"
+		curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$out" "$url"
 	else
-		wget -q -O "$out" "$url"
+		wget -q --https-only --secure-protocol=TLSv1_2 -O "$out" "$url"
 	fi
 }
 
 detect_libc() {
 	# Prefer musl on systems whose dynamic loader is provided by musl (Alpine,
-	# Void musl, etc). Fall back to glibc otherwise.
+	# Void musl, etc). Fall back to glibc otherwise. The loader probe is
+	# arch-specific: an x86_64 musl loader on disk says nothing about an
+	# aarch64 host (and vice versa), so only the loader matching "$1" counts.
+	loader_arch="$1"
 	if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
 		echo "musl"
-	elif [ -f /lib/ld-musl-x86_64.so.1 ] || [ -f /lib/ld-musl-aarch64.so.1 ]; then
+	elif [ -n "$loader_arch" ] && [ -f "/lib/ld-musl-${loader_arch}.so.1" ]; then
 		echo "musl"
 	else
 		echo "gnu"
@@ -88,7 +123,12 @@ detect_target() {
 	arch="$(uname -m)"
 	case "$os" in
 	Linux)
-		libc="$(detect_libc)"
+		case "$arch" in
+		x86_64 | amd64) loader_arch="x86_64" ;;
+		aarch64 | arm64) loader_arch="aarch64" ;;
+		*) loader_arch="" ;;
+		esac
+		libc="$(detect_libc "$loader_arch")"
 		case "$arch" in
 		x86_64 | amd64) echo "x86_64-unknown-linux-${libc}" ;;
 		aarch64 | arm64) echo "aarch64-unknown-linux-${libc}" ;;
@@ -111,20 +151,43 @@ detect_target() {
 	esac
 }
 
+# Pull the digest for "$2" (the archive's basename) out of a
+# `sha256sum`-style checksum file. Prefers the line naming the archive so
+# a multi-asset checksum file can never hand back another asset's digest;
+# falls back to a lone unnamed digest line (GNU coreutils and the
+# PowerShell `Get-FileHash` output both round-trip through this).
+expected_sha256() {
+	expected_file="$1"
+	archive_name="$2"
+	awk -v want="$archive_name" '
+		{ gsub(/\r$/, "") }
+		$1 == "" { next }
+		{
+			name = $2
+			sub(/^\*/, "", name)
+			sub(/^.*\//, "", name)
+			if (name == want) { print tolower($1); found = 1; exit }
+			if (NF == 1 || name == "") { lone = tolower($1); lone_count++ }
+			else { other++ }
+		}
+		END { if (!found && lone_count == 1 && other == 0) print lone }
+	' "$expected_file"
+}
+
 verify_sha256() {
 	archive="$1"
 	expected_file="$2"
-	expected="$(awk '{print $1}' "$expected_file")"
+	archive_name="$3"
+	expected="$(expected_sha256 "$expected_file" "$archive_name")"
 	if [ -z "$expected" ]; then
-		err "could not parse expected SHA-256 from $expected_file"
+		err "could not find a SHA-256 digest for ${archive_name} in $expected_file"
 	fi
 	if command -v sha256sum >/dev/null 2>&1; then
-		actual="$(sha256sum "$archive" | awk '{print $1}')"
+		actual="$(sha256sum "$archive" | awk '{print tolower($1)}')"
 	elif command -v shasum >/dev/null 2>&1; then
-		actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+		actual="$(shasum -a 256 "$archive" | awk '{print tolower($1)}')"
 	else
-		log "no sha256sum/shasum available; skipping checksum verification"
-		return 0
+		err "no sha256sum/shasum available to verify ${archive_name}; install one, or re-run with --no-verify to install without verification"
 	fi
 	if [ "$expected" != "$actual" ]; then
 		err "SHA-256 mismatch: expected $expected, got $actual"
@@ -151,10 +214,14 @@ trap 'rm -rf "$TMP"' EXIT
 log "downloading ${BASE_URL}/${ARCHIVE}"
 fetch "${BASE_URL}/${ARCHIVE}" "${TMP}/${ARCHIVE}"
 
-if fetch "${BASE_URL}/${ARCHIVE}.sha256" "${TMP}/${ARCHIVE}.sha256" 2>/dev/null; then
-	verify_sha256 "${TMP}/${ARCHIVE}" "${TMP}/${ARCHIVE}.sha256"
+if [ "$VERIFY" = "1" ]; then
+	if fetch "${BASE_URL}/${ARCHIVE}.sha256" "${TMP}/${ARCHIVE}.sha256" 2>/dev/null; then
+		verify_sha256 "${TMP}/${ARCHIVE}" "${TMP}/${ARCHIVE}.sha256" "${ARCHIVE}"
+	else
+		err "checksum asset ${ARCHIVE}.sha256 not published at ${BASE_URL}; refusing to install unverified (re-run with --no-verify to override)"
+	fi
 else
-	log "no .sha256 file published; skipping checksum verification"
+	log "checksum verification disabled (--no-verify); the archive is NOT verified"
 fi
 
 log "extracting"

@@ -54,8 +54,13 @@ curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/inst
 ```
 
 This pulls the matching tarball from the latest stable GitHub Release, verifies
-its SHA-256, and drops the binary into `$HOME/.local/bin`. Override with flags
-or environment variables:
+its SHA-256, and drops the binary into `$HOME/.local/bin`. Verification is
+mandatory and fails closed: if the release publishes no `.sha256` asset, or the
+machine has neither `sha256sum` nor `shasum`, the install aborts instead of
+proceeding unverified. Pass `--no-verify` (or `AGENT_LENS_NO_VERIFY=1`) to
+install without verification deliberately.
+
+Override with flags or environment variables — run `--help` for the full list:
 
 ```bash
 # explicit destination
@@ -65,6 +70,10 @@ curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/inst
 # pin a specific release tag, or use rolling for the rolling prerelease
 AGENT_LENS_TAG=v0.1.0 AGENT_LENS_DIR="$HOME/.local/bin" \
   bash <(curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh)
+
+# list every flag and environment variable
+curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh \
+  | bash -s -- --help
 ```
 
 ### Via mise (GitHub backend)
