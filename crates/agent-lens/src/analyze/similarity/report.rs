@@ -208,7 +208,40 @@ struct PairView<'a> {
     doc_overlap: Option<f64>,
 }
 
-pub(super) fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
+/// Cluster-level rollup of the per-pair doc overlap, for the markdown
+/// report. JSON always carries the raw per-pair values; markdown gets a
+/// range plus how many of the cluster's pairs actually had doc text on
+/// both sides, since a range drawn from one documented pair out of six
+/// means something quite different from one drawn from all six.
+fn doc_overlap_summary(cluster: &ClusterView<'_>) -> String {
+    let scored: Vec<f64> = cluster.pairs.iter().filter_map(|p| p.doc_overlap).collect();
+    let total = cluster.pairs.len();
+    let Some((min, max)) = min_max(&scored) else {
+        return format!("doc overlap n/a (0/{total} pairs documented)");
+    };
+    format!(
+        "doc overlap {:.0}–{:.0}% ({}/{total} pairs documented)",
+        min * 100.0,
+        max * 100.0,
+        scored.len(),
+    )
+}
+
+/// Span of a slice of scores, or `None` when there are none to span.
+fn min_max(values: &[f64]) -> Option<(f64, f64)> {
+    let first = *values.first()?;
+    Some(
+        values
+            .iter()
+            .fold((first, first), |(lo, hi), &v| (lo.min(v), hi.max(v))),
+    )
+}
+
+pub(super) fn format_markdown(
+    report: &Report<'_>,
+    top: Option<usize>,
+    doc_overlap: bool,
+) -> String {
     let cut = match &report.sweep {
         Some(ladder) => format!("sweep {}", format_ladder(ladder)),
         None => format!("threshold {:.2}", report.threshold),
@@ -238,18 +271,7 @@ pub(super) fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
-        let survival_tag = cluster
-            .survives_at_threshold
-            .map(|rung| format!(" [survives ≥{rung:.2}]"))
-            .unwrap_or_default();
-        let _ = writeln!(
-            out,
-            "\n- {} functions, similarity {:.0}–{:.0}%{}",
-            cluster.size,
-            cluster.min_similarity * 100.0,
-            cluster.max_similarity * 100.0,
-            survival_tag,
-        );
+        let _ = writeln!(out, "\n- {}", cluster_headline(cluster, doc_overlap));
         for f in &cluster.functions {
             let _ = writeln!(
                 out,
@@ -261,6 +283,27 @@ pub(super) fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String
     out
 }
 
+/// The one-line summary heading a cluster's member list: size, the
+/// similarity band, then the optional annotations — doc overlap when
+/// asked for, and the sweep survival rung when sweeping.
+fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool) -> String {
+    let doc_tag = if doc_overlap {
+        format!(", {}", doc_overlap_summary(cluster))
+    } else {
+        String::new()
+    };
+    let survival_tag = cluster
+        .survives_at_threshold
+        .map(|rung| format!(" [survives ≥{rung:.2}]"))
+        .unwrap_or_default();
+    format!(
+        "{} functions, similarity {:.0}–{:.0}%{doc_tag}{survival_tag}",
+        cluster.size,
+        cluster.min_similarity * 100.0,
+        cluster.max_similarity * 100.0,
+    )
+}
+
 /// Render a sweep ladder as `[0.60, 0.75, 0.85]` for the markdown header.
 fn format_ladder(ladder: &[f64]) -> String {
     let rungs: Vec<String> = ladder.iter().map(|r| format!("{r:.2}")).collect();
@@ -270,6 +313,7 @@ fn format_ladder(ladder: &[f64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::path::PathBuf;
 
     fn owned_function(name: &str) -> OwnedFunction {
@@ -405,5 +449,68 @@ mod tests {
             ],
         );
         assert_eq!(sorted_pair_key(2, 0), (0, 2));
+    }
+
+    /// Cluster carrying only the per-pair doc scores the rollup reads.
+    fn cluster_with_doc_scores(docs: &[Option<f64>]) -> ClusterView<'static> {
+        let f = FunctionRef {
+            file: "lib.rs",
+            name: "alpha",
+            start_line: 1,
+            end_line: 5,
+            is_test: false,
+        };
+        ClusterView {
+            size: 2,
+            min_similarity: 0.9,
+            max_similarity: 0.9,
+            survives_at_threshold: None,
+            functions: Vec::new(),
+            pairs: docs
+                .iter()
+                .map(|&doc_overlap| PairView {
+                    a: f,
+                    b: f,
+                    similarity: 0.9,
+                    body_similarity: 0.9,
+                    signature_similarity: None,
+                    type_overlap: None,
+                    identifier_overlap: None,
+                    doc_overlap,
+                })
+                .collect(),
+        }
+    }
+
+    #[rstest]
+    #[case::single(&[Some(0.5)], "doc overlap 50–50% (1/1 pairs documented)")]
+    #[case::spread(
+        &[Some(0.2), Some(0.8), Some(0.5)],
+        "doc overlap 20–80% (3/3 pairs documented)"
+    )]
+    // A range drawn from one pair out of three is a much weaker signal
+    // than the same range drawn from all three, so the count is reported.
+    #[case::partial(
+        &[Some(0.4), None, None],
+        "doc overlap 40–40% (1/3 pairs documented)"
+    )]
+    #[case::none_documented(&[None, None], "doc overlap n/a (0/2 pairs documented)")]
+    #[case::no_pairs(&[], "doc overlap n/a (0/0 pairs documented)")]
+    fn doc_overlap_summary_reports_range_and_documented_pair_count(
+        #[case] docs: &[Option<f64>],
+        #[case] expected: &str,
+    ) {
+        assert_eq!(
+            doc_overlap_summary(&cluster_with_doc_scores(docs)),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::empty(&[], None)]
+    #[case::single(&[0.3], Some((0.3, 0.3)))]
+    #[case::unordered(&[0.5, 0.1, 0.9, 0.4], Some((0.1, 0.9)))]
+    fn min_max_spans_the_values(#[case] values: &[f64], #[case] expected: Option<(f64, f64)>) {
+        assert_eq!(min_max(values), expected);
     }
 }

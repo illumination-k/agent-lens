@@ -108,6 +108,71 @@ fn analyze_similarity_sweep_clusters_at_floor_and_tags_survival() {
     assert!(stdout.contains("[survives ≥0.75]"), "got: {stdout}");
 }
 
+const DOCUMENTED_PAIR_RS: &str = r#"
+/// Validate the user id before persisting.
+fn validate_user(id: u64) -> bool {
+    let raw = id;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
+}
+
+/// Validate the order id before persisting.
+fn validate_order(id: u64) -> bool {
+    let raw = id;
+    if raw == 0 {
+        false
+    } else {
+        raw > 10
+    }
+}
+"#;
+
+/// The doc-overlap rollup has to be reachable both ways an analyzer is
+/// driven: the `--doc-overlap` flag and the `doc-overlap` profile key.
+#[rstest]
+#[case::flag(None)]
+#[case::profile_key(Some(
+    "[profile.audit]\npath = \".\"\nformat = \"md\"\ntools = [\"similarity\"]\n\n[profile.audit.similarity]\nthreshold = 0.8\ndoc-overlap = true\n"
+))]
+fn similarity_markdown_reports_doc_overlap(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "lib.rs", DOCUMENTED_PAIR_RS);
+
+    let output = match config {
+        None => agent_lens(
+            &[
+                "analyze",
+                "similarity",
+                ".",
+                "--format",
+                "md",
+                "--threshold",
+                "0.8",
+                "--doc-overlap",
+            ],
+            dir.path(),
+            None,
+        ),
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            agent_lens(&["run", "audit"], dir.path(), None)
+        }
+    };
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("doc overlap 67–67% (1/1 pairs documented)"),
+        "got: {stdout}",
+    );
+}
+
 #[test]
 fn analyze_command_prints_report_with_single_trailing_newline() {
     let dir = tempfile::tempdir().unwrap();

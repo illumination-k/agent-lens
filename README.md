@@ -180,6 +180,11 @@ agent-lens analyze similarity crates/lens-rust/src --method token
 # merely structural parallels, without re-running at 0.85 / 0.75 / 0.6
 agent-lens analyze similarity crates/lens-rust/src --format md --sweep 0.6,0.75,0.85
 
+# Roll the doc-comment overlap into the markdown report. Diagnostic only —
+# it never feeds the score — but it separates "same stated intent" clones
+# from functions that merely share a shape. JSON carries it per pair either way
+agent-lens analyze similarity crates/lens-rust/src --format md --doc-overlap
+
 # All analyzers accept path filters: focus tests, drop tests, or exclude globs
 agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6

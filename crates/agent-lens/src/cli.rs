@@ -591,10 +591,16 @@ enum AnalyzeCommand {
     /// Function bodies are compared via TSED on their normalised AST;
     /// pairs scoring at or above `--threshold` are folded into complete-link
     /// clusters where every member is similar to every other (no chaining
-    /// through weaker links). The parser is chosen from each file extension
+    /// through weaker links). Each reported pair also carries diagnostic
+    /// components that never feed the score, among them `doc_overlap` —
+    /// the word-level overlap of the two doc comments, which separates
+    /// "same stated intent" clones from functions that merely share a
+    /// shape. The parser is chosen from each file extension
     /// (Rust, TypeScript/JavaScript, Python, or Go). The JSON format is
-    /// the default machine-readable output; `--format md` emits a
-    /// compact summary tuned for LLM context.
+    /// the default machine-readable output and always carries the
+    /// per-pair components; `--format md` emits a compact summary tuned
+    /// for LLM context, with the doc overlap rolled in under
+    /// `--doc-overlap`.
     #[command(after_long_help = examples::SIMILARITY)]
     Similarity(AnalyzeSimilarityArgs),
     /// Report functions whose body, after stripping a short chain of
@@ -785,6 +791,17 @@ struct AnalyzeSimilarityArgs {
     /// comparable.
     #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
     method: SimilarityMethod,
+    /// Roll the per-pair doc-comment overlap up into the markdown
+    /// report, as a range plus how many of the cluster's pairs carried
+    /// doc text on both sides. Diagnostic only — it never feeds the
+    /// similarity score. High overlap on a high-similarity cluster means
+    /// the *stated intent* matches too (a strong merge candidate, often
+    /// a copy-paste that took the doc with it); low overlap flags a
+    /// structural coincidence that usually should not be merged. JSON
+    /// output always carries the per-pair values, with or without this
+    /// flag.
+    #[arg(long)]
+    doc_overlap: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1116,6 +1133,7 @@ fn build_analyze_command(
                 sweep: opts.sweep.unwrap_or_default(),
                 min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
                 method: opts.method.unwrap_or_default(),
+                doc_overlap: opts.doc_overlap,
             })
         }
         config::ToolName::Wrapper => {
@@ -1314,6 +1332,7 @@ impl AnalyzeCommand {
                     .with_diff_only(args.diff.diff_only)
                     .with_min_lines(args.min_lines)
                     .with_method(args.method)
+                    .with_doc_overlap(args.doc_overlap)
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -1766,6 +1785,24 @@ mod tests {
         assert_eq!(args.ranking.top, Some(3));
         // `--method` is omitted above, so it defaults to TSED.
         assert_eq!(args.method, SimilarityMethod::Tsed);
+        // `--doc-overlap` is omitted above; the markdown rollup is opt-in.
+        assert!(!args.doc_overlap);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_doc_overlap() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--doc-overlap",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert!(args.doc_overlap);
     }
 
     #[test]
@@ -2377,7 +2414,7 @@ fn dispatch(n: i32) -> i32 {
     #[test]
     fn build_analyze_command_maps_similarity_options() {
         let profile: config::Profile = toml::from_str(
-            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\nmethod = \"token\"\ndiff-only = true\n",
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\nmethod = \"token\"\ndoc-overlap = true\ndiff-only = true\n",
         )
         .unwrap();
         let cmd = build_analyze_command(
@@ -2396,6 +2433,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.min_lines, 9);
         assert_eq!(args.ranking.top, Some(4));
         assert_eq!(args.method, SimilarityMethod::Token);
+        assert!(args.doc_overlap);
         assert!(args.diff.diff_only);
     }
 
@@ -2417,6 +2455,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.min_lines, DEFAULT_SIMILARITY_MIN_LINES);
         assert_eq!(args.ranking.top, None);
         assert_eq!(args.method, SimilarityMethod::Tsed);
+        assert!(!args.doc_overlap);
         assert!(!args.diff.diff_only);
     }
 

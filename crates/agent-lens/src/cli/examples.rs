@@ -176,6 +176,7 @@ Examples:
     agent-lens analyze similarity src/ --format md
     agent-lens analyze similarity src/ --sweep 0.6,0.75,0.85 --format md
     agent-lens analyze similarity . --diff-only --format md
+    agent-lens analyze similarity src/ --doc-overlap --format md
     agent-lens analyze similarity src/ --method token --min-lines 10
 ";
 
