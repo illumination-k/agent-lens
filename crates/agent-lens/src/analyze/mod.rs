@@ -23,6 +23,7 @@ pub mod hotspot;
 pub mod hubs;
 pub mod impact;
 pub mod layers;
+mod module_graph;
 mod path_filter;
 mod runner;
 pub mod similarity;
@@ -242,6 +243,7 @@ use error_from::impl_from_coupling_error;
 
 impl_from_coupling_error!(lens_rust::CouplingError => CrateAnalyzerError, MissingMod);
 impl_from_coupling_error!(lens_ts::CouplingError => CrateAnalyzerError);
+impl_from_coupling_error!(lens_py::CouplingError => CrateAnalyzerError, UnsupportedRoot);
 impl_from_coupling_error!(lens_golang::CouplingError => CrateAnalyzerError, UnsupportedRoot);
 
 #[cfg(test)]

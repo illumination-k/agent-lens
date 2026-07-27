@@ -5,12 +5,29 @@
 //! ladder; consolidating them here cuts the structural duplication and
 //! means a future fix lands in one place.
 
+use proc_macro2::TokenStream;
+use quote::ToTokens;
 use syn::{
     Attribute, Block, ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemTrait, Signature, TraitItem,
     Type,
 };
 
 use crate::attrs::{has_cfg_test, is_test_function};
+
+/// Render `node` back to source-like text.
+///
+/// `proc-macro2` re-emits tokens with stable spacing, but it still
+/// injects spaces around `::`, `.`, `;`, and `&`. Collapse them so that
+/// a rendered path or callee reads like Rust rather than a token dump.
+pub(crate) fn render_tokens<T: ToTokens>(node: &T) -> String {
+    let mut stream = TokenStream::new();
+    node.to_tokens(&mut stream);
+    let raw = stream.to_string();
+    raw.replace(" :: ", "::")
+        .replace(" . ", ".")
+        .replace(" ;", ";")
+        .replace("& ", "&")
+}
 
 /// Return the trailing identifier of a `Type::Path` (e.g. `Foo` for
 /// `mod::Foo<T>`). Returns `None` for non-path types like

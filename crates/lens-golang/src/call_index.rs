@@ -18,7 +18,8 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, VisibilityShape,
+    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, VisibilityShape, qualify_module,
+    starts_uppercase,
 };
 use tree_sitter::Node;
 
@@ -116,8 +117,8 @@ fn function_shape(
     let raw_name = function_name_text(node, source)?;
     let display_name = raw_name.to_owned();
     let qualified = match owner {
-        Some(class) => qualify(module, &format!("{class}::{display_name}")),
-        None => qualify(module, &display_name),
+        Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
+        None => qualify_module(module, &display_name),
     };
     let owner_shape = owner.map(|class_name| OwnerShape {
         display_name: class_name.to_owned(),
@@ -165,8 +166,8 @@ fn collect_calls_in_function(
         return;
     };
     let caller_qualified = match owner {
-        Some(class) => qualify(module, &format!("{class}::{raw_name}")),
-        None => qualify(module, raw_name),
+        Some(class) => qualify_module(module, &format!("{class}::{raw_name}")),
+        None => qualify_module(module, raw_name),
     };
     let ctx = CallContext {
         source,
@@ -396,21 +397,6 @@ fn push_import_spec(spec: Node<'_>, source: &[u8], out: &mut Vec<ImportShape>) {
         // set `exported_symbol = Some("path")`).
         exported_symbol: SyntaxFact::Known(None),
     });
-}
-
-fn qualify(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{module}::{name}")
-    }
-}
-
-fn starts_uppercase(value: &str) -> bool {
-    value
-        .chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_uppercase())
 }
 
 #[cfg(test)]

@@ -41,9 +41,8 @@ use serde::Serialize;
 use tracing::warn;
 
 use super::error_from::impl_from_coupling_error;
-use super::{
-    AnalyzePathFilter, OutputFormat, SourceLang, relative_display_path, resolve_crate_root,
-};
+use super::module_graph::{GraphPolicy, ModuleFile, ModuleGraph, build_graph};
+use super::{AnalyzePathFilter, OutputFormat, SourceLang, module_graph, relative_display_path};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContextSpanAnalyzerError {
@@ -160,7 +159,7 @@ impl ContextSpanAnalyzer {
         format: OutputFormat,
     ) -> Result<String, ContextSpanAnalyzerError> {
         let mut graph = if self.entry_globs.is_empty() {
-            build_graph(path)?
+            build_graph(path, GraphPolicy::CONTEXT_SPAN)?
         } else {
             build_ts_graph_from_entry_globs(path, &self.entry_globs)?
         };
@@ -168,7 +167,7 @@ impl ContextSpanAnalyzer {
         graph.modules.retain(|m| filter.includes_path(&m.file));
         // `compute_report` deduplicates and drops self-loops; reuse its
         // cleaned edge list so the closure walk doesn't re-do that work.
-        let module_paths: Vec<ModulePath> = graph.modules.iter().map(|m| m.path.clone()).collect();
+        let module_paths = module_graph::module_paths(&graph);
         let report = compute_report(&module_paths, graph.edges);
         let spans = compute_context_spans(&module_paths, &report.edges);
         let view = ReportView::new(&graph.root, &spans, &graph.modules);
@@ -179,124 +178,6 @@ impl ContextSpanAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&view)),
         }
     }
-}
-
-#[derive(Debug)]
-struct ModuleFile {
-    path: ModulePath,
-    file: PathBuf,
-}
-
-#[derive(Debug)]
-struct ModuleGraph {
-    root: PathBuf,
-    modules: Vec<ModuleFile>,
-    edges: Vec<CouplingEdge>,
-}
-
-fn build_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
-    if let Some(lang) = SourceLang::from_path(path) {
-        return match lang {
-            SourceLang::Rust => build_rust_graph(path),
-            SourceLang::TypeScript(_) => build_ts_graph(path),
-            SourceLang::Python => build_python_graph(path),
-            SourceLang::Go => build_go_graph(path),
-        };
-    }
-
-    if path.is_dir() {
-        // `go.mod` is the unambiguous signal of a Go module root, so
-        // check it before the Rust crate-root resolver and the Python
-        // fallback. Without this, a Go project would fall through to
-        // Python's directory walk and report nonsense (or to the Rust
-        // resolver and fail with a confusing error).
-        if path.join("go.mod").is_file() {
-            return build_go_graph(path);
-        }
-        if let Ok(root) = resolve_crate_root(path) {
-            return build_rust_graph(&root);
-        }
-        return build_python_graph(path);
-    }
-
-    Err(ContextSpanAnalyzerError::UnsupportedRoot {
-        path: path.to_path_buf(),
-    })
-}
-
-fn build_rust_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
-    let root = resolve_crate_root(path)?;
-    let modules = lens_rust::build_module_tree(&root)?;
-    let edges = lens_rust::extract_edges(&modules);
-    Ok(ModuleGraph {
-        root,
-        modules: modules
-            .into_iter()
-            .map(|m| ModuleFile {
-                path: m.path,
-                file: m.file,
-            })
-            .collect(),
-        edges,
-    })
-}
-
-fn build_ts_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
-    let modules = lens_ts::build_module_tree(path)?;
-    let edges = lens_ts::extract_edges(&modules);
-    Ok(ModuleGraph {
-        root: path.to_path_buf(),
-        modules: modules
-            .into_iter()
-            .map(|m| ModuleFile {
-                path: m.path,
-                file: m.file,
-            })
-            .collect(),
-        edges,
-    })
-}
-
-fn build_python_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
-    let modules = lens_py::build_module_tree(path)?;
-    if modules.is_empty() {
-        return Err(ContextSpanAnalyzerError::UnsupportedRoot {
-            path: path.to_path_buf(),
-        });
-    }
-    let edges = lens_py::extract_edges(&modules);
-    Ok(ModuleGraph {
-        root: path.to_path_buf(),
-        modules: modules
-            .into_iter()
-            .map(|m| ModuleFile {
-                path: m.path,
-                file: m.file,
-            })
-            .collect(),
-        edges,
-    })
-}
-
-fn build_go_graph(path: &Path) -> Result<ModuleGraph, ContextSpanAnalyzerError> {
-    let modules = lens_golang::build_module_tree(path)?;
-    if modules.is_empty() {
-        return Err(ContextSpanAnalyzerError::UnsupportedRoot {
-            path: path.to_path_buf(),
-        });
-    }
-    let edges = lens_golang::extract_edges(&modules);
-    Ok(ModuleGraph {
-        root: path.to_path_buf(),
-        modules: modules
-            .into_iter()
-            .map(|m| ModuleFile {
-                path: m.path,
-                file: m.file,
-            })
-            .collect(),
-        edges,
-    })
 }
 
 /// Walk `root` (gitignore-aware) and pick every file matching one of

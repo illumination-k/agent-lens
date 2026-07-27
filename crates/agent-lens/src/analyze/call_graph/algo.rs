@@ -30,67 +30,128 @@ pub(crate) struct Condensation {
 /// Iterative Tarjan SCC over `adjacency` (nodes `0..adjacency.len()`,
 /// neighbor values must be in range).
 pub(crate) fn condense(adjacency: &[Vec<usize>]) -> Condensation {
-    let n = adjacency.len();
-    let mut index = vec![UNVISITED; n];
-    let mut lowlink = vec![0usize; n];
-    let mut on_stack = vec![false; n];
-    let mut stack: Vec<usize> = Vec::new();
-    let mut next_index = 0usize;
-    let mut components: Vec<Vec<usize>> = Vec::new();
-    let mut component_of = vec![UNVISITED; n];
-    // Explicit DFS frames: (node, next neighbor offset). Replaces the
-    // recursion in the classic formulation.
-    let mut frames: Vec<(usize, usize)> = Vec::new();
+    let mut tarjan = Tarjan::new(adjacency.len());
+    for root in 0..adjacency.len() {
+        tarjan.visit_tree_rooted_at(root, adjacency);
+    }
+    let edges = condensed_edges(adjacency, &tarjan.component_of, tarjan.components.len());
+    Condensation {
+        components: tarjan.components,
+        component_of: tarjan.component_of,
+        edges,
+    }
+}
 
-    for root in 0..n {
-        if index[root] != UNVISITED {
-            continue;
+/// Working state of the iterative Tarjan pass.
+///
+/// The classic formulation recurses once per edge; at function-call
+/// granularity that risks blowing the stack on a deep chain, so the DFS
+/// carries its own [`Self::frames`] stack instead.
+struct Tarjan {
+    /// DFS discovery order, [`UNVISITED`] until the node is reached.
+    index: Vec<usize>,
+    /// Lowest discovery index reachable from the node's subtree.
+    lowlink: Vec<usize>,
+    on_stack: Vec<bool>,
+    /// Nodes of the component currently being built, innermost last.
+    stack: Vec<usize>,
+    next_index: usize,
+    components: Vec<Vec<usize>>,
+    component_of: Vec<usize>,
+    /// Explicit DFS frames: `(node, next neighbor offset)`.
+    frames: Vec<(usize, usize)>,
+}
+
+impl Tarjan {
+    fn new(node_count: usize) -> Self {
+        Self {
+            index: vec![UNVISITED; node_count],
+            lowlink: vec![0usize; node_count],
+            on_stack: vec![false; node_count],
+            stack: Vec::new(),
+            next_index: 0,
+            components: Vec::new(),
+            component_of: vec![UNVISITED; node_count],
+            frames: Vec::new(),
         }
-        index[root] = next_index;
-        lowlink[root] = next_index;
-        next_index += 1;
-        stack.push(root);
-        on_stack[root] = true;
-        frames.push((root, 0));
+    }
 
-        while let Some(&(v, neighbor_offset)) = frames.last() {
-            if let Some(&w) = adjacency[v].get(neighbor_offset) {
-                if let Some(frame) = frames.last_mut() {
-                    frame.1 += 1;
-                }
-                if index[w] == UNVISITED {
-                    index[w] = next_index;
-                    lowlink[w] = next_index;
-                    next_index += 1;
-                    stack.push(w);
-                    on_stack[w] = true;
-                    frames.push((w, 0));
-                } else if on_stack[w] {
-                    lowlink[v] = lowlink[v].min(index[w]);
-                }
-            } else {
-                frames.pop();
-                if let Some(&(parent, _)) = frames.last() {
-                    lowlink[parent] = lowlink[parent].min(lowlink[v]);
-                }
-                if lowlink[v] == index[v] {
-                    let mut component = Vec::new();
-                    while let Some(w) = stack.pop() {
-                        on_stack[w] = false;
-                        component_of[w] = components.len();
-                        component.push(w);
-                        if w == v {
-                            break;
-                        }
-                    }
-                    component.sort_unstable();
-                    components.push(component);
-                }
+    /// Run the DFS over everything still unvisited below `root`. A
+    /// `root` that an earlier tree already reached is a no-op.
+    fn visit_tree_rooted_at(&mut self, root: usize, adjacency: &[Vec<usize>]) {
+        if self.index[root] != UNVISITED {
+            return;
+        }
+        self.discover(root);
+        while let Some(&(node, neighbor_offset)) = self.frames.last() {
+            match adjacency[node].get(neighbor_offset) {
+                Some(&neighbor) => self.advance_over(node, neighbor),
+                None => self.finish(node),
             }
         }
     }
 
-    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); components.len()];
+    /// Consume one out-edge of `node`: descend into `neighbor` when it is
+    /// new, otherwise fold its discovery index into `node`'s lowlink if
+    /// it is still an open component member.
+    fn advance_over(&mut self, node: usize, neighbor: usize) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.1 += 1;
+        }
+        if self.index[neighbor] == UNVISITED {
+            self.discover(neighbor);
+        } else if self.on_stack[neighbor] {
+            self.lowlink[node] = self.lowlink[node].min(self.index[neighbor]);
+        }
+    }
+
+    /// Assign `node` the next discovery index and open a DFS frame for it.
+    fn discover(&mut self, node: usize) {
+        self.index[node] = self.next_index;
+        self.lowlink[node] = self.next_index;
+        self.next_index += 1;
+        self.stack.push(node);
+        self.on_stack[node] = true;
+        self.frames.push((node, 0));
+    }
+
+    /// Close `node`'s frame: propagate its lowlink up to the parent, and
+    /// emit a component when `node` turned out to be an SCC root.
+    fn finish(&mut self, node: usize) {
+        self.frames.pop();
+        if let Some(&(parent, _)) = self.frames.last() {
+            self.lowlink[parent] = self.lowlink[parent].min(self.lowlink[node]);
+        }
+        if self.lowlink[node] == self.index[node] {
+            self.pop_component(node);
+        }
+    }
+
+    /// Pop the open stack down to and including `root` — by the SCC-root
+    /// invariant, exactly the members of one component.
+    fn pop_component(&mut self, root: usize) {
+        let mut component = Vec::new();
+        while let Some(node) = self.stack.pop() {
+            self.on_stack[node] = false;
+            self.component_of[node] = self.components.len();
+            component.push(node);
+            if node == root {
+                break;
+            }
+        }
+        component.sort_unstable();
+        self.components.push(component);
+    }
+}
+
+/// Project `adjacency` onto component indices: sorted, deduplicated, and
+/// with self-edges (edges internal to a component) dropped.
+fn condensed_edges(
+    adjacency: &[Vec<usize>],
+    component_of: &[usize],
+    component_count: usize,
+) -> Vec<Vec<usize>> {
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); component_count];
     for (v, neighbors) in adjacency.iter().enumerate() {
         for &w in neighbors {
             let (from, to) = (component_of[v], component_of[w]);
@@ -103,12 +164,7 @@ pub(crate) fn condense(adjacency: &[Vec<usize>]) -> Condensation {
         neighbors.sort_unstable();
         neighbors.dedup();
     }
-
-    Condensation {
-        components,
-        component_of,
-        edges,
-    }
+    edges
 }
 
 /// A weighted directed edge handed to [`greedy_feedback_arcs`].

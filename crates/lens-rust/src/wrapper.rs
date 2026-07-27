@@ -9,14 +9,12 @@
 //! report.
 
 use lens_domain::{WrapperFinding, args_pass_through_by, qualify as qualify_name};
-use proc_macro2::TokenStream;
-use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{
     Block, Expr, ExprCall, ExprMethodCall, FnArg, Local, Pat, PatIdent, Signature, Stmt, UnOp,
 };
 
-use crate::common::{WalkOptions, walk_fn_items};
+use crate::common::{WalkOptions, render_tokens, walk_fn_items};
 use crate::parser::RustParseError;
 
 /// Method names with no arguments that we treat as "no semantic content":
@@ -240,19 +238,6 @@ fn is_thin_path(expr: &Expr) -> bool {
         Expr::Group(group) => is_thin_path(&group.expr),
         _ => false,
     }
-}
-
-fn render_tokens<T: ToTokens>(node: &T) -> String {
-    let mut stream = TokenStream::new();
-    node.to_tokens(&mut stream);
-    let raw = stream.to_string();
-    // `proc-macro2` re-emits tokens with stable spacing, but it still
-    // injects spaces around `::` and `.`. Collapse them so that the
-    // rendered callee reads like a Rust path rather than a token dump.
-    raw.replace(" :: ", "::")
-        .replace(" . ", ".")
-        .replace(" ;", ";")
-        .replace("& ", "&")
 }
 
 fn collect_param_idents(sig: &Signature) -> Vec<String> {

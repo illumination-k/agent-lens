@@ -3,7 +3,7 @@
 use lens_domain::{
     BodyShape, FunctionDef, FunctionShape, FunctionSignature, LanguageParseError, LanguageParser,
     OwnerKind, OwnerShape, ReceiverShape, SignatureShape, SourceSpan, SyntaxFact, TreeNode,
-    VisibilityShape, identifier_tokens, qualify as qualify_name,
+    VisibilityShape, identifier_tokens, qualify as qualify_name, qualify_module,
 };
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -282,14 +282,6 @@ fn visibility_shape(vis: &syn::Visibility) -> VisibilityShape {
             VisibilityShape::Restricted(restricted.to_token_stream().to_string())
         }
         syn::Visibility::Inherited => VisibilityShape::Private,
-    }
-}
-
-fn qualify_module(module: &str, name: &str) -> String {
-    if module.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{module}::{name}")
     }
 }
 
