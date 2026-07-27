@@ -21,7 +21,7 @@ use agent_lens::analyze::{
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
     FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer,
     HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, SimilarityAnalyzer,
-    SimilarityMethod, WrapperAnalyzer,
+    SimilarityMethod, UntestedAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -603,6 +603,28 @@ enum AnalyzeCommand {
     /// `--doc-overlap`.
     #[command(after_long_help = examples::SIMILARITY)]
     Similarity(AnalyzeSimilarityArgs),
+    /// Report production functions with no static call path from any
+    /// test function.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and walks forward from every test function over resolved call
+    /// edges; the production functions the walk never reaches are the
+    /// report, grouped by module and ranked by untested LOC. This is a
+    /// structural complement to coverage — no execution, no
+    /// instrumentation — and it measures "no resolved call path from a
+    /// test function", not "uncovered": integration tests that drive the
+    /// built binary reach functions with no in-graph test caller, and
+    /// those are listed here anyway. Only resolved edges are traversable,
+    /// so the listing is an upper bound; unresolved and ambiguous call
+    /// sites leaving test-reached code are counted, and a function an
+    /// ambiguous site might reach is flagged on its own row.
+    /// `--exclude-tests` removes the traversal's starting points and is
+    /// reported as such. The parser is chosen from each file extension
+    /// (Rust, TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` caps the
+    /// module listing at `--top` (default 20).
+    #[command(after_long_help = examples::UNTESTED)]
+    Untested(AnalyzeUntestedArgs),
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
@@ -735,6 +757,14 @@ struct AnalyzeImpactArgs {
 
 #[derive(Debug, Clone, Args)]
 struct AnalyzeLayersArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeUntestedArgs {
     #[command(flatten)]
     common: AnalyzeCommonArgs,
     #[command(flatten)]
@@ -1011,6 +1041,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,
         ),
+        (profile.untested.is_some(), config::ToolName::Untested),
         (profile.wrapper.is_some(), config::ToolName::Wrapper),
     ]
     .into_iter()
@@ -1136,6 +1167,13 @@ fn build_analyze_command(
                 doc_overlap: opts.doc_overlap,
             })
         }
+        config::ToolName::Untested => {
+            let opts = profile.untested.clone().unwrap_or_default();
+            AnalyzeCommand::Untested(AnalyzeUntestedArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+            })
+        }
         config::ToolName::Wrapper => {
             let opts = profile.wrapper.clone().unwrap_or_default();
             AnalyzeCommand::Wrapper(AnalyzeWrapperArgs {
@@ -1215,6 +1253,7 @@ impl_with_analyze_path_args!(
     HubsAnalyzer,
     ImpactAnalyzer,
     LayersAnalyzer,
+    UntestedAnalyzer,
     WrapperAnalyzer,
 );
 
@@ -1333,6 +1372,13 @@ impl AnalyzeCommand {
                     .with_min_lines(args.min_lines)
                     .with_method(args.method)
                     .with_doc_overlap(args.doc_overlap)
+                    .with_top(args.ranking.top)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Untested(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                UntestedAnalyzer::new()
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -2125,6 +2171,42 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_untested_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "untested",
+            "crates",
+            "--top",
+            "30",
+            "--format",
+            "md",
+            "--exclude",
+            "benches/**",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
+            panic!("expected analyze untested");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(30));
+        assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
+    }
+
+    #[test]
+    fn parses_analyze_untested_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "untested", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
+            panic!("expected analyze untested");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+    }
+
+    #[test]
     fn parses_analyze_coupling_default_format_is_json() {
         let cli =
             Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
@@ -2494,6 +2576,25 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.ranking.top, Some(9));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_untested_options() {
+        let profile: config::Profile =
+            toml::from_str("path = \"crates\"\ntools = [\"untested\"]\n\n[untested]\ntop = 11\n")
+                .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Untested,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::Untested(args) = cmd else {
+            panic!("expected analyze untested");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(11));
     }
 
     #[test]

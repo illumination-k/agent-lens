@@ -285,15 +285,15 @@ without reading the source.
 The current binary exposes three top-level command trees plus `run`,
 `skills`, `config`, and `help`:
 
-| Command tree | Commands                                                                                                                                                        |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                       |
-| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                       |
-| `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `context-span`, `hotspot` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                   |
-| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                             |
-| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                        |
-| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                              |
+| Command tree | Commands                                                                                                                                                                    |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                   |
+| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                   |
+| `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `untested`, `context-span`, `hotspot` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                               |
+| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                         |
+| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                    |
+| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                          |
 
 `agent-lens --help` opens with a question-to-analyzer routing table
 ("what breaks if I change this?" → `analyze impact`) plus the output
@@ -342,6 +342,7 @@ Analyzer-specific options today:
 | `hubs`           | `--top N`                                                                                                                                                       |
 | `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                        |
 | `layers`         | `--top N`                                                                                                                                                       |
+| `untested`       | `--top N`                                                                                                                                                       |
 | `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                         |
 | `coupling`       | shared analyzer options only                                                                                                                                    |
 | `cycles`         | shared analyzer options only                                                                                                                                    |
@@ -351,8 +352,8 @@ Analyzer-specific options today:
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
 `wrapper`, `cohesion`, `hotspot`, `function-graph`, `cycles`, `graph-query`,
-`hubs`, `impact`, `layers`, and `context-span` cover all four language
-families. `coupling` covers Rust,
+`hubs`, `impact`, `layers`, `untested`, and `context-span` cover all four
+language families. `coupling` covers Rust,
 TypeScript / JavaScript, and Go.
 
 ### As a Claude Code hook
@@ -524,6 +525,7 @@ new handlers to plug into the same plumbing.
 | `cycles`         | Function-level strongly connected components of the call graph (resolved edges only): recursion knots and cross-file tangles that must change as one unit, with members, same-file flag, nearby-ambiguity warning, and advisory cheapest-cut break suggestions with call-line evidence.                                          | Rust, TS / JS, Python, Go |
 | `hubs`           | Hub smells on the function call graph: outlier fan-out (god functions), outlier fan-in (load-bearing blast-radius signal), Henry-Kafura `loc × (fan_in × fan_out)²` bottlenecks, and cross-module pull (misplaced functions), with prod/test fan-in split and deterministic PageRank-importance percentiles.                     | Rust, TS / JS, Python, Go |
 | `layers`         | Inferred Lakos levelization of the call graph: a function level per function (`1 + max(level of callees)`, cycles collapsed), a module level per module from the induced module graph, entry points, module cycles and skip-level calls with call-site evidence, and per-module member-level spans as a vertical cohesion smell. | Rust, TS / JS, Python, Go |
+| `untested`       | Production functions with no resolved call path from any test function: multi-source forward traversal from every test node, grouped by module and ranked by untested LOC, with each row's LOC / fan-in / complexity, plus the upper-bound support (unresolved and ambiguous call sites leaving test-reached code).              | Rust, TS / JS, Python, Go |
 | `impact`         | Blast radius of a change: functions transitively calling the seeds (working-tree diff or `--function`) over the SCC condensation, direct callers verbatim, deeper callers folded per depth and module, reachable tests as a verification checklist.                                                                              | Rust, TS / JS, Python, Go |
 | `graph-query`    | One canned call-graph traversal per run: `callers`, `callees`, `neighborhood`, or the shortest `path` between two symbols, with the call lines of every hop.                                                                                                                                                                     | Rust, TS / JS, Python, Go |
 | `context-span`   | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                                                                                                                        | Rust, TS / JS, Python, Go |
@@ -531,8 +533,8 @@ new handlers to plug into the same plumbing.
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
-For `complexity`, `cohesion`, `similarity`, `hotspot`, `hubs`, `impact`, and
-`layers`, `--top` caps the
+For `complexity`, `cohesion`, `similarity`, `hotspot`, `hubs`, `impact`,
+`layers`, and `untested`, `--top` caps the
 Markdown ranking while JSON stays complete. `--min-score` filters the Markdown
 ranking for `complexity` (cognitive score) and `cohesion` (LCOM4); for
 `similarity` it is an alias of `--threshold`.
@@ -559,8 +561,8 @@ Adding a language means writing one adapter crate and wiring it into the
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
 `similarity`, `complexity`, `wrapper`, `cohesion`, `hotspot`,
-`function-graph`, `cycles`, `graph-query`, `hubs`, `impact`, `layers`, and
-`context-span` are wired through the Rust,
+`function-graph`, `cycles`, `graph-query`, `hubs`, `impact`, `layers`,
+`untested`, and `context-span` are wired through the Rust,
 TypeScript / JavaScript, Python, and Go adapters. `coupling` is wired
 through the Rust, TypeScript / JavaScript, and Go adapters; Python is not
 covered yet because it has no `coupling` module-graph extractor.
@@ -667,7 +669,7 @@ CodeQL, dependency review, Trivy, TruffleHog, SBOM generation, the flake build
 The near-term direction is to keep improving the analyzer surfaces that help
 agents make better edit decisions: duplication, wrappers, cohesion,
 complexity, coupling, context span, hotspots, and call-graph structure
-(hubs, cycles, queries, impact, layers).
+(hubs, cycles, queries, impact, layers, untested).
 
 New metrics are prioritised by _does this change how an agent decides what to
 do?_ rather than _does it look nice in a dashboard?_

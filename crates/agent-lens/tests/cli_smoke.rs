@@ -364,6 +364,39 @@ fn run_profile_drives_impact_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_untested_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "pub fn covered() -> usize { 1 }\n\
+         pub fn never_reached() -> usize { 2 }\n\
+         #[cfg(test)]\n\
+         mod tests {\n\
+         use super::*;\n\
+         #[test]\n\
+         fn t() { covered(); }\n\
+         }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.gaps]\npath = \"src\"\ntools = [\"untested\"]\n\n\
+         [profile.gaps.untested]\ntop = 5\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "gaps"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "untested");
+    let report = &json["results"][0]["report"];
+    assert_eq!(report["summary"]["untested_function_count"], 1);
+    assert_eq!(
+        report["modules"][0]["functions"][0]["qualified_name"],
+        "crate::never_reached",
+    );
+}
+
+#[test]
 fn run_profile_rejects_graph_query_without_options_table() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);

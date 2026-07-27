@@ -30,6 +30,7 @@ Pick an analyzer by question:
     which functions are load-bearing?     analyze hubs
     what breaks if I change this?         analyze impact
     which level does this code sit on?    analyze layers
+    what has no test path guarding it?    analyze untested
     who calls this / how do I get there?  analyze graph-query
     give me the raw call graph            analyze function-graph
 "
@@ -160,6 +161,13 @@ Examples:
 
     agent-lens analyze layers src/ --format md
     agent-lens analyze layers src/ --exclude-tests --top 30 --format md
+";
+
+pub const UNTESTED: &str = "\
+Examples:
+
+    agent-lens analyze untested src/ --format md
+    agent-lens analyze untested . --exclude 'benches/**' --top 30 --format md
 ";
 
 pub const HOTSPOT: &str = "\

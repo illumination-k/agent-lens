@@ -28,6 +28,7 @@ mod path_filter;
 mod runner;
 pub mod similarity;
 mod source_files;
+pub mod untested;
 pub mod wrapper;
 
 use std::path::{Path, PathBuf};
@@ -56,6 +57,7 @@ pub use similarity::{
     DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, FunctionSelection, SimilarityAnalyzer,
     SimilarityMethod,
 };
+pub use untested::UntestedAnalyzer;
 pub use wrapper::WrapperAnalyzer;
 
 pub use crate_root::resolve_crate_root;
