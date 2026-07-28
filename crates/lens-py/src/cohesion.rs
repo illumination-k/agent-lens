@@ -1010,6 +1010,25 @@ class Service:
     }
 
     #[test]
+    fn module_line_range_spans_the_first_through_the_last_statement() {
+        // Leading newline puts `counter` on line 2; the unit must span
+        // from there to the last line of the last statement, not to the
+        // end of the module-level function that happens to close it.
+        let src = "\ncounter = 0\n\ndef bump():\n    global counter\n    counter += 1\n";
+        let u = module_unit(src);
+        assert_eq!(u.start_line, 2);
+        assert_eq!(u.end_line, 6);
+    }
+
+    #[test]
+    fn module_line_range_of_a_single_line_body_is_that_line() {
+        let src = "x = 1\ndef f():\n    return x\n";
+        let u = module_unit(src);
+        assert_eq!(u.start_line, 1);
+        assert_eq!(u.end_line, 3);
+    }
+
+    #[test]
     fn nested_attribute_access_does_not_leak_self_field() {
         // `obj.tag` inside a method that has no `self.<x>` access should
         // not record `tag` as a self-field. Without the visitor's

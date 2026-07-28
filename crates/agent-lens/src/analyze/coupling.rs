@@ -1,5 +1,6 @@
-//! `analyze coupling` — module-level coupling metrics for a Rust crate
-//! or a TypeScript / JavaScript module graph.
+//! `analyze coupling` — module-level coupling metrics for a Rust crate,
+//! a TypeScript / JavaScript module graph, a Go module, or a Python
+//! package tree.
 //!
 //! Builds a language-specific module tree, then reports the metrics
 //! derived from the cross-module reference graph: Number of Couplings,
@@ -16,7 +17,11 @@
 //! edges. For TypeScript / JavaScript the entry point is a single
 //! source file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
 //! `.cjs`) and the graph is grown by following relative `import` /
-//! `export … from` specifiers; one source file is one module.
+//! `export … from` specifiers; one source file is one module. For Go the
+//! entry point is a `.go` file or a directory containing `go.mod`, and
+//! one package is one module. For Python the entry point is a `.py` file
+//! or a package directory, one source file is one module, and `import` /
+//! `from … import` statements become the edges.
 //!
 //! Limitations carried over from the underlying extractors:
 //!
@@ -29,6 +34,11 @@
 //! * TypeScript / JavaScript: only relative module specifiers
 //!   (`./` and `../`) are followed. Bare specifiers and TypeScript
 //!   path aliases are not resolved.
+//! * Python: only imports that resolve to a `.py` file under the root
+//!   become edges — standard-library and third-party imports are
+//!   dropped, matching the single-tree scope of the other backends.
+//!   Dynamic imports (`importlib`, `__import__`) are invisible, and
+//!   `sys.path` manipulation is not modelled.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -75,7 +85,8 @@ impl CouplingAnalyzer {
     /// Resolve `path`, build the language-specific module tree, and
     /// produce a report in `format`. Rust resolves the crate root from
     /// a `.rs` file or a directory; TypeScript / JavaScript starts at
-    /// the entry source file and follows relative imports.
+    /// the entry source file and follows relative imports; Go and Python
+    /// walk a directory for packages and `.py` files respectively.
     pub fn analyze(
         &self,
         path: &Path,
@@ -102,7 +113,7 @@ impl CouplingAnalyzer {
 
 /// Dispatch on language and compute the raw [`CouplingReport`] for `path`,
 /// or return `None` when `path` is not anchored at a supported root
-/// (e.g. a directory that is neither a Rust crate nor a Go module).
+/// (e.g. a directory holding no Rust crate, Go module, or Python files).
 ///
 /// This is the language-agnostic entry point the SessionStart summary
 /// hook needs: it wants the metrics, not the analyzer's JSON/markdown
@@ -577,7 +588,12 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("/tmp/odd"), "got {msg}");
-        assert!(msg.contains("no usable Rust crate root"), "got {msg}");
+        assert!(msg.contains("unsupported analysis root"), "got {msg}");
+        // Every backend the dispatch can reach is named, so the message
+        // does not read as a Rust-only failure.
+        for hint in ["Rust", "TS/JS", "Python", "Go"] {
+            assert!(msg.contains(hint), "{hint} missing from {msg}");
+        }
     }
 
     #[test]
@@ -844,6 +860,57 @@ mod tests {
             .analyze(dir.path(), OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["edge_count"], 0);
+    }
+
+    #[test]
+    fn python_package_directory_reports_in_tree_import_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "__init__.py", "");
+        write_file(
+            dir.path(),
+            "app.py",
+            concat!(
+                "import os\n",
+                "from util.text import slugify\n\n",
+                "def main():\n    return slugify(os.getcwd())\n",
+            ),
+        );
+        write_file(dir.path(), "util/__init__.py", "");
+        write_file(
+            dir.path(),
+            "util/text.py",
+            "def slugify(value):\n    return value.lower()\n",
+        );
+
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(modules.contains(&"crate::app"), "got {modules:?}");
+        assert!(modules.contains(&"crate::util::text"), "got {modules:?}");
+        // `import os` is stdlib and resolves to nothing in-tree, so the
+        // only edge is app -> util.text.
+        assert_eq!(parsed["edge_count"], 1);
+        assert_eq!(parsed["edges"][0]["from"], "crate::app");
+        assert_eq!(parsed["edges"][0]["to"], "crate::util::text");
+    }
+
+    #[test]
+    fn python_file_root_is_a_single_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "solo.py", "def f():\n    return 1\n");
+        let json = CouplingAnalyzer::new()
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["module_count"], 1);
         assert_eq!(parsed["edge_count"], 0);
     }
 

@@ -219,10 +219,10 @@ pub enum CrateAnalyzerError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// The provided path exists but isn't a `.rs` file or a directory
-    /// containing a recognisable crate root.
+    /// The provided path exists but no language backend claims it: not a
+    /// crate root, not an entry file, and a directory walk found nothing.
     #[error(
-        "no usable Rust crate root found at {path:?}; pass a .rs file or a directory containing src/lib.rs or src/main.rs"
+        "unsupported analysis root {path:?}; pass a Rust crate root (.rs file or a directory containing src/lib.rs or src/main.rs), a TS/JS entry file, a Python file/directory, or a Go file/module directory"
     )]
     UnsupportedRoot { path: PathBuf },
     /// `mod foo;` was declared in a parent file but neither `foo.rs` nor
