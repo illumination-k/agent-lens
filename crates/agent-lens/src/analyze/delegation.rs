@@ -537,11 +537,28 @@ fn outgoing_calls(graph: &CallGraph) -> Vec<OutgoingCalls<'_>> {
 
 /// Whether a call site adds nothing a reader has to follow: a name the
 /// language's own tables mark as ubiquitous (`.clone()`, `.into()`) or
-/// as a builtin (`len`, `append`). Everything else — a log call, a lock
+/// as a builtin (`len`, `append`), or a value constructor that only
+/// re-wraps the forwarded result. Everything else — a log call, a lock
 /// acquisition, a second workspace call — is work.
 fn is_trivial_adapter(language: GraphLanguage, callee: &str) -> bool {
     language.ubiquitous_method_names().contains(callee)
         || language.builtin_function_names().contains(callee)
+        || is_result_constructor(language, callee)
+}
+
+/// Constructors that wrap a forwarded result without changing it.
+///
+/// `Ok(inner(x))` is a coercion in exactly the sense `.into()` is, and
+/// the resolver leaves it unattributed like any other call outside the
+/// workspace — so without this the most ordinary Rust forwarding shape
+/// would never classify. The other three languages return the value
+/// directly and have no equivalent spelling, so they contribute
+/// nothing here rather than an approximation.
+fn is_result_constructor(language: GraphLanguage, callee: &str) -> bool {
+    match language {
+        GraphLanguage::Rust => matches!(callee, "Ok" | "Err" | "Some"),
+        GraphLanguage::TypeScript | GraphLanguage::Python | GraphLanguage::Go => false,
+    }
 }
 
 fn graph_language_of(node: &CallGraphNode) -> Option<GraphLanguage> {
@@ -1187,23 +1204,31 @@ pub mod db {{
     }
 
     /// A trivial adapter on the forwarded result is still forwarding —
-    /// `.into()` is a coercion, not logic.
-    #[test]
-    fn a_trivial_adapter_on_the_forwarded_call_keeps_the_hop() {
+    /// `.into()` is a coercion, not logic, and so is the `Ok(…)` every
+    /// fallible Rust forwarder wraps its result in.
+    #[rstest]
+    #[case::method_adapter("u64", "crate::service::save(id).into()")]
+    #[case::result_constructor("Result<u32, ()>", "Ok(crate::service::save(id))")]
+    fn a_trivial_adapter_on_the_forwarded_call_keeps_the_hop(
+        #[case] return_type: &str,
+        #[case] body: &str,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
             "src/lib.rs",
-            "pub mod api {
-    pub fn save(id: usize) -> u64 { crate::service::save(id).into() }
-}
-pub mod service {
-    pub fn save(id: usize) -> u32 { crate::db::insert(id) }
-}
-pub mod db {
-    pub fn insert(id: usize) -> u32 { id as u32 }
-}
+            &format!(
+                "pub mod api {{
+    pub fn save(id: usize) -> {return_type} {{ {body} }}
+}}
+pub mod service {{
+    pub fn save(id: usize) -> u32 {{ crate::db::insert(id) }}
+}}
+pub mod db {{
+    pub fn insert(id: usize) -> u32 {{ id as u32 }}
+}}
 ",
+            ),
         );
 
         assert_eq!(
