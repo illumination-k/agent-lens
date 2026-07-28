@@ -14,6 +14,8 @@
 //!   [`find_similar_functions`] helper that drives pairwise comparison, and
 //!   [`cluster_similar_pairs`] for collapsing pairs into complete-link
 //!   clusters.
+//! * [`line_index`] — byte offset → 1-based line number mapping, shared by
+//!   every adapter whose parser reports positions as byte offsets.
 //! * [`lsh`] — MinHash + banded LSH used to pre-filter candidate pairs once
 //!   the corpus grows past a couple hundred functions, replacing the
 //!   quadratic cartesian product with a near-linear pass.
@@ -53,6 +55,7 @@ pub mod context_span;
 pub mod coupling;
 pub mod function;
 pub mod hotspot;
+pub mod line_index;
 pub mod lsh;
 pub mod method_names;
 pub mod naming;
@@ -80,6 +83,7 @@ pub use function::{
     find_similar_pair_indices, find_similar_pair_indices_with_strategy,
 };
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
+pub use line_index::LineIndex;
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use method_names::UbiquitousMethodNames;
 pub use naming::{identifier_tokens, qualify, qualify_module, starts_uppercase};

@@ -15,7 +15,7 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | Are there forwarding-only functions worth inlining?     | `wrapper`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which classes/`impl` blocks are doing too many things?  | `cohesion`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which functions are landmines to edit?                  | `complexity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which modules are Fan-In bottlenecks or cyclic?         | `coupling`       | Rust crate / TS/JS entry / Go module              |
+| Which modules are Fan-In bottlenecks or cyclic?         | `coupling`       | Rust crate / TS/JS entry / Go or Python directory |
 | Which functions call each other in a cycle?             | `cycles`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | How many files must I read to understand a module?      | `context-span`   | Rust crate / TS/JS entry / Python / Go            |
 | Who calls this function? What does it call?             | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
@@ -28,7 +28,7 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | Which code has no test path guarding it?                | `untested`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Where do churn and complexity collide?                  | `hotspot`        | git-tracked file or directory                     |
 
-`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, and Go modules. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
+`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
 
 ## Output format
 
@@ -106,7 +106,7 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 - **wrapper**: a hit means the function body, after stripping `?` / `.into()` / `.unwrap()` / `.await`, is just a forwarding call. Either inline it or document why the indirection exists.
 - **cohesion**: `lcom4 == 1` is healthy. `lcom4 >= 2` means the `impl` has disjoint method clusters and is a candidate for splitting.
 - **complexity**: cognitive ≥ 15 is a yellow flag, ≥ 25 is a red flag. Maintainability Index < 65 means the function is hard to maintain regardless of what cyclomatic says.
-- **coupling**: high `fan_in` ⇒ a hub everything depends on (slow to change safely); high `fan_out` ⇒ a module that is hard to test in isolation; non-empty `cycles` is always a smell. Reports Martin's `instability = Ce/(Ca+Ce)` per module too. The module unit differs by language: for Rust it is the crate's `mod` tree, for TS/JS a source file reachable from the entry, for Go a package (directory) in the module.
+- **coupling**: high `fan_in` ⇒ a hub everything depends on (slow to change safely); high `fan_out` ⇒ a module that is hard to test in isolation; non-empty `cycles` is always a smell. Reports Martin's `instability = Ce/(Ca+Ce)` per module too. The module unit differs by language: for Rust it is the crate's `mod` tree, for TS/JS a source file reachable from the entry, for Go a package (directory) in the module, for Python a `.py` file under the root.
 - **cycles**: each entry is a group of 2+ functions that call each other (directly or transitively) over resolved call edges — they must be understood, tested, and changed as one unit. `same_file: true` usually means intentional mutual recursion (parsers, tree walkers) and is ranked below cross-file tangles. `break_suggestions` name the cheapest internal edges (by static call-site count) whose removal breaks the cycle — advisory: check the listed `call_lines` before acting, a cheap edge can still be load-bearing. A high `ambiguous_edge_count_nearby` means the tangle's true extent is uncertain.
 - **context-span**: each module's transitive outgoing closure plus the count of distinct source files those modules span. Treat the file count as an "onboarding cost" — a module with span 30 means an agent must open ~30 files to reason about it.
 - **function-graph**: nodes are functions with per-node weights (`fan_in`, `fan_out`, complexity, MI, Halstead). Edges are syntactic call sites with a `resolution` (`resolved` / `unresolved` / `ambiguous` / `anonymous`). Resolution is heuristic — high `unresolved_edge_count` mostly means trait dispatch and external calls, not a bug. Prefer `graph-query` for point questions; use the full dump for visualization or offline processing.

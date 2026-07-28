@@ -405,7 +405,8 @@ enum AnalyzeCommand {
     #[command(after_long_help = examples::COMPLEXITY)]
     Complexity(AnalyzeComplexityArgs),
     /// Report module-level coupling metrics for a Rust crate, a
-    /// TypeScript / JavaScript module graph, or a Go module.
+    /// TypeScript / JavaScript module graph, a Go module, or a Python
+    /// package tree.
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
@@ -414,8 +415,10 @@ enum AnalyzeCommand {
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one, a TypeScript / JavaScript entry file
     /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
-    /// `.cjs`) whose relative imports define the module graph, or a
-    /// `.go` file or Go module directory (containing `go.mod`).
+    /// `.cjs`) whose relative imports define the module graph, a
+    /// `.go` file or Go module directory (containing `go.mod`), or a
+    /// `.py` file or package directory whose in-tree imports define the
+    /// module graph.
     #[command(after_long_help = examples::COUPLING)]
     Coupling(AnalyzeCommonArgs),
     /// Report function-level call cycles: groups of 2+ functions that

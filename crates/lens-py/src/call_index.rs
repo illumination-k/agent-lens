@@ -16,15 +16,15 @@
 use std::collections::HashSet;
 
 use lens_domain::{
-    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
+    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, LineIndex,
+    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module,
+    starts_uppercase,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport};
 use ruff_python_parser::parse_module;
 
 use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
-use crate::line_index::LineIndex;
 use crate::parser::{PythonParseError, function_body_tree};
 
 /// Extract neutral function-shape facts for Python.
@@ -235,7 +235,7 @@ fn call_shape(
     namespace_aliases: &HashSet<String>,
 ) -> CallShape {
     let facts = callee_facts(&call.func, namespace_aliases);
-    let line = line_index.line_of(call.range.start().to_usize());
+    let line = line_index.line(call.range.start().to_u32());
     CallShape {
         caller_qualified_name: SyntaxFact::Known(Some(caller_qualified_name.to_owned())),
         caller_module: SyntaxFact::Known(module.to_owned()),
@@ -405,11 +405,11 @@ fn top_segment(dotted: &str) -> &str {
 }
 
 fn function_span(func: &StmtFunctionDef, lines: &LineIndex) -> SourceSpan {
-    let start_line = lines.line_of(func.range.start().to_usize());
+    let start_line = lines.line(func.range.start().to_u32());
     // `range.end()` lands at the position just past the last byte of the
     // body; the line that byte sits on is the closing line.
-    let end_offset = func.range.end().to_usize().saturating_sub(1);
-    let end_line = lines.line_of(end_offset);
+    let end_offset = func.range.end().to_u32().saturating_sub(1);
+    let end_line = lines.line(end_offset);
     SourceSpan {
         start_line,
         end_line,

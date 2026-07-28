@@ -13,12 +13,11 @@
 //! lists differ because TS uses `await` / `as T` / `!` / `?.` rather
 //! than `?` / `.unwrap()` / `.into()`.
 
-use lens_domain::{WrapperFinding, args_pass_through_by};
+use lens_domain::{LineIndex, WrapperFinding, args_pass_through_by};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
 
-use crate::line_index::LineIndex;
 use crate::parser::{Dialect, TsParseError};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 

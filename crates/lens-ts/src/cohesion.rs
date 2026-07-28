@@ -34,7 +34,7 @@
 
 use std::collections::HashSet;
 
-use lens_domain::{CohesionUnit, CohesionUnitKind, MethodCohesion};
+use lens_domain::{CohesionUnit, CohesionUnitKind, LineIndex, MethodCohesion};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
@@ -42,7 +42,6 @@ use oxc_parser::Parser;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 
-use crate::line_index::LineIndex;
 use crate::parser::{Dialect, TsParseError};
 
 /// Failures produced while extracting cohesion units.
