@@ -118,6 +118,8 @@ pub struct Profile {
     #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
     #[serde(default)]
+    pub untested: Option<UntestedOptions>,
+    #[serde(default)]
     pub wrapper: Option<WrapperOptions>,
 }
 
@@ -149,6 +151,7 @@ pub enum ToolName {
     Impact,
     Layers,
     Similarity,
+    Untested,
     Wrapper,
 }
 
@@ -168,6 +171,7 @@ impl ToolName {
             Self::Impact => "impact",
             Self::Layers => "layers",
             Self::Similarity => "similarity",
+            Self::Untested => "untested",
             Self::Wrapper => "wrapper",
         }
     }
@@ -245,6 +249,13 @@ pub struct ImpactOptions {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct LayersOptions {
+    pub top: Option<usize>,
+}
+
+/// `[profile.<name>.untested]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct UntestedOptions {
     pub top: Option<usize>,
 }
 
