@@ -547,22 +547,55 @@ fn parse_pub_use(source: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         };
         let body = body[..end].to_owned();
         statement = None;
-        collect_use_tree(&body, &mut names, &mut globs);
+        collect_use_tree(&body, "", &mut names, &mut globs);
     }
     (names, globs)
 }
 
-/// Split one `pub use` body into the names and glob prefixes it exposes.
-fn collect_use_tree(body: &str, names: &mut BTreeSet<String>, globs: &mut BTreeSet<String>) {
+/// Split one `pub use` body into the names and glob prefixes it exposes,
+/// recursing so a nested group (`a::{b, c::{d, e}}`) contributes its
+/// leaves rather than the raw group text.
+fn collect_use_tree(
+    body: &str,
+    prefix: &str,
+    names: &mut BTreeSet<String>,
+    globs: &mut BTreeSet<String>,
+) {
     let body = body.trim();
     let Some(open) = body.find('{') else {
-        collect_use_leaf(body, "", names, globs);
+        collect_use_leaf(body, prefix, names, globs);
         return;
     };
-    let prefix = body[..open].trim().trim_end_matches("::");
-    let inner = body[open + 1..].trim_end().trim_end_matches('}');
-    for item in split_top_level(inner) {
-        collect_use_leaf(item.trim(), prefix, names, globs);
+    let inner_prefix = join_use_path(prefix, body[..open].trim().trim_end_matches("::"));
+    for item in split_top_level(brace_group(&body[open..])) {
+        collect_use_tree(item, &inner_prefix, names, globs);
+    }
+}
+
+/// The text inside the brace group starting at `body`, which begins with
+/// `{`, up to its matching close brace.
+fn brace_group(body: &str) -> &str {
+    let mut depth = 0usize;
+    for (offset, ch) in body.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return &body[1..offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    &body[1..]
+}
+
+fn join_use_path(prefix: &str, rest: &str) -> String {
+    match (prefix.is_empty(), rest.is_empty()) {
+        (true, _) => rest.to_owned(),
+        (_, true) => prefix.to_owned(),
+        _ => format!("{prefix}::{rest}"),
     }
 }
 
@@ -577,11 +610,7 @@ fn collect_use_leaf(
     if path.is_empty() {
         return;
     }
-    let full = if prefix.is_empty() {
-        path.to_owned()
-    } else {
-        format!("{prefix}::{path}")
-    };
+    let full = join_use_path(prefix, path);
     match full.strip_suffix("::*").or(full.strip_suffix('*')) {
         Some(glob) => {
             globs.insert(glob.trim_end_matches("::").to_owned());
@@ -751,10 +780,11 @@ fn suggest(lang: AuditLang, scope: CallerScope, module: &str, scope_module: &str
     }
 }
 
-/// Count, per finding, the call sites that could reach it from outside
-/// the proposed scope: ambiguous sites naming it as a candidate, and
-/// unresolved sites naming it by name. Both are reasons to check a row
-/// before narrowing it.
+/// Count, per finding, the call sites that could still reach it from
+/// outside the proposed scope: ambiguous sites carrying it in their
+/// candidate set, and receiver calls the resolver declined to attribute
+/// (see [`gated_by_name`]). Both are reasons to check a row before
+/// narrowing it, and neither drops it.
 fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) {
     if findings.is_empty() {
         return;
@@ -1259,6 +1289,31 @@ mod tests {
             None,
             "a cross-crate caller needs the `pub` it has: {report}",
         );
+
+        // One row per bucket, so a mis-bucketed finding cannot hide in a
+        // total: `module_only`, `from_sibling`, `from_uncle`, `from_far`,
+        // plus the callers, which nothing calls in turn.
+        let summary = &report["summary"];
+        assert_eq!(summary["same_module_count"], 1, "report: {report}");
+        assert_eq!(summary["ancestor_module_count"], 2);
+        assert_eq!(summary["same_crate_count"], 1);
+        assert_eq!(summary["no_resolved_caller_count"], 4);
+        assert_eq!(summary["over_exposed_count"], 8);
+        // Eight of the nine audited public functions; `crossing` is the
+        // one its callers still need.
+        assert_eq!(summary["over_exposed_share"], 8.0 / 9.0);
+
+        let deep = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["module"] == "app::a::deep")
+            .unwrap_or_else(|| panic!("report: {report}"));
+        assert_eq!(deep["finding_count"], 4);
+        assert_eq!(
+            deep["called_count"], 3,
+            "`crossing` is absent and `local_caller` has no caller: {deep}",
+        );
     }
 
     /// The parent module is spelled `pub(super)` rather than the
@@ -1392,6 +1447,11 @@ mod tests {
         // `Owner`, `published`, and `Owner::method` — the type counts as
         // a re-export of its methods, not of itself (it is no function).
         assert_eq!(report["audit"]["re_exported_function_count"], 2);
+        assert_eq!(report["audit"]["public_function_count"], 4);
+        assert!(
+            analyze_md(dir.path()).contains("Audited 2 of 4 non-test public function(s)"),
+            "the audited count is the public count minus the re-exports",
+        );
     }
 
     #[rstest]
@@ -1402,6 +1462,8 @@ mod tests {
     #[case::group_with_glob("pub use inner::{one, deep::*};", &["one"], &["inner::deep"])]
     #[case::nested_path("pub use a::b::target;", &["target"], &[])]
     #[case::crate_prefix("pub use crate::inner::*;", &[], &["crate::inner"])]
+    #[case::nested_group("pub use a::{b, c::{d, e}};", &["b", "d", "e"], &[])]
+    #[case::nested_group_with_glob("pub use a::{b, c::{d, *}};", &["b", "d"], &["a::c"])]
     #[case::not_public("use inner::target;", &[], &[])]
     #[case::in_a_comment("// pub use inner::target;", &[], &[])]
     fn pub_use_statements_yield_their_names_and_globs(
@@ -1418,6 +1480,15 @@ mod tests {
             globs.iter().map(String::as_str).collect::<Vec<_>>(),
             expected_globs
         );
+    }
+
+    #[rstest]
+    #[case::flat("a, b", &["a", " b"])]
+    #[case::nested_group_stays_whole("a, b::{c, d}, e", &["a", " b::{c, d}", " e"])]
+    #[case::single_item("only", &["only"])]
+    #[case::empty("", &[""])]
+    fn brace_groups_split_on_top_level_commas_only(#[case] inner: &str, #[case] expected: &[&str]) {
+        assert_eq!(split_top_level(inner), expected);
     }
 
     /// A brace group split across lines is one statement, and the
@@ -1510,8 +1581,69 @@ mod tests {
             "a function no unattributed site names stays unflagged: {flagged:?}",
         );
 
+        assert_eq!(
+            report["summary"]["possible_external_caller_count"], 2,
+            "only the two ambiguous candidates count: {report}",
+        );
+
         let md = analyze_md(dir.path());
         assert!(md.contains("verify first: 1 ambiguous"), "got: {md}");
+        assert_eq!(
+            md.matches("verify first").count(),
+            2,
+            "a row nothing names must not carry the caveat: {md}",
+        );
+    }
+
+    /// Rust visibility is inherited downward, so an unattributable call
+    /// from *below* the proposed scope is already inside it and must not
+    /// argue against narrowing — while the same call is outside the
+    /// scope of a function in a different subtree.
+    #[test]
+    fn an_unattributable_call_below_the_proposed_scope_is_inside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "app",
+            &[
+                ("lib.rs", "pub mod one;\npub mod two;\n"),
+                (
+                    "one.rs",
+                    "pub mod sub;\npub struct A;\n\
+                     impl A { pub fn target(&self) -> usize { 1 } }\n\
+                     pub fn local(a: &A) -> usize { A::target(a) }\n",
+                ),
+                (
+                    "one/sub.rs",
+                    "use crate::one::A;\npub fn from_below(a: &A) -> usize { a.target() }\n",
+                ),
+                (
+                    "two.rs",
+                    "pub struct B;\nimpl B { pub fn target(&self) -> usize { 2 } }\n",
+                ),
+            ],
+        );
+
+        let report = analyze_json(dir.path());
+        let ambiguous_for = |name: &str| {
+            report["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["findings"].as_array().unwrap())
+                .find(|f| f["qualified_name"] == name)
+                .map(|f| f["ambiguous_calls_outside_scope"].as_u64().unwrap())
+        };
+        assert_eq!(
+            ambiguous_for("app::one::A::target"),
+            Some(0),
+            "the ambiguous call sits under `app::one`, where a private item is visible: {report}",
+        );
+        assert_eq!(
+            ambiguous_for("app::two::B::target"),
+            Some(1),
+            "the same call is outside `app::two`: {report}",
+        );
     }
 
     /// `.clone()` is a name the resolver refuses to attribute from a
@@ -1529,11 +1661,13 @@ mod tests {
                     "owner.rs",
                     "pub struct W;\n\
                      impl W { pub fn clone(&self) -> usize { 1 } }\n\
-                     pub fn local() -> usize { W.clone() }\n",
+                     pub fn helper() -> usize { 2 }\n\
+                     pub fn local() -> usize { W.clone() + helper() }\n",
                 ),
                 (
                     "elsewhere.rs",
-                    "pub fn unrelated(v: &Vec<u8>) -> usize { v.clone().len() }\n",
+                    "pub fn unrelated(v: &Vec<u8>) -> usize { v.clone().len() }\n\
+                     pub fn calls_out() -> usize { external::helper() }\n",
                 ),
             ],
         );
@@ -1553,29 +1687,62 @@ mod tests {
                 > 0,
             "got: {clone}",
         );
+        let ordinary = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .find(|f| f["qualified_name"] == "app::owner::helper")
+            .unwrap_or_else(|| panic!("report: {report}"));
+        assert_eq!(
+            ordinary["ubiquitous_name_calls_outside_scope"], 0,
+            "an unresolved path call the resolver already ruled out is not evidence: {ordinary}",
+        );
     }
 
-    #[test]
-    fn packages_with_both_a_library_and_a_binary_root_are_named_as_a_caveat() {
+    /// Only a package holding *both* roots is two crates under one
+    /// name. A library alone, or a binary alone, is one crate and needs
+    /// no caveat.
+    #[rstest]
+    #[case::library_and_binary(
+        &[("lib.rs", "pub mod inner;\n"), ("main.rs", "fn main() {}\n")],
+        true
+    )]
+    #[case::library_and_bin_directory(
+        &[("lib.rs", "pub mod inner;\n"), ("bin/tool.rs", "fn main() {}\n")],
+        true
+    )]
+    #[case::library_only(&[("lib.rs", "pub mod inner;\n")], false)]
+    #[case::binary_only(&[("main.rs", "fn main() {}\n")], false)]
+    fn only_packages_holding_both_roots_are_named_as_a_caveat(
+        #[case] roots: &[(&str, &str)],
+        #[case] expected: bool,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        write_crate(
-            dir.path(),
-            "app",
-            &[
-                ("lib.rs", "pub mod inner;\n"),
-                ("inner.rs", "pub fn target() -> usize { 1 }\n"),
-                ("main.rs", "fn main() { let _ = app::inner::target(); }\n"),
-            ],
-        );
+        let mut files = roots.to_vec();
+        files.push(("inner.rs", "pub fn target() -> usize { 1 }\n"));
+        write_crate(dir.path(), "app", &files);
 
         let report = analyze_json(dir.path());
+        let named: Vec<String> = report["audit"]["mixed_target_crates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_owned())
+            .collect();
         assert_eq!(
-            report["audit"]["mixed_target_crates"],
-            serde_json::json!(["app"])
+            named,
+            if expected {
+                vec!["app".to_owned()]
+            } else {
+                Vec::new()
+            },
+            "report: {report}",
         );
-        assert!(
+        assert_eq!(
             analyze_md(dir.path()).contains("Library and binary roots share a package name"),
-            "the caveat is stated, not just serialized",
+            expected,
+            "the caveat is rendered exactly when it applies",
         );
     }
 
@@ -1627,10 +1794,18 @@ mod tests {
              export function caller(): number { return exported(); }\n",
         );
         write_file(dir.path(), "src/lib.py", "def helper():\n    return 1\n");
+        write_file(
+            dir.path(),
+            "src/lib.test.ts",
+            "export function spec(): number { return 1; }\n",
+        );
 
         let report = analyze_json(dir.path());
         assert_eq!(report["audit"]["public_function_count"], 0);
-        assert_eq!(report["audit"]["unsupported_language_function_count"], 3);
+        assert_eq!(
+            report["audit"]["unsupported_language_function_count"], 3,
+            "the count is of production functions; the test file's is not one: {report}",
+        );
         assert!(report["modules"].as_array().unwrap().is_empty());
 
         let md = analyze_md(dir.path());
@@ -1719,6 +1894,116 @@ mod tests {
         assert!(
             !analyze_md(dir.path()).contains("module(s) not shown"),
             "nothing was dropped, so nothing is announced",
+        );
+    }
+
+    #[rstest]
+    #[case::one(&["a"], "`a`")]
+    #[case::at_the_cap(&["a", "b", "c"], "`a`, `b`, `c`")]
+    #[case::over_the_cap(&["a", "b", "c", "d", "e"], "`a`, `b`, `c` +2 more")]
+    fn caller_modules_are_listed_up_to_the_cap_then_counted(
+        #[case] modules: &[&str],
+        #[case] expected: &str,
+    ) {
+        let modules: Vec<String> = modules.iter().map(|m| (*m).to_owned()).collect();
+        assert_eq!(render_caller_modules(&modules), expected);
+    }
+
+    /// Both sides of the per-module row cap: a module over it announces
+    /// the remainder, a module at it announces nothing.
+    #[test]
+    fn the_per_module_row_cap_reports_only_a_real_remainder() {
+        let over = tempfile::tempdir().unwrap();
+        let mut source = String::new();
+        for i in 0..(FINDINGS_PER_MODULE + 2) {
+            let _ = writeln!(source, "pub fn f{i}() -> usize {{ {i} }}");
+        }
+        write_crate(
+            over.path(),
+            "app",
+            &[("lib.rs", "pub mod inner;\n"), ("inner.rs", &source)],
+        );
+        let md = analyze_md(over.path());
+        assert!(
+            md.contains("+2 more (JSON output carries every row)"),
+            "got: {md}",
+        );
+        assert_eq!(
+            md.lines().filter(|l| l.starts_with("- `")).count(),
+            FINDINGS_PER_MODULE,
+        );
+        // The counts line is the only place the bucket totals appear.
+        assert!(
+            md.contains("Narrowing candidates:"),
+            "the summary counts are rendered: {md}",
+        );
+
+        let exact = tempfile::tempdir().unwrap();
+        let mut source = String::new();
+        for i in 0..FINDINGS_PER_MODULE {
+            let _ = writeln!(source, "pub fn f{i}() -> usize {{ {i} }}");
+        }
+        write_crate(
+            exact.path(),
+            "app",
+            &[("lib.rs", "pub mod inner;\n"), ("inner.rs", &source)],
+        );
+        let md = analyze_md(exact.path());
+        assert!(
+            !md.contains("more (JSON output carries every row)"),
+            "nothing was dropped, so nothing is announced: {md}",
+        );
+    }
+
+    /// `--only-tests` and `--exclude-tests` both reach the graph
+    /// builder: one leaves no public function to audit, the other drops
+    /// the test callers a finding would otherwise have.
+    #[test]
+    fn the_test_filters_reach_the_graph_the_audit_runs_on() {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "app",
+            &[
+                ("lib.rs", "pub mod inner;\n"),
+                (
+                    "inner.rs",
+                    "pub fn target() -> usize { 1 }\n\
+                     #[cfg(test)]\n\
+                     mod tests {\n\
+                     #[test]\n\
+                     fn t() { let _ = super::target(); }\n\
+                     }\n",
+                ),
+            ],
+        );
+
+        let baseline = analyze_json(dir.path());
+        assert_eq!(
+            suggestion_for(&baseline, "app::inner::target").as_deref(),
+            Some("drop `pub`"),
+            "the test caller is what makes the module the scope: {baseline}",
+        );
+
+        let json = VisibilityAnalyzer::new()
+            .with_exclude_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let excluded: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            suggestion_for(&excluded, "app::inner::target").as_deref(),
+            Some("verify: no resolved caller in the analyzed tree"),
+            "dropping the tests drops the only caller: {excluded}",
+        );
+
+        let json = VisibilityAnalyzer::new()
+            .with_only_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let only_tests: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            only_tests["audit"]["public_function_count"], 0,
+            "test functions are never audited, so nothing is left: {only_tests}",
         );
     }
 
