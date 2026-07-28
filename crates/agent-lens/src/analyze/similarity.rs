@@ -2412,7 +2412,7 @@ fn beta(x: i32) -> i32 {
     )]
     #[case::missing_file(
         setup_missing_file,
-        |e: &AnalyzerError| matches!(e, AnalyzerError::Io { .. }),
+        |e: &AnalyzerError| matches!(e, AnalyzerError::PathNotFound { .. }),
     )]
     #[case::parse_failure(
         setup_invalid_rust,
