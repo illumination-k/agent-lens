@@ -33,7 +33,7 @@
 
 use std::collections::HashSet;
 
-use lens_domain::{CohesionUnit, CohesionUnitKind, MethodCohesion};
+use lens_domain::{CohesionUnit, CohesionUnitKind, LineIndex, MethodCohesion};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{
     Decorator, ExceptHandler, Expr, Stmt, StmtAnnAssign, StmtAssign, StmtAugAssign, StmtClassDef,
@@ -44,7 +44,6 @@ use ruff_python_parser::{ParseError, parse_module};
 use ruff_text_size::Ranged;
 
 use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
-use crate::line_index::LineIndex;
 
 /// Failures produced while extracting cohesion units.
 #[derive(Debug, thiserror::Error)]
@@ -110,9 +109,9 @@ fn unit_from_class(class: &StmtClassDef, lines: &LineIndex) -> Option<CohesionUn
         .map(|m| method_cohesion(m, &sibling_names, lines))
         .collect();
 
-    let start_line = lines.line_of(class.range.start().to_usize());
-    let end_offset = class.range.end().to_usize().saturating_sub(1);
-    let end_line = lines.line_of(end_offset);
+    let start_line = lines.line(class.range.start().to_u32());
+    let end_offset = class.range.end().to_u32().saturating_sub(1);
+    let end_line = lines.line(end_offset);
     Some(CohesionUnit::build(
         CohesionUnitKind::Inherent,
         class_name,
@@ -179,9 +178,9 @@ fn method_cohesion(
     calls.sort();
     calls.dedup();
 
-    let start_line = lines.line_of(method.range.start().to_usize());
-    let end_offset = method.range.end().to_usize().saturating_sub(1);
-    let end_line = lines.line_of(end_offset);
+    let start_line = lines.line(method.range.start().to_u32());
+    let end_offset = method.range.end().to_u32().saturating_sub(1);
+    let end_line = lines.line(end_offset);
     MethodCohesion::new(method.name.as_str(), start_line, end_line, fields, calls)
 }
 
@@ -338,13 +337,13 @@ fn module_line_range(body: &[Stmt], lines: &LineIndex) -> (usize, usize) {
     }
     let first = body
         .first()
-        .map(|s| s.range().start().to_usize())
+        .map(|s| s.range().start().to_u32())
         .unwrap_or(0);
     let last = body
         .last()
-        .map(|s| s.range().end().to_usize().saturating_sub(1))
+        .map(|s| s.range().end().to_u32().saturating_sub(1))
         .unwrap_or(0);
-    (lines.line_of(first), lines.line_of(last))
+    (lines.line(first), lines.line(last))
 }
 
 fn module_function_cohesion(
@@ -372,9 +371,9 @@ fn module_function_cohesion(
     calls.sort();
     calls.dedup();
 
-    let start_line = lines.line_of(func.range.start().to_usize());
-    let end_offset = func.range.end().to_usize().saturating_sub(1);
-    let end_line = lines.line_of(end_offset);
+    let start_line = lines.line(func.range.start().to_u32());
+    let end_offset = func.range.end().to_u32().saturating_sub(1);
+    let end_line = lines.line(end_offset);
     MethodCohesion::new(func.name.as_str(), start_line, end_line, fields, calls)
 }
 

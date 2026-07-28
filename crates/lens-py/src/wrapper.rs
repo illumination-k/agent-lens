@@ -15,14 +15,13 @@
 //! Pytest-flavoured functions and `unittest.TestCase` methods are
 //! forwarding by design and would only add noise.
 
-use lens_domain::{WrapperFinding, args_pass_through_by, qualify};
+use lens_domain::{LineIndex, WrapperFinding, args_pass_through_by, qualify};
 use ruff_python_ast::{
     Expr, ExprAttribute, ExprCall, Parameters, Stmt, StmtClassDef, StmtFunctionDef, StmtReturn,
 };
 use ruff_python_parser::{ParseError, parse_module};
 
 use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
-use crate::line_index::LineIndex;
 
 /// Method names with no arguments that we treat as "no semantic
 /// content": stringification / coercion shims.
@@ -140,9 +139,9 @@ fn analyze(
     if !args_pass_through(args, &params) {
         return None;
     }
-    let start_line = lines.line_of(func.range.start().to_usize());
-    let end_offset = func.range.end().to_usize().saturating_sub(1);
-    let end_line = lines.line_of(end_offset);
+    let start_line = lines.line(func.range.start().to_u32());
+    let end_offset = func.range.end().to_u32().saturating_sub(1);
+    let end_line = lines.line(end_offset);
     Some(WrapperFinding {
         name: qualify(owner, func.name.as_str()),
         start_line,

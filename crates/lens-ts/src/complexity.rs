@@ -31,13 +31,12 @@
 
 use std::collections::HashMap;
 
-use lens_domain::{FunctionComplexity, HalsteadCounts};
+use lens_domain::{FunctionComplexity, HalsteadCounts, LineIndex};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 
-use crate::line_index::LineIndex;
 use crate::parser::{Dialect, TsParseError};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 

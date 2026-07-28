@@ -17,7 +17,6 @@ mod cohesion;
 mod complexity;
 mod context_span;
 mod coupling;
-mod line_index;
 mod method_names;
 mod parser;
 mod tree;

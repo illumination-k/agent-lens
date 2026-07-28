@@ -21,8 +21,8 @@
 use std::path::Path;
 
 use lens_domain::{
-    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, ReceiverShape, TreeNode,
-    identifier_tokens,
+    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, LineIndex, ReceiverShape,
+    TreeNode, identifier_tokens,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -30,7 +30,6 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use crate::attrs::{name_looks_like_test_class, name_looks_like_test_function};
-use crate::line_index::LineIndex;
 use crate::tree::{expr_tree, function_body_tree};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 

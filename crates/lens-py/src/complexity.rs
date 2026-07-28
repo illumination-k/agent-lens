@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use lens_domain::{FunctionComplexity, HalsteadCounts, qualify};
+use lens_domain::{FunctionComplexity, HalsteadCounts, LineIndex, qualify};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{
     BoolOp, CmpOp, Expr, ExprBoolOp, ExprCall, ExprCompare, ExprIf, ExprUnaryOp, Number, Stmt,
@@ -34,7 +34,6 @@ use ruff_python_ast::{
 use ruff_python_parser::{ParseError, parse_module};
 
 use crate::attrs::{inherits_protocol, is_stub_function};
-use crate::line_index::LineIndex;
 
 /// Failures produced while extracting complexity units.
 #[derive(Debug, thiserror::Error)]
@@ -100,9 +99,9 @@ fn analyze(name: &str, func: &StmtFunctionDef, lines: &LineIndex) -> FunctionCom
         total_operators: visitor.halstead.operators.values().sum(),
         total_operands: visitor.halstead.operands.values().sum(),
     };
-    let start_line = lines.line_of(func.range.start().to_usize());
-    let end_offset = func.range.end().to_usize().saturating_sub(1);
-    let end_line = lines.line_of(end_offset);
+    let start_line = lines.line(func.range.start().to_u32());
+    let end_offset = func.range.end().to_u32().saturating_sub(1);
+    let end_line = lines.line(end_offset);
     FunctionComplexity {
         name: name.to_owned(),
         start_line,

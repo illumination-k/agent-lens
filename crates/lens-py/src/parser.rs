@@ -1,15 +1,14 @@
 //! ruff-based implementation of [`lens_domain::LanguageParser`] for Python.
 
 use lens_domain::{
-    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, ReceiverShape, TreeNode,
-    identifier_tokens, qualify as qualify_name,
+    FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, LineIndex, ReceiverShape,
+    TreeNode, identifier_tokens, qualify as qualify_name,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
 use ruff_python_parser::{ParseError, parse_module};
 
 use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
-use crate::line_index::LineIndex;
 
 /// A Python-language parser backed by [`ruff_python_parser`].
 ///
@@ -125,11 +124,11 @@ fn function_def_from(
     is_method: bool,
     lines: &LineIndex,
 ) -> FunctionDef {
-    let start_line = lines.line_of(func.range.start().to_usize());
+    let start_line = lines.line(func.range.start().to_u32());
     // `range.end()` lands at the position just past the last byte of the
     // body; we want the line that byte sits on.
-    let end_offset = func.range.end().to_usize().saturating_sub(1);
-    let end_line = lines.line_of(end_offset);
+    let end_offset = func.range.end().to_u32().saturating_sub(1);
+    let end_line = lines.line(end_offset);
     FunctionDef {
         name: name.to_owned(),
         start_line,
