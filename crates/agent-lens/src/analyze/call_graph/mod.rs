@@ -738,6 +738,126 @@ mod tests {
         );
     }
 
+    /// One language's take on "a workspace symbol shares a builtin's
+    /// name": the builtin is called bare, so it never reaches the
+    /// receiver table that guards `.clone()`.
+    #[derive(Debug, Clone, Copy)]
+    struct BuiltinFixture {
+        file: &'static str,
+        source: &'static str,
+        /// Caller of the bare builtin, which must stay unresolved.
+        builtin_caller: &'static str,
+        builtin_callee: &'static str,
+        /// Caller of a bare workspace call, which must still resolve.
+        workspace_caller: &'static str,
+        workspace_callee: &'static str,
+    }
+
+    const GO_BUILTIN_FIXTURE: BuiltinFixture = BuiltinFixture {
+        file: "src/lib.go",
+        source: "package lib\n\
+                 \n\
+                 type buffer struct{ items []int }\n\
+                 \n\
+                 func (b *buffer) append(v int) { b.items = []int{v} }\n\
+                 \n\
+                 func Collect(xs []int) []int { return append([]int{}, xs...) }\n\
+                 \n\
+                 func Specific() int { return helper() }\n\
+                 \n\
+                 func helper() int { return 0 }\n",
+        builtin_caller: "Collect",
+        builtin_callee: "append",
+        workspace_caller: "Specific",
+        workspace_callee: "helper",
+    };
+
+    const PYTHON_BUILTIN_FIXTURE: BuiltinFixture = BuiltinFixture {
+        file: "src/lib.py",
+        source: "class W:\n\
+                 \x20   def len(self):\n\
+                 \x20       return 0\n\
+                 \n\
+                 def measure(xs):\n\
+                 \x20   return len(xs)\n\
+                 \n\
+                 def specific():\n\
+                 \x20   return helper()\n\
+                 \n\
+                 def helper():\n\
+                 \x20   return 0\n",
+        builtin_caller: "measure",
+        builtin_callee: "len",
+        workspace_caller: "specific",
+        workspace_callee: "helper",
+    };
+
+    const TYPESCRIPT_BUILTIN_FIXTURE: BuiltinFixture = BuiltinFixture {
+        file: "src/lib.ts",
+        source: "export class W {\n\
+                 static parseInt(s: string): number { return 0; }\n\
+                 }\n\
+                 export function toNumber(s: string): number { return parseInt(s, 10); }\n\
+                 export function specific(): number { return helper(); }\n\
+                 export function helper(): number { return 0; }\n",
+        builtin_caller: "toNumber",
+        builtin_callee: "parseInt",
+        workspace_caller: "specific",
+        workspace_callee: "helper",
+    };
+
+    const RUST_BUILTIN_FIXTURE: BuiltinFixture = BuiltinFixture {
+        file: "src/lib.rs",
+        source: "pub struct W;\n\
+                 impl W {\n\
+                 pub fn drop(&self) {}\n\
+                 }\n\
+                 pub fn release(v: Vec<u8>) { drop(v); }\n\
+                 pub fn specific() -> usize { helper() }\n\
+                 pub fn helper() -> usize { 0 }\n",
+        builtin_caller: "release",
+        builtin_callee: "drop",
+        workspace_caller: "specific",
+        workspace_callee: "helper",
+    };
+
+    /// Regression for the plain-call counterpart of the receiver-call
+    /// over-resolution: a bare `append(...)` is the language's builtin,
+    /// so it must not become an edge into the one workspace symbol that
+    /// happens to share the name — while ordinary bare calls into the
+    /// workspace keep resolving.
+    #[rstest]
+    #[case::go(GO_BUILTIN_FIXTURE)]
+    #[case::python(PYTHON_BUILTIN_FIXTURE)]
+    #[case::typescript(TYPESCRIPT_BUILTIN_FIXTURE)]
+    #[case::rust(RUST_BUILTIN_FIXTURE)]
+    fn plain_calls_to_builtins_do_not_become_workspace_edges(#[case] fixture: BuiltinFixture) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), fixture.file, fixture.source);
+        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+
+        assert_eq!(
+            call_outcome(&graph, fixture.builtin_caller, fixture.builtin_callee),
+            (Resolution::Unresolved, None),
+            "plain call to the builtin {}",
+            fixture.builtin_callee,
+        );
+
+        let (resolution, target) =
+            call_outcome(&graph, fixture.workspace_caller, fixture.workspace_callee);
+        assert_eq!(
+            resolution,
+            Resolution::Resolved,
+            "plain call to the workspace function {}",
+            fixture.workspace_callee,
+        );
+        assert!(
+            target.is_some_and(|t| t.ends_with(fixture.workspace_callee)),
+            "expected a target ending in {}, got {target:?}",
+            fixture.workspace_callee,
+        );
+    }
+
     /// Asserts a [`call_outcome`] landed on `W::<method>` — the target
     /// is checked by suffix because the module prefix differs per
     /// language.
