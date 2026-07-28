@@ -397,6 +397,45 @@ fn run_profile_drives_untested_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_visibility_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", "pub mod inner;\n");
+    write_file(
+        dir.path(),
+        "src/inner.rs",
+        "pub fn target() -> usize { 1 }\n\
+         pub fn caller() -> usize { target() }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.exposure]\npath = \"src\"\ntools = [\"visibility\"]\n\n\
+         [profile.exposure.visibility]\ntop = 5\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "exposure"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "visibility");
+    let report = &json["results"][0]["report"];
+    let findings: Vec<(&str, &str)> = report["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["findings"].as_array().unwrap())
+        .map(|f| {
+            (
+                f["qualified_name"].as_str().unwrap(),
+                f["suggested_visibility"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        findings.contains(&("crate::inner::target", "drop `pub`")),
+        "got: {findings:?}",
+    );
+}
+
+#[test]
 fn run_profile_rejects_graph_query_without_options_table() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);

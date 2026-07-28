@@ -31,6 +31,7 @@ Pick an analyzer by question:
     what breaks if I change this?         analyze impact
     which level does this code sit on?    analyze layers
     what has no test path guarding it?    analyze untested
+    is this `pub` wider than it needs?    analyze visibility
     who calls this / how do I get there?  analyze graph-query
     give me the raw call graph            analyze function-graph
 "
@@ -168,6 +169,14 @@ Examples:
 
     agent-lens analyze untested src/ --format md
     agent-lens analyze untested . --exclude 'benches/**' --top 30 --format md
+";
+
+pub const VISIBILITY: &str = "\
+Examples:
+
+    agent-lens analyze visibility . --format md
+    agent-lens analyze visibility crates/ --top 30 --format md
+    agent-lens analyze visibility . --exclude-tests --format md
 ";
 
 pub const HOTSPOT: &str = "\
