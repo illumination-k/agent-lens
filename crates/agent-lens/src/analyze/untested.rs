@@ -570,7 +570,9 @@ mod tests {
     }
 
     /// A test calls `covered`, which calls `covered_indirect`; `orphan`
-    /// is called only by production code and `lonely` by nothing.
+    /// is called only by production code and `lonely` by nothing. The
+    /// three test functions outnumber the two they reach, so the root
+    /// count and the reached count cannot be confused for each other.
     const RUST_SOURCE: &str = "pub fn covered() { covered_indirect(); }\n\
          fn covered_indirect() {}\n\
          pub fn orphan() { lonely_callee(); }\n\
@@ -581,6 +583,8 @@ mod tests {
          fn helper() { covered(); }\n\
          #[test]\n\
          fn t() { helper(); }\n\
+         #[test]\n\
+         fn t_standalone() {}\n\
          }\n";
 
     #[test]
@@ -598,12 +602,15 @@ mod tests {
             ["crate::lonely_callee", "crate::orphan"],
         );
         assert_eq!(report["summary"]["prod_function_count"], 4);
+        // Production functions the walk reached — not the roots it walked
+        // from, of which there are three.
         assert_eq!(report["summary"]["test_reached_function_count"], 2);
         assert_eq!(report["summary"]["untested_function_count"], 2);
+        assert_eq!(report["summary"]["untested_share"], 0.5);
         assert_eq!(report["summary"]["module_count"], 1);
         assert_eq!(report["test_roots"]["absent"], false);
         // `#[cfg(test)]` helpers count as roots alongside `#[test]` fns.
-        assert_eq!(report["test_roots"]["function_count"], 2);
+        assert_eq!(report["test_roots"]["function_count"], 3);
     }
 
     #[test]
@@ -647,13 +654,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Two same-named methods on different owners: a bare `target()`
         // call from the test cannot pick one, so both stay untested but
-        // are flagged rather than asserted unreachable.
+        // are flagged rather than asserted unreachable. `quiet` shares
+        // their module and is named by nothing, so the flag has to
+        // separate the two kinds of row.
         write_file(
             dir.path(),
             "src/lib.rs",
             "pub struct A;\npub struct B;\n\
              impl A { pub fn target(&self) -> usize { 1 } }\n\
              impl B { pub fn target(&self) -> usize { 2 } }\n\
+             pub fn quiet() -> usize { 3 }\n\
              #[cfg(test)]\n\
              mod tests {\n\
              #[test]\n\
@@ -662,22 +672,77 @@ mod tests {
         );
 
         let report = analyze_json(dir.path());
-        let flagged: Vec<u64> = report["modules"]
+        let flagged: Vec<(&str, u64)> = report["modules"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|m| m["functions"].as_array().unwrap())
-            .map(|f| f["ambiguous_inbound_from_reached"].as_u64().unwrap())
+            .map(|f| {
+                (
+                    f["qualified_name"].as_str().unwrap(),
+                    f["ambiguous_inbound_from_reached"].as_u64().unwrap(),
+                )
+            })
             .collect();
-        assert_eq!(flagged, [1, 1], "both candidates are flagged");
+        assert_eq!(
+            flagged,
+            [
+                ("crate::A::target", 1),
+                ("crate::B::target", 1),
+                ("crate::quiet", 0),
+            ],
+            "only the candidates of the ambiguous call are flagged",
+        );
         assert_eq!(
             report["bounds"]["possibly_test_reached_function_count"], 2,
             "report: {report}",
         );
+        assert_eq!(report["modules"][0]["possibly_test_reached_count"], 2);
         assert_eq!(report["bounds"]["ambiguous_call_count_in_reached"], 1);
 
         let md = analyze_md(dir.path());
-        assert!(md.contains("may be test-reached"), "got: {md}");
+        assert!(
+            md.contains("may be test-reached: 1 ambiguous call site(s)"),
+            "got: {md}",
+        );
+        assert!(
+            !md.contains("may be test-reached: 0"),
+            "an unflagged row must not claim possible reach, got: {md}",
+        );
+    }
+
+    /// Call sites outside any function — a `static` initialiser here —
+    /// have no caller to attribute, so the traversal cannot see them from
+    /// either end and they are reported as their own bound.
+    #[test]
+    fn call_sites_with_no_enclosing_function_are_counted_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn seed() -> usize { 1 }\n\
+             pub static N: usize = seed();\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+             #[test]\n\
+             fn t() {}\n\
+             }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            report["bounds"]["caller_unattributed_call_count"], 1,
+            "report: {report}",
+        );
+        // The static's call is invisible to the traversal, so `seed`
+        // stays listed rather than counting as reached.
+        assert_eq!(untested_names(&report), ["crate::seed"]);
+
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains("1 call site(s) had no enclosing function"),
+            "got: {md}",
+        );
     }
 
     #[test]
@@ -767,6 +832,61 @@ mod tests {
         assert_eq!(untested_names(&report), [expected_untested]);
     }
 
+    /// Three modules of untested code so both sides of the module cap
+    /// are observable: `--top` truncates and says how many it dropped,
+    /// and an uncapped run says nothing at all.
+    #[test]
+    fn top_caps_the_module_listing_and_reports_the_remainder() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c"] {
+            write_file(
+                dir.path(),
+                &format!("src/{name}.rs"),
+                &format!("pub fn {name}_one() {{}}\n"),
+            );
+        }
+
+        let capped = UntestedAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert_eq!(
+            capped.lines().filter(|l| l.starts_with("### `")).count(),
+            1,
+            "got: {capped}",
+        );
+        assert!(capped.contains("1 of 3 module(s)"), "got: {capped}");
+        assert!(
+            capped.contains("+2 more module(s) not shown"),
+            "got: {capped}",
+        );
+
+        let uncapped = analyze_md(dir.path());
+        assert_eq!(
+            uncapped.lines().filter(|l| l.starts_with("### `")).count(),
+            3,
+            "got: {uncapped}",
+        );
+        assert!(
+            !uncapped.contains("module(s) not shown"),
+            "nothing was dropped, so nothing should be announced, got: {uncapped}",
+        );
+    }
+
+    #[test]
+    fn excluded_paths_leave_the_report_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/kept.rs", "pub fn kept_one() {}\n");
+        write_file(dir.path(), "src/dropped.rs", "pub fn dropped_one() {}\n");
+
+        let json = UntestedAnalyzer::new()
+            .with_exclude_patterns(vec!["dropped.rs".to_owned()])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(untested_names(&report), ["crate::kept::kept_one"]);
+    }
+
     #[test]
     fn excluding_tests_reports_the_missing_roots_instead_of_the_whole_codebase() {
         let dir = tempfile::tempdir().unwrap();
@@ -851,6 +971,24 @@ mod tests {
         assert_eq!(
             md.lines().filter(|l| l.starts_with("- `")).count(),
             FUNCTIONS_PER_MODULE,
+        );
+
+        // A module that fits under the cap announces no remainder.
+        let small = tempfile::tempdir().unwrap();
+        write_file(
+            small.path(),
+            "src/lib.rs",
+            "pub fn only_one() {}\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+             #[test]\n\
+             fn t() {}\n\
+             }\n",
+        );
+        let md = analyze_md(small.path());
+        assert!(
+            !md.contains("more (JSON output carries every row)"),
+            "got: {md}",
         );
     }
 
