@@ -104,6 +104,7 @@ Examples:
     agent-lens analyze coupling src/lib.rs --format md
     agent-lens analyze coupling ./crates/core --format md
     agent-lens analyze coupling src/index.ts --exclude-tests --format md
+    agent-lens analyze coupling ./src/mypkg --format md
 ";
 
 pub const CYCLES: &str = "\

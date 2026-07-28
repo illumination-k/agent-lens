@@ -14,6 +14,15 @@ pub(crate) fn collect_source_files(
     path: &Path,
     filter: &CompiledPathFilter,
 ) -> Result<Vec<SourceFile>, AnalyzerError> {
+    // Checked before the file/directory split: an extension-less path
+    // that does not exist would otherwise take the single-file branch
+    // and be reported as an unsupported extension, which sends the
+    // reader looking for a language-support problem.
+    if !path.exists() {
+        return Err(AnalyzerError::PathNotFound {
+            path: path.to_path_buf(),
+        });
+    }
     if path.is_dir() {
         collect_directory_source_files(path, filter)
     } else if filter.includes_path(path) {

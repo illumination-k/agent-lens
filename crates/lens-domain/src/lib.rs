@@ -14,6 +14,8 @@
 //!   [`find_similar_functions`] helper that drives pairwise comparison, and
 //!   [`cluster_similar_pairs`] for collapsing pairs into complete-link
 //!   clusters.
+//! * [`line_index`] — byte offset → 1-based line number mapping, shared by
+//!   every adapter whose parser reports positions as byte offsets.
 //! * [`lsh`] — MinHash + banded LSH used to pre-filter candidate pairs once
 //!   the corpus grows past a couple hundred functions, replacing the
 //!   quadratic cartesian product with a near-linear pass.
@@ -34,11 +36,12 @@
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
-//! * [`method_names`] — the [`UbiquitousMethodNames`] lookup shape.
-//!   Adapters own the actual name tables (`.clone()`, `.map()`,
-//!   `.append()`, …); the call-graph resolver consults them to avoid
-//!   attributing a receiver call to a workspace function that merely
-//!   shares a standard-library method name.
+//! * [`method_names`] — the [`UbiquitousMethodNames`] and
+//!   [`BuiltinFunctionNames`] lookup shapes. Adapters own the actual
+//!   name tables (`.clone()`, `.map()`, `append(…)`, `len(…)`, …); the
+//!   call-graph resolver consults them to avoid attributing a call to a
+//!   workspace function that merely shares a standard-library method
+//!   name or a language builtin.
 //! * [`wrapper`] — thin-wrapper finding shape. Adapters decide what
 //!   counts as a trivial adapter in their grammar; the result type is
 //!   shared so `agent-lens` can dispatch on language without per-adapter
@@ -53,6 +56,7 @@ pub mod context_span;
 pub mod coupling;
 pub mod function;
 pub mod hotspot;
+pub mod line_index;
 pub mod lsh;
 pub mod method_names;
 pub mod naming;
@@ -80,8 +84,9 @@ pub use function::{
     find_similar_pair_indices, find_similar_pair_indices_with_strategy,
 };
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
+pub use line_index::LineIndex;
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
-pub use method_names::UbiquitousMethodNames;
+pub use method_names::{BuiltinFunctionNames, UbiquitousMethodNames};
 pub use naming::{identifier_tokens, qualify, qualify_module, starts_uppercase};
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,

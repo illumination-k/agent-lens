@@ -215,7 +215,8 @@ agent-lens analyze complexity src/foo.rs
 agent-lens analyze complexity src/foo.rs --diff-only
 
 # Module-level Fan-In / Fan-Out / Henry-Kafura IFC, Instability, and
-# cyclic SCCs for a Rust crate, TS/JS module graph, or Go module
+# cyclic SCCs for a Rust crate, TS/JS module graph, Go module, or
+# Python package tree
 agent-lens analyze coupling crates/agent-lens
 
 # Static function call graph for visualization tooling
@@ -362,10 +363,9 @@ Analyzer-specific options today:
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
 `wrapper`, `cohesion`, `hotspot`, `function-graph`, `cycles`, `graph-query`,
-`hubs`, `impact`, `layers`, `untested`, `visibility`, and `context-span`
-cover all four language families (`visibility` judges Rust and Go, the two
-adapters that extract export status, and counts the rest as skipped). `coupling` covers Rust,
-TypeScript / JavaScript, and Go.
+`hubs`, `impact`, `layers`, `untested`, `context-span`, and `coupling`
+cover all four language families. `visibility` judges Rust and Go, the two
+adapters that extract export status, and counts the rest as skipped.
 
 ### As a Claude Code hook
 
@@ -531,7 +531,7 @@ new handlers to plug into the same plumbing.
 | `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                                                                                                                                                  | Rust, TS / JS, Python, Go |
 | `cohesion`       | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                                                                                                                                                      | Rust, TS / JS, Python, Go |
 | `complexity`     | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                                                                                                                              | Rust, TS / JS, Python, Go |
-| `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                                                                                               | Rust, TS / JS, Go         |
+| `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                                                                                               | Rust, TS / JS, Python, Go |
 | `function-graph` | Static function nodes and heuristic caller→callee edges as visualization-ready JSON. Node weights include static call counts, fan-in/out, LOC, Cyclomatic / Cognitive / Nesting, Halstead Volume, Maintainability Index, plus runtime placeholders for later trace/profile joins.                                                                               | Rust, TS / JS, Python, Go |
 | `cycles`         | Function-level strongly connected components of the call graph (resolved edges only): recursion knots and cross-file tangles that must change as one unit, with members, same-file flag, nearby-ambiguity warning, and advisory cheapest-cut break suggestions with call-line evidence.                                                                         | Rust, TS / JS, Python, Go |
 | `hubs`           | Hub smells on the function call graph: outlier fan-out (god functions), outlier fan-in (load-bearing blast-radius signal), Henry-Kafura `loc × (fan_in × fan_out)²` bottlenecks, and cross-module pull (misplaced functions), with prod/test fan-in split and deterministic PageRank-importance percentiles.                                                    | Rust, TS / JS, Python, Go |
@@ -574,12 +574,10 @@ Adding a language means writing one adapter crate and wiring it into the
 
 `similarity`, `complexity`, `wrapper`, `cohesion`, `hotspot`,
 `function-graph`, `cycles`, `graph-query`, `hubs`, `impact`, `layers`,
-`untested`, and `context-span` are wired through the Rust,
+`untested`, `context-span`, and `coupling` are wired through the Rust,
 TypeScript / JavaScript, Python, and Go adapters. `visibility` is wired
 through the Rust and Go adapters only, because TypeScript and Python carry
-no extracted export status. `coupling` is wired
-through the Rust, TypeScript / JavaScript, and Go adapters; Python is not
-covered yet because it has no `coupling` module-graph extractor.
+no extracted export status.
 `function-graph` uses a syntactic call-site index rather than type inference
 or macro expansion. Its JSON is meant for external visualization: callers can
 switch graph layers between structure (`fan_in`/`fan_out`, call counts),

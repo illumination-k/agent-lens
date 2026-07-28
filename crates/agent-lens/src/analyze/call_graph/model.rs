@@ -7,7 +7,9 @@
 //! `analyze function-graph`, so field names and ordering here are
 //! part of the JSON schema.
 
-use lens_domain::{FunctionShape, SyntaxFact, UbiquitousMethodNames, VisibilityShape};
+use lens_domain::{
+    BuiltinFunctionNames, FunctionShape, SyntaxFact, UbiquitousMethodNames, VisibilityShape,
+};
 use serde::Serialize;
 
 /// One function definition in the call graph.
@@ -231,6 +233,19 @@ impl GraphLanguage {
             Self::TypeScript => lens_ts::UBIQUITOUS_METHOD_NAMES,
             Self::Python => lens_py::UBIQUITOUS_METHOD_NAMES,
             Self::Go => lens_golang::UBIQUITOUS_METHOD_NAMES,
+        }
+    }
+
+    /// Names the language defines as bare-callable functions, owned by
+    /// each adapter for the same reason as
+    /// [`Self::ubiquitous_method_names`]. Consulted on the plain-call
+    /// path, which the receiver table never reaches.
+    pub(crate) fn builtin_function_names(self) -> BuiltinFunctionNames {
+        match self {
+            Self::Rust => lens_rust::BUILTIN_FUNCTION_NAMES,
+            Self::TypeScript => lens_ts::BUILTIN_FUNCTION_NAMES,
+            Self::Python => lens_py::BUILTIN_FUNCTION_NAMES,
+            Self::Go => lens_golang::BUILTIN_FUNCTION_NAMES,
         }
     }
 }

@@ -19,7 +19,7 @@
 //! (`Foo::clone(x)`) carries the owner in the path, so it resolves
 //! normally regardless of what is listed here.
 
-use lens_domain::UbiquitousMethodNames;
+use lens_domain::{BuiltinFunctionNames, UbiquitousMethodNames};
 
 /// Rust's ubiquitous method names, sorted for binary search.
 pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames::new(&[
@@ -201,6 +201,16 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "zip",
 ]);
 
+/// Prelude functions Rust code calls bare, sorted for binary search.
+///
+/// Deliberately tiny: Rust's other bare-callable prelude items are
+/// macros (`println!`, `format!`) or tuple-struct constructors (`Some`,
+/// `Ok`), neither of which the resolver sees as a plain function call.
+/// `drop` is the one name a call site can spell bare while meaning
+/// `core::mem::drop` — and a workspace `Drop::drop` impl would otherwise
+/// absorb every one of them.
+pub const BUILTIN_FUNCTION_NAMES: BuiltinFunctionNames = BuiltinFunctionNames::new(&["drop"]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +219,15 @@ mod tests {
     #[test]
     fn table_is_sorted_and_deduped() {
         assert!(UBIQUITOUS_METHOD_NAMES.is_sorted_and_deduped());
+        assert!(BUILTIN_FUNCTION_NAMES.is_sorted_and_deduped());
+    }
+
+    #[rstest]
+    #[case::prelude_free_function("drop", true)]
+    #[case::macro_not_a_call("println", false)]
+    #[case::project_specific("with_children", false)]
+    fn builtin_table_covers_only_bare_prelude_calls(#[case] name: &str, #[case] expected: bool) {
+        assert_eq!(BUILTIN_FUNCTION_NAMES.contains(name), expected);
     }
 
     #[rstest]

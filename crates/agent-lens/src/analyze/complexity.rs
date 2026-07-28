@@ -480,6 +480,18 @@ fn dispatch(n: i32) -> i32 {
         assert!(matches!(err, AnalyzerError::UnsupportedExtension { .. }));
     }
 
+    /// A path that does not exist has no extension to reject, and
+    /// saying so is what tells the reader to check the path rather
+    /// than the language support.
+    #[test]
+    fn missing_path_errors_as_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = ComplexityAnalyzer::new()
+            .analyze(&dir.path().join("nope"), OutputFormat::Json)
+            .unwrap_err();
+        assert!(matches!(err, AnalyzerError::PathNotFound { .. }), "{err:?}");
+    }
+
     #[test]
     fn python_function_metrics_are_reported() {
         // `simple` returns a literal rather than `pass`-only so that
@@ -510,14 +522,14 @@ def branchy(n):
     }
 
     #[test]
-    fn missing_file_surfaces_io_error() {
+    fn missing_file_surfaces_not_found_error() {
         let err = ComplexityAnalyzer::new()
             .analyze(
                 Path::new("/definitely/does/not/exist.rs"),
                 OutputFormat::Json,
             )
             .unwrap_err();
-        assert!(matches!(err, AnalyzerError::Io { .. }));
+        assert!(matches!(err, AnalyzerError::PathNotFound { .. }), "{err:?}");
     }
 
     #[test]

@@ -451,6 +451,37 @@ fn run_profile_rejects_graph_query_without_options_table() {
     assert!(stderr.contains("graph-query"), "got: {stderr}");
 }
 
+/// The mistake this catches is writing the profile path relative to the
+/// shell's cwd: from `dir` the config is at `cfg/`, so `src` resolves to
+/// `cfg/src`, which does not exist even though `dir/src` does. The
+/// message has to say that rather than blame the file extension.
+#[test]
+fn run_reports_a_missing_profile_path_as_a_path_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    write_file(
+        dir.path(),
+        "cfg/agent-lens.toml",
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    );
+
+    let output = agent_lens(
+        &["run", "audit", "--config", "cfg/agent-lens.toml"],
+        dir.path(),
+        None,
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("does not exist"), "got: {stderr}");
+    assert!(stderr.contains("audit"), "got: {stderr}");
+    assert!(stderr.contains("agent-lens.toml"), "got: {stderr}");
+    assert!(
+        !stderr.contains("unsupported file extension"),
+        "got: {stderr}"
+    );
+}
+
 #[test]
 fn run_resolves_target_relative_to_explicit_config_dir() {
     let dir = tempfile::tempdir().unwrap();

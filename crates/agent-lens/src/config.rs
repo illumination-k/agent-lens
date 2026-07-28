@@ -349,6 +349,17 @@ pub enum ConfigError {
     },
     #[error("profile {name:?} is invalid: {message}")]
     Invalid { name: String, message: String },
+    /// The resolution rule is spelled out rather than implied: the
+    /// mistake this message catches is almost always a path written
+    /// relative to the shell's cwd instead of to the config's directory.
+    #[error(
+        "profile {name:?}: path {path:?} does not exist (looked in {resolved:?}; a relative profile path resolves against the directory holding {CONFIG_FILE_NAME})"
+    )]
+    ProfilePathNotFound {
+        name: String,
+        path: PathBuf,
+        resolved: PathBuf,
+    },
     #[error("tool `{tool}` needs a `[profile.<name>.{tool}]` options table to run")]
     MissingToolOptions { tool: &'static str },
 }

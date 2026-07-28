@@ -8,8 +8,9 @@
 use std::collections::HashSet;
 
 use lens_domain::{
-    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
+    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, LineIndex,
+    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module,
+    starts_uppercase,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -18,7 +19,6 @@ use oxc_parser::Parser;
 use oxc_syntax::scope::ScopeFlags;
 
 use crate::attrs::name_looks_like_test_function;
-use crate::line_index::LineIndex;
 use crate::parser::{Dialect, TsParseError};
 use crate::tree::function_body_tree;
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};

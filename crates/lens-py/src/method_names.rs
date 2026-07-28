@@ -10,7 +10,7 @@
 //! Names a project invented stay out: matching those by name is the
 //! resolver's main source of true positives.
 
-use lens_domain::UbiquitousMethodNames;
+use lens_domain::{BuiltinFunctionNames, UbiquitousMethodNames};
 
 /// Python's ubiquitous method names, sorted for binary search.
 pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames::new(&[
@@ -93,6 +93,29 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "zfill",
 ]);
 
+/// Python builtins that are effectively never redefined at module
+/// scope, sorted for binary search.
+///
+/// Deliberately a fraction of `builtins`: Python lets a module define
+/// its own `filter`, `format`, `sum`, or `list`, and such a definition
+/// is a genuine call target the resolver should keep matching. The bar
+/// for an entry is that redefining the name at module scope would be
+/// pathological, so a bare call to it is never a workspace call.
+pub const BUILTIN_FUNCTION_NAMES: BuiltinFunctionNames = BuiltinFunctionNames::new(&[
+    "enumerate",
+    "getattr",
+    "hasattr",
+    "isinstance",
+    "issubclass",
+    "len",
+    "print",
+    "range",
+    "repr",
+    "setattr",
+    "super",
+    "zip",
+]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +124,18 @@ mod tests {
     #[test]
     fn table_is_sorted_and_deduped() {
         assert!(UBIQUITOUS_METHOD_NAMES.is_sorted_and_deduped());
+        assert!(BUILTIN_FUNCTION_NAMES.is_sorted_and_deduped());
+    }
+
+    #[rstest]
+    #[case::length("len", true)]
+    #[case::iteration("enumerate", true)]
+    #[case::attribute_access("getattr", true)]
+    #[case::shadowable_builtin("filter", false)]
+    #[case::shadowable_constructor("dict", false)]
+    #[case::project_specific("build_index", false)]
+    fn builtin_table_keeps_shadowable_names_out(#[case] name: &str, #[case] expected: bool) {
+        assert_eq!(BUILTIN_FUNCTION_NAMES.contains(name), expected);
     }
 
     #[rstest]

@@ -13,7 +13,7 @@
 //! Names a project invented stay out: matching those by name is the
 //! resolver's main source of true positives.
 
-use lens_domain::UbiquitousMethodNames;
+use lens_domain::{BuiltinFunctionNames, UbiquitousMethodNames};
 
 /// TypeScript / JavaScript's ubiquitous method names, sorted for binary
 /// search.
@@ -115,6 +115,32 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "warn",
 ]);
 
+/// Global functions callable without a receiver in every TypeScript /
+/// JavaScript runtime, sorted for binary search.
+///
+/// Restricted to globals a project would not export under the same
+/// name. `fetch`, `describe`, `expect`, and friends are plausible
+/// project exports, so they stay out and keep matching. Constructors
+/// (`String`, `Number`, `Array`) stay out too: they are static members
+/// already covered by [`UBIQUITOUS_METHOD_NAMES`].
+pub const BUILTIN_FUNCTION_NAMES: BuiltinFunctionNames = BuiltinFunctionNames::new(&[
+    "clearInterval",
+    "clearTimeout",
+    "decodeURI",
+    "decodeURIComponent",
+    "encodeURI",
+    "encodeURIComponent",
+    "isFinite",
+    "isNaN",
+    "parseFloat",
+    "parseInt",
+    "queueMicrotask",
+    "require",
+    "setInterval",
+    "setTimeout",
+    "structuredClone",
+]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +149,18 @@ mod tests {
     #[test]
     fn table_is_sorted_and_deduped() {
         assert!(UBIQUITOUS_METHOD_NAMES.is_sorted_and_deduped());
+        assert!(BUILTIN_FUNCTION_NAMES.is_sorted_and_deduped());
+    }
+
+    #[rstest]
+    #[case::timer("setTimeout", true)]
+    #[case::parsing("parseInt", true)]
+    #[case::cjs_import("require", true)]
+    #[case::plausible_project_export("fetch", false)]
+    #[case::constructor("String", false)]
+    #[case::project_specific("renderRow", false)]
+    fn builtin_table_keeps_project_owned_globals_out(#[case] name: &str, #[case] expected: bool) {
+        assert_eq!(BUILTIN_FUNCTION_NAMES.contains(name), expected);
     }
 
     #[rstest]

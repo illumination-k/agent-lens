@@ -405,7 +405,8 @@ enum AnalyzeCommand {
     #[command(after_long_help = examples::COMPLEXITY)]
     Complexity(AnalyzeComplexityArgs),
     /// Report module-level coupling metrics for a Rust crate, a
-    /// TypeScript / JavaScript module graph, or a Go module.
+    /// TypeScript / JavaScript module graph, a Go module, or a Python
+    /// package tree.
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
@@ -414,8 +415,10 @@ enum AnalyzeCommand {
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one, a TypeScript / JavaScript entry file
     /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
-    /// `.cjs`) whose relative imports define the module graph, or a
-    /// `.go` file or Go module directory (containing `go.mod`).
+    /// `.cjs`) whose relative imports define the module graph, a
+    /// `.go` file or Go module directory (containing `go.mod`), or a
+    /// `.py` file or package directory whose in-tree imports define the
+    /// module graph.
     #[command(after_long_help = examples::COUPLING)]
     Coupling(AnalyzeCommonArgs),
     /// Report function-level call cycles: groups of 2+ functions that
@@ -1025,6 +1028,18 @@ fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let profile = config.profile(&args.profile)?;
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     let target = profile.resolved_path(config_dir);
+    // Checked once here rather than per analyzer: every tool in the
+    // profile would otherwise fail the same way, and only this layer
+    // knows the path came from a config and what it was resolved
+    // against.
+    if !target.exists() {
+        return Err(ConfigError::ProfilePathNotFound {
+            name: args.profile,
+            path: profile.path.clone(),
+            resolved: target,
+        }
+        .into());
+    }
     let format = profile.format.unwrap_or(OutputFormat::Json);
 
     for tool in unused_tool_option_tables(profile) {

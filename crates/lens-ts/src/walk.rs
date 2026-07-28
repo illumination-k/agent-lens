@@ -27,7 +27,7 @@ use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 use oxc_syntax::scope::ScopeFlags;
 
-use crate::line_index::LineIndex;
+use lens_domain::LineIndex;
 
 /// Name infix used for a function nested inside another function's body.
 /// The walker mints `<parent>::closure#<N>` (`N` is 1-based, source
