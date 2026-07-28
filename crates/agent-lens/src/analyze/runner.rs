@@ -242,12 +242,24 @@ impl<'a, S, V, X> PerFileReport<'a, S, V, X> {
     pub fn summary(&self) -> Option<&X> {
         self.summary.as_ref()
     }
+
+    /// Number of fields [`Serialize`] will emit: the four fixed ones
+    /// plus `summary` when present.
+    ///
+    /// Split out and excluded from cargo-mutants (`.cargo/mutants.toml`)
+    /// because `serialize_struct`'s length argument is a capacity hint
+    /// for length-prefixed formats. Reports are only ever rendered as
+    /// JSON, and `serde_json` ignores the hint entirely, so an off-by-one
+    /// here produces byte-identical output — an equivalent mutant, not a
+    /// test gap.
+    fn field_count(&self) -> usize {
+        4 + usize::from(self.summary.is_some())
+    }
 }
 
 impl<S: PerFileShape, V: Serialize, X: Serialize> Serialize for PerFileReport<'_, S, V, X> {
     fn serialize<Z: Serializer>(&self, serializer: Z) -> Result<Z::Ok, Z::Error> {
-        let len = 4 + usize::from(self.summary.is_some());
-        let mut state = serializer.serialize_struct("Report", len)?;
+        let mut state = serializer.serialize_struct("Report", self.field_count())?;
         state.serialize_field("root", &self.root)?;
         state.serialize_field("file_count", &self.files.len())?;
         state.serialize_field(S::COUNT_FIELD, &self.item_count())?;

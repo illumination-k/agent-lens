@@ -43,4 +43,9 @@ exclude_re = [
   # turning the predicate into `None`/`always-false` is observationally
   # equivalent to the slow path under behaviour-only assertions.
   "try_complete_clique",
+  # runner: `serialize_struct`'s length argument is a capacity hint for
+  # length-prefixed formats. Analyzer reports are only ever rendered as
+  # JSON, and serde_json ignores the hint, so an off-by-one produces
+  # byte-identical output.
+  "PerFileReport.*::field_count",
 ]
