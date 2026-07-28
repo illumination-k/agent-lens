@@ -999,6 +999,18 @@ fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let profile = config.profile(&args.profile)?;
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     let target = profile.resolved_path(config_dir);
+    // Checked once here rather than per analyzer: every tool in the
+    // profile would otherwise fail the same way, and only this layer
+    // knows the path came from a config and what it was resolved
+    // against.
+    if !target.exists() {
+        return Err(ConfigError::ProfilePathNotFound {
+            name: args.profile,
+            path: profile.path.clone(),
+            resolved: target,
+        }
+        .into());
+    }
     let format = profile.format.unwrap_or(OutputFormat::Json);
 
     for tool in unused_tool_option_tables(profile) {

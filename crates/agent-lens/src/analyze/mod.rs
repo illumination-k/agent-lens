@@ -177,6 +177,8 @@ pub enum AnalyzerError {
         #[source]
         source: std::io::Error,
     },
+    #[error("path does not exist: {path:?}")]
+    PathNotFound { path: PathBuf },
     #[error("unsupported file extension: {path:?}")]
     UnsupportedExtension { path: PathBuf },
     #[error("failed to parse source: {0}")]

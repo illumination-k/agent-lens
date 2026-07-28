@@ -506,14 +506,14 @@ def meaningful(x):
     }
 
     #[test]
-    fn missing_file_surfaces_io_error() {
+    fn missing_file_surfaces_not_found_error() {
         let err = WrapperAnalyzer::new()
             .analyze(
                 Path::new("/definitely/does/not/exist.rs"),
                 OutputFormat::Json,
             )
             .unwrap_err();
-        assert!(matches!(err, AnalyzerError::Io { .. }));
+        assert!(matches!(err, AnalyzerError::PathNotFound { .. }), "{err:?}");
     }
 
     #[test]
