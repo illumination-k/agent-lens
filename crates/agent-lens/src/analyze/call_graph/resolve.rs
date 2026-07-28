@@ -7,14 +7,19 @@
 //! candidate node-id set so downstream analyzers can widen traversals
 //! instead of dropping the edge.
 //!
-//! The one place the name fallback is switched off is a receiver call
-//! (`recv.foo()`) on a name the language's standard library defines on
-//! nearly every value — see
-//! [`GraphLanguage::ubiquitous_method_names`][super::model::GraphLanguage::ubiquitous_method_names].
-//! There the name is the only evidence available and it is worthless,
-//! so the site stays [`Resolution::Unresolved`] rather than becoming a
-//! phantom edge into whichever workspace function happens to share the
-//! name.
+//! The name fallback is switched off in two places, both for the same
+//! reason — the name is the only evidence available and the language
+//! already owns it, so a workspace match is a phantom edge rather than a
+//! lucky hit:
+//!
+//! * a receiver call (`recv.foo()`) on a name the standard library
+//!   defines on nearly every value — see
+//!   [`GraphLanguage::ubiquitous_method_names`][super::model::GraphLanguage::ubiquitous_method_names];
+//! * a plain call to a language builtin (`append(xs, x)`, `len(s)`) —
+//!   see
+//!   [`GraphLanguage::builtin_function_names`][super::model::GraphLanguage::builtin_function_names].
+//!
+//! Both leave the site [`Resolution::Unresolved`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -138,7 +143,7 @@ impl Resolver {
 
     /// `language` is the language of the file the call site lives in;
     /// it selects the ubiquitous-method-name table consulted for
-    /// receiver calls.
+    /// receiver calls and the builtin table consulted for plain calls.
     pub(crate) fn resolve(&self, site: &CallShape, language: GraphLanguage) -> ResolvedCall {
         let Some(callee_name) = site.callee_name() else {
             return ResolvedCall::anonymous();
@@ -159,6 +164,16 @@ impl Resolver {
             if let Some(ids) = self.qualified.get(&candidate) {
                 return resolve_ids(ids, ResolutionMethod::Lexical);
             }
+        }
+        // A bare call to a language builtin (`append(xs, x)`, `len(s)`)
+        // is not a workspace call, but the name fallback below cannot
+        // see that: it matches the last segment alone, so one workspace
+        // function — or method, since methods are indexed by their last
+        // segment too — absorbs every builtin call site in the corpus.
+        // Lexical resolution above already had its chance, so a module
+        // that defines and calls its own `append` keeps that edge.
+        if language.builtin_function_names().contains(callee_name) {
+            return ResolvedCall::unresolved();
         }
         let Some(ids) = self.last_segment.get(callee_name) else {
             return ResolvedCall::unresolved();
@@ -533,6 +548,52 @@ mod tests {
 
         assert_eq!(call.resolution, expected, "{callee} under {language:?}");
         assert_eq!(call.to.is_some(), expected == Resolution::Resolved);
+    }
+
+    /// A builtin is called bare, so it never reaches the receiver table
+    /// — but the name fallback still applies, and a workspace method
+    /// sharing the name would otherwise absorb every call site.
+    #[rstest]
+    #[case::go_denies_append(GraphLanguage::Go, "append", Resolution::Unresolved)]
+    #[case::go_denies_len(GraphLanguage::Go, "len", Resolution::Unresolved)]
+    #[case::go_allows_workspace_name(GraphLanguage::Go, "with_children", Resolution::Resolved)]
+    #[case::python_denies_len(GraphLanguage::Python, "len", Resolution::Unresolved)]
+    #[case::python_allows_go_builtin(GraphLanguage::Python, "append", Resolution::Resolved)]
+    #[case::typescript_denies_parse_int(
+        GraphLanguage::TypeScript,
+        "parseInt",
+        Resolution::Unresolved
+    )]
+    #[case::rust_denies_drop(GraphLanguage::Rust, "drop", Resolution::Unresolved)]
+    #[case::rust_allows_go_builtin(GraphLanguage::Rust, "append", Resolution::Resolved)]
+    fn plain_calls_to_builtins_stay_unresolved_per_language(
+        #[case] language: GraphLanguage,
+        #[case] callee: &str,
+        #[case] expected: Resolution,
+    ) {
+        let nodes: Vec<CallGraphNode> = ["append", "len", "parseInt", "drop", "with_children"]
+            .into_iter()
+            .map(|name| node(&format!("crate::other::W::{name}")))
+            .collect();
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&site(callee), language);
+
+        assert_eq!(call.resolution, expected, "{callee} under {language:?}");
+        assert_eq!(call.to.is_some(), expected == Resolution::Resolved);
+    }
+
+    /// Shadowing is legal, and a module calling the function it defined
+    /// resolves lexically before the builtin table is ever consulted.
+    #[test]
+    fn a_module_calling_its_own_shadowing_definition_still_resolves() {
+        let nodes = vec![node("crate::m::append")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&site("append"), GraphLanguage::Go);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+        assert_eq!(call.method, Some(ResolutionMethod::Lexical));
     }
 
     /// A path call carries the owner, so the table must not touch it —

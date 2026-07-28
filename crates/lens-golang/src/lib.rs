@@ -34,6 +34,6 @@ pub use cohesion::extract_cohesion_units;
 pub use complexity::extract_complexity_units;
 pub use context_span::{build_context_span_report, extract_context_spans};
 pub use coupling::{CouplingError, GoPackage, build_module_tree, extract_edges};
-pub use method_names::UBIQUITOUS_METHOD_NAMES;
+pub use method_names::{BUILTIN_FUNCTION_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use parser::{GoParseError, GoParser};
 pub use wrapper::find_wrappers;
