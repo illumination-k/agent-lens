@@ -9,6 +9,10 @@ workspace = true
 
 [dependencies]
 lens-domain = { path = "../lens-domain", version = "0.1.0" }
+# The ruff crates are not published to crates.io, so they are pinned by git tag
+# and all three must be bumped together (see the `allow-git` note in deny.toml).
+# A git dependency makes `cargo publish` impossible for the whole workspace;
+# that is acceptable while releases are binary-only.
 ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18", version = "0.0.0" }
 ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18", version = "0.0.0" }
 ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18", version = "0.0.0" }
@@ -16,4 +20,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }

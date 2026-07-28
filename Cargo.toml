@@ -8,12 +8,23 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/illumination-k/agent-lens"
 
+# External dependency versions are declared once here and referenced from the
+# member manifests with `{ workspace = true }`, so a crate cannot silently pull
+# a different version of something another crate already depends on. Deps with a
+# single consumer that are inherent to that crate's job (the tree-sitter/oxc/ruff
+# /syn parser front-ends) stay in the crate that owns the language.
 [workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
 criterion = "0.8"
 proptest = "1"
 rayon = "1"
 rstest = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
 thiserror = "2"
+toml = "1.1"
+toml_edit = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
