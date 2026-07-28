@@ -66,14 +66,20 @@ pub fn render_summary(cwd: &Path) -> Result<Option<String>, SessionSummaryError>
     Ok(Some(body))
 }
 
-/// Run the hotspot analyzer against `cwd` and return a compact section
-/// for the SessionStart payload, or `None` when there is nothing to
-/// inject (cwd outside a git working tree, no Rust files, every file
-/// has score 0). Soft failures are logged to stderr and treated as
-/// "no section."
+/// Run the hotspot analyzer against `cwd` over production files only,
+/// and return a compact section for the SessionStart payload, or `None`
+/// when there is nothing to inject (cwd outside a git working tree, no
+/// source files, every file has score 0). Soft failures are logged to
+/// stderr and treated as "no section."
 fn render_hotspot_section(cwd: &Path) -> Result<Option<String>, SessionSummaryError> {
     let json = match HotspotAnalyzer::new()
         .with_top(Some(HOTSPOT_TOP))
+        // Test files score high on churn × complexity honestly — they
+        // change with every feature and table-driven cases branch a lot
+        // — but "where should I be careful today" is a question about
+        // shipped code, and at HOTSPOT_TOP rows one test file crowds out
+        // the production file it exercises.
+        .with_exclude_tests(true)
         .analyze(cwd, OutputFormat::Json)
     {
         Ok(s) => s,
@@ -238,8 +244,37 @@ fn format_cycle(cycle: &DependencyCycle) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::write_file;
+    use crate::test_support::{run_git, write_file};
     use lens_domain::ModulePath;
+
+    /// A test file out-scoring the production file it exercises is the
+    /// normal case, not a corner one: tests change with every feature
+    /// and table-driven cases branch heavily. The injected ranking is
+    /// about shipped code, so it must not surface them.
+    #[test]
+    fn hotspot_section_ranks_production_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn flat(n: i32) -> i32 {\n    if n > 0 { 1 } else { 0 }\n}\n",
+        );
+        write_file(
+            dir.path(),
+            "tests/heavy_test.rs",
+            "#[test]\nfn nested() {\n    for a in 0..3 {\n        if a > 0 {\n            for b in 0..3 {\n                if b > 1 { assert!(a > b || b > a); }\n            }\n        }\n    }\n}\n",
+        );
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let section = render_hotspot_section(dir.path())
+            .expect("hotspot section should not error")
+            .expect("a git repo with production code should yield a section");
+
+        assert!(section.contains("src/lib.rs"), "got {section}");
+        assert!(!section.contains("heavy_test.rs"), "got {section}");
+    }
 
     #[test]
     fn coupling_section_renders_for_go_module_directory() {
