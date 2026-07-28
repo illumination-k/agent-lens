@@ -258,9 +258,10 @@ struct Hop {
     statement_count: Option<usize>,
     /// Arguments are the parameters, passed straight through.
     pass_through: bool,
-    /// Distinct resolved callers of this hop. A hop with callers of its
-    /// own cannot simply be deleted — those call sites move to the
-    /// terminus.
+    /// Resolved callers of this hop from outside the chain. The hop
+    /// above is not counted — collapsing the chain is what removes it —
+    /// so this is exactly the call sites that would have to be
+    /// repointed at the terminus.
     caller_count: usize,
 }
 
@@ -323,7 +324,7 @@ impl Report {
     ) -> Self {
         let classified = classify_nodes(graph);
         let walk = walk_chains(graph, &classified.next);
-        let callers = resolved_caller_counts(graph);
+        let callers = resolved_callers(graph);
 
         let all_chains: Vec<Chain> = walk
             .chains
@@ -610,7 +611,7 @@ fn facade_nodes(graph: &CallGraph) -> HashSet<usize> {
 }
 
 /// Distinct resolved callers per node index.
-fn resolved_caller_counts(graph: &CallGraph) -> BTreeMap<usize, usize> {
+fn resolved_callers(graph: &CallGraph) -> BTreeMap<usize, BTreeSet<usize>> {
     let index_by_id = graph.node_index_by_id();
     let mut callers: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for edge in &graph.edges {
@@ -628,9 +629,6 @@ fn resolved_caller_counts(graph: &CallGraph) -> BTreeMap<usize, usize> {
         }
     }
     callers
-        .into_iter()
-        .map(|(idx, callers)| (idx, callers.len()))
-        .collect()
 }
 
 /// One maximal path through the delegator subgraph, by node index.
@@ -692,7 +690,12 @@ fn walk_chains(graph: &CallGraph, next: &BTreeMap<usize, usize>) -> ChainWalk {
     }
 }
 
-fn build_chain(graph: &CallGraph, chain: &RawChain, callers: &BTreeMap<usize, usize>) -> Chain {
+fn build_chain(
+    graph: &CallGraph,
+    chain: &RawChain,
+    callers: &BTreeMap<usize, BTreeSet<usize>>,
+) -> Chain {
+    let on_chain: BTreeSet<usize> = chain.hops.iter().copied().collect();
     let hops: Vec<Hop> = chain
         .hops
         .iter()
@@ -708,7 +711,9 @@ fn build_chain(graph: &CallGraph, chain: &RawChain, callers: &BTreeMap<usize, us
                 loc: node.weights.loc,
                 statement_count: node.delegation.as_ref().and_then(|f| f.statement_count),
                 pass_through: node.delegation.as_ref().is_some_and(|f| f.pass_through),
-                caller_count: callers.get(&idx).copied().unwrap_or(0),
+                caller_count: callers
+                    .get(&idx)
+                    .map_or(0, |callers| callers.difference(&on_chain).count()),
             }
         })
         .collect();
@@ -1159,6 +1164,144 @@ pub mod db {
         );
         assert!(md.contains("3 forwarding hop(s)"), "depth missing: {md}");
         assert!(md.contains("args forwarded verbatim"), "hop facts: {md}");
+        // The prose above the listing carries the two calibration
+        // paragraphs: what was classified, and what the chains add up
+        // to.
+        assert!(
+            md.contains("Classified 4 non-test function(s): 3 delegator(s)"),
+            "audit line missing: {md}",
+        );
+        assert!(
+            md.contains("3 forwarding hop(s) across 1 chain(s), deepest 3 hops"),
+            "counts line missing: {md}",
+        );
+        assert!(
+            !md.contains("other caller(s) to move"),
+            "nothing else calls these hops, so there is nothing to move: {md}",
+        );
+    }
+
+    /// `--top` caps both listings, and each says exactly how many rows
+    /// it held back.
+    #[test]
+    fn top_caps_each_listing_and_counts_what_it_held_back() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod first {
+    pub fn one(id: usize) -> usize { two(id) }
+    pub fn two(id: usize) -> usize { crate::work::run(id) }
+}
+pub mod second {
+    pub fn one(id: usize) -> usize { two(id) }
+    pub fn two(id: usize) -> usize { crate::work::run(id) }
+}
+pub mod third {
+    pub fn one(id: usize) -> usize { two(id) }
+    pub fn two(id: usize) -> usize { crate::work::run(id) }
+}
+pub mod work {
+    pub fn run(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+
+        let md = DelegationAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("## Chains (deepest first; 1 of 3 chain(s))"),
+            "chain heading: {md}",
+        );
+        assert!(
+            md.contains("+2 more chain(s) not shown"),
+            "held-back chains: {md}",
+        );
+        assert!(
+            md.contains("+2 more module(s) not shown"),
+            "held-back modules: {md}",
+        );
+
+        // Uncapped, nothing is held back and every row is rendered.
+        let full = analyze_md(dir.path());
+        assert!(!full.contains("not shown"), "nothing held back: {full}");
+        assert_eq!(
+            full.lines()
+                .filter(|line| line.contains("function(s) forward"))
+                .count(),
+            3,
+            "one row per module: {full}",
+        );
+    }
+
+    /// The cost a chain imposes is measured in files, so a chain whose
+    /// hops sit in different files is counted apart from one that does
+    /// not leave its own.
+    #[test]
+    fn a_chain_crossing_files_is_counted_as_the_one_that_costs_file_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod api;\npub mod service;\npub mod db;\n",
+        );
+        write_file(
+            dir.path(),
+            "src/api.rs",
+            "pub fn save(id: usize) -> usize { crate::service::save(id) }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/service.rs",
+            "pub fn save(id: usize) -> usize { crate::db::insert(id) }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/db.rs",
+            "pub fn insert(id: usize) -> usize { id + 1 }\npub fn extra(id: usize) -> usize { id }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["chains"][0]["file_count"], 3, "report: {report}");
+        assert_eq!(report["summary"]["multi_file_chain_count"], 1);
+    }
+
+    /// A hop other code also calls cannot simply be deleted — those
+    /// call sites move to the terminus — so the row says how many.
+    #[test]
+    fn a_hop_with_callers_of_its_own_reports_what_a_collapse_would_move() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod api {
+    pub fn save(id: usize) -> usize { crate::service::save(id) }
+    pub fn also(id: usize) -> usize { let mut t = 0; for i in 0..id { t += crate::service::save(i); } t }
+}
+pub mod service {
+    pub fn save(id: usize) -> usize { crate::db::insert(id) }
+}
+pub mod db {
+    pub fn insert(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+
+        let report = analyze_json(dir.path());
+        let hops = report["chains"][0]["hops"].as_array().unwrap();
+        assert_eq!(hops[0]["caller_count"], 0, "report: {report}");
+        assert_eq!(
+            hops[1]["caller_count"], 1,
+            "`api::also` counts, the hop above it does not: {report}",
+        );
+        assert!(
+            analyze_md(dir.path()).contains("1 other caller(s) to move"),
+            "the markdown carries the cost of collapsing the chain",
+        );
     }
 
     /// One hop that does something of its own is enough to cut the
@@ -1411,6 +1554,90 @@ pub mod db {
         );
     }
 
+    /// Every threshold in the layer verdict has to matter on its own:
+    /// too few forwarders, too small a share of the module, or
+    /// forwarding scattered across several modules each leave a module
+    /// that is not a layer.
+    #[rstest]
+    #[case::too_few_delegators(
+        "pub mod api {
+    pub fn a(id: usize) -> usize { crate::service::a(id) }
+    pub fn b(id: usize) -> usize { crate::service::b(id) }
+}",
+        2
+    )]
+    #[case::minority_of_the_module(
+        "pub mod api {
+    pub fn a(id: usize) -> usize { crate::service::a(id) }
+    pub fn b(id: usize) -> usize { crate::service::b(id) }
+    pub fn c(id: usize) -> usize { crate::service::c(id) }
+    pub fn d(id: usize) -> usize { let mut t = 0; for i in 0..id { t += i; } t }
+    pub fn e(id: usize) -> usize { let mut t = 1; for i in 0..id { t *= i; } t }
+    pub fn f(id: usize) -> usize { let mut t = 2; for i in 0..id { t += i * 2; } t }
+    pub fn g(id: usize) -> usize { let mut t = 3; for i in 0..id { t += i + 1; } t }
+}",
+        3
+    )]
+    #[case::forwarding_scattered_across_modules(
+        "pub mod api {
+    pub fn a(id: usize) -> usize { crate::service::a(id) }
+    pub fn b(id: usize) -> usize { crate::other::b(id) }
+    pub fn c(id: usize) -> usize { crate::third::c(id) }
+}",
+        3
+    )]
+    fn a_module_is_a_layer_candidate_only_when_every_threshold_holds(
+        #[case] api: &str,
+        #[case] expected_delegators: u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "{api}
+pub mod service {{
+    pub fn a(id: usize) -> usize {{ crate::db::insert(id) }}
+    pub fn b(id: usize) -> usize {{ crate::db::insert(id) }}
+    pub fn c(id: usize) -> usize {{ crate::db::insert(id) }}
+}}
+pub mod other {{
+    pub fn b(id: usize) -> usize {{ crate::db::insert(id) }}
+}}
+pub mod third {{
+    pub fn c(id: usize) -> usize {{ crate::db::insert(id) }}
+}}
+pub mod db {{
+    pub fn insert(id: usize) -> usize {{ id + 1 }}
+    pub fn extra(id: usize) -> usize {{ id }}
+}}
+"
+            ),
+        );
+
+        let report = analyze_json(dir.path());
+        let api = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["module"] == "crate::api")
+            .unwrap_or_else(|| panic!("report: {report}"));
+        assert_eq!(api["delegator_count"], expected_delegators, "{api}");
+        assert_eq!(
+            api["lasagna_candidate"], false,
+            "one threshold short of a layer: {api}",
+        );
+        let md = analyze_md(dir.path());
+        let api_row = md
+            .lines()
+            .find(|line| line.starts_with("- `crate::api`"))
+            .unwrap_or_else(|| panic!("no module row for `crate::api`: {md}"));
+        assert!(
+            !api_row.contains("layer candidate"),
+            "and the markdown does not call it one: {api_row}",
+        );
+    }
+
     /// Chains are ranked deepest first so the worst context tax is the
     /// first row.
     #[test]
@@ -1553,6 +1780,10 @@ pub fn extra(id: usize) -> usize { id }
         let report = analyze_json(dir.path());
         let paths = chain_paths(&report);
         assert_eq!(paths.len(), 1, "report: {report}");
+        assert_eq!(
+            report["summary"]["multi_file_chain_count"], 0,
+            "one file holds this stack, so it costs no extra file opens: {report}",
+        );
         let names: Vec<&str> = paths[0]
             .iter()
             .map(|name| name.rsplit("::").next().unwrap_or(name))
