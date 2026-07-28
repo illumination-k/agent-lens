@@ -1,4 +1,7 @@
-# CLAUDE.md
+# Agent guide
+
+`AGENTS.md` is a symlink to this file, so Claude Code, Codex, and any other
+`AGENTS.md` consumer read the same guidance.
 
 This library is pre-alpha and under active development. The API is not stable and may change without a major version bump, so backwards compatibility is not guaranteed at this stage.
 
@@ -20,20 +23,30 @@ Run `mise install` first to install the toolchain and project tools.
 At the end of a session, run `mise run ci` and make sure it passes. Use the narrower tasks while iterating:
 
 ```bash
-mise run fmt      # Format
+mise run fmt      # Format (cargo fmt, dprint, shfmt, oxfmt)
 mise run lint     # Lint and policy checks
-mise run test     # Tests
-mise run ci       # Full required verification
+mise run test     # Tests (nextest, doctests, vitest)
+mise run ci       # Full required verification; covers everything CI gates on
+mise run bench    # Criterion benchmarks; not part of ci
 mise run mutants  # Mutation tests; slow and not part of normal ci
 ```
 
-Also run mutation testing against the current diff whenever practical. It is acceptable for this to be diff-scoped rather than a full mutation run, but do not skip it silently when the change touches Rust logic.
+Also run mutation testing against the current diff whenever practical. `mise run
+mutants:rust:diff [base]` (base defaults to `main`) is the diff-scoped form and is
+what CI runs on a PR; `mise run mutants` is the full-workspace run. It is acceptable
+for this to be diff-scoped rather than a full mutation run, but do not skip it
+silently when the change touches Rust logic.
 
 When adding or changing tests, use [`rstest`](https://docs.rs/rstest) as much as practical, especially for parameterized cases and fixture-style setup.
 
 When regression risk is high, especially around core logic, introduce property-based tests.
 
-When a change touches code that has benchmarks, report whether benchmark regression was checked and what the result was.
+When a change touches code that has benchmarks, report whether benchmark regression was checked and what the result was. The convention is to save a baseline on the unchanged code and compare against it:
+
+```bash
+git stash && mise run bench:rust --save-baseline base && git stash pop
+mise run bench:rust --baseline base
+```
 
 Keep stdout reserved for protocol data and analyzer results. Send logs and diagnostics to stderr through `tracing`.
 

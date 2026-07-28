@@ -18,8 +18,24 @@ expression = "MIT"
 license-files = []
 
 [bans]
-multiple-versions = "warn"
+# `deny` rather than `warn` so a new duplicate major fails `cargo deny check`
+# instead of scrolling past in the log. Every accepted duplicate is listed in
+# `skip` below with the reason it cannot be collapsed yet, so the list has to be
+# updated deliberately when a dependency bump introduces one.
+multiple-versions = "deny"
 wildcards = "deny"
+
+skip = [
+  # `unicode_names2`, a build dependency of `ruff_python_parser`, still uses the
+  # phf 0.11 line while oxc 0.140 is on 0.14. Collapses when ruff bumps it.
+  { crate = "phf@0.11", reason = "unicode_names2 (via ruff_python_parser) lags oxc's phf 0.14" },
+  { crate = "phf_generator@0.11", reason = "pulled by phf 0.11" },
+  { crate = "phf_shared@0.11", reason = "pulled by phf 0.11" },
+  # `clap_derive` has moved to syn 3 while the rest of the proc-macro ecosystem
+  # (serde_derive, thiserror-impl, tracing-attributes, oxc_ast_macros, and
+  # `lens-rust`'s own parser) is still on syn 2.
+  { crate = "syn@2", reason = "proc-macro ecosystem and lens-rust are still on syn 2; clap_derive is on syn 3" },
+]
 
 [advisories]
 ignore = []
@@ -28,4 +44,12 @@ ignore = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# `ruff_python_ast` / `ruff_python_parser` / `ruff_text_size` are not published
+# to crates.io, so `lens-py` pins them by git tag. Consequences, tracked in
+# https://github.com/illumination-k/agent-lens/issues/292:
+#   * no workspace crate can be `cargo publish`ed while this entry exists
+#     (releases are binary-only today, so this is not blocking);
+#   * the three ruff crates must move in lockstep, which is why `dependabot.yml`
+#     groups them.
+# Drop this entry once the ruff crates are on crates.io.
 allow-git = ["https://github.com/astral-sh/ruff"]

@@ -35,3 +35,15 @@ run = [
   "ghalint run",
   "pinact run",
 ]
+
+[tasks."lint:precommit"]
+description = "Run the prek (pre-commit) hooks over every tracked file"
+run = "prek run --all-files"
+
+# `lint_base.yml` and `lint_gha.yml` are required checks, so they have to be part
+# of `mise run ci` — otherwise a change can pass locally and fail CI on a dprint
+# diff or an unpinned action. The three tasks below mirror that pair of workflows
+# step for step.
+[tasks."ci:base"]
+description = "Run the base repo and GitHub Actions lint tasks"
+depends = ["lint:precommit", "lint:base", "lint:gha"]
