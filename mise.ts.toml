@@ -2,18 +2,29 @@
 node = "25.9.0"
 pnpm = "11.0.1"
 
+# Every other web task depends on this: on a fresh checkout `web/node_modules`
+# does not exist yet, and `pnpm exec oxlint` would fail before linting anything.
+# It is not `sources`/`outputs` cached on purpose — a skipped install after a
+# manually removed `node_modules` is a worse failure than a redundant one.
+[tasks."install:ts"]
+description = "Install the web dependencies from the lockfile"
+run = "pnpm --dir web install --frozen-lockfile"
+
 [tasks."fmt:ts"]
 description = "Format with oxfmt"
+depends = ["install:ts"]
 
-run = "pnpm --dir web exec oxfmt --write src scripts"
+run = "pnpm --dir web exec oxfmt --write src"
 
 [tasks."lint:ts"]
 description = "Lint and type-check TypeScript"
+depends = ["install:ts"]
 
 run = ["pnpm --dir web exec oxlint -c oxlint.config.ts .", "pnpm --dir web exec tsc --noEmit"]
 
 [tasks."test:ts"]
 description = "Run tests with vitest"
+depends = ["install:ts"]
 
 run = "pnpm --dir web exec vitest run"
 

@@ -618,15 +618,29 @@ testing.
 ```bash
 mise install      # one-shot setup
 
-mise run fmt      # format everything (cargo fmt, dprint, shfmt)
-mise run lint     # clippy, rustfmt --check, cargo-deny, cargo-audit,
+mise run fmt      # format everything (cargo fmt, dprint, shfmt, oxfmt)
+mise run lint     # clippy, rustfmt --check, cargo-deny, cargo-audit, prek,
                   # dprint/shfmt/shellcheck, actionlint/zizmor/ghalint/pinact
-mise run lint:base # base repo lint (dprint, shfmt, shellcheck, pre-commit hooks)
+mise run lint:base # base repo lint (dprint, shfmt, shellcheck)
 mise run lint:gha  # GitHub Actions lint (actionlint, zizmor, ghalint, pinact)
-mise run test     # cargo nextest run --locked --all-features
+mise run test     # cargo nextest + doctests + vitest
 mise run ci       # the full lint + test pipeline CI runs
-mise run mutants  # cargo-mutants (slow; not in CI by default)
+mise run bench    # Criterion benchmarks (not in CI)
+mise run mutants  # full-workspace cargo-mutants (slow; not in CI by default)
 mise run mutants:rust:diff [base]  # mutation-test Rust changes vs base
+```
+
+`mise run ci` fans out to `ci:base` (prek, dprint/shfmt/shellcheck,
+actionlint/zizmor/ghalint/pinact), `ci:rust`, and `ci:ts`, which together cover
+every required GitHub check — so a green local run means a green PR. The web
+tasks install `web/node_modules` themselves, so `mise run ci` works on a fresh
+checkout.
+
+Benchmarks use Criterion's baseline mechanism:
+
+```bash
+git stash && mise run bench:rust --save-baseline base && git stash pop
+mise run bench:rust --baseline base   # reports % change vs the saved run
 ```
 
 On NixOS — or anywhere mise's pre-built tool binaries won't run — `nix develop`

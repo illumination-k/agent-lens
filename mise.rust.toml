@@ -43,6 +43,48 @@ run = "cargo nextest run --locked --all-features"
 description = "Run Rust doctests (cargo-nextest does not run them)"
 run = "cargo test --doc --locked --all-features --workspace"
 
+[tasks."bench:rust"]
+description = "Run the Criterion benchmarks; save or compare a named baseline"
+usage = '''
+flag "--save-baseline <name>" help="Store this run under a Criterion baseline name (convention: 'base' before a change, 'change' after)"
+flag "--baseline <name>" help="Compare this run against a previously saved Criterion baseline"
+'''
+run = '''
+set -eu
+set --
+if [ -n "${usage_save_baseline:-}" ]; then
+  set -- "$@" --save-baseline "$usage_save_baseline"
+fi
+if [ -n "${usage_baseline:-}" ]; then
+  set -- "$@" --baseline "$usage_baseline"
+fi
+cargo bench --workspace --all-features -- "$@"
+'''
+
+# Lives here rather than in `.mise.toml` so it resolves only where its dependency
+# does, and is not a `mutants:*` glob: that would also pull in the diff-scoped
+# run, which is the task you want on its own during normal development.
+[tasks.mutants]
+description = "Run the full-workspace mutation test (slow; not part of ci)"
+depends = "mutants:rust"
+
+[tasks."mutants:rust"]
+description = "Run cargo-mutants across the whole workspace (very slow; not part of ci)"
+usage = '''
+flag "-j --jobs <jobs>" help="Number of cargo-mutants jobs to run in parallel" default="2"
+'''
+run = '''
+set -eu
+jobs="${usage_jobs:-2}"
+case "$jobs" in
+  ''|*[!0-9]*|0)
+    echo "--jobs must be a positive integer."
+    exit 1
+    ;;
+esac
+cargo mutants --workspace --no-shuffle --jobs "$jobs"
+'''
+
 [tasks."mutants:rust:diff"]
 description = "Run cargo-mutants only on Rust lines changed vs a base git ref (default: main)"
 usage = '''
