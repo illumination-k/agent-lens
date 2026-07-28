@@ -1,6 +1,6 @@
 ---
 name: agent-lens
-description: Use when the user asks to analyze this codebase with agent-lens, or asks which analyzer fits a given question (duplication, complexity, hotspots, coupling, cohesion, forwarding wrappers). Routes to the right `agent-lens analyze` subcommand and explains how to read the output. Prefer the more specific skills (find-duplicates, review-pending-changes, find-refactor-targets, audit-architecture) when one of them clearly fits.
+description: Use when the user asks to analyze this codebase with agent-lens, or asks which analyzer fits a given question (duplication, complexity, hotspots, coupling, cohesion, forwarding wrappers, delegation chains). Routes to the right `agent-lens analyze` subcommand and explains how to read the output. Prefer the more specific skills (find-duplicates, review-pending-changes, find-refactor-targets, audit-architecture) when one of them clearly fits.
 ---
 
 # agent-lens analyzer dispatcher
@@ -13,6 +13,7 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | ------------------------------------------------------- | ---------------- | ------------------------------------------------- |
 | Are there near-duplicate functions?                     | `similarity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Are there forwarding-only functions worth inlining?     | `wrapper`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| How many hops of forwarding before the real work?       | `delegation`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which classes/`impl` blocks are doing too many things?  | `cohesion`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which functions are landmines to edit?                  | `complexity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which modules are Fan-In bottlenecks or cyclic?         | `coupling`       | Rust crate / TS/JS entry / Go or Python directory |
@@ -29,7 +30,7 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | Is this `pub` wider than its callers need?              | `visibility`     | `.rs` / `.go` file or dir                         |
 | Where do churn and complexity collide?                  | `hotspot`        | git-tracked file or directory                     |
 
-`similarity` / `wrapper` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `visibility` judges Rust and Go only — TypeScript and Python carry no extracted export status, and it says how many functions it skipped for that reason. `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
+`similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` judges Rust and Go only — TypeScript and Python carry no extracted export status, and it says how many functions it skipped for that reason. `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
 
 ## Output format
 
@@ -100,6 +101,9 @@ agent-lens analyze untested crates/agent-lens/src --format md
 # Which `pub` items no caller outside a narrower scope uses
 agent-lens analyze visibility . --format md
 
+# How many forwarding hops sit between an entry point and the real work
+agent-lens analyze delegation crates/agent-lens/src --format md
+
 # Where is the next refactor likely to pay off?
 agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 ```
@@ -108,6 +112,7 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 
 - **similarity**: each entry is a pair `(a, b)` with `tsed` in `[0.0, 1.0]`. ≥ 0.95 is essentially a clone; 0.85–0.95 is a near-miss worth refactoring; below 0.85 is filtered out by default. The `--threshold` flag is for tightening or loosening that bar; `--sweep 0.6,0.75,0.85` instead clusters once at the lowest rung and tags each cluster with the highest rung it survives (a coarse dendrogram), separating verbatim clones from structural parallels in one run.
 - **wrapper**: a hit means the function body, after stripping `?` / `.into()` / `.unwrap()` / `.await`, is just a forwarding call. Either inline it or document why the indirection exists.
+- **delegation**: each row is a chain of functions that only forward, ending at the terminus — the one doing the work, named with its `file:line`, which is the file to open first. Depth is the context tax: a 3-hop chain costs four file opens to answer one question. Trust the hops marked `args forwarded verbatim` most (the language's own wrapper detector agreed); a hop without that mark was classified from body shape alone and can be composing rather than forwarding — a constructor calling a constructor is the usual false positive. `other caller(s) to move` on a hop is the cost of collapsing the chain: those call sites have to be repointed at the terminus. The module roll-up is the lasagna half: a module flagged `layer candidate` is mostly forwarders pointing mostly at one other module, so inlining it is a single mechanical change. One-hop forwards are counted, not listed — that is `analyze wrapper`'s report, and it carries argument-level evidence.
 - **cohesion**: `lcom4 == 1` is healthy. `lcom4 >= 2` means the `impl` has disjoint method clusters and is a candidate for splitting.
 - **complexity**: cognitive ≥ 15 is a yellow flag, ≥ 25 is a red flag. Maintainability Index < 65 means the function is hard to maintain regardless of what cyclomatic says.
 - **coupling**: high `fan_in` ⇒ a hub everything depends on (slow to change safely); high `fan_out` ⇒ a module that is hard to test in isolation; non-empty `cycles` is always a smell. Reports Martin's `instability = Ce/(Ca+Ce)` per module too. The module unit differs by language: for Rust it is the crate's `mod` tree, for TS/JS a source file reachable from the entry, for Go a package (directory) in the module, for Python a `.py` file under the root.

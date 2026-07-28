@@ -14,6 +14,7 @@ pub mod context_span;
 pub mod coupling;
 mod crate_root;
 pub mod cycles;
+pub mod delegation;
 mod diff;
 mod error_from;
 mod format;
@@ -42,6 +43,7 @@ pub use complexity::ComplexityAnalyzer;
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
 pub use cycles::CyclesAnalyzer;
+pub use delegation::DelegationAnalyzer;
 pub use function_graph::FunctionGraphAnalyzer;
 pub use graph_query::{
     DEFAULT_GRAPH_QUERY_DEPTH, DEFAULT_GRAPH_QUERY_LIMIT, GraphDirection, GraphQueryAnalyzer,

@@ -14,7 +14,7 @@ Unlike ordinary linting, its output is tuned to be useful when placed in an LLM 
 The project bundles two related surfaces:
 
 - Hook handlers that integrate with coding-agent workflows and surface focused context at useful moments.
-- On-demand analyzers that report codebase shape: duplication, wrappers, cohesion, complexity, coupling, context span, hotspots, and call-graph structure (hubs, cycles, queries, impact, layers, untested, visibility).
+- On-demand analyzers that report codebase shape: duplication, wrappers, delegation chains, cohesion, complexity, coupling, context span, hotspots, and call-graph structure (hubs, cycles, queries, impact, layers, untested, visibility).
 
 ## Development Process
 

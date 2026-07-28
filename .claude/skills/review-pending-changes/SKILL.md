@@ -1,6 +1,6 @@
 ---
 name: review-pending-changes
-description: Use when the user wants to audit pending git changes (unstaged edits, work-in-progress) for quality issues before committing — duplicated functions, thin wrappers, complexity creep, weakened cohesion. Composes the `--diff-only` modes of `agent-lens analyze similarity / wrapper / cohesion / complexity`.
+description: Use when the user wants to audit pending git changes (unstaged edits, work-in-progress) for quality issues before committing — duplicated functions, thin wrappers, complexity creep, weakened cohesion. Composes the `--diff-only` modes of `agent-lens analyze similarity / wrapper / cohesion / complexity / delegation`.
 ---
 
 # Review pending changes with agent-lens
@@ -24,7 +24,7 @@ git diff --name-only --diff-filter=AM \
   | grep -E '\.(rs|tsx?|mts|cts|jsx?|mjs|cjs|py|go)$'
 ```
 
-All four diff-only analyzers (`similarity`, `wrapper`, `cohesion`, `complexity`) accept Rust, TypeScript / JavaScript, Python, and Go — no need to fan out by extension.
+All five diff-only analyzers (`similarity`, `wrapper`, `cohesion`, `complexity`, `delegation`) accept Rust, TypeScript / JavaScript, Python, and Go — no need to fan out by extension.
 
 ### 2. Run the diff-scoped analyzers per file
 
@@ -35,6 +35,12 @@ agent-lens analyze similarity <path> --diff-only --format md
 agent-lens analyze wrapper    <path> --diff-only --format md
 agent-lens analyze cohesion   <path> --diff-only --format md
 agent-lens analyze complexity <path> --diff-only --format md
+```
+
+Then once, for the tree the change lives in — a forwarding chain spans files, so a per-file run cannot see one:
+
+```bash
+agent-lens analyze delegation <dir> --diff-only --format md
 ```
 
 If a report is empty, skip it silently — empty diff-only output is the success case.
@@ -63,7 +69,7 @@ git diff -U0 -- '*.go' | grep -qE '^[+-]\s*"' && \
 For each finding, classify:
 
 - **Block-on-commit**: new clone (TSED ≥ 0.95), new function with cognitive ≥ 25, new `impl` whose LCOM4 jumped from 1 to ≥ 2, new dependency cycle in the coupling cycles list.
-- **Worth a callout**: cognitive 15–25, MI < 65, new wrapper with one call site, fan-out increase that pushes a module past the rest of the crate.
+- **Worth a callout**: cognitive 15–25, MI < 65, new wrapper with one call site, a forwarding chain the edit lengthened (open its terminus and ask whether the new hop earns its file), fan-out increase that pushes a module past the rest of the crate.
 - **Noise**: TSED < 0.85 once `--exclude-tests` is on; minor cognitive deltas on already-complex functions.
 
 Surface block-on-commit findings to the user before they commit. Mention worth-a-callout findings once, then move on.

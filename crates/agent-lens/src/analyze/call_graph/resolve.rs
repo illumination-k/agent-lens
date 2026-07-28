@@ -517,6 +517,7 @@ mod tests {
             visibility: NodeVisibility::Unknown,
             weights: NodeWeights::default(),
             outgoing_calls: ResolutionCallCounts::default(),
+            delegation: None,
         }
     }
 

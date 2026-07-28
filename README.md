@@ -295,15 +295,15 @@ without reading the source.
 The current binary exposes three top-level command trees plus `run`,
 `skills`, `config`, and `help`:
 
-| Command tree | Commands                                                                                                                                                                                  |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                 |
-| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                 |
-| `analyze`    | `similarity`, `wrapper`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `untested`, `visibility`, `context-span`, `hotspot` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                             |
-| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                       |
-| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                  |
-| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                        |
+| Command tree | Commands                                                                                                                                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                               |
+| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                               |
+| `analyze`    | `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `untested`, `visibility`, `context-span`, `hotspot` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                           |
+| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                     |
+| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                |
+| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                      |
 
 `agent-lens --help` opens with a question-to-analyzer routing table
 ("what breaks if I change this?" → `analyze impact`) plus the output
@@ -348,6 +348,7 @@ Analyzer-specific options today:
 | `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                       |
 | `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                       |
 | `wrapper`        | `--diff-only`                                                                                                                                                   |
+| `delegation`     | `--diff-only`, `--top N`                                                                                                                                        |
 | `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                      |
 | `hubs`           | `--top N`                                                                                                                                                       |
 | `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                        |
@@ -362,10 +363,12 @@ Analyzer-specific options today:
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
-`wrapper`, `cohesion`, `hotspot`, `function-graph`, `cycles`, `graph-query`,
-`hubs`, `impact`, `layers`, `untested`, `context-span`, and `coupling`
-cover all four language families. `visibility` judges Rust and Go, the two
-adapters that extract export status, and counts the rest as skipped.
+`wrapper`, `delegation`, `cohesion`, `hotspot`, `function-graph`, `cycles`,
+`graph-query`, `hubs`, `impact`, `layers`, `untested`, `context-span`, and
+`coupling` cover all four language families. `visibility` judges Rust and Go,
+the two adapters that extract export status, and counts the rest as skipped.
+`delegation` runs on all four, but only Rust and Go can exempt a module
+facade, and its confidence is highest on Rust.
 
 ### As a Claude Code hook
 
@@ -525,23 +528,24 @@ new handlers to plug into the same plumbing.
 
 ### Analyzers
 
-| Subcommand       | What it surfaces                                                                                                                                                                                                                                                                                                                                                | Languages                 |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `similarity`     | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                                                                                                                                                     | Rust, TS / JS, Python, Go |
-| `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                                                                                                                                                  | Rust, TS / JS, Python, Go |
-| `cohesion`       | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                                                                                                                                                      | Rust, TS / JS, Python, Go |
-| `complexity`     | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                                                                                                                              | Rust, TS / JS, Python, Go |
-| `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                                                                                               | Rust, TS / JS, Python, Go |
-| `function-graph` | Static function nodes and heuristic caller→callee edges as visualization-ready JSON. Node weights include static call counts, fan-in/out, LOC, Cyclomatic / Cognitive / Nesting, Halstead Volume, Maintainability Index, plus runtime placeholders for later trace/profile joins.                                                                               | Rust, TS / JS, Python, Go |
-| `cycles`         | Function-level strongly connected components of the call graph (resolved edges only): recursion knots and cross-file tangles that must change as one unit, with members, same-file flag, nearby-ambiguity warning, and advisory cheapest-cut break suggestions with call-line evidence.                                                                         | Rust, TS / JS, Python, Go |
-| `hubs`           | Hub smells on the function call graph: outlier fan-out (god functions), outlier fan-in (load-bearing blast-radius signal), Henry-Kafura `loc × (fan_in × fan_out)²` bottlenecks, and cross-module pull (misplaced functions), with prod/test fan-in split and deterministic PageRank-importance percentiles.                                                    | Rust, TS / JS, Python, Go |
-| `layers`         | Inferred Lakos levelization of the call graph: a function level per function (`1 + max(level of callees)`, cycles collapsed), a module level per module from the induced module graph, entry points, module cycles and skip-level calls with call-site evidence, and per-module member-level spans as a vertical cohesion smell.                                | Rust, TS / JS, Python, Go |
-| `untested`       | Production functions with no resolved call path from any test function: multi-source forward traversal from every test node, grouped by module and ranked by untested LOC, with each row's LOC / fan-in / complexity, plus the upper-bound support (unresolved and ambiguous call sites leaving test-reached code).                                             | Rust, TS / JS, Python, Go |
-| `visibility`     | `pub` (Rust) / exported (Go) functions whose resolved callers all sit inside a narrower scope, with the declaration that would still compile (`drop pub`, `pub(super)`, `pub(in …)`, `pub(crate)`, unexport), the caller modules as evidence, and the unattributable call sites that argue against each row. `pub use` re-exports are excluded as intended API. | Rust, Go                  |
-| `impact`         | Blast radius of a change: functions transitively calling the seeds (working-tree diff or `--function`) over the SCC condensation, direct callers verbatim, deeper callers folded per depth and module, reachable tests as a verification checklist.                                                                                                             | Rust, TS / JS, Python, Go |
-| `graph-query`    | One canned call-graph traversal per run: `callers`, `callees`, `neighborhood`, or the shortest `path` between two symbols, with the call lines of every hop.                                                                                                                                                                                                    | Rust, TS / JS, Python, Go |
-| `context-span`   | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                                                                                                                                                       | Rust, TS / JS, Python, Go |
-| `hotspot`        | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                                                                                                                                                | Rust, TS / JS, Python, Go |
+| Subcommand       | What it surfaces                                                                                                                                                                                                                                                                                                                                                                     | Languages                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------- |
+| `similarity`     | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                                                                                                                                                                          | Rust, TS / JS, Python, Go |
+| `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                                                                                                                                                                       | Rust, TS / JS, Python, Go |
+| `delegation`     | Chains of functions that only forward (`api::save -> service::save -> repo::save -> db::insert`), with per-hop `file:line`, the terminus that does the work as the headline, and a per-module roll-up of delegator ratio and target concentration (lasagna layers). Generalizes `wrapper` from one hop to many; forwarders that log, lock, or validate are deliberately not counted. | Rust, TS / JS, Python, Go |
+| `cohesion`       | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                                                                                                                                                                           | Rust, TS / JS, Python, Go |
+| `complexity`     | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                                                                                                                                                   | Rust, TS / JS, Python, Go |
+| `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                                                                                                                    | Rust, TS / JS, Python, Go |
+| `function-graph` | Static function nodes and heuristic caller→callee edges as visualization-ready JSON. Node weights include static call counts, fan-in/out, LOC, Cyclomatic / Cognitive / Nesting, Halstead Volume, Maintainability Index, plus runtime placeholders for later trace/profile joins.                                                                                                    | Rust, TS / JS, Python, Go |
+| `cycles`         | Function-level strongly connected components of the call graph (resolved edges only): recursion knots and cross-file tangles that must change as one unit, with members, same-file flag, nearby-ambiguity warning, and advisory cheapest-cut break suggestions with call-line evidence.                                                                                              | Rust, TS / JS, Python, Go |
+| `hubs`           | Hub smells on the function call graph: outlier fan-out (god functions), outlier fan-in (load-bearing blast-radius signal), Henry-Kafura `loc × (fan_in × fan_out)²` bottlenecks, and cross-module pull (misplaced functions), with prod/test fan-in split and deterministic PageRank-importance percentiles.                                                                         | Rust, TS / JS, Python, Go |
+| `layers`         | Inferred Lakos levelization of the call graph: a function level per function (`1 + max(level of callees)`, cycles collapsed), a module level per module from the induced module graph, entry points, module cycles and skip-level calls with call-site evidence, and per-module member-level spans as a vertical cohesion smell.                                                     | Rust, TS / JS, Python, Go |
+| `untested`       | Production functions with no resolved call path from any test function: multi-source forward traversal from every test node, grouped by module and ranked by untested LOC, with each row's LOC / fan-in / complexity, plus the upper-bound support (unresolved and ambiguous call sites leaving test-reached code).                                                                  | Rust, TS / JS, Python, Go |
+| `visibility`     | `pub` (Rust) / exported (Go) functions whose resolved callers all sit inside a narrower scope, with the declaration that would still compile (`drop pub`, `pub(super)`, `pub(in …)`, `pub(crate)`, unexport), the caller modules as evidence, and the unattributable call sites that argue against each row. `pub use` re-exports are excluded as intended API.                      | Rust, Go                  |
+| `impact`         | Blast radius of a change: functions transitively calling the seeds (working-tree diff or `--function`) over the SCC condensation, direct callers verbatim, deeper callers folded per depth and module, reachable tests as a verification checklist.                                                                                                                                  | Rust, TS / JS, Python, Go |
+| `graph-query`    | One canned call-graph traversal per run: `callers`, `callees`, `neighborhood`, or the shortest `path` between two symbols, with the call lines of every hop.                                                                                                                                                                                                                         | Rust, TS / JS, Python, Go |
+| `context-span`   | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                                                                                                                                                                            | Rust, TS / JS, Python, Go |
+| `hotspot`        | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                                                                                                                                                                     | Rust, TS / JS, Python, Go |
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
@@ -563,7 +567,7 @@ path relative to the module tree's source root. The same spelling is used
 in the `SessionStart` coupling thumbnail.
 
 For `complexity`, `cohesion`, `similarity`, `hotspot`, `hubs`, `impact`,
-`layers`, `untested`, and `visibility`, `--top` caps the
+`layers`, `untested`, `visibility`, and `delegation`, `--top` caps the
 Markdown ranking while JSON stays complete. `--min-score` filters the Markdown
 ranking for `complexity` (cognitive score) and `cohesion` (LCOM4); for
 `similarity` it is an alias of `--threshold`.
@@ -589,12 +593,13 @@ Adding a language means writing one adapter crate and wiring it into the
 | Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser)    | `lens-py`     |
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
-`similarity`, `complexity`, `wrapper`, `cohesion`, `hotspot`,
+`similarity`, `complexity`, `wrapper`, `delegation`, `cohesion`, `hotspot`,
 `function-graph`, `cycles`, `graph-query`, `hubs`, `impact`, `layers`,
 `untested`, `context-span`, and `coupling` are wired through the Rust,
 TypeScript / JavaScript, Python, and Go adapters. `visibility` is wired
 through the Rust and Go adapters only, because TypeScript and Python carry
-no extracted export status.
+no extracted export status; `delegation` runs everywhere but can only apply
+its facade exemption where export status exists.
 `function-graph` uses a syntactic call-site index rather than type inference
 or macro expansion. Its JSON is meant for external visualization: callers can
 switch graph layers between structure (`fan_in`/`fan_out`, call counts),
@@ -710,9 +715,10 @@ CodeQL, dependency review, Trivy, TruffleHog, SBOM generation, the flake build
 ## Roadmap
 
 The near-term direction is to keep improving the analyzer surfaces that help
-agents make better edit decisions: duplication, wrappers, cohesion,
-complexity, coupling, context span, hotspots, and call-graph structure
-(hubs, cycles, queries, impact, layers, untested, visibility).
+agents make better edit decisions: duplication, wrappers,
+delegation chains, cohesion, complexity, coupling, context span, hotspots,
+and call-graph structure (hubs, cycles, queries, impact, layers, untested,
+visibility).
 
 New metrics are prioritised by _does this change how an agent decides what to
 do?_ rather than _does it look nice in a dashboard?_

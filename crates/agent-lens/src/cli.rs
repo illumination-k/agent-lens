@@ -18,10 +18,10 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
-    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
-    FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer,
-    HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, SimilarityAnalyzer,
-    SimilarityMethod, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, DelegationAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind,
+    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat,
+    SimilarityAnalyzer, SimilarityMethod, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -442,6 +442,37 @@ enum AnalyzeCommand {
     /// compact summary tuned for LLM context.
     #[command(after_long_help = examples::CYCLES)]
     Cycles(AnalyzeCommonArgs),
+    /// Report chains of functions that only forward, and the modules
+    /// built out of them.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and walks the subgraph of functions that add nothing of their
+    /// own: exactly one resolved outgoing target, no other call site
+    /// beyond the language's own trivial adapters (`.clone()`,
+    /// `.into()`, builtins), at most three body statements, and
+    /// `cyclomatic == 1`. `analyze wrapper` reports the one-hop case
+    /// with argument-level evidence; this reports what happens when it
+    /// stacks — `api::save -> service::save -> repo::save ->
+    /// db::insert`, where an agent opens four files to reach the one
+    /// doing the work, so the terminus is the headline of every row. A
+    /// module roll-up adds the "lasagna layer" half: how much of a
+    /// module is forwarding and how much of that forwarding points at
+    /// one other module. Classification under-reports on purpose — a
+    /// forwarder that also logs, locks, or validates is not a middle
+    /// man, and a function whose body facts were unavailable is
+    /// reported as unclassified rather than assumed thin. Test
+    /// functions, a module's sole public surface (a facade; Rust and Go
+    /// only, the two adapters that extract export status), and doc
+    /// comments saying "deprecated" are exempt, and a chain running
+    /// through an exempt function is cut there. Chains follow resolved
+    /// edges only, so depths are lower bounds; forwarding cycles have
+    /// no head to walk from and are counted rather than listed. The
+    /// parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` caps each
+    /// listing at `--top` (default 20).
+    #[command(after_long_help = examples::DELEGATION)]
+    Delegation(AnalyzeDelegationArgs),
     /// Emit a static function call graph as visualization-ready data.
     ///
     /// The graph is heuristic and current-source only: nodes are functions,
@@ -788,6 +819,16 @@ struct AnalyzeLayersArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+struct AnalyzeDelegationArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    #[command(flatten)]
+    diff: AnalyzeDiffArgs,
+}
+
+#[derive(Debug, Clone, Args)]
 struct AnalyzeUntestedArgs {
     #[command(flatten)]
     common: AnalyzeCommonArgs,
@@ -1085,6 +1126,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,
         ),
+        (profile.delegation.is_some(), config::ToolName::Delegation),
         (profile.untested.is_some(), config::ToolName::Untested),
         (profile.visibility.is_some(), config::ToolName::Visibility),
         (profile.wrapper.is_some(), config::ToolName::Wrapper),
@@ -1212,6 +1254,16 @@ fn build_analyze_command(
                 doc_overlap: opts.doc_overlap,
             })
         }
+        config::ToolName::Delegation => {
+            let opts = profile.delegation.clone().unwrap_or_default();
+            AnalyzeCommand::Delegation(AnalyzeDelegationArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                diff: AnalyzeDiffArgs {
+                    diff_only: opts.diff_only,
+                },
+            })
+        }
         config::ToolName::Untested => {
             let opts = profile.untested.clone().unwrap_or_default();
             AnalyzeCommand::Untested(AnalyzeUntestedArgs {
@@ -1298,6 +1350,7 @@ impl_with_analyze_path_args!(
     ComplexityAnalyzer,
     CouplingAnalyzer,
     CyclesAnalyzer,
+    DelegationAnalyzer,
     FunctionGraphAnalyzer,
     GraphQueryAnalyzer,
     ContextSpanAnalyzer,
@@ -1426,6 +1479,14 @@ impl AnalyzeCommand {
                     .with_method(args.method)
                     .with_doc_overlap(args.doc_overlap)
                     .with_top(args.ranking.top)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Delegation(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                DelegationAnalyzer::new()
+                    .with_top(args.ranking.top)
+                    .with_diff_only(args.diff.diff_only)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
@@ -2303,6 +2364,42 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_delegation_with_top_and_diff_only() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "delegation",
+            "crates",
+            "--format",
+            "md",
+            "--top",
+            "30",
+            "--diff-only",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
+            panic!("expected analyze delegation");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(30));
+        assert!(args.diff.diff_only);
+    }
+
+    #[test]
+    fn parses_analyze_delegation_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "delegation", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
+            panic!("expected analyze delegation");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+        assert!(!args.diff.diff_only);
+    }
+
+    #[test]
     fn parses_analyze_coupling_default_format_is_json() {
         let cli =
             Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
@@ -2692,6 +2789,28 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.ranking.top, Some(9));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_delegation_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"delegation\"]\n\n\
+             [delegation]\ntop = 7\ndiff-only = true\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Delegation,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::Delegation(args) = cmd else {
+            panic!("expected analyze delegation");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(7));
+        assert!(args.diff.diff_only);
     }
 
     #[test]

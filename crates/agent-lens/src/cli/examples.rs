@@ -23,6 +23,7 @@ Pick an analyzer by question:
     is this function too complex?         analyze complexity
     did I already write this?             analyze similarity
     is this body just a forwarder?        analyze wrapper
+    how many hops before real work?       analyze delegation
     does this type do too many things?    analyze cohesion
     which modules are entangled?          analyze coupling
     which functions recurse mutually?     analyze cycles
@@ -170,6 +171,14 @@ Examples:
 
     agent-lens analyze untested src/ --format md
     agent-lens analyze untested . --exclude 'benches/**' --top 30 --format md
+";
+
+pub const DELEGATION: &str = "\
+Examples:
+
+    agent-lens analyze delegation . --format md
+    agent-lens analyze delegation crates/ --top 30 --format md
+    agent-lens analyze delegation . --diff-only --format md
 ";
 
 pub const VISIBILITY: &str = "\
