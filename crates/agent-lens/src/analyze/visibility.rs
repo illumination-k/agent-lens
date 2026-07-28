@@ -1464,6 +1464,7 @@ mod tests {
     #[case::crate_prefix("pub use crate::inner::*;", &[], &["crate::inner"])]
     #[case::nested_group("pub use a::{b, c::{d, e}};", &["b", "d", "e"], &[])]
     #[case::nested_group_with_glob("pub use a::{b, c::{d, *}};", &["b", "d"], &["a::c"])]
+    #[case::sibling_after_a_nested_group("pub use a::{b::{c}, d};", &["c", "d"], &[])]
     #[case::not_public("use inner::target;", &[], &[])]
     #[case::in_a_comment("// pub use inner::target;", &[], &[])]
     fn pub_use_statements_yield_their_names_and_globs(
@@ -1480,6 +1481,19 @@ mod tests {
             globs.iter().map(String::as_str).collect::<Vec<_>>(),
             expected_globs
         );
+    }
+
+    #[rstest]
+    #[case::both("a", "b", "a::b")]
+    #[case::no_prefix("", "b", "b")]
+    #[case::no_rest("a", "", "a")]
+    #[case::neither("", "", "")]
+    fn use_paths_join_without_dangling_separators(
+        #[case] prefix: &str,
+        #[case] rest: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(join_use_path(prefix, rest), expected);
     }
 
     #[rstest]
@@ -1697,6 +1711,51 @@ mod tests {
         assert_eq!(
             ordinary["ubiquitous_name_calls_outside_scope"], 0,
             "an unresolved path call the resolver already ruled out is not evidence: {ordinary}",
+        );
+
+        // The receiver call is the row's only evidence, so it alone has
+        // to be enough to flag it.
+        assert_eq!(clone["ambiguous_calls_outside_scope"], 0, "got: {clone}");
+        assert_eq!(report["summary"]["possible_external_caller_count"], 1);
+        assert!(
+            analyze_md(dir.path()).contains("0 ambiguous and 1 unattributable receiver call"),
+            "the caveat names the receiver call it rests on",
+        );
+    }
+
+    /// A Go package is the whole boundary, so the sub-package call that
+    /// Rust would treat as inside the scope is outside it here — the
+    /// mirror of the Rust case above.
+    #[test]
+    fn a_go_sub_package_call_is_outside_the_package_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "pkg/w.go",
+            "package pkg\n\ntype W struct{}\n\nfunc (w W) String() string { return \"\" }\n\n\
+             func Local(w W) string { return W.String(w) }\n",
+        );
+        write_file(
+            dir.path(),
+            "pkg/sub/s.go",
+            "package sub\n\ntype T struct{}\n\nfunc Use(t T) string { return t.String() }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let stringer = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .find(|f| f["qualified_name"] == "pkg::W::String")
+            .unwrap_or_else(|| panic!("report: {report}"));
+        assert_eq!(
+            stringer["caller_scope"], "same_module",
+            "the typed path call inside the package is the scope: {stringer}",
+        );
+        assert_eq!(
+            stringer["ubiquitous_name_calls_outside_scope"], 1,
+            "`pkg/sub` is a different package, so its call is outside: {stringer}",
         );
     }
 
