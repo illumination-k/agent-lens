@@ -29,6 +29,7 @@ mod runner;
 pub mod similarity;
 mod source_files;
 pub mod untested;
+pub mod visibility;
 pub mod wrapper;
 
 use std::path::{Path, PathBuf};
@@ -58,6 +59,7 @@ pub use similarity::{
     SimilarityMethod,
 };
 pub use untested::UntestedAnalyzer;
+pub use visibility::VisibilityAnalyzer;
 pub use wrapper::WrapperAnalyzer;
 
 pub use crate_root::resolve_crate_root;

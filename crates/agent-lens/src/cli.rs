@@ -21,7 +21,7 @@ use agent_lens::analyze::{
     DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, FunctionGraphAnalyzer,
     FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer,
     HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, SimilarityAnalyzer,
-    SimilarityMethod, UntestedAnalyzer, WrapperAnalyzer,
+    SimilarityMethod, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -628,6 +628,27 @@ enum AnalyzeCommand {
     /// module listing at `--top` (default 20).
     #[command(after_long_help = examples::UNTESTED)]
     Untested(AnalyzeUntestedArgs),
+    /// Report `pub` / exported functions no caller outside a narrower
+    /// scope uses.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and folds each public function's resolved callers into the
+    /// narrowest module containing all of them; when that is narrower
+    /// than the declaration, the function is listed with the visibility
+    /// its callers would still permit (`drop pub`, `pub(super)`,
+    /// `pub(in ...)`, `pub(crate)`, or unexporting for Go). Narrowing is
+    /// compiler-verified, so a wrong row costs a failed build rather
+    /// than lost code. Only resolved edges carry a caller module:
+    /// ambiguous and name-matching unresolved call sites from outside
+    /// the proposed scope are counted per row as the reason to check it
+    /// first. Callers outside the analyzed path are invisible, so a
+    /// single library crate's own API surface looks crate-internal —
+    /// the report says so when only one crate is in scope. Export status
+    /// is extracted for Rust and Go only; TypeScript and Python
+    /// functions are counted as skipped. JSON is the default;
+    /// `--format md` caps the module listing at `--top` (default 20).
+    #[command(after_long_help = examples::VISIBILITY)]
+    Visibility(AnalyzeVisibilityArgs),
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
@@ -768,6 +789,14 @@ struct AnalyzeLayersArgs {
 
 #[derive(Debug, Clone, Args)]
 struct AnalyzeUntestedArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeVisibilityArgs {
     #[command(flatten)]
     common: AnalyzeCommonArgs,
     #[command(flatten)]
@@ -1057,6 +1086,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             config::ToolName::ContextSpan,
         ),
         (profile.untested.is_some(), config::ToolName::Untested),
+        (profile.visibility.is_some(), config::ToolName::Visibility),
         (profile.wrapper.is_some(), config::ToolName::Wrapper),
     ]
     .into_iter()
@@ -1189,6 +1219,13 @@ fn build_analyze_command(
                 ranking: AnalyzeRankingArgs { top: opts.top },
             })
         }
+        config::ToolName::Visibility => {
+            let opts = profile.visibility.clone().unwrap_or_default();
+            AnalyzeCommand::Visibility(AnalyzeVisibilityArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+            })
+        }
         config::ToolName::Wrapper => {
             let opts = profile.wrapper.clone().unwrap_or_default();
             AnalyzeCommand::Wrapper(AnalyzeWrapperArgs {
@@ -1269,6 +1306,7 @@ impl_with_analyze_path_args!(
     ImpactAnalyzer,
     LayersAnalyzer,
     UntestedAnalyzer,
+    VisibilityAnalyzer,
     WrapperAnalyzer,
 );
 
@@ -1394,6 +1432,13 @@ impl AnalyzeCommand {
             Self::Untested(args) => {
                 let (path, format, path_filter) = args.common.into_parts();
                 UntestedAnalyzer::new()
+                    .with_top(args.ranking.top)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Visibility(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                VisibilityAnalyzer::new()
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -2222,6 +2267,42 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_visibility_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "visibility",
+            "crates",
+            "--top",
+            "30",
+            "--format",
+            "md",
+            "--exclude",
+            "benches/**",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
+            panic!("expected analyze visibility");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(30));
+        assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
+    }
+
+    #[test]
+    fn parses_analyze_visibility_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "visibility", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
+            panic!("expected analyze visibility");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+    }
+
+    #[test]
     fn parses_analyze_coupling_default_format_is_json() {
         let cli =
             Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
@@ -2588,6 +2669,26 @@ fn dispatch(n: i32) -> i32 {
         .unwrap();
         let AnalyzeCommand::Layers(args) = cmd else {
             panic!("expected analyze layers");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(9));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_visibility_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"visibility\"]\n\n[visibility]\ntop = 9\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Visibility,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::Visibility(args) = cmd else {
+            panic!("expected analyze visibility");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.ranking.top, Some(9));

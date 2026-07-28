@@ -120,6 +120,8 @@ pub struct Profile {
     #[serde(default)]
     pub untested: Option<UntestedOptions>,
     #[serde(default)]
+    pub visibility: Option<VisibilityOptions>,
+    #[serde(default)]
     pub wrapper: Option<WrapperOptions>,
 }
 
@@ -152,6 +154,7 @@ pub enum ToolName {
     Layers,
     Similarity,
     Untested,
+    Visibility,
     Wrapper,
 }
 
@@ -172,6 +175,7 @@ impl ToolName {
             Self::Layers => "layers",
             Self::Similarity => "similarity",
             Self::Untested => "untested",
+            Self::Visibility => "visibility",
             Self::Wrapper => "wrapper",
         }
     }
@@ -256,6 +260,13 @@ pub struct LayersOptions {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct UntestedOptions {
+    pub top: Option<usize>,
+}
+
+/// `[profile.<name>.visibility]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct VisibilityOptions {
     pub top: Option<usize>,
 }
 
