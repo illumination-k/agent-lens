@@ -21,6 +21,7 @@ web/node_modules/
 web/dist/
 web/.tanstack/
 web/.vite/
+web/coverage/
 .env
 .env.*
 !.env.example

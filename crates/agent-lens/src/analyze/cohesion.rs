@@ -15,7 +15,9 @@ use std::path::Path;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
-use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::runner::{
+    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
+};
 use super::{
     AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64, read_source,
 };
@@ -57,7 +59,7 @@ impl CohesionAnalyzer {
         let files = self
             .filter
             .collect_per_file(path, |sf| self.analyze_file(sf))?;
-        let report = Report::new(path, &files);
+        let report = build_report(path, &files);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.min_score)
         })
@@ -135,42 +137,29 @@ pub(crate) fn unit_label(lang: SourceLang, kind: &CohesionUnitKind, type_name: &
     }
 }
 
-#[derive(Debug, Serialize)]
-struct Report<'a> {
-    /// Input path: a single source file, or the root directory walked.
-    root: String,
-    file_count: usize,
-    unit_count: usize,
-    files: Vec<FileView<'a>>,
+/// Names cohesion's two report fields for the shared per-file report.
+#[derive(Debug)]
+struct CohesionShape;
+
+impl PerFileShape for CohesionShape {
+    const COUNT_FIELD: &'static str = "unit_count";
+    const ITEMS_FIELD: &'static str = "units";
 }
 
-impl<'a> Report<'a> {
-    fn new(path: &Path, files: &'a [FileReport]) -> Self {
-        let unit_count = files.iter().map(|f| f.units.len()).sum();
-        Self {
-            root: path.display().to_string(),
-            file_count: files.len(),
-            unit_count,
-            files: files.iter().map(FileView::new).collect(),
-        }
-    }
-}
+type Report<'a> = PerFileReport<'a, CohesionShape, UnitView<'a>>;
+type FileView<'a> = super::runner::FileView<'a, CohesionShape, UnitView<'a>>;
 
-#[derive(Debug, Serialize)]
-struct FileView<'a> {
-    file: &'a str,
-    unit_count: usize,
-    units: Vec<UnitView<'a>>,
-}
-
-impl<'a> FileView<'a> {
-    fn new(f: &'a FileReport) -> Self {
-        Self {
-            file: f.file.as_str(),
-            unit_count: f.units.len(),
-            units: f.units.iter().map(|u| UnitView::new(u, f.lang)).collect(),
-        }
-    }
+fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
+    let views = files
+        .iter()
+        .map(|f| {
+            FileView::new(
+                f.file.as_str(),
+                f.units.iter().map(|u| UnitView::new(u, f.lang)).collect(),
+            )
+        })
+        .collect();
+    PerFileReport::new(path, views)
 }
 
 #[derive(Debug, Serialize)]
@@ -267,13 +256,15 @@ const DEFAULT_MIN_SCORE: usize = 2;
 fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<usize>) -> String {
     let mut out = format!(
         "# Cohesion report: {} ({} file(s), {} unit(s))\n",
-        report.root, report.file_count, report.unit_count,
+        report.root(),
+        report.file_count(),
+        report.item_count(),
     );
-    if report.unit_count == 0 {
+    if report.item_count() == 0 {
         out.push_str("\n_No cohesion units (no `impl` block / class / module-level functions)._\n");
         return out;
     }
-    render_ranked_units(&mut out, &report.files, top, min_score);
+    render_ranked_units(&mut out, report.files(), top, min_score);
     out
 }
 
@@ -293,8 +284,8 @@ fn render_ranked_units(
     let mut rows: Vec<TopUnitRow<'_>> = files
         .iter()
         .flat_map(|file| {
-            file.units.iter().map(|unit| TopUnitRow {
-                file: file.file,
+            file.items().iter().map(|unit| TopUnitRow {
+                file: file.file(),
                 unit,
             })
         })

@@ -16,7 +16,9 @@ use std::path::Path;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
-use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::runner::{
+    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
+};
 use super::{
     AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64, read_source,
 };
@@ -58,7 +60,7 @@ impl ComplexityAnalyzer {
         let files = self
             .filter
             .collect_per_file(path, |sf| self.analyze_file(sf))?;
-        let report = Report::new(path, &files);
+        let report = build_report(path, &files);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.min_score)
         })
@@ -97,44 +99,29 @@ struct FileReport {
     functions: Vec<FunctionComplexity>,
 }
 
-#[derive(Debug, Serialize)]
-struct Report<'a> {
-    /// Input path: a single source file, or the root directory walked.
-    root: String,
-    file_count: usize,
-    function_count: usize,
-    summary: Summary,
-    files: Vec<FileView<'a>>,
+/// Names complexity's two report fields for the shared per-file report.
+#[derive(Debug)]
+struct ComplexityShape;
+
+impl PerFileShape for ComplexityShape {
+    const COUNT_FIELD: &'static str = "function_count";
+    const ITEMS_FIELD: &'static str = "functions";
 }
 
-impl<'a> Report<'a> {
-    fn new(path: &Path, files: &'a [FileReport]) -> Self {
-        let function_count = files.iter().map(|f| f.functions.len()).sum();
-        Self {
-            root: path.display().to_string(),
-            file_count: files.len(),
-            function_count,
-            summary: Summary::from_files(files),
-            files: files.iter().map(FileView::from).collect(),
-        }
-    }
-}
+type Report<'a> = PerFileReport<'a, ComplexityShape, FunctionView<'a>, Summary>;
+type FileView<'a> = super::runner::FileView<'a, ComplexityShape, FunctionView<'a>>;
 
-#[derive(Debug, Serialize)]
-struct FileView<'a> {
-    file: &'a str,
-    function_count: usize,
-    functions: Vec<FunctionView<'a>>,
-}
-
-impl<'a> From<&'a FileReport> for FileView<'a> {
-    fn from(f: &'a FileReport) -> Self {
-        Self {
-            file: f.file.as_str(),
-            function_count: f.functions.len(),
-            functions: f.functions.iter().map(FunctionView::from).collect(),
-        }
-    }
+fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
+    let views = files
+        .iter()
+        .map(|f| {
+            FileView::new(
+                f.file.as_str(),
+                f.functions.iter().map(FunctionView::from).collect(),
+            )
+        })
+        .collect();
+    PerFileReport::new(path, views).with_summary(Summary::from_files(files))
 }
 
 #[derive(Debug, Serialize)]
@@ -242,14 +229,18 @@ const DEFAULT_TOP: usize = 5;
 fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<u32>) -> String {
     let mut out = format!(
         "# Complexity report: {} ({} file(s), {} function(s))\n",
-        report.root, report.file_count, report.function_count,
+        report.root(),
+        report.file_count(),
+        report.item_count(),
     );
-    if report.function_count == 0 {
+    if report.item_count() == 0 {
         out.push_str("\n_No functions found._\n");
         return out;
     }
-    render_summary(&mut out, &report.summary);
-    render_top_functions(&mut out, &report.files, top, min_score);
+    if let Some(summary) = report.summary() {
+        render_summary(&mut out, summary);
+    }
+    render_top_functions(&mut out, report.files(), top, min_score);
     out
 }
 
@@ -303,8 +294,8 @@ fn render_top_functions(
     let mut rows: Vec<TopRow<'_>> = files
         .iter()
         .flat_map(|fv| {
-            fv.functions.iter().map(|func| TopRow {
-                file: fv.file,
+            fv.items().iter().map(|func| TopRow {
+                file: fv.file(),
                 func,
             })
         })

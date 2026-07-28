@@ -707,6 +707,7 @@ name = "lens-golang"
 version = "0.1.0"
 dependencies = [
  "lens-domain",
+ "proptest",
  "rstest",
  "tempfile",
  "thiserror",
@@ -721,6 +722,7 @@ name = "lens-py"
 version = "0.1.0"
 dependencies = [
  "lens-domain",
+ "proptest",
  "rstest",
  "ruff_python_ast",
  "ruff_python_parser",
@@ -735,6 +737,7 @@ version = "0.1.0"
 dependencies = [
  "lens-domain",
  "proc-macro2",
+ "proptest",
  "quote",
  "rstest",
  "syn 2.0.119",
@@ -753,7 +756,9 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "oxc_syntax",
+ "proptest",
  "rstest",
+ "tempfile",
  "thiserror",
 ]
 

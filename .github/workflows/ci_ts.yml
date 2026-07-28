@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     env:
       MISE_ENV: ts
     steps:
@@ -34,3 +35,18 @@ jobs:
       # dependency, so there is no separate install step to keep in sync.
       - name: CI
         run: mise run ci:ts
+
+      # Mirrors the Rust job: `ci:ts` gates the build, then a separate
+      # instrumented run produces the report so the fast lane stays
+      # uninstrumented.
+      - name: Generate coverage report
+        run: mise run test:ts:coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          use_oidc: true
+          files: web/coverage/lcov.info
+          flags: web
+          fail_ci_if_error: true
+          verbose: true

@@ -29,22 +29,13 @@ pub fn extract_context_spans(entry: &Path) -> Result<ContextSpanReport, ContextS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use tempfile::TempDir;
 
-    static TEMP_PROJECT_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn mk_temp_project() -> std::path::PathBuf {
-        let id = TEMP_PROJECT_ID.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!(
-            "lens_ts_context_span_{}_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos(),
-            id
-        ));
-        std::fs::create_dir_all(&base).expect("create temp project");
-        base
+    /// A throwaway project root. `TempDir` handles both uniqueness and
+    /// cleanup (including on panic), replacing the hand-rolled
+    /// timestamp + counter naming and success-path-only teardown.
+    fn mk_temp_project() -> TempDir {
+        tempfile::tempdir().expect("create temp project")
     }
 
     fn span<'a>(report: &'a ContextSpanReport, path: &str) -> &'a lens_domain::ModuleContextSpan {
@@ -58,7 +49,8 @@ mod tests {
     #[test]
     fn context_span_counts_transitive_dependencies_in_chain() {
         // main -> a -> b, so main reaches {a, b}.
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let entry = root.join("src").join("main.ts");
         let a = root.join("src").join("a.ts");
         let b = root.join("src").join("b.ts");
@@ -82,13 +74,12 @@ mod tests {
         assert_eq!(b.direct, 0);
         assert_eq!(b.transitive, 0);
         assert!(b.reachable.is_empty());
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn cycle_does_not_include_self_in_reachable_set() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let entry = root.join("src").join("main.ts");
         let a = root.join("src").join("a.ts");
         std::fs::create_dir_all(entry.parent().expect("parent")).expect("mkdir src");
@@ -109,13 +100,12 @@ mod tests {
         assert_eq!(main.direct, 1);
         assert_eq!(main.transitive, 1);
         assert_eq!(main.reachable, vec![ModulePath::new("crate::a")]);
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn skips_assets_and_counts_dynamic_import_targets() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let route = root.join("src").join("routes").join("index.tsx");
         let main = root.join("src").join("main.ts");
         let css = root.join("src").join("styles.css");
@@ -134,8 +124,6 @@ mod tests {
         assert_eq!(route.direct, 1);
         assert_eq!(route.transitive, 1);
         assert_eq!(route.reachable, vec![ModulePath::new("crate::main")]);
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

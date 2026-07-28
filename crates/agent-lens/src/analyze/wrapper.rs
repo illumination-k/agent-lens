@@ -15,7 +15,9 @@ use std::path::Path;
 use lens_domain::{ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
-use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::runner::{
+    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
+};
 use super::{AnalyzerError, OutputFormat, SourceFile, SourceLang, read_source};
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
@@ -36,7 +38,7 @@ impl WrapperAnalyzer {
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let files = self.collect_file_reports(path)?;
-        let report = Report::new(path, &files);
+        let report = build_report(path, &files);
         render_report(&report, format, || format_markdown(&report))
     }
 
@@ -257,42 +259,28 @@ struct FileReport {
     findings: Vec<WrapperFinding>,
 }
 
-#[derive(Debug, Serialize)]
-struct Report<'a> {
-    /// Input path: a single source file, or the root directory walked.
-    root: String,
-    file_count: usize,
-    wrapper_count: usize,
-    files: Vec<FileView<'a>>,
+/// Names wrapper's two report fields for the shared per-file report.
+#[derive(Debug)]
+struct WrapperShape;
+
+impl PerFileShape for WrapperShape {
+    const COUNT_FIELD: &'static str = "wrapper_count";
+    const ITEMS_FIELD: &'static str = "wrappers";
 }
 
-impl<'a> Report<'a> {
-    fn new(path: &Path, files: &'a [FileReport]) -> Self {
-        let wrapper_count = files.iter().map(|f| f.findings.len()).sum();
-        Self {
-            root: path.display().to_string(),
-            file_count: files.len(),
-            wrapper_count,
-            files: files.iter().map(FileView::from).collect(),
-        }
-    }
-}
+type Report<'a> = PerFileReport<'a, WrapperShape, WrapperView<'a>>;
 
-#[derive(Debug, Serialize)]
-struct FileView<'a> {
-    file: &'a str,
-    wrapper_count: usize,
-    wrappers: Vec<WrapperView<'a>>,
-}
-
-impl<'a> From<&'a FileReport> for FileView<'a> {
-    fn from(f: &'a FileReport) -> Self {
-        Self {
-            file: f.file.as_str(),
-            wrapper_count: f.findings.len(),
-            wrappers: f.findings.iter().map(WrapperView::from).collect(),
-        }
-    }
+fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
+    let views = files
+        .iter()
+        .map(|f| {
+            super::runner::FileView::new(
+                f.file.as_str(),
+                f.findings.iter().map(WrapperView::from).collect(),
+            )
+        })
+        .collect();
+    PerFileReport::new(path, views)
 }
 
 #[derive(Debug, Serialize)]
@@ -340,22 +328,20 @@ impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
 fn format_markdown(report: &Report<'_>) -> String {
     let mut out = format!(
         "# Wrapper report: {} ({} file(s), {} wrapper(s))\n",
-        report.root, report.file_count, report.wrapper_count,
+        report.root(),
+        report.file_count(),
+        report.item_count(),
     );
-    if report.wrapper_count == 0 {
+    if report.item_count() == 0 {
         out.push_str("\n_No thin forwarding wrappers found._\n");
         return out;
     }
-    for file in &report.files {
+    for file in report.files() {
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
-        let _ = writeln!(
-            out,
-            "\n## {} ({} wrapper(s))",
-            file.file, file.wrapper_count
-        );
-        for w in &file.wrappers {
+        let _ = writeln!(out, "\n## {} ({} wrapper(s))", file.file(), file.count());
+        for w in file.items() {
             // Body shape: callee chain plus optional adapter suffix.
             let body = if w.adapters.is_empty() {
                 format!("-> {}", w.callee)
