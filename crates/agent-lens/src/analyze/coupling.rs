@@ -23,6 +23,12 @@
 //! or a package directory, one source file is one module, and `import` /
 //! `from … import` statements become the edges.
 //!
+//! Module paths are reported in the analyzed language's own spelling —
+//! Go packages by `go.mod` import path, TS/JS and Python modules by
+//! their path relative to the module tree's source root — while the
+//! graph itself keeps one canonical shape. See
+//! [`super::module_label`].
+//!
 //! Limitations carried over from the underlying extractors:
 //!
 //! * Rust: `#[path = "..."]` attributes on `mod` declarations are not
@@ -50,6 +56,7 @@ use lens_domain::{
 use serde::Serialize;
 
 use super::module_graph::{GraphPolicy, build_graph, module_paths};
+use super::module_label::ModuleLabeler;
 use super::{AnalyzePathFilter, CouplingAnalyzerError, OutputFormat, format_optional_f64};
 
 /// Stateless analyzer entry point. Kept as a struct so per-run
@@ -101,7 +108,7 @@ impl CouplingAnalyzer {
             .edges
             .retain(|e| kept.contains(&e.from) && kept.contains(&e.to));
         let report = compute_report(&module_paths(&graph), graph.edges);
-        let view = ReportView::new(&graph.root, &report);
+        let view = ReportView::new(&graph.root, &graph.labeler, &report);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
@@ -109,6 +116,14 @@ impl CouplingAnalyzer {
             OutputFormat::Md => Ok(format_markdown(&view)),
         }
     }
+}
+
+/// A [`CouplingReport`] paired with the spelling its module paths should
+/// be rendered in. The report itself stays in the canonical `crate::a::b`
+/// shape; the labeler knows how the analyzed language writes that.
+pub(crate) struct LabeledReport {
+    pub(crate) report: CouplingReport,
+    pub(crate) labeler: ModuleLabeler,
 }
 
 /// Dispatch on language and compute the raw [`CouplingReport`] for `path`,
@@ -121,15 +136,17 @@ impl CouplingAnalyzer {
 /// direct `lens_rust::build_module_tree` call would be. `UnsupportedRoot`
 /// is folded into `None` because "this directory isn't the kind of root
 /// we analyze" is not an error worth surfacing at session start.
-pub(crate) fn report_for_path(
-    path: &Path,
-) -> Result<Option<CouplingReport>, CouplingAnalyzerError> {
+pub(crate) fn report_for_path(path: &Path) -> Result<Option<LabeledReport>, CouplingAnalyzerError> {
     let graph = match build_graph(path, GraphPolicy::COUPLING) {
         Ok(graph) => graph,
         Err(CouplingAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(Some(compute_report(&module_paths(&graph), graph.edges)))
+    let labeler = graph.labeler.clone();
+    Ok(Some(LabeledReport {
+        report: compute_report(&module_paths(&graph), graph.edges),
+        labeler,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -138,30 +155,46 @@ struct ReportView<'a> {
     module_count: usize,
     edge_count: usize,
     cycle_count: usize,
-    modules: Vec<ModuleView<'a>>,
+    modules: Vec<ModuleView>,
     edges: Vec<EdgeView<'a>>,
-    pairs: Vec<PairView<'a>>,
-    cycles: Vec<CycleView<'a>>,
+    pairs: Vec<PairView>,
+    cycles: Vec<CycleView>,
 }
 
 impl<'a> ReportView<'a> {
-    fn new(root: &Path, report: &'a CouplingReport) -> Self {
+    fn new(root: &Path, labeler: &ModuleLabeler, report: &'a CouplingReport) -> Self {
         Self {
             crate_root: root.display().to_string(),
             module_count: report.modules.len(),
             edge_count: report.number_of_couplings,
             cycle_count: report.cycles.len(),
-            modules: report.modules.iter().map(ModuleView::from).collect(),
-            edges: report.edges.iter().map(EdgeView::from).collect(),
-            pairs: report.pairs.iter().map(PairView::from).collect(),
-            cycles: report.cycles.iter().map(CycleView::from).collect(),
+            modules: report
+                .modules
+                .iter()
+                .map(|m| ModuleView::new(m, labeler))
+                .collect(),
+            edges: report
+                .edges
+                .iter()
+                .map(|e| EdgeView::new(e, labeler))
+                .collect(),
+            pairs: report
+                .pairs
+                .iter()
+                .map(|p| PairView::new(p, labeler))
+                .collect(),
+            cycles: report
+                .cycles
+                .iter()
+                .map(|c| CycleView::new(c, labeler))
+                .collect(),
         }
     }
 }
 
 #[derive(Debug, Serialize)]
-struct ModuleView<'a> {
-    path: &'a str,
+struct ModuleView {
+    path: String,
     fan_in: usize,
     fan_out: usize,
     ifc: u64,
@@ -171,10 +204,10 @@ struct ModuleView<'a> {
     instability: Option<f64>,
 }
 
-impl<'a> From<&'a ModuleMetrics> for ModuleView<'a> {
-    fn from(m: &'a ModuleMetrics) -> Self {
+impl ModuleView {
+    fn new(m: &ModuleMetrics, labeler: &ModuleLabeler) -> Self {
         Self {
-            path: m.path.as_str(),
+            path: labeler.label(&m.path),
             fan_in: m.fan_in,
             fan_out: m.fan_out,
             ifc: m.ifc,
@@ -184,33 +217,33 @@ impl<'a> From<&'a ModuleMetrics> for ModuleView<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct CycleView<'a> {
+struct CycleView {
     size: usize,
-    members: Vec<&'a str>,
+    members: Vec<String>,
 }
 
-impl<'a> From<&'a DependencyCycle> for CycleView<'a> {
-    fn from(c: &'a DependencyCycle) -> Self {
+impl CycleView {
+    fn new(c: &DependencyCycle, labeler: &ModuleLabeler) -> Self {
         Self {
             size: c.members.len(),
-            members: c.members.iter().map(ModulePath::as_str).collect(),
+            members: c.members.iter().map(|m| labeler.label(m)).collect(),
         }
     }
 }
 
 #[derive(Debug, Serialize)]
 struct EdgeView<'a> {
-    from: &'a str,
-    to: &'a str,
+    from: String,
+    to: String,
     symbol: &'a str,
     kind: &'static str,
 }
 
-impl<'a> From<&'a CouplingEdge> for EdgeView<'a> {
-    fn from(e: &'a CouplingEdge) -> Self {
+impl<'a> EdgeView<'a> {
+    fn new(e: &'a CouplingEdge, labeler: &ModuleLabeler) -> Self {
         Self {
-            from: e.from.as_str(),
-            to: e.to.as_str(),
+            from: labeler.label(&e.from),
+            to: labeler.label(&e.to),
             symbol: e.symbol.as_str(),
             kind: e.kind.as_str(),
         }
@@ -218,17 +251,17 @@ impl<'a> From<&'a CouplingEdge> for EdgeView<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct PairView<'a> {
-    a: &'a str,
-    b: &'a str,
+struct PairView {
+    a: String,
+    b: String,
     shared_symbols: usize,
 }
 
-impl<'a> From<&'a PairCoupling> for PairView<'a> {
-    fn from(p: &'a PairCoupling) -> Self {
+impl PairView {
+    fn new(p: &PairCoupling, labeler: &ModuleLabeler) -> Self {
         Self {
-            a: p.a.as_str(),
-            b: p.b.as_str(),
+            a: labeler.label(&p.a),
+            b: labeler.label(&p.b),
             shared_symbols: p.shared_symbols,
         }
     }
@@ -251,20 +284,20 @@ fn format_markdown(view: &ReportView<'_>) -> String {
     out
 }
 
-fn render_modules_table(out: &mut String, modules: &[ModuleView<'_>]) {
+fn render_modules_table(out: &mut String, modules: &[ModuleView]) {
     // writeln! into a String cannot fail; the result is swallowed
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
     let _ = writeln!(out, "\n## Modules (by IFC desc)\n");
     let _ = writeln!(out, "| module | fan_in | fan_out | ifc | instability |");
     let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
-    let mut sorted: Vec<&ModuleView<'_>> = modules.iter().collect();
+    let mut sorted: Vec<&ModuleView> = modules.iter().collect();
     sorted.sort_by(|a, b| {
         b.ifc
             .cmp(&a.ifc)
             .then_with(|| b.fan_in.cmp(&a.fan_in))
             .then_with(|| b.fan_out.cmp(&a.fan_out))
-            .then_with(|| a.path.cmp(b.path))
+            .then_with(|| a.path.cmp(&b.path))
     });
     for m in sorted {
         let _ = writeln!(
@@ -279,7 +312,7 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView<'_>]) {
     }
 }
 
-fn render_cycles(out: &mut String, cycles: &[CycleView<'_>]) {
+fn render_cycles(out: &mut String, cycles: &[CycleView]) {
     if cycles.is_empty() {
         return;
     }
@@ -289,7 +322,7 @@ fn render_cycles(out: &mut String, cycles: &[CycleView<'_>]) {
     }
 }
 
-fn render_pairs(out: &mut String, pairs: &[PairView<'_>]) {
+fn render_pairs(out: &mut String, pairs: &[PairView]) {
     if pairs.is_empty() {
         return;
     }
@@ -683,14 +716,10 @@ mod tests {
         assert_eq!(parsed["module_count"], 2);
         assert!(parsed["edge_count"].as_u64().unwrap() >= 1);
         let modules = parsed["modules"].as_array().unwrap();
-        let main_m = modules
-            .iter()
-            .find(|m| m["path"] == "crate::main")
-            .expect("crate::main");
-        let util_m = modules
-            .iter()
-            .find(|m| m["path"] == "crate::util")
-            .expect("crate::util");
+        // TS modules are files, so they are labelled with their path
+        // relative to the module tree's source root — not `crate::…`.
+        let main_m = modules.iter().find(|m| m["path"] == "main").expect("main");
+        let util_m = modules.iter().find(|m| m["path"] == "util").expect("util");
         assert!(main_m["fan_out"].as_u64().unwrap() >= 1);
         assert_eq!(main_m["fan_in"], 0);
         // util is depended on, so I = 0 (fully stable).
@@ -700,8 +729,7 @@ mod tests {
 
         let pairs = parsed["pairs"].as_array().unwrap();
         assert!(pairs.iter().any(|p| {
-            (p["a"] == "crate::main" && p["b"] == "crate::util")
-                || (p["a"] == "crate::util" && p["b"] == "crate::main")
+            (p["a"] == "main" && p["b"] == "util") || (p["a"] == "util" && p["b"] == "main")
         }));
     }
 
@@ -734,8 +762,8 @@ mod tests {
             .iter()
             .map(|m| m.as_str().unwrap())
             .collect();
-        assert!(members.contains(&"crate::a"));
-        assert!(members.contains(&"crate::b"));
+        assert!(members.contains(&"a"));
+        assert!(members.contains(&"b"));
     }
 
     #[test]
@@ -759,8 +787,12 @@ mod tests {
             .unwrap();
         assert!(md.contains("# Coupling report:"));
         assert!(md.contains("## Modules"));
-        assert!(md.contains("crate::main"));
-        assert!(md.contains("crate::util"));
+        assert!(md.contains("| main |"));
+        assert!(md.contains("| util |"));
+        assert!(
+            !md.contains("crate::"),
+            "TS rows must not be Rust-spelled: {md}"
+        );
         assert!(md.contains("Top coupled pairs"));
     }
 
@@ -791,12 +823,12 @@ mod tests {
             .iter()
             .map(|m| m["path"].as_str().unwrap())
             .collect();
-        assert!(modules.contains(&"crate::main"));
-        assert!(!modules.contains(&"crate::generated"));
+        assert!(modules.contains(&"main"));
+        assert!(!modules.contains(&"generated"));
         // No edges should reference the dropped module.
         for e in parsed["edges"].as_array().unwrap() {
-            assert_ne!(e["from"], "crate::generated");
-            assert_ne!(e["to"], "crate::generated");
+            assert_ne!(e["from"], "generated");
+            assert_ne!(e["to"], "generated");
         }
     }
 
@@ -829,14 +861,18 @@ mod tests {
             .iter()
             .map(|m| m["path"].as_str().unwrap())
             .collect();
-        assert!(modules.contains(&"crate"));
-        assert!(modules.contains(&"crate::pkg::util"));
+        // Go packages are named by import path, taken from `go.mod`.
+        assert!(modules.contains(&"github.com/x/proj"), "got {modules:?}");
+        assert!(
+            modules.contains(&"github.com/x/proj/pkg/util"),
+            "got {modules:?}",
+        );
         assert!(parsed["edge_count"].as_u64().unwrap() >= 1);
         let util = parsed["modules"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|m| m["path"] == "crate::pkg::util")
+            .find(|m| m["path"] == "github.com/x/proj/pkg/util")
             .expect("util module");
         // util is depended on by main, so I = 0 (fully stable).
         assert_eq!(util["instability"].as_f64().unwrap(), 0.0);
@@ -893,13 +929,14 @@ mod tests {
             .iter()
             .map(|m| m["path"].as_str().unwrap())
             .collect();
-        assert!(modules.contains(&"crate::app"), "got {modules:?}");
-        assert!(modules.contains(&"crate::util::text"), "got {modules:?}");
+        // Python modules are spelled with dots, relative to the root.
+        assert!(modules.contains(&"app"), "got {modules:?}");
+        assert!(modules.contains(&"util.text"), "got {modules:?}");
         // `import os` is stdlib and resolves to nothing in-tree, so the
         // only edge is app -> util.text.
         assert_eq!(parsed["edge_count"], 1);
-        assert_eq!(parsed["edges"][0]["from"], "crate::app");
-        assert_eq!(parsed["edges"][0]["to"], "crate::util::text");
+        assert_eq!(parsed["edges"][0]["from"], "app");
+        assert_eq!(parsed["edges"][0]["to"], "util.text");
     }
 
     #[test]

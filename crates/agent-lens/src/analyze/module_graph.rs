@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use lens_domain::{CouplingEdge, ModulePath};
 
+use super::module_label::ModuleLabeler;
 use super::{CrateAnalyzerError, SourceLang, resolve_crate_root};
 
 /// One module in the graph, paired with the file it was read from.
@@ -27,17 +28,28 @@ pub(crate) struct ModuleFile {
 }
 
 /// A language-agnostic module dependency graph.
+///
+/// Module paths are stored in the canonical `crate::a::b` shape every
+/// adapter emits; `labeler` carries the language's own spelling of that
+/// shape and is applied when a report is rendered.
 #[derive(Debug)]
 pub(crate) struct ModuleGraph {
     pub(crate) root: PathBuf,
+    pub(crate) labeler: ModuleLabeler,
     pub(crate) modules: Vec<ModuleFile>,
     pub(crate) edges: Vec<CouplingEdge>,
 }
 
 impl ModuleGraph {
-    fn new<M: Into<ModuleFile>>(root: PathBuf, modules: Vec<M>, edges: Vec<CouplingEdge>) -> Self {
+    fn new<M: Into<ModuleFile>>(
+        root: PathBuf,
+        labeler: ModuleLabeler,
+        modules: Vec<M>,
+        edges: Vec<CouplingEdge>,
+    ) -> Self {
         Self {
             root,
+            labeler,
             modules: modules.into_iter().map(Into::into).collect(),
             edges,
         }
@@ -142,13 +154,23 @@ pub(crate) fn build_rust_graph(path: &Path) -> Result<ModuleGraph, CrateAnalyzer
     let root = resolve_crate_root(path)?;
     let modules = lens_rust::build_module_tree(&root)?;
     let edges = lens_rust::extract_edges(&modules);
-    Ok(ModuleGraph::new(root, modules, edges))
+    Ok(ModuleGraph::new(
+        root,
+        ModuleLabeler::rust(),
+        modules,
+        edges,
+    ))
 }
 
 pub(crate) fn build_ts_graph(path: &Path) -> Result<ModuleGraph, CrateAnalyzerError> {
     let modules = lens_ts::build_module_tree(path)?;
     let edges = lens_ts::extract_edges(&modules);
-    Ok(ModuleGraph::new(path.to_path_buf(), modules, edges))
+    Ok(ModuleGraph::new(
+        path.to_path_buf(),
+        ModuleLabeler::typescript(),
+        modules,
+        edges,
+    ))
 }
 
 /// Python is reached without a root marker — either an explicit `.py`
@@ -161,7 +183,12 @@ fn build_python_graph(path: &Path) -> Result<ModuleGraph, CrateAnalyzerError> {
         return Err(unsupported_root(path));
     }
     let edges = lens_py::extract_edges(&modules);
-    Ok(ModuleGraph::new(path.to_path_buf(), modules, edges))
+    Ok(ModuleGraph::new(
+        path.to_path_buf(),
+        ModuleLabeler::python(),
+        modules,
+        edges,
+    ))
 }
 
 fn build_go_graph(path: &Path, policy: GraphPolicy) -> Result<ModuleGraph, CrateAnalyzerError> {
@@ -169,8 +196,17 @@ fn build_go_graph(path: &Path, policy: GraphPolicy) -> Result<ModuleGraph, Crate
     if policy.empty_go_module_is_unsupported && modules.is_empty() {
         return Err(unsupported_root(path));
     }
+    // The `go.mod` module directive is what turns a package's relative
+    // position into the import path an agent would actually type, so it
+    // is read for labelling even though edge resolution reads it too.
+    let labeler = ModuleLabeler::go(lens_golang::module_prefix(&modules));
     let edges = lens_golang::extract_edges(&modules);
-    Ok(ModuleGraph::new(path.to_path_buf(), modules, edges))
+    Ok(ModuleGraph::new(
+        path.to_path_buf(),
+        labeler,
+        modules,
+        edges,
+    ))
 }
 
 fn unsupported_root(path: &Path) -> CrateAnalyzerError {

@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use lens_domain::{CouplingReport, DependencyCycle, ModuleMetrics, PairCoupling};
 use tracing::warn;
 
+use crate::analyze::coupling::LabeledReport;
+use crate::analyze::module_label::ModuleLabeler;
 use crate::analyze::{HotspotAnalyzer, HotspotError, OutputFormat};
 
 /// How many hotspot rows to include in the injected report.
@@ -155,8 +157,8 @@ impl HotspotRow {
 /// lets Go (and any future directory-detectable language) get a coupling
 /// thumbnail at session start instead of Rust only.
 fn render_coupling_section(cwd: &Path) -> Result<Option<String>, SessionSummaryError> {
-    let report = match crate::analyze::coupling::report_for_path(cwd) {
-        Ok(Some(report)) => report,
+    let LabeledReport { report, labeler } = match crate::analyze::coupling::report_for_path(cwd) {
+        Ok(Some(labeled)) => labeled,
         Ok(None) => return Ok(None),
         Err(e) => return Err(SessionSummaryError::Coupling(e)),
     };
@@ -165,10 +167,10 @@ fn render_coupling_section(cwd: &Path) -> Result<Option<String>, SessionSummaryE
         return Ok(None);
     }
 
-    Ok(Some(format_coupling(&report)))
+    Ok(Some(format_coupling(&report, &labeler)))
 }
 
-fn format_coupling(report: &CouplingReport) -> String {
+fn format_coupling(report: &CouplingReport, labeler: &ModuleLabeler) -> String {
     let mut out = format!(
         "## Coupling ({} module(s), {} edge(s), {} cycle(s))\n",
         report.modules.len(),
@@ -183,7 +185,7 @@ fn format_coupling(report: &CouplingReport) -> String {
             let _ = writeln!(
                 out,
                 "- {} (fan_in={}, fan_out={}, ifc={})",
-                m.path.as_str(),
+                labeler.label(&m.path),
                 m.fan_in,
                 m.fan_out,
                 m.ifc,
@@ -194,7 +196,7 @@ fn format_coupling(report: &CouplingReport) -> String {
     if !report.cycles.is_empty() {
         let _ = writeln!(out, "\nDependency cycles:");
         for cycle in &report.cycles {
-            let _ = writeln!(out, "- {}", format_cycle(cycle));
+            let _ = writeln!(out, "- {}", format_cycle(cycle, labeler));
         }
     }
 
@@ -205,8 +207,8 @@ fn format_coupling(report: &CouplingReport) -> String {
             let _ = writeln!(
                 out,
                 "- {} ↔ {} ({} shared symbol(s))",
-                p.a.as_str(),
-                p.b.as_str(),
+                labeler.label(&p.a),
+                labeler.label(&p.b),
                 p.shared_symbols,
             );
         }
@@ -232,12 +234,8 @@ fn top_modules_by_ifc(modules: &[ModuleMetrics]) -> Vec<&ModuleMetrics> {
     sorted
 }
 
-fn format_cycle(cycle: &DependencyCycle) -> String {
-    let names: Vec<&str> = cycle
-        .members
-        .iter()
-        .map(lens_domain::ModulePath::as_str)
-        .collect();
+fn format_cycle(cycle: &DependencyCycle, labeler: &ModuleLabeler) -> String {
+    let names: Vec<String> = cycle.members.iter().map(|m| labeler.label(m)).collect();
     format!("{} module(s): {}", cycle.members.len(), names.join(" → "))
 }
 
@@ -303,7 +301,14 @@ mod tests {
             .expect("coupling section should not error")
             .expect("Go module should yield a coupling section");
         assert!(section.contains("## Coupling"), "got {section}");
-        assert!(section.contains("crate::pkg::util"), "got {section}");
+        // The injected thumbnail is the first thing an agent reads in a
+        // fresh session, so Go packages have to be named the way Go
+        // names them — by import path, not with a Rust `crate::` root.
+        assert!(
+            section.contains("github.com/x/proj/pkg/util"),
+            "got {section}",
+        );
+        assert!(!section.contains("crate::"), "got {section}");
     }
 
     #[test]
@@ -384,7 +389,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            format_cycle(&cycle),
+            format_cycle(&cycle, &ModuleLabeler::rust()),
             "3 module(s): crate::a → crate::b → crate::c",
         );
     }
@@ -392,7 +397,7 @@ mod tests {
     #[test]
     fn format_coupling_includes_top_modules_section_when_non_empty() {
         let r = report(vec![module("crate::hub", 2, 2, 16)], Vec::new());
-        let out = format_coupling(&r);
+        let out = format_coupling(&r, &ModuleLabeler::rust());
         assert!(out.contains("Top modules by IFC:"), "got {out}");
         assert!(
             out.contains("crate::hub (fan_in=2, fan_out=2, ifc=16)"),
@@ -403,7 +408,7 @@ mod tests {
     #[test]
     fn format_coupling_omits_top_modules_section_when_only_zero_ifc() {
         let r = report(vec![module("crate::leaf", 0, 1, 0)], Vec::new());
-        let out = format_coupling(&r);
+        let out = format_coupling(&r, &ModuleLabeler::rust());
         assert!(
             !out.contains("Top modules by IFC:"),
             "should skip empty section: {out}",
@@ -416,7 +421,7 @@ mod tests {
             members: vec![ModulePath::new("crate::a"), ModulePath::new("crate::b")],
         };
         let r = report(Vec::new(), vec![cycle]);
-        let out = format_coupling(&r);
+        let out = format_coupling(&r, &ModuleLabeler::rust());
         assert!(out.contains("Dependency cycles:"), "got {out}");
         assert!(out.contains("crate::a → crate::b"), "got {out}");
     }
@@ -424,7 +429,7 @@ mod tests {
     #[test]
     fn format_coupling_omits_cycles_section_when_empty() {
         let r = report(Vec::new(), Vec::new());
-        let out = format_coupling(&r);
+        let out = format_coupling(&r, &ModuleLabeler::rust());
         assert!(
             !out.contains("Dependency cycles:"),
             "should skip empty section: {out}",
