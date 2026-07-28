@@ -227,6 +227,29 @@ fn doc_overlap_summary(cluster: &ClusterView<'_>) -> String {
     )
 }
 
+/// Cluster-level rollup of the per-pair identifier overlap, or `None`
+/// when no pair carries one (both sides need a signature shape).
+///
+/// Reported unconditionally, unlike doc overlap: it is already computed
+/// for scoring, so it costs nothing, and it is what tells the reader
+/// which refactor a cluster calls for. Identifiers matching as well as
+/// bodies means a verbatim clone, deletable today; identifiers diverging
+/// under an identical body means same-shape / different-entity
+/// boilerplate, where the answer is a generic helper or nothing.
+fn identifier_overlap_summary(cluster: &ClusterView<'_>) -> Option<String> {
+    let scored: Vec<f64> = cluster
+        .pairs
+        .iter()
+        .filter_map(|p| p.identifier_overlap)
+        .collect();
+    let (min, max) = min_max(&scored)?;
+    Some(format!(
+        "identifier overlap {:.0}–{:.0}%",
+        min * 100.0,
+        max * 100.0,
+    ))
+}
+
 /// Span of a slice of scores, or `None` when there are none to span.
 fn min_max(values: &[f64]) -> Option<(f64, f64)> {
     let first = *values.first()?;
@@ -284,9 +307,13 @@ pub(super) fn format_markdown(
 }
 
 /// The one-line summary heading a cluster's member list: size, the
-/// similarity band, then the optional annotations — doc overlap when
-/// asked for, and the sweep survival rung when sweeping.
+/// similarity band, the identifier-overlap band, then the optional
+/// annotations — doc overlap when asked for, and the sweep survival
+/// rung when sweeping.
 fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool) -> String {
+    let identifier_tag = identifier_overlap_summary(cluster)
+        .map(|summary| format!(", {summary}"))
+        .unwrap_or_default();
     let doc_tag = if doc_overlap {
         format!(", {}", doc_overlap_summary(cluster))
     } else {
@@ -297,7 +324,7 @@ fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool) -> String {
         .map(|rung| format!(" [survives ≥{rung:.2}]"))
         .unwrap_or_default();
     format!(
-        "{} functions, similarity {:.0}–{:.0}%{doc_tag}{survival_tag}",
+        "{} functions, similarity {:.0}–{:.0}%{identifier_tag}{doc_tag}{survival_tag}",
         cluster.size,
         cluster.min_similarity * 100.0,
         cluster.max_similarity * 100.0,
@@ -449,6 +476,76 @@ mod tests {
             ],
         );
         assert_eq!(sorted_pair_key(2, 0), (0, 2));
+    }
+
+    /// Cluster carrying only the per-pair identifier scores the rollup
+    /// reads, with a fixed similarity band so the headline is stable.
+    fn cluster_with_identifier_scores(scores: &[Option<f64>]) -> ClusterView<'static> {
+        let f = FunctionRef {
+            file: "lib.rs",
+            name: "alpha",
+            start_line: 1,
+            end_line: 5,
+            is_test: false,
+        };
+        ClusterView {
+            size: 2,
+            min_similarity: 0.9,
+            max_similarity: 0.9,
+            survives_at_threshold: None,
+            functions: Vec::new(),
+            pairs: scores
+                .iter()
+                .map(|&identifier_overlap| PairView {
+                    a: f,
+                    b: f,
+                    similarity: 0.9,
+                    body_similarity: 0.9,
+                    signature_similarity: None,
+                    type_overlap: None,
+                    identifier_overlap,
+                    doc_overlap: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[rstest]
+    #[case::verbatim_clone(&[Some(1.0)], Some("identifier overlap 100–100%"))]
+    #[case::parameterised_repetition(
+        &[Some(0.2), Some(0.5), Some(0.33)],
+        Some("identifier overlap 20–50%")
+    )]
+    // Both sides need a signature shape; without one there is nothing
+    // to report and the headline drops the tag rather than showing 0%.
+    #[case::unscored(&[None, None], None)]
+    #[case::no_pairs(&[], None)]
+    fn identifier_overlap_summary_spans_the_scored_pairs(
+        #[case] scores: &[Option<f64>],
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(
+            identifier_overlap_summary(&cluster_with_identifier_scores(scores)).as_deref(),
+            expected,
+        );
+    }
+
+    /// The regression the tag exists for: two clusters that are
+    /// indistinguishable by the similarity band alone, and that call
+    /// for different refactors.
+    #[test]
+    fn headline_separates_verbatim_clones_from_parameterised_repetition() {
+        let clone = cluster_with_identifier_scores(&[Some(1.0)]);
+        let boilerplate = cluster_with_identifier_scores(&[Some(0.2), Some(0.5)]);
+
+        assert_eq!(
+            cluster_headline(&clone, false),
+            "2 functions, similarity 90–90%, identifier overlap 100–100%",
+        );
+        assert_eq!(
+            cluster_headline(&boilerplate, false),
+            "2 functions, similarity 90–90%, identifier overlap 20–50%",
+        );
     }
 
     /// Cluster carrying only the per-pair doc scores the rollup reads.
