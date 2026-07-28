@@ -1237,6 +1237,173 @@ pub mod work {
         );
     }
 
+    /// The deprecation exemption reads the doc text, so a documented
+    /// hop that says nothing about deprecation has to stay a hop —
+    /// otherwise the exemption would swallow every documented forwarder.
+    #[test]
+    fn a_doc_that_does_not_say_deprecated_leaves_the_hop_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod api {
+    /// Save the record. Callers should prefer this entry point.
+    pub fn save(id: usize) -> usize { crate::service::save(id) }
+}
+pub mod service {
+    /// Hand the record to the store.
+    pub fn save(id: usize) -> usize { crate::db::insert(id) }
+    pub fn extra(id: usize) -> usize { id }
+}
+pub mod db {
+    pub fn insert(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["audit"]["deprecated_exempt_count"], 0, "{report}");
+        assert_eq!(
+            chain_paths(&report),
+            vec![vec![
+                "crate::api::save".to_owned(),
+                "crate::service::save".to_owned(),
+                "crate::db::insert".to_owned(),
+            ]],
+        );
+    }
+
+    /// The pass-through fact comes from the language's own wrapper
+    /// detector, joined back to the graph by name *and* line span. Two
+    /// functions can share a file-local name, so the span is what keeps
+    /// one's verdict off the other.
+    #[test]
+    fn the_pass_through_fact_lands_on_the_function_the_detector_meant() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod forwarding {
+    pub fn save(id: usize) -> usize { crate::db::insert(id) }
+}
+pub mod composing {
+    pub fn save(id: usize) -> usize { crate::forwarding::save(id + 1) }
+}
+pub mod db {
+    pub fn insert(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+
+        let report = analyze_json(dir.path());
+        let hops = report["chains"][0]["hops"].as_array().unwrap();
+        assert_eq!(hops[0]["qualified_name"], "crate::composing::save");
+        assert_eq!(
+            hops[0]["pass_through"], false,
+            "it changes the argument, so the detector rejected it: {report}",
+        );
+        assert_eq!(hops[1]["qualified_name"], "crate::forwarding::save");
+        assert_eq!(
+            hops[1]["pass_through"], true,
+            "the same-named function one module over does forward: {report}",
+        );
+        assert_eq!(report["chains"][0]["pass_through_hop_count"], 1);
+    }
+
+    /// The shared path filters reach the graph this analyzer builds
+    /// on: an excluded file takes its hop out of the chain, and
+    /// `--only-tests` leaves nothing to report at all, since a test
+    /// function is never a delegator.
+    #[rstest]
+    #[case::exclude_patterns(&["src/service.rs"], false)]
+    #[case::only_tests(&[], true)]
+    fn the_path_filters_reach_the_graph(#[case] exclude: &[&str], #[case] only_tests: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod api;\npub mod service;\npub mod db;\n",
+        );
+        write_file(
+            dir.path(),
+            "src/api.rs",
+            "pub fn save(id: usize) -> usize { crate::service::save(id) }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/service.rs",
+            "pub fn save(id: usize) -> usize { crate::db::insert(id) }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/db.rs",
+            "pub fn insert(id: usize) -> usize { id + 1 }\npub fn extra(id: usize) -> usize { id }\n",
+        );
+
+        let json = DelegationAnalyzer::new()
+            .with_exclude_patterns(exclude.iter().map(|p| (*p).to_owned()).collect())
+            .with_only_tests(only_tests)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            chain_paths(&report).is_empty(),
+            "the filter took the chain out of the graph: {report}",
+        );
+        let unfiltered = analyze_json(dir.path());
+        assert_eq!(
+            chain_paths(&unfiltered).len(),
+            1,
+            "and the same tree unfiltered still has it: {unfiltered}",
+        );
+    }
+
+    /// `--exclude-tests` drops test files, and with them the callers
+    /// that live there — so a hop only tests call stops reporting work
+    /// to move.
+    #[test]
+    fn excluding_tests_drops_the_callers_that_live_in_them() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod api {
+    pub fn save(id: usize) -> usize { crate::service::save(id) }
+}
+pub mod service {
+    pub fn save(id: usize) -> usize { crate::db::insert(id) }
+}
+pub mod db {
+    pub fn insert(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn calls_the_middle_hop() { let _ = crate::service::save(1); }
+}
+",
+        );
+
+        let hop_callers = |exclude_tests: bool| {
+            let json = DelegationAnalyzer::new()
+                .with_exclude_tests(exclude_tests)
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap();
+            let report: Value = serde_json::from_str(&json).unwrap();
+            report["chains"][0]["hops"][1]["caller_count"].as_u64()
+        };
+
+        assert_eq!(hop_callers(false), Some(1), "the test calls it");
+        assert_eq!(
+            hop_callers(true),
+            Some(0),
+            "with tests out of the graph, only the hop above calls it",
+        );
+    }
+
     /// The cost a chain imposes is measured in files, so a chain whose
     /// hops sit in different files is counted apart from one that does
     /// not leave its own.
@@ -1662,13 +1829,18 @@ pub mod work {
 ",
         );
 
-        let depths: Vec<usize> = analyze_json(dir.path())["chains"]
+        let report = analyze_json(dir.path());
+        let depths: Vec<usize> = report["chains"]
             .as_array()
             .unwrap()
             .iter()
             .map(|chain| chain["depth"].as_u64().unwrap() as usize)
             .collect();
         assert_eq!(depths, vec![3, 2]);
+        assert_eq!(
+            report["audit"]["single_hop_count"], 0,
+            "a two-hop chain is a chain, not a wrapper: {report}",
+        );
     }
 
     #[test]
