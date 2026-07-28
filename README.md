@@ -545,6 +545,23 @@ new handlers to plug into the same plumbing.
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
+`coupling` and `context-span` name each module the way the analyzed
+language names it. Internally every adapter emits the same
+`crate::a::b` shape so the graph algorithms stay language-neutral; the
+spelling is applied when the report is rendered:
+
+| Language                | Root module         | Nested module                      |
+| ----------------------- | ------------------- | ---------------------------------- |
+| Rust                    | `crate`             | `crate::analyze::coupling`         |
+| Go (with `go.mod`)      | `github.com/x/proj` | `github.com/x/proj/internal/store` |
+| Go (no `go.mod`)        | `.`                 | `internal/store`                   |
+| TypeScript / JavaScript | `.`                 | `components/Chat`                  |
+| Python                  | `.`                 | `util.text`                        |
+
+TS/JS and Python modules are one-per-file, so their labels are the file's
+path relative to the module tree's source root. The same spelling is used
+in the `SessionStart` coupling thumbnail.
+
 For `complexity`, `cohesion`, `similarity`, `hotspot`, `hubs`, `impact`,
 `layers`, `untested`, and `visibility`, `--top` caps the
 Markdown ranking while JSON stays complete. `--min-score` filters the Markdown

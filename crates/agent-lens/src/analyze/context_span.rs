@@ -18,6 +18,9 @@
 //! Cycles are handled — a module never counts itself in its own
 //! transitive set, even when the graph loops back.
 //!
+//! Module paths are reported in the analyzed language's own spelling;
+//! see [`super::module_label`].
+//!
 //! Rust limitations are inherited from the coupling extractor:
 //! `#[path = ".."]` attributes are not honoured, cross-crate references
 //! are dropped, macro-generated items are invisible, and non-standard
@@ -42,6 +45,7 @@ use tracing::warn;
 
 use super::error_from::impl_from_coupling_error;
 use super::module_graph::{GraphPolicy, ModuleFile, ModuleGraph, build_graph};
+use super::module_label::ModuleLabeler;
 use super::{AnalyzePathFilter, OutputFormat, SourceLang, module_graph, relative_display_path};
 
 #[derive(Debug, thiserror::Error)]
@@ -170,7 +174,7 @@ impl ContextSpanAnalyzer {
         let module_paths = module_graph::module_paths(&graph);
         let report = compute_report(&module_paths, graph.edges);
         let spans = compute_context_spans(&module_paths, &report.edges);
-        let view = ReportView::new(&graph.root, &spans, &graph.modules);
+        let view = ReportView::new(&graph.root, &graph.labeler, &spans, &graph.modules);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(ContextSpanAnalyzerError::Serialize)
@@ -237,6 +241,7 @@ fn build_ts_graph_from_entry_globs(
 
     Ok(ModuleGraph {
         root: root.to_path_buf(),
+        labeler: ModuleLabeler::typescript(),
         modules: modules_by_file.into_values().collect(),
         edges: all_edges,
     })
@@ -284,18 +289,23 @@ fn compile_entry_globs(patterns: &[String]) -> Result<GlobSet, ContextSpanAnalyz
 }
 
 #[derive(Debug, Serialize)]
-struct ReportView<'a> {
+struct ReportView {
     crate_root: String,
     module_count: usize,
-    modules: Vec<ModuleSpanView<'a>>,
+    modules: Vec<ModuleSpanView>,
 }
 
-impl<'a> ReportView<'a> {
-    fn new(root: &Path, spans: &'a ContextSpanReport, modules: &[ModuleFile]) -> Self {
+impl ReportView {
+    fn new(
+        root: &Path,
+        labeler: &ModuleLabeler,
+        spans: &ContextSpanReport,
+        modules: &[ModuleFile],
+    ) -> Self {
         let module_views = spans
             .modules
             .iter()
-            .map(|s| ModuleSpanView::new(s, modules))
+            .map(|s| ModuleSpanView::new(s, labeler, modules))
             .collect();
         Self {
             crate_root: root.display().to_string(),
@@ -306,26 +316,26 @@ impl<'a> ReportView<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct ModuleSpanView<'a> {
-    path: &'a str,
+struct ModuleSpanView {
+    path: String,
     direct: usize,
     transitive: usize,
     /// Distinct source files the transitive closure spans, excluding
     /// this module's own file. Multiple inline modules in the same
     /// parent file collapse to one count here.
     files: usize,
-    reachable: Vec<&'a str>,
+    reachable: Vec<String>,
 }
 
-impl<'a> ModuleSpanView<'a> {
-    fn new(span: &'a ModuleContextSpan, modules: &[ModuleFile]) -> Self {
+impl ModuleSpanView {
+    fn new(span: &ModuleContextSpan, labeler: &ModuleLabeler, modules: &[ModuleFile]) -> Self {
         let files = transitive_file_count(&span.path, &span.reachable, modules);
         Self {
-            path: span.path.as_str(),
+            path: labeler.label(&span.path),
             direct: span.direct,
             transitive: span.transitive,
             files,
-            reachable: span.reachable.iter().map(ModulePath::as_str).collect(),
+            reachable: span.reachable.iter().map(|p| labeler.label(p)).collect(),
         }
     }
 }
@@ -361,7 +371,7 @@ fn transitive_file_count(
 
 const TOP_REACHABLE_LIMIT: usize = 5;
 
-fn format_markdown(view: &ReportView<'_>) -> String {
+fn format_markdown(view: &ReportView) -> String {
     let mut out = format!(
         "# Context span report: {} ({} module(s))\n",
         view.crate_root, view.module_count,
@@ -374,19 +384,19 @@ fn format_markdown(view: &ReportView<'_>) -> String {
     out
 }
 
-fn render_modules_table(out: &mut String, modules: &[ModuleSpanView<'_>]) {
+fn render_modules_table(out: &mut String, modules: &[ModuleSpanView]) {
     // writeln! into a String cannot fail; the result is swallowed
     // deliberately to satisfy the workspace's `unwrap_used` lint.
     let _ = writeln!(out, "\n## Modules (by transitive desc)\n");
     let _ = writeln!(out, "| module | direct | transitive | files | reachable |");
     let _ = writeln!(out, "| --- | ---: | ---: | ---: | --- |");
-    let mut sorted: Vec<&ModuleSpanView<'_>> = modules.iter().collect();
+    let mut sorted: Vec<&ModuleSpanView> = modules.iter().collect();
     sorted.sort_by(|a, b| {
         b.transitive
             .cmp(&a.transitive)
             .then_with(|| b.files.cmp(&a.files))
             .then_with(|| b.direct.cmp(&a.direct))
-            .then_with(|| a.path.cmp(b.path))
+            .then_with(|| a.path.cmp(&b.path))
     });
     for m in sorted {
         let preview = reachable_preview(&m.reachable);
@@ -398,12 +408,16 @@ fn render_modules_table(out: &mut String, modules: &[ModuleSpanView<'_>]) {
     }
 }
 
-fn reachable_preview(reachable: &[&str]) -> String {
+fn reachable_preview(reachable: &[String]) -> String {
     if reachable.is_empty() {
         return "—".to_owned();
     }
-    let head: Vec<&&str> = reachable.iter().take(TOP_REACHABLE_LIMIT).collect();
-    let mut s = head.iter().map(|x| **x).collect::<Vec<_>>().join(", ");
+    let mut s = reachable
+        .iter()
+        .take(TOP_REACHABLE_LIMIT)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
     if reachable.len() > TOP_REACHABLE_LIMIT {
         let _ = write!(s, ", … (+{} more)", reachable.len() - TOP_REACHABLE_LIMIT);
     }
@@ -501,7 +515,7 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let modules = parsed["modules"].as_array().unwrap();
-        let main = modules.iter().find(|m| m["path"] == "crate::main").unwrap();
+        let main = modules.iter().find(|m| m["path"] == "main").unwrap();
         assert_eq!(main["direct"].as_u64().unwrap(), 1);
         assert_eq!(main["transitive"].as_u64().unwrap(), 2);
         assert_eq!(main["files"].as_u64().unwrap(), 2);
@@ -511,8 +525,8 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(reachable.contains(&"crate::a"));
-        assert!(reachable.contains(&"crate::b"));
+        assert!(reachable.contains(&"a"));
+        assert!(reachable.contains(&"b"));
     }
 
     #[test]
@@ -536,7 +550,10 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let modules = parsed["modules"].as_array().unwrap();
-        let a = modules.iter().find(|m| m["path"] == "crate::a").unwrap();
+        let a = modules
+            .iter()
+            .find(|m| m["path"] == "github.com/x/proj/a")
+            .unwrap();
         assert_eq!(a["direct"].as_u64().unwrap(), 1);
         assert_eq!(a["transitive"].as_u64().unwrap(), 2);
         assert_eq!(a["files"].as_u64().unwrap(), 2);
@@ -546,8 +563,8 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(reachable.contains(&"crate::b"));
-        assert!(reachable.contains(&"crate::c"));
+        assert!(reachable.contains(&"github.com/x/proj/b"));
+        assert!(reachable.contains(&"github.com/x/proj/c"));
     }
 
     #[test]
@@ -562,7 +579,7 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let modules = parsed["modules"].as_array().unwrap();
-        let c = modules.iter().find(|m| m["path"] == "crate::c").unwrap();
+        let c = modules.iter().find(|m| m["path"] == "c").unwrap();
         assert_eq!(c["direct"].as_u64().unwrap(), 1);
         assert_eq!(c["transitive"].as_u64().unwrap(), 2);
         assert_eq!(c["files"].as_u64().unwrap(), 2);
@@ -572,8 +589,8 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(reachable.contains(&"crate::a"));
-        assert!(reachable.contains(&"crate::b"));
+        assert!(reachable.contains(&"a"));
+        assert!(reachable.contains(&"b"));
     }
 
     #[test]
@@ -806,9 +823,9 @@ mod tests {
             .collect();
         // Expect exactly: page, route, util — three discovered files.
         assert_eq!(parsed["module_count"], 3);
-        assert!(modules.iter().any(|p| p.ends_with("::page")));
-        assert!(modules.iter().any(|p| p.ends_with("::route")));
-        assert!(modules.iter().any(|p| p.ends_with("::util")));
+        assert!(modules.iter().any(|p| p.ends_with("/page")));
+        assert!(modules.iter().any(|p| p.ends_with("/route")));
+        assert!(modules.iter().any(|p| p.ends_with("util")));
     }
 
     #[test]
@@ -881,14 +898,24 @@ mod tests {
             .iter()
             .map(|m| m["path"].as_str().unwrap())
             .collect();
-        assert!(modules.iter().any(|p| p.ends_with("::page")));
-        assert!(modules.iter().any(|p| p.ends_with("::data")));
-        assert!(!modules.iter().any(|p| p.ends_with("::data.json")));
+        assert!(
+            modules.iter().any(|p| p.ends_with("page")),
+            "got {modules:?}"
+        );
+        assert!(
+            modules.iter().any(|p| p.ends_with("data")),
+            "got {modules:?}"
+        );
+        assert!(!modules.iter().any(|p| p.ends_with("data.json")));
+    }
+
+    fn strings(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| (*s).to_owned()).collect()
     }
 
     #[test]
     fn reachable_preview_truncates_long_lists() {
-        let xs: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g"];
+        let xs = strings(&["a", "b", "c", "d", "e", "f", "g"]);
         let preview = reachable_preview(&xs);
         assert!(preview.starts_with("a, b, c, d, e"));
         assert!(preview.contains("(+2 more)"));
@@ -896,7 +923,7 @@ mod tests {
 
     #[test]
     fn reachable_preview_renders_em_dash_when_empty() {
-        let xs: Vec<&str> = Vec::new();
+        let xs: Vec<String> = Vec::new();
         assert_eq!(reachable_preview(&xs), "—");
     }
 
@@ -906,7 +933,7 @@ mod tests {
         // not emit a "+0 more" tail. The strict `>` comparison in
         // `reachable_preview` is what guards this; weakening it to
         // `>=` would render a spurious "(+0 more)" suffix here.
-        let xs: Vec<&str> = vec!["a", "b", "c", "d", "e"];
+        let xs = strings(&["a", "b", "c", "d", "e"]);
         assert_eq!(xs.len(), TOP_REACHABLE_LIMIT);
         let preview = reachable_preview(&xs);
         assert_eq!(preview, "a, b, c, d, e");

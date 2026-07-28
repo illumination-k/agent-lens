@@ -24,6 +24,7 @@ pub mod hubs;
 pub mod impact;
 pub mod layers;
 mod module_graph;
+pub(crate) mod module_label;
 mod path_filter;
 mod runner;
 pub mod similarity;

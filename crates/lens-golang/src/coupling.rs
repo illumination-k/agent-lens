@@ -9,9 +9,11 @@
 //!
 //! The mapping from filesystem layout to [`ModulePath`] mirrors the
 //! Python adapter: the root is `crate`, and each subdirectory adds a
-//! `::`-separated segment. The module name from `go.mod` is *only*
-//! used to recognise local imports; the emitted [`ModulePath`] always
-//! starts with `crate` so reports stay comparable across languages.
+//! `::`-separated segment. That shape is an internal convention shared
+//! by every adapter so the graph algorithms in `lens-domain` compare
+//! like with like — it is not what a reader sees. The CLI re-spells
+//! these paths as Go import paths at render time, using
+//! [`module_prefix`] as the root.
 //!
 //! Like the Python adapter, this module only extracts edges; metric
 //! aggregation lives in `lens-domain`.
@@ -124,7 +126,7 @@ pub fn build_module_tree(root: &Path) -> Result<Vec<GoPackage>, CouplingError> {
 /// silently dropped; self-loops and duplicates are not filtered here
 /// (`lens-domain::compute_report` handles that).
 pub fn extract_edges(packages: &[GoPackage]) -> Vec<CouplingEdge> {
-    let module_prefix = read_go_module_prefix(packages);
+    let module_prefix = module_prefix(packages);
     let known: HashSet<&ModulePath> = packages.iter().map(|p| &p.path).collect();
     let go_to_module: HashMap<String, ModulePath> = packages
         .iter()
@@ -287,7 +289,11 @@ fn resolve_import(import: &str, go_to_module: &HashMap<String, ModulePath>) -> O
 /// relative paths — but it does degrade import resolution across the
 /// whole scan, so a `go.mod` that exists and can't be read is logged.
 /// A missing one is the normal single-file / test case and stays quiet.
-fn read_go_module_prefix(packages: &[GoPackage]) -> Option<String> {
+///
+/// Callers outside edge extraction use this to name packages the way Go
+/// names them: prefixed with the module path, so a report row reads as
+/// the import path it corresponds to.
+pub fn module_prefix(packages: &[GoPackage]) -> Option<String> {
     let mut roots: BTreeSet<&Path> = packages.iter().map(|p| p.file.as_path()).collect();
     while let Some(dir) = roots.pop_first() {
         let go_mod = dir.join("go.mod");
@@ -412,7 +418,7 @@ mod tests {
             imports: Vec::new(),
         }];
 
-        let (prefix, logs) = crate::test_support::capture_logs(|| read_go_module_prefix(&packages));
+        let (prefix, logs) = crate::test_support::capture_logs(|| module_prefix(&packages));
 
         assert_eq!(prefix, None);
         assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
@@ -428,8 +434,7 @@ mod tests {
             imports: Vec::new(),
         }];
 
-        let (prefix, logs) =
-            crate::test_support::capture_logs(|| read_go_module_prefix(&quiet_packages));
+        let (prefix, logs) = crate::test_support::capture_logs(|| module_prefix(&quiet_packages));
 
         assert_eq!(prefix, None);
         assert!(
