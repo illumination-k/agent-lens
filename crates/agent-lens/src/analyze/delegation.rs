@@ -1237,6 +1237,103 @@ pub mod work {
         );
     }
 
+    /// The body-size limit is a boundary, so the largest body still
+    /// called a forward has to be exercised: three statements pass,
+    /// four (above) do not.
+    #[test]
+    fn a_body_at_the_statement_limit_is_still_a_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod api {
+    pub fn save(id: usize) -> usize { crate::service::save(id) }
+}
+pub mod service {
+    pub fn save(id: usize) -> usize { let a = id; let b = a; crate::db::insert(b) }
+}
+pub mod db {
+    pub fn insert(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+
+        let report = analyze_json(dir.path());
+        let hops = report["chains"][0]["hops"].as_array().unwrap();
+        assert_eq!(hops[1]["statement_count"], 3, "report: {report}");
+        assert_eq!(
+            chain_paths(&report),
+            vec![vec![
+                "crate::api::save".to_owned(),
+                "crate::service::save".to_owned(),
+                "crate::db::insert".to_owned(),
+            ]],
+        );
+    }
+
+    /// The facade exemption is Rust and Go, and Go decides by export
+    /// case: a package whose only exported function forwards, with
+    /// unexported code behind it, is a facade.
+    #[test]
+    fn a_go_package_with_one_exported_forwarder_is_a_facade() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "api/api.go",
+            "package api\n\nfunc Save(id int) int { return forward(id) }\n\n\
+             func forward(id int) int { return store.Insert(id) }\n",
+        );
+        write_file(
+            dir.path(),
+            "store/store.go",
+            "package store\n\nfunc Insert(id int) int { return id + 1 }\n\n\
+             func Extra(id int) int { return id }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            report["audit"]["facade_exempt_count"], 1,
+            "`Save` is the package's whole exported surface: {report}",
+        );
+        assert!(
+            chain_paths(&report).is_empty(),
+            "and the exemption cuts the chain that ran through it: {report}",
+        );
+    }
+
+    /// A forwarding cycle is counted even when ordinary chains exist
+    /// alongside it — the two are different findings, not one total.
+    #[test]
+    fn a_cycle_is_counted_beside_the_chains_that_do_terminate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod chain {
+    pub fn one(id: usize) -> usize { two(id) }
+    pub fn two(id: usize) -> usize { crate::work::run(id) }
+}
+pub mod knot {
+    pub fn a(id: usize) -> usize { b(id) }
+    pub fn b(id: usize) -> usize { a(id) }
+}
+pub mod work {
+    pub fn run(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["audit"]["delegator_count"], 4, "report: {report}");
+        assert_eq!(
+            report["audit"]["cyclic_delegator_count"], 2,
+            "only the knot has no head to walk from: {report}",
+        );
+        assert_eq!(chain_paths(&report).len(), 1);
+    }
+
     /// The deprecation exemption reads the doc text, so a documented
     /// hop that says nothing about deprecation has to stay a hop —
     /// otherwise the exemption would swallow every documented forwarder.
@@ -1483,6 +1580,10 @@ pub mod db {
         "let a = id; let b = a; let c = b; crate::repo::save(c)",
         "four statements is more body than a forward"
     )]
+    #[case::calls_out_of_the_workspace(
+        "external_audit(id); crate::repo::save(id)",
+        "a call the resolver cannot attribute is work unless the language calls the name trivial"
+    )]
     fn a_hop_that_does_work_is_not_a_delegator(#[case] body: &str, #[case] why: &str) {
         let dir = tempfile::tempdir().unwrap();
         write_file(
@@ -1714,6 +1815,10 @@ pub mod db {
         assert_eq!(api["dominant_target_module"], "crate::service");
         assert_eq!(api["target_concentration"], 1.0);
         assert_eq!(api["lasagna_candidate"], true);
+        assert_eq!(
+            api["chain_hop_count"], 3,
+            "all three of its forwarders are hops on a reported chain: {api}",
+        );
         assert_eq!(report["summary"]["lasagna_module_count"], 2);
         assert!(
             analyze_md(dir.path()).contains("layer candidate"),
@@ -1906,6 +2011,57 @@ pub fn extra(id: usize) -> usize { id }
             modules,
             ["crate::api", "crate::service"],
             "the roll-up narrows to the modules the kept chain runs through",
+        );
+    }
+
+    /// With `--diff-only` and an edit that touches no chain, the empty
+    /// report says which kind of empty it is: chains exist, none of
+    /// them moved.
+    #[test]
+    fn diff_only_distinguishes_no_chains_from_no_changed_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod api {
+    pub fn save(id: usize) -> usize { crate::service::save(id) }
+}
+pub mod service {
+    pub fn save(id: usize) -> usize { crate::work::run(id) }
+}
+pub mod work {
+    pub fn run(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+        write_file(
+            dir.path(),
+            "src/untouched.rs",
+            "pub fn nothing() -> usize { 0 }\n",
+        );
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        write_file(
+            dir.path(),
+            "src/untouched.rs",
+            "pub fn nothing() -> usize { 1 }\n",
+        );
+
+        let md = DelegationAnalyzer::new()
+            .with_diff_only(true)
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("No forwarding chain touches the unstaged changes"),
+            "a chain exists, it just did not move: {md}",
+        );
+        assert!(
+            md.contains("of 1 chain(s) found"),
+            "and the audit says how many were filtered out: {md}",
         );
     }
 
