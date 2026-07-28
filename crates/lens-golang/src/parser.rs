@@ -21,6 +21,7 @@ use lens_domain::{
 use tree_sitter::{Node, Parser};
 
 use crate::attrs::name_looks_like_test_function;
+use crate::node_text::{node_str, node_text_or_empty};
 
 /// Tree-sitter-backed Go parser.
 ///
@@ -157,8 +158,10 @@ fn signature_info(node: Node<'_>, source: &[u8], raw_name: &str) -> FunctionSign
             let names = declaration_names(decl, source);
             // An unnamed parameter (`func f(int)`) still occupies one slot.
             parameter_count += names.len().max(1);
-            if let Some(ty) = decl.child_by_field_name("type") {
-                parameter_type_paths.push(node_text(ty, source));
+            if let Some(ty) = decl.child_by_field_name("type")
+                && let Some(text) = node_str(ty, source)
+            {
+                parameter_type_paths.push(text.to_owned());
             }
             parameter_names.extend(names);
         }
@@ -192,7 +195,7 @@ fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
     loop {
         if cursor.field_name() == Some("name")
             && cursor.node().kind() == "identifier"
-            && let Ok(text) = cursor.node().utf8_text(source)
+            && let Some(text) = node_str(cursor.node(), source)
         {
             names.push(text.to_owned());
         }
@@ -209,12 +212,14 @@ fn collect_result_types(result: Node<'_>, source: &[u8], out: &mut Vec<String>) 
     if result.kind() == "parameter_list" {
         let mut cursor = result.walk();
         for decl in result.named_children(&mut cursor) {
-            if let Some(ty) = decl.child_by_field_name("type") {
-                out.push(node_text(ty, source));
+            if let Some(ty) = decl.child_by_field_name("type")
+                && let Some(text) = node_str(ty, source)
+            {
+                out.push(text.to_owned());
             }
         }
-    } else {
-        out.push(node_text(result, source));
+    } else if let Some(text) = node_str(result, source) {
+        out.push(text.to_owned());
     }
 }
 
@@ -227,8 +232,10 @@ fn collect_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = params.walk();
     for decl in params.named_children(&mut cursor) {
-        if decl.kind() == "type_parameter_declaration" {
-            out.push(node_text(decl, source));
+        if decl.kind() == "type_parameter_declaration"
+            && let Some(text) = node_str(decl, source)
+        {
+            out.push(text.to_owned());
         }
     }
     out
@@ -256,10 +263,6 @@ fn receiver_shape(node: Node<'_>) -> ReceiverShape {
     ReceiverShape::None
 }
 
-fn node_text(node: Node<'_>, source: &[u8]) -> String {
-    node.utf8_text(source).unwrap_or_default().to_owned()
-}
-
 /// Godoc-style doc comment: the run of `comment` siblings immediately
 /// above the declaration, with no blank line between the last comment
 /// and the declaration (or between the comments themselves). Comment
@@ -273,7 +276,7 @@ pub(crate) fn doc_comment_text(node: Node<'_>, source: &[u8]) -> Option<String> 
         if sibling.kind() != "comment" || sibling.end_position().row + 1 != expected_row {
             break;
         }
-        let Ok(text) = sibling.utf8_text(source) else {
+        let Some(text) = node_str(sibling, source) else {
             break;
         };
         lines.push(strip_comment_markers(text));
@@ -305,7 +308,7 @@ fn strip_comment_markers(text: &str) -> String {
 /// field; methods use `name: field_identifier`.
 pub(crate) fn function_name_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
     node.child_by_field_name("name")
-        .and_then(|n| n.utf8_text(source).ok())
+        .and_then(|n| node_str(n, source))
 }
 
 /// Walk the receiver `parameter_list` of a `method_declaration` to
@@ -334,7 +337,7 @@ pub(crate) fn method_receiver_type(node: Node<'_>, source: &[u8]) -> Option<Stri
 
 fn receiver_type_text(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "type_identifier" => node.utf8_text(source).ok().map(str::to_owned),
+        "type_identifier" => node_str(node, source).map(str::to_owned),
         "pointer_type" => {
             // `pointer_type` wraps the pointee as its sole named
             // child; the grammar doesn't expose it under a field name,
@@ -413,13 +416,15 @@ fn build_tree(node: Node<'_>, source: &[u8], is_root: bool) -> TreeNode {
     TreeNode::with_children(label, value, children)
 }
 
+/// The `value` carried by a [`TreeNode`], used by value-aware APTED
+/// comparison. Every other node kind already has no value, so an
+/// unreadable identifier falling back to `""` degrades a comparison
+/// rather than putting a blank name in a report — and [`node_str`] has
+/// logged the read failure by the time we get here either way.
 fn node_value(node: Node<'_>, source: &[u8]) -> String {
     match node.kind() {
         "identifier" | "field_identifier" | "package_identifier" | "type_identifier"
-        | "label_name" => node
-            .utf8_text(source)
-            .map(str::to_owned)
-            .unwrap_or_default(),
+        | "label_name" => node_text_or_empty(node, source),
         "function_declaration" | "method_declaration" => {
             function_name_text(node, source).unwrap_or("").to_owned()
         }

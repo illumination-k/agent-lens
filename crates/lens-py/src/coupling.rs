@@ -301,8 +301,12 @@ fn resolve_module(
         if let Some(m) = py_to_mod.get(&prefix)
             && known.contains(m)
         {
-            let symbol = segs.last().copied().unwrap_or_default().to_owned();
-            return Some((m.clone(), symbol));
+            // The loop only runs for `segs.len() >= 2`, so the last
+            // segment is always there. Recording an empty symbol on the
+            // edge would still be wrong if it weren't, so drop the
+            // resolution rather than emit a nameless one.
+            let symbol = segs.last().copied().filter(|s| !s.is_empty())?;
+            return Some((m.clone(), symbol.to_owned()));
         }
     }
     None
@@ -334,9 +338,12 @@ fn resolve_from_base(current: &str, level: u32, module: Option<&str>) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
+    use std::collections::{HashMap, HashSet};
 
-    use super::{build_module_tree, extract_edges};
+    use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
+    use rstest::rstest;
+
+    use super::{build_module_tree, extract_edges, resolve_module};
 
     fn e(from: &str, to: &str, symbol: &str) -> CouplingEdge {
         CouplingEdge {
@@ -345,6 +352,31 @@ mod tests {
             symbol: symbol.to_owned(),
             kind: EdgeKind::Use,
         }
+    }
+
+    /// A dotted name whose last segment is empty (`pkg.b.`) used to
+    /// resolve to an edge carrying `symbol: ""`. An edge naming nothing
+    /// is worse than no edge: the report shows a dependency an agent
+    /// cannot look up.
+    #[rstest]
+    #[case::exact_module("pkg.b", Some(("crate::pkg::b", "b")))]
+    #[case::symbol_in_module("pkg.b.handler", Some(("crate::pkg::b", "handler")))]
+    #[case::trailing_dot("pkg.b.", None)]
+    #[case::unknown_module("other.thing", None)]
+    fn resolve_module_never_yields_an_empty_symbol(
+        #[case] name: &str,
+        #[case] expected: Option<(&str, &str)>,
+    ) {
+        let module = ModulePath::new("crate::pkg::b");
+        let py_to_mod = HashMap::from([("pkg.b".to_owned(), module.clone())]);
+        let known = HashSet::from([module]);
+
+        let resolved = resolve_module(name, &py_to_mod, &known);
+
+        assert_eq!(
+            resolved.map(|(to, symbol)| (to.as_str().to_owned(), symbol)),
+            expected.map(|(to, symbol)| (to.to_owned(), symbol.to_owned())),
+        );
     }
 
     #[test]

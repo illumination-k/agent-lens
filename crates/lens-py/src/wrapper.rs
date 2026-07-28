@@ -184,7 +184,15 @@ fn peel_adapters(expr: &Expr) -> (&Expr, Vec<String>) {
                 current = &a.value;
             }
             Expr::Call(call) if is_trivial_unary_builtin(call) => {
-                outer_to_inner.push(format!("{}()", builtin_name(call).unwrap_or_default()));
+                // `is_trivial_unary_builtin` already matched the name
+                // against the allow-list, so this cannot fail — but
+                // rendering `()` for a nameless adapter would put a
+                // meaningless label in the report, so stop peeling
+                // instead of guessing.
+                let Some(name) = builtin_name(call) else {
+                    break;
+                };
+                outer_to_inner.push(format!("{name}()"));
                 let inner = call
                     .arguments
                     .args
@@ -197,7 +205,9 @@ fn peel_adapters(expr: &Expr) -> (&Expr, Vec<String>) {
                 }
             }
             Expr::Call(call) if is_trivial_method_call(call) => {
-                let name = method_call_name(call).unwrap_or_default();
+                let Some(name) = method_call_name(call) else {
+                    break;
+                };
                 outer_to_inner.push(format!(".{name}()"));
                 if let Some(receiver) = method_call_receiver(call) {
                     current = receiver;

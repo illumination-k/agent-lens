@@ -19,6 +19,7 @@ use lens_domain::{CohesionUnit, CohesionUnitKind, MethodCohesion, qualify};
 use tree_sitter::Node;
 
 use crate::attrs::name_looks_like_test_function;
+use crate::node_text::node_str;
 use crate::parser::{GoParseError, function_name_text, method_receiver_type, parse_tree};
 
 /// Display name for the file-level cohesion unit (top-level free
@@ -223,7 +224,7 @@ fn collect_named_field_identifiers(node: Node<'_>, source: &[u8], out: &mut Hash
     loop {
         if cursor.field_name() == Some("name")
             && cursor.node().kind() == "identifier"
-            && let Ok(text) = cursor.node().utf8_text(source)
+            && let Some(text) = node_str(cursor.node(), source)
         {
             out.insert(text.to_owned());
         }
@@ -273,7 +274,7 @@ fn collect_identifier_list(node: Node<'_>, source: &[u8], out: &mut HashSet<Stri
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "identifier"
-            && let Ok(text) = child.utf8_text(source)
+            && let Some(text) = node_str(child, source)
         {
             out.insert(text.to_owned());
         }
@@ -307,7 +308,7 @@ impl PackageRefVisitor<'_> {
     fn record_call(&mut self, node: Node<'_>) {
         if let Some(func) = node.child_by_field_name("function")
             && func.kind() == "identifier"
-            && let Ok(name) = func.utf8_text(self.source)
+            && let Some(name) = node_str(func, self.source)
             && self.siblings.contains(name)
         {
             self.calls.push(name.to_owned());
@@ -315,7 +316,7 @@ impl PackageRefVisitor<'_> {
     }
 
     fn record_identifier(&mut self, node: Node<'_>) {
-        if let Ok(name) = node.utf8_text(self.source)
+        if let Some(name) = node_str(node, self.source)
             && self.package_fields.contains(name)
             && !self.locals.contains(name)
         {
@@ -357,13 +358,13 @@ fn receiver_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             continue;
         }
         if let Some(name) = child.child_by_field_name("name") {
-            return Some(node_text(name, source));
+            return node_str(name, source).map(str::to_owned);
         }
 
         let mut inner = child.walk();
         for part in child.named_children(&mut inner) {
             if part.kind() == "identifier" {
-                return Some(node_text(part, source));
+                return node_str(part, source).map(str::to_owned);
             }
         }
     }
@@ -427,13 +428,9 @@ impl<'a> ReceiverRefVisitor<'a> {
 fn selector_parts<'a>(node: Node<'_>, source: &'a [u8]) -> Option<(&'a str, &'a str)> {
     let operand = node.child_by_field_name("operand")?;
     let field = node.child_by_field_name("field")?;
-    let recv = operand.utf8_text(source).ok()?;
-    let member = field.utf8_text(source).ok()?;
+    let recv = node_str(operand, source)?;
+    let member = node_str(field, source)?;
     Some((recv, member))
-}
-
-fn node_text(node: Node<'_>, source: &[u8]) -> String {
-    node.utf8_text(source).unwrap_or_default().to_owned()
 }
 
 #[cfg(test)]

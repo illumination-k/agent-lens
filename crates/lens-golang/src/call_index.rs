@@ -24,6 +24,7 @@ use lens_domain::{
 use tree_sitter::Node;
 
 use crate::attrs::name_looks_like_test_function;
+use crate::node_text::node_str;
 use crate::parser::{
     GoParseError, function_name_text, method_receiver_type, parse_tree, unquote_go_string_literal,
 };
@@ -241,10 +242,16 @@ fn callee_facts(
 ) -> CalleeFacts {
     match callee.kind() {
         "identifier" => {
-            let name = callee.utf8_text(source).unwrap_or("").to_owned();
+            let Some(name) = node_str(callee, source) else {
+                return CalleeFacts {
+                    name: None,
+                    path_segments: None,
+                    receiver: ReceiverExprKind::None,
+                };
+            };
             CalleeFacts {
-                name: Some(name.clone()),
-                path_segments: Some(vec![name]),
+                name: Some(name.to_owned()),
+                path_segments: Some(vec![name.to_owned()]),
                 receiver: ReceiverExprKind::None,
             }
         }
@@ -256,7 +263,13 @@ fn callee_facts(
                     receiver: ReceiverExprKind::Expression,
                 };
             };
-            let field_name = field.utf8_text(source).unwrap_or("").to_owned();
+            let Some(field_name) = node_str(field, source).map(str::to_owned) else {
+                return CalleeFacts {
+                    name: None,
+                    path_segments: None,
+                    receiver: ReceiverExprKind::Expression,
+                };
+            };
             let mut segments = callee
                 .child_by_field_name("operand")
                 .and_then(|operand| expression_path(operand, source))
@@ -304,13 +317,13 @@ fn callee_facts(
 fn expression_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
     match node.kind() {
         "identifier" | "type_identifier" | "package_identifier" => {
-            Some(vec![node.utf8_text(source).ok()?.to_owned()])
+            Some(vec![node_str(node, source)?.to_owned()])
         }
         "selector_expression" => {
             let operand = node.child_by_field_name("operand")?;
             let field = node.child_by_field_name("field")?;
             let mut segments = expression_path(operand, source)?;
-            segments.push(field.utf8_text(source).ok()?.to_owned());
+            segments.push(node_str(field, source)?.to_owned());
             Some(segments)
         }
         "parenthesized_expression" => {
@@ -355,7 +368,7 @@ fn push_import_spec(spec: Node<'_>, source: &[u8], out: &mut Vec<ImportShape>) {
     let Some(path_node) = spec.child_by_field_name("path") else {
         return;
     };
-    let Ok(raw_path) = path_node.utf8_text(source) else {
+    let Some(raw_path) = node_str(path_node, source) else {
         return;
     };
     let path = unquote_go_string_literal(raw_path);
@@ -380,11 +393,7 @@ fn push_import_spec(spec: Node<'_>, source: &[u8], out: &mut Vec<ImportShape>) {
     let local_alias = match spec.child_by_field_name("name") {
         Some(name) => match name.kind() {
             "blank_identifier" | "dot" => None,
-            _ => name
-                .utf8_text(source)
-                .ok()
-                .map(str::to_owned)
-                .or(default_alias),
+            _ => node_str(name, source).map(str::to_owned).or(default_alias),
         },
         None => default_alias,
     };

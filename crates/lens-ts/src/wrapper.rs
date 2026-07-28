@@ -155,7 +155,14 @@ fn peel_adapters<'a>(expr: &'a Expression<'a>) -> (&'a Expression<'a>, Vec<Strin
                 _ => break,
             },
             Expression::CallExpression(call) if is_trivial_method_call(call) => {
-                let name = method_call_name(call).unwrap_or_default();
+                // `is_trivial_method_call` already matched the name
+                // against the allow-list, so this cannot fail — but
+                // rendering `.()` for a nameless adapter would put a
+                // meaningless label in the report, so stop peeling
+                // instead of guessing.
+                let Some(name) = method_call_name(call) else {
+                    break;
+                };
                 outer_to_inner.push(format!(".{name}()"));
                 current = nested_call_receiver(call).unwrap_or(current);
                 if std::ptr::eq(current, expr) {
