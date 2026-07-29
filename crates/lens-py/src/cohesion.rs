@@ -166,22 +166,17 @@ fn method_cohesion(
         visitor.visit_stmt(stmt);
     }
 
-    let mut fields = visitor.fields;
-    fields.sort();
-    fields.dedup();
-
-    let mut calls: Vec<String> = visitor
-        .calls
-        .into_iter()
-        .filter(|name| siblings.contains(name))
-        .collect();
-    calls.sort();
-    calls.dedup();
-
     let start_line = lines.line(method.range.start().to_u32());
     let end_offset = method.range.end().to_u32().saturating_sub(1);
     let end_line = lines.line(end_offset);
-    MethodCohesion::new(method.name.as_str(), start_line, end_line, fields, calls)
+    MethodCohesion::from_refs(
+        method.name.as_str(),
+        start_line,
+        end_line,
+        visitor.fields,
+        visitor.calls,
+        siblings,
+    )
 }
 
 #[derive(Default)]
@@ -364,17 +359,17 @@ fn module_function_cohesion(
     for stmt in &func.body {
         visitor.visit_stmt(stmt);
     }
-    let mut fields = visitor.fields;
-    fields.sort();
-    fields.dedup();
-    let mut calls = visitor.calls;
-    calls.sort();
-    calls.dedup();
-
     let start_line = lines.line(func.range.start().to_u32());
     let end_offset = func.range.end().to_u32().saturating_sub(1);
     let end_line = lines.line(end_offset);
-    MethodCohesion::new(func.name.as_str(), start_line, end_line, fields, calls)
+    MethodCohesion::from_refs(
+        func.name.as_str(),
+        start_line,
+        end_line,
+        visitor.fields,
+        visitor.calls,
+        siblings,
+    )
 }
 
 /// Names that resolve to function-local bindings (parameters and any

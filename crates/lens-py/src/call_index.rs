@@ -24,8 +24,8 @@ use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport};
 use ruff_python_parser::parse_module;
 
-use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
 use crate::parser::{PythonParseError, function_body_tree};
+use crate::walk::{FnSite, walk_module_fns};
 
 /// Extract neutral function-shape facts for Python.
 ///
@@ -39,9 +39,9 @@ pub fn extract_function_shapes_with_module(
     let parsed = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
-    for stmt in &parsed.body {
-        collect_function_shapes(stmt, None, false, module, &lines, &mut out);
-    }
+    walk_module_fns(&parsed.body, &mut |site| {
+        out.push(function_shape(&site, module, &lines));
+    });
     Ok(out)
 }
 
@@ -69,133 +69,74 @@ pub fn extract_call_shapes_with_module(
         })
         .collect();
     let mut out = Vec::new();
-    for stmt in &parsed.body {
-        collect_call_shapes(
-            stmt,
-            None,
+    walk_module_fns(&parsed.body, &mut |site| {
+        collect_calls_in_function(
+            &site,
             module,
             &imports,
             &namespace_aliases,
             &lines,
             &mut out,
         );
-    }
+    });
     Ok(out)
 }
 
-fn collect_function_shapes(
-    stmt: &Stmt,
-    owner: Option<&str>,
-    owner_is_test: bool,
-    module: &str,
-    lines: &LineIndex,
-    out: &mut Vec<FunctionShape>,
-) {
-    match stmt {
-        Stmt::FunctionDef(func) => {
-            // Drop stub-shaped functions exactly like the similarity / cohesion
-            // / complexity extractors do — a `pass`-bodied or `@overload`
-            // function carries no analysable graph signal.
-            if is_stub_function(func) {
-                return;
-            }
-            let display_name = func.name.as_str().to_owned();
-            let qualified = match owner {
-                Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
-                None => qualify_module(module, &display_name),
-            };
-            let owner_shape = owner.map(|class_name| OwnerShape {
-                display_name: class_name.to_owned(),
-                kind: OwnerKind::Class,
-            });
-            let is_test = owner_is_test || is_test_function(func);
-            let span = function_span(func, lines);
-            out.push(FunctionShape {
-                display_name,
-                qualified_name: SyntaxFact::Known(qualified),
-                module_path: SyntaxFact::Known(module.to_owned()),
-                owner: SyntaxFact::Known(owner_shape),
-                // Export status is not extracted yet, so stay honest
-                // with `Unknown` instead of hardcoding `Unexported`.
-                visibility: SyntaxFact::Unknown,
-                signature: SyntaxFact::Unknown,
-                doc: crate::parser::docstring_text(func),
-                body: BodyShape {
-                    tree: function_body_tree(func),
-                },
-                span,
-                is_test,
-            });
-        }
-        Stmt::ClassDef(class) => {
-            // Protocol classes are pure declarations; every method body is a
-            // `...` stub. Drop the whole subtree, matching the similarity
-            // / cohesion / complexity passes.
-            if inherits_protocol(class) {
-                return;
-            }
-            let class_is_test = owner_is_test || is_test_class(class);
-            let class_name = class.name.as_str();
-            for inner in &class.body {
-                collect_function_shapes(inner, Some(class_name), class_is_test, module, lines, out);
-            }
-        }
-        _ => {}
+fn function_shape(site: &FnSite<'_>, module: &str, lines: &LineIndex) -> FunctionShape {
+    let func = site.func;
+    let display_name = func.name.as_str().to_owned();
+    let qualified = match site.owner {
+        Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
+        None => qualify_module(module, &display_name),
+    };
+    let owner_shape = site.owner.map(|class_name| OwnerShape {
+        display_name: class_name.to_owned(),
+        kind: OwnerKind::Class,
+    });
+    FunctionShape {
+        display_name,
+        qualified_name: SyntaxFact::Known(qualified),
+        module_path: SyntaxFact::Known(module.to_owned()),
+        owner: SyntaxFact::Known(owner_shape),
+        // Export status is not extracted yet, so stay honest
+        // with `Unknown` instead of hardcoding `Unexported`.
+        visibility: SyntaxFact::Unknown,
+        signature: SyntaxFact::Unknown,
+        doc: crate::parser::docstring_text(func),
+        body: BodyShape {
+            tree: function_body_tree(func),
+        },
+        span: function_span(func, lines),
+        is_test: site.is_test,
     }
 }
 
-fn collect_call_shapes(
-    stmt: &Stmt,
-    owner: Option<&str>,
+fn collect_calls_in_function(
+    site: &FnSite<'_>,
     module: &str,
     imports: &[ImportShape],
     namespace_aliases: &HashSet<String>,
     lines: &LineIndex,
     out: &mut Vec<CallShape>,
 ) {
-    match stmt {
-        Stmt::FunctionDef(func) => {
-            if is_stub_function(func) {
-                return;
-            }
-            let display_name = func.name.as_str();
-            let caller_qualified = match owner {
-                Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
-                None => qualify_module(module, display_name),
-            };
-            let mut visitor = FunctionBodyCallVisitor {
-                module,
-                caller_qualified_name: caller_qualified,
-                caller_owner: owner.map(ToOwned::to_owned),
-                line_index: lines,
-                imports,
-                namespace_aliases,
-                out: Vec::new(),
-            };
-            for body_stmt in &func.body {
-                visitor.visit_stmt(body_stmt);
-            }
-            out.extend(visitor.out);
-        }
-        Stmt::ClassDef(class) => {
-            if inherits_protocol(class) {
-                return;
-            }
-            let class_name = class.name.as_str();
-            for inner in &class.body {
-                collect_call_shapes(
-                    inner,
-                    Some(class_name),
-                    module,
-                    imports,
-                    namespace_aliases,
-                    lines,
-                    out,
-                );
-            }
-        }
-        _ => {}
+    let display_name = site.func.name.as_str();
+    let caller_qualified = match site.owner {
+        Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
+        None => qualify_module(module, display_name),
+    };
+    let mut visitor = FunctionBodyCallVisitor {
+        module,
+        caller_qualified_name: caller_qualified,
+        caller_owner: site.owner.map(ToOwned::to_owned),
+        line_index: lines,
+        imports,
+        namespace_aliases,
+        out: Vec::new(),
+    };
+    for body_stmt in &site.func.body {
+        visitor.visit_stmt(body_stmt);
     }
+    out.extend(visitor.out);
 }
 
 struct FunctionBodyCallVisitor<'a> {

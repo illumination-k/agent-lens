@@ -31,7 +31,7 @@ exclude_re = [
   "ComplexityVisitor::record_stmt_halstead",
   "ComplexityVisitor::record_expr_halstead",
   "ComplexityVisitor::record_finally",
-  "ComplexityVisitor::enter_nest",
+  "ComplexityCounters::enter_nest",
   # complexity: pure label-mapping helpers
   "cmp_op_str",
   "number_literal_repr",

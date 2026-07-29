@@ -72,7 +72,7 @@ pub use apted::{
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };
-pub use complexity::{FunctionComplexity, HalsteadCounts};
+pub use complexity::{ComplexityCounters, FunctionComplexity, HalsteadAcc, HalsteadCounts};
 pub use context_span::{ContextSpanReport, ModuleContextSpan, compute_context_spans};
 pub use coupling::{
     CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,

@@ -20,7 +20,8 @@ use tree_sitter::Node;
 
 use crate::attrs::name_looks_like_test_function;
 use crate::node_text::node_str;
-use crate::parser::{GoParseError, function_name_text, method_receiver_type, parse_tree};
+use crate::parser::{GoParseError, function_name_text, parse_tree};
+use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Display name for the file-level cohesion unit (top-level free
 /// functions). Matches the Rust / Python adapters' `<module>` label.
@@ -32,18 +33,17 @@ pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, GoParse
     let bytes = source.as_bytes();
     let mut by_owner: BTreeMap<String, Vec<MethodRow>> = BTreeMap::new();
 
-    let mut cursor = tree.root_node().walk();
-    for child in tree.root_node().named_children(&mut cursor) {
-        if child.kind() != "method_declaration" {
-            continue;
+    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+        // Methods only: free functions are rolled up into the separate
+        // `<module>` unit built below, not into a receiver's unit.
+        if !site.is_method {
+            return;
         }
-        let Some(owner) = method_receiver_type(child, bytes) else {
-            continue;
+        let (Some(owner), Some(row)) = (site.owner.clone(), method_row(&site, bytes)) else {
+            return;
         };
-        if let Some(row) = method_row(child, bytes) {
-            by_owner.entry(owner).or_default().push(row);
-        }
-    }
+        by_owner.entry(owner).or_default().push(row);
+    });
 
     let mut out = Vec::new();
     for (owner, rows) in by_owner {
@@ -51,25 +51,13 @@ pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, GoParse
         let methods: Vec<MethodCohesion> = rows
             .iter()
             .map(|row| {
-                let mut calls: Vec<String> = row
-                    .calls
-                    .iter()
-                    .filter(|c| sibling_names.contains(*c))
-                    .cloned()
-                    .collect();
-                calls.sort();
-                calls.dedup();
-
-                let mut fields = row.fields.clone();
-                fields.sort();
-                fields.dedup();
-
-                MethodCohesion::new(
+                MethodCohesion::from_refs(
                     qualify(Some(owner.as_str()), row.short_name.as_str()),
                     row.start_line,
                     row.end_line,
-                    fields,
-                    calls,
+                    row.fields.clone(),
+                    row.calls.clone(),
+                    &sibling_names,
                 )
             })
             .collect();
@@ -103,16 +91,11 @@ pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, GoParse
 /// are call edges.
 fn build_package_unit(root: Node<'_>, source: &[u8]) -> Option<CohesionUnit> {
     let mut functions: Vec<Node<'_>> = Vec::new();
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        if child.kind() == "function_declaration"
-            && let Some(name) = function_name_text(child, source)
-            && !name_looks_like_test_function(name)
-            && child.child_by_field_name("body").is_some()
-        {
-            functions.push(child);
+    walk_top_level_fns(root, source, &mut |site| {
+        if !site.is_method && !name_looks_like_test_function(site.name) {
+            functions.push(site.node);
         }
-    }
+    });
     if functions.is_empty() {
         return None;
     }
@@ -171,19 +154,13 @@ fn package_function_cohesion(
     };
     visitor.visit(body);
 
-    let mut fields = visitor.fields;
-    fields.sort();
-    fields.dedup();
-    let mut calls = visitor.calls;
-    calls.sort();
-    calls.dedup();
-
-    Some(MethodCohesion::new(
+    Some(MethodCohesion::from_refs(
         name,
         func.start_position().row + 1,
         func.end_position().row + 1,
-        fields,
-        calls,
+        visitor.fields,
+        visitor.calls,
+        siblings,
     ))
 }
 
@@ -334,15 +311,14 @@ struct MethodRow {
     calls: Vec<String>,
 }
 
-fn method_row(node: Node<'_>, source: &[u8]) -> Option<MethodRow> {
-    let body = node.child_by_field_name("body")?;
-    let short_name = function_name_text(node, source)?.to_owned();
+fn method_row(site: &FnSite<'_, '_>, source: &[u8]) -> Option<MethodRow> {
+    let node = site.node;
     let receiver = receiver_name(node, source)?;
     let mut visitor = ReceiverRefVisitor::new(receiver.as_str(), source);
-    visitor.visit(body);
+    visitor.visit(site.body);
 
     Some(MethodRow {
-        short_name,
+        short_name: site.name.to_owned(),
         start_line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
         fields: visitor.fields,

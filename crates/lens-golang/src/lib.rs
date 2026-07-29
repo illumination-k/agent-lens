@@ -29,6 +29,7 @@ mod parser;
 mod proptests;
 #[cfg(test)]
 mod test_support;
+mod walk;
 mod wrapper;
 
 pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};

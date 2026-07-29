@@ -149,24 +149,13 @@ fn method_cohesion(
     let mut visitor = SelfRefVisitor::default();
     visitor.visit_block(&method.block);
 
-    let mut fields = visitor.fields;
-    fields.sort();
-    fields.dedup();
-
-    let mut calls: Vec<String> = visitor
-        .calls
-        .into_iter()
-        .filter(|name| siblings.contains(name))
-        .collect();
-    calls.sort();
-    calls.dedup();
-
-    MethodCohesion::new(
+    MethodCohesion::from_refs(
         method.sig.ident.to_string(),
         method.sig.span().start().line,
         method.block.span().end().line,
-        fields,
-        calls,
+        visitor.fields,
+        visitor.calls,
+        siblings,
     )
 }
 
@@ -305,19 +294,13 @@ fn module_function_cohesion(
     };
     visitor.visit_block(&func.block);
 
-    let mut fields = visitor.fields;
-    fields.sort();
-    fields.dedup();
-    let mut calls = visitor.calls;
-    calls.sort();
-    calls.dedup();
-
-    MethodCohesion::new(
+    MethodCohesion::from_refs(
         func.sig.ident.to_string(),
         func.sig.span().start().line,
         func.block.span().end().line,
-        fields,
-        calls,
+        visitor.fields,
+        visitor.calls,
+        siblings,
     )
 }
 

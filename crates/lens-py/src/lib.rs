@@ -19,6 +19,7 @@ mod method_names;
 mod parser;
 #[cfg(test)]
 mod proptests;
+mod walk;
 mod wrapper;
 
 pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};

@@ -25,9 +25,8 @@ use tree_sitter::Node;
 
 use crate::attrs::name_looks_like_test_function;
 use crate::node_text::node_str;
-use crate::parser::{
-    GoParseError, function_name_text, method_receiver_type, parse_tree, unquote_go_string_literal,
-};
+use crate::parser::{GoParseError, parse_tree, unquote_go_string_literal};
+use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Extract neutral function-shape facts for Go.
 pub fn extract_function_shapes_with_module(
@@ -37,23 +36,9 @@ pub fn extract_function_shapes_with_module(
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let mut out = Vec::new();
-    let mut cursor = tree.root_node().walk();
-    for child in tree.root_node().named_children(&mut cursor) {
-        match child.kind() {
-            "function_declaration" => {
-                if let Some(shape) = function_shape(child, bytes, module, None) {
-                    out.push(shape);
-                }
-            }
-            "method_declaration" => {
-                let owner = method_receiver_type(child, bytes);
-                if let Some(shape) = function_shape(child, bytes, module, owner.as_deref()) {
-                    out.push(shape);
-                }
-            }
-            _ => {}
-        }
-    }
+    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+        out.push(function_shape(&site, bytes, module));
+    });
     Ok(out)
 }
 
@@ -78,44 +63,17 @@ pub fn extract_call_shapes_with_module(
         .collect();
 
     let mut out = Vec::new();
-    let mut cursor = tree.root_node().walk();
-    for child in tree.root_node().named_children(&mut cursor) {
-        match child.kind() {
-            "function_declaration" => collect_calls_in_function(
-                child,
-                bytes,
-                module,
-                None,
-                &imports,
-                &namespace_aliases,
-                &mut out,
-            ),
-            "method_declaration" => {
-                let owner = method_receiver_type(child, bytes);
-                collect_calls_in_function(
-                    child,
-                    bytes,
-                    module,
-                    owner.as_deref(),
-                    &imports,
-                    &namespace_aliases,
-                    &mut out,
-                );
-            }
-            _ => {}
-        }
-    }
+    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+        collect_calls_in_function(&site, bytes, module, &imports, &namespace_aliases, &mut out);
+    });
     Ok(out)
 }
 
-fn function_shape(
-    node: Node<'_>,
-    source: &[u8],
-    module: &str,
-    owner: Option<&str>,
-) -> Option<FunctionShape> {
-    let body = node.child_by_field_name("body")?;
-    let raw_name = function_name_text(node, source)?;
+fn function_shape(site: &FnSite<'_, '_>, source: &[u8], module: &str) -> FunctionShape {
+    let node = site.node;
+    let body = site.body;
+    let raw_name = site.name;
+    let owner = site.owner.as_deref();
     let display_name = raw_name.to_owned();
     let qualified = match owner {
         Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
@@ -135,7 +93,7 @@ fn function_shape(
     } else {
         VisibilityShape::Unexported
     };
-    Some(FunctionShape {
+    FunctionShape {
         display_name,
         qualified_name: SyntaxFact::Known(qualified),
         module_path: SyntaxFact::Known(module.to_owned()),
@@ -148,27 +106,21 @@ fn function_shape(
         },
         span,
         is_test,
-    })
+    }
 }
 
 fn collect_calls_in_function(
-    node: Node<'_>,
+    site: &FnSite<'_, '_>,
     source: &[u8],
     module: &str,
-    owner: Option<&str>,
     imports: &[ImportShape],
     namespace_aliases: &HashSet<String>,
     out: &mut Vec<CallShape>,
 ) {
-    let Some(body) = node.child_by_field_name("body") else {
-        return;
-    };
-    let Some(raw_name) = function_name_text(node, source) else {
-        return;
-    };
+    let owner = site.owner.as_deref();
     let caller_qualified = match owner {
-        Some(class) => qualify_module(module, &format!("{class}::{raw_name}")),
-        None => qualify_module(module, raw_name),
+        Some(class) => qualify_module(module, &format!("{class}::{}", site.name)),
+        None => qualify_module(module, site.name),
     };
     let ctx = CallContext {
         source,
@@ -178,7 +130,7 @@ fn collect_calls_in_function(
         imports,
         namespace_aliases,
     };
-    visit_calls(body, &ctx, out);
+    visit_calls(site.body, &ctx, out);
 }
 
 /// Bundle the caller-side facts shared by every recursive `visit_calls`

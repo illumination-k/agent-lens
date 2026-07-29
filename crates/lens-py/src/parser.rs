@@ -5,10 +5,10 @@ use lens_domain::{
     TreeNode, identifier_tokens, qualify as qualify_name,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
-use ruff_python_ast::{Expr, Stmt, StmtClassDef, StmtFunctionDef};
+use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
 use ruff_python_parser::{ParseError, parse_module};
 
-use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
+use crate::walk::walk_module_fns;
 
 /// A Python-language parser backed by [`ruff_python_parser`].
 ///
@@ -57,64 +57,17 @@ fn extract_with(source: &str) -> Result<Vec<FunctionDef>, PythonParseError> {
     let module = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
-    for stmt in &module.body {
-        collect_stmt(stmt, None, false, &lines, &mut out);
-    }
+    walk_module_fns(&module.body, &mut |site| {
+        let qualified = qualify_name(site.owner, site.func.name.as_str());
+        out.push(function_def_from(
+            site.func,
+            &qualified,
+            site.is_test,
+            site.owner.is_some(),
+            &lines,
+        ));
+    });
     Ok(out)
-}
-
-fn collect_stmt(
-    stmt: &Stmt,
-    owner: Option<&str>,
-    owner_is_test: bool,
-    lines: &LineIndex,
-    out: &mut Vec<FunctionDef>,
-) {
-    match stmt {
-        Stmt::FunctionDef(func) => {
-            // Stub-shaped functions (`@overload`, `@abstractmethod`,
-            // `pass` / `...` / docstring-only / `raise NotImplementedError`)
-            // carry no analysable content — every Protocol method
-            // collapses to the same one-node tree, which would dominate
-            // similarity reports. Filter unconditionally; this is not
-            // a `--exclude-tests`-style policy choice.
-            if is_stub_function(func) {
-                return;
-            }
-            let is_test = owner_is_test || is_test_function(func);
-            let qualified = qualify_name(owner, func.name.as_str());
-            out.push(function_def_from(
-                func,
-                &qualified,
-                is_test,
-                owner.is_some(),
-                lines,
-            ));
-            // Function bodies are atomic units of analysis: nested `def`s
-            // and inner classes contribute to the parent's tree but are
-            // not surfaced as their own [`FunctionDef`] entries. Mirrors
-            // `lens-rust` (closures stay inside their parent fn) and
-            // `lens-ts` (inner functions are deliberately left out).
-        }
-        Stmt::ClassDef(class) => collect_class(class, lines, out),
-        _ => {}
-    }
-}
-
-fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<FunctionDef>) {
-    // PEP 544 `Protocol` classes describe a structural contract; their
-    // methods are stubs by definition. Drop the whole subtree so a
-    // generic Protocol with default `...` bodies doesn't pollute
-    // similarity / wrapper reports. Mirrors how `lens-rust` filters
-    // `trait` methods that have no `default` body.
-    if inherits_protocol(class) {
-        return;
-    }
-    let class_is_test = is_test_class(class);
-    let class_name = class.name.as_str();
-    for inner in &class.body {
-        collect_stmt(inner, Some(class_name), class_is_test, lines, out);
-    }
 }
 
 fn function_def_from(

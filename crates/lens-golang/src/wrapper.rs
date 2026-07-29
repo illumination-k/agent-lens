@@ -11,7 +11,8 @@ use lens_domain::{WrapperFinding, args_pass_through_by, qualify};
 use tree_sitter::Node;
 
 use crate::node_text::node_str;
-use crate::parser::{GoParseError, function_name_text, method_receiver_type, parse_tree};
+use crate::parser::{GoParseError, parse_tree};
+use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Zero-argument method calls that carry no semantic content of their
 /// own — they just re-present the receiver in another form. Peeling them
@@ -28,31 +29,17 @@ pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, GoParseError> 
     let bytes = source.as_bytes();
     let mut out = Vec::new();
 
-    let mut cursor = tree.root_node().walk();
-    for child in tree.root_node().named_children(&mut cursor) {
-        match child.kind() {
-            "function_declaration" => {
-                if let Some(f) = analyze_function(child, bytes, None) {
-                    out.push(f);
-                }
-            }
-            "method_declaration" => {
-                let owner = method_receiver_type(child, bytes);
-                if let Some(f) = analyze_function(child, bytes, owner.as_deref()) {
-                    out.push(f);
-                }
-            }
-            _ => {}
-        }
-    }
+    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+        out.extend(analyze_function(&site, bytes));
+    });
 
     Ok(out)
 }
 
-fn analyze_function(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Option<WrapperFinding> {
-    let body = node.child_by_field_name("body")?;
-    let name = qualify(owner, function_name_text(node, source)?);
-    let stmt = single_statement(body)?;
+fn analyze_function(site: &FnSite<'_, '_>, source: &[u8]) -> Option<WrapperFinding> {
+    let node = site.node;
+    let name = qualify(site.owner.as_deref(), site.name);
+    let stmt = single_statement(site.body)?;
     let expr = statement_expr(stmt, source)?;
     let (inner, adapters) = peel_adapters(expr, source);
     let (callee, args) = core_call(inner, source)?;

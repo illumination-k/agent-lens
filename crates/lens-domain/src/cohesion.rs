@@ -27,6 +27,8 @@
 //! [`MethodCohesion`] entries; this module only knows how to fold them into
 //! components and scores.
 
+use std::collections::HashSet;
+
 use crate::function::FunctionDef;
 
 /// What kind of unit a [`CohesionUnit`] describes.
@@ -81,6 +83,58 @@ impl MethodCohesion {
             fields,
             calls,
         }
+    }
+
+    /// Build one entry from what a language visitor actually observed.
+    ///
+    /// Every adapter's visitor collects field and call names in source
+    /// order, with repeats, and with calls that may leave the unit. The
+    /// three normalisations that turn those into the invariants
+    /// [`MethodCohesion`] documents — calls restricted to `siblings`,
+    /// both lists sorted and deduplicated — are language-independent, so
+    /// they live here instead of being repeated per adapter and per unit
+    /// kind.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashSet;
+    ///
+    /// use lens_domain::MethodCohesion;
+    ///
+    /// let siblings: HashSet<String> = ["helper".to_owned()].into_iter().collect();
+    /// let method = MethodCohesion::from_refs(
+    ///     "render",
+    ///     10,
+    ///     20,
+    ///     vec!["width".to_owned(), "depth".to_owned(), "width".to_owned()],
+    ///     vec!["helper".to_owned(), "helper".to_owned(), "elsewhere".to_owned()],
+    ///     &siblings,
+    /// );
+    ///
+    /// assert_eq!(method.fields, ["depth", "width"]);
+    /// assert_eq!(method.calls, ["helper"]);
+    /// ```
+    pub fn from_refs(
+        name: impl Into<String>,
+        start_line: usize,
+        end_line: usize,
+        fields: Vec<String>,
+        calls: Vec<String>,
+        siblings: &HashSet<String>,
+    ) -> Self {
+        let mut fields = fields;
+        fields.sort();
+        fields.dedup();
+
+        let mut calls: Vec<String> = calls
+            .into_iter()
+            .filter(|name| siblings.contains(name))
+            .collect();
+        calls.sort();
+        calls.dedup();
+
+        Self::new(name, start_line, end_line, fields, calls)
     }
 
     pub fn from_function(def: &FunctionDef, fields: Vec<String>, calls: Vec<String>) -> Self {

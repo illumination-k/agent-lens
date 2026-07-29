@@ -18,13 +18,12 @@
 //! function's score, matching how the similarity parser treats Go
 //! closures as part of their parent function.
 
-use std::collections::HashMap;
-
-use lens_domain::{FunctionComplexity, HalsteadCounts, qualify};
+use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, qualify};
 use tree_sitter::Node;
 
 use crate::node_text::node_str;
-use crate::parser::{GoParseError, function_name_text, method_receiver_type, parse_tree};
+use crate::parser::{GoParseError, parse_tree};
+use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Extract one [`FunctionComplexity`] per function-shaped item in
 /// `source`. Methods are reported as `Receiver::method`; free functions
@@ -33,72 +32,32 @@ pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>,
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let mut out = Vec::new();
-    let mut cursor = tree.root_node().walk();
-    for child in tree.root_node().named_children(&mut cursor) {
-        match child.kind() {
-            "function_declaration" => {
-                if let Some(unit) = analyze_function(child, bytes, None) {
-                    out.push(unit);
-                }
-            }
-            "method_declaration" => {
-                let owner = method_receiver_type(child, bytes);
-                if let Some(unit) = analyze_function(child, bytes, owner.as_deref()) {
-                    out.push(unit);
-                }
-            }
-            _ => {}
-        }
-    }
+    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+        out.push(analyze_function(&site, bytes));
+    });
     Ok(out)
 }
 
-fn analyze_function(
-    node: Node<'_>,
-    source: &[u8],
-    owner: Option<&str>,
-) -> Option<FunctionComplexity> {
-    let body = node.child_by_field_name("body")?;
-    let name = qualify(owner, function_name_text(node, source)?);
+fn analyze_function(site: &FnSite<'_, '_>, source: &[u8]) -> FunctionComplexity {
     let mut visitor = ComplexityVisitor::new(source);
-    visitor.visit_node(body);
-    Some(FunctionComplexity {
-        name,
-        start_line: node.start_position().row + 1,
-        end_line: node.end_position().row + 1,
-        cyclomatic: 1 + visitor.cyclomatic_branches,
-        cognitive: visitor.cognitive,
-        max_nesting: visitor.max_nesting,
-        halstead: visitor.halstead_counts(),
-    })
-}
-
-#[derive(Default)]
-struct HalsteadAcc {
-    operators: HashMap<String, usize>,
-    operands: HashMap<String, usize>,
-}
-
-impl HalsteadAcc {
-    fn op(&mut self, s: &str) {
-        bump_count(&mut self.operators, s);
-    }
-
-    fn operand(&mut self, s: &str) {
-        bump_count(&mut self.operands, s);
+    visitor.visit_node(site.body);
+    FunctionComplexity {
+        name: qualify(site.owner.as_deref(), site.name),
+        start_line: site.node.start_position().row + 1,
+        end_line: site.node.end_position().row + 1,
+        cyclomatic: visitor.counters.cyclomatic(),
+        cognitive: visitor.counters.cognitive(),
+        max_nesting: visitor.counters.max_nesting(),
+        halstead: visitor.halstead.counts(),
     }
 }
 
-fn bump_count(map: &mut HashMap<String, usize>, s: &str) {
-    *map.entry(s.to_owned()).or_insert(0) += 1;
-}
-
+/// Go-specific half of the complexity walk: which tree-sitter node counts
+/// as a branch and which Halstead label it carries. The scoring rules live
+/// in [`ComplexityCounters`] / [`HalsteadAcc`].
 struct ComplexityVisitor<'a> {
     source: &'a [u8],
-    cyclomatic_branches: u32,
-    cognitive: u32,
-    nesting: u32,
-    max_nesting: u32,
+    counters: ComplexityCounters,
     halstead: HalsteadAcc,
 }
 
@@ -106,35 +65,13 @@ impl<'a> ComplexityVisitor<'a> {
     fn new(source: &'a [u8]) -> Self {
         Self {
             source,
-            cyclomatic_branches: 0,
-            cognitive: 0,
-            nesting: 0,
-            max_nesting: 0,
+            counters: ComplexityCounters::default(),
             halstead: HalsteadAcc::default(),
         }
     }
 
-    fn halstead_counts(&self) -> HalsteadCounts {
-        HalsteadCounts {
-            distinct_operators: self.halstead.operators.len(),
-            distinct_operands: self.halstead.operands.len(),
-            total_operators: self.halstead.operators.values().sum(),
-            total_operands: self.halstead.operands.values().sum(),
-        }
-    }
-
-    fn enter_nest(&mut self) {
-        self.nesting += 1;
-        self.max_nesting = self.max_nesting.max(self.nesting);
-    }
-
-    fn exit_nest(&mut self) {
-        self.nesting = self.nesting.saturating_sub(1);
-    }
-
     fn add_branch(&mut self) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
     }
 
     fn visit_node(&mut self, node: Node<'_>) {
@@ -171,12 +108,12 @@ impl<'a> ComplexityVisitor<'a> {
 
             if child.kind() == "block" {
                 if saw_else {
-                    self.cognitive += 1;
+                    self.counters.add_cognitive(1);
                     saw_else = false;
                 }
-                self.enter_nest();
+                self.counters.enter_nest();
                 self.visit_node(child);
-                self.exit_nest();
+                self.counters.exit_nest();
             } else {
                 saw_else = false;
                 self.visit_node(child);
@@ -192,16 +129,14 @@ impl<'a> ComplexityVisitor<'a> {
 
     fn visit_case_control(&mut self, node: Node<'_>, op: &str) {
         let arms = u32::try_from(count_decision_case_nodes(node)).unwrap_or(u32::MAX);
-        self.cyclomatic_branches += arms.saturating_sub(1);
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branches(arms.saturating_sub(1));
         self.halstead.op(op);
         self.visit_control_children(node, false);
     }
 
     fn visit_binary_expression(&mut self, node: Node<'_>) {
         if logical_operator_text(node, self.source).is_some() {
-            self.cyclomatic_branches += 1;
-            self.cognitive += 1;
+            self.counters.add_flat_branch();
         }
         self.record_named_node(node);
         self.visit_children(node);
@@ -210,9 +145,9 @@ impl<'a> ComplexityVisitor<'a> {
     fn visit_control_children(&mut self, node: Node<'_>, nest_blocks: bool) {
         for_each_child(node, |child| {
             if should_nest_control_child(child, nest_blocks) {
-                self.enter_nest();
+                self.counters.enter_nest();
                 self.visit_node(child);
-                self.exit_nest();
+                self.counters.exit_nest();
             } else {
                 self.visit_node(child);
             }

@@ -22,18 +22,15 @@
 //! code) but are not surfaced as separate units. This mirrors how the
 //! similarity extractor treats `def` bodies as atomic.
 
-use std::collections::HashMap;
-
-use lens_domain::{FunctionComplexity, HalsteadCounts, LineIndex, qualify};
+use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, LineIndex, qualify};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{
     BoolOp, CmpOp, Expr, ExprBoolOp, ExprCall, ExprCompare, ExprIf, ExprUnaryOp, Number, Stmt,
-    StmtAssert, StmtClassDef, StmtFor, StmtFunctionDef, StmtIf, StmtMatch, StmtTry, StmtWhile,
-    StmtWith, UnaryOp,
+    StmtAssert, StmtFor, StmtFunctionDef, StmtIf, StmtMatch, StmtTry, StmtWhile, StmtWith, UnaryOp,
 };
 use ruff_python_parser::{ParseError, parse_module};
 
-use crate::attrs::{inherits_protocol, is_stub_function};
+use crate::walk::walk_module_fns;
 
 /// Failures produced while extracting complexity units.
 #[derive(Debug, thiserror::Error)]
@@ -49,43 +46,13 @@ pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>,
     let module = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
-    for stmt in &module.body {
-        collect_stmt(stmt, None, &lines, &mut out);
-    }
+    // Stub bodies all score CC=1, cognitive=0, and Protocol classes are
+    // nothing but stubs; the walk drops both before they reach the table.
+    walk_module_fns(&module.body, &mut |site| {
+        let name = qualify(site.owner, site.func.name.as_str());
+        out.push(analyze(&name, site.func, &lines));
+    });
     Ok(out)
-}
-
-fn collect_stmt(
-    stmt: &Stmt,
-    owner: Option<&str>,
-    lines: &LineIndex,
-    out: &mut Vec<FunctionComplexity>,
-) {
-    match stmt {
-        Stmt::FunctionDef(func) => {
-            // Stubs all score CC=1, cognitive=0; reporting them just
-            // inflates the table with rows that carry no signal.
-            if is_stub_function(func) {
-                return;
-            }
-            let name = qualify(owner, func.name.as_str());
-            out.push(analyze(&name, func, lines));
-        }
-        Stmt::ClassDef(class) => collect_class(class, lines, out),
-        _ => {}
-    }
-}
-
-fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<FunctionComplexity>) {
-    // Protocol classes are pure declarations — every method body is a
-    // `...` stub. Drop the whole subtree.
-    if inherits_protocol(class) {
-        return;
-    }
-    let class_name = class.name.as_str();
-    for inner in &class.body {
-        collect_stmt(inner, Some(class_name), lines, out);
-    }
 }
 
 fn analyze(name: &str, func: &StmtFunctionDef, lines: &LineIndex) -> FunctionComplexity {
@@ -93,12 +60,6 @@ fn analyze(name: &str, func: &StmtFunctionDef, lines: &LineIndex) -> FunctionCom
     for stmt in &func.body {
         visitor.visit_stmt(stmt);
     }
-    let halstead = HalsteadCounts {
-        distinct_operators: visitor.halstead.operators.len(),
-        distinct_operands: visitor.halstead.operands.len(),
-        total_operators: visitor.halstead.operators.values().sum(),
-        total_operands: visitor.halstead.operands.values().sum(),
-    };
     let start_line = lines.line(func.range.start().to_u32());
     let end_offset = func.range.end().to_u32().saturating_sub(1);
     let end_line = lines.line(end_offset);
@@ -106,65 +67,25 @@ fn analyze(name: &str, func: &StmtFunctionDef, lines: &LineIndex) -> FunctionCom
         name: name.to_owned(),
         start_line,
         end_line,
-        cyclomatic: 1 + visitor.cyclomatic_branches,
-        cognitive: visitor.cognitive,
-        max_nesting: visitor.max_nesting,
-        halstead,
+        cyclomatic: visitor.counters.cyclomatic(),
+        cognitive: visitor.counters.cognitive(),
+        max_nesting: visitor.counters.max_nesting(),
+        halstead: visitor.halstead.counts(),
     }
 }
 
+/// Python-specific half of the complexity walk: which ruff node counts as
+/// a branch and which Halstead label it carries. The scoring rules live in
+/// [`ComplexityCounters`] / [`HalsteadAcc`].
 #[derive(Default)]
-struct HalsteadAcc {
-    operators: HashMap<String, usize>,
-    operands: HashMap<String, usize>,
-}
-
-impl HalsteadAcc {
-    fn op(&mut self, s: &str) {
-        bump_count(&mut self.operators, s);
-    }
-    fn operand(&mut self, s: &str) {
-        bump_count(&mut self.operands, s);
-    }
-}
-
-fn bump_count(map: &mut HashMap<String, usize>, s: &str) {
-    *map.entry(s.to_owned()).or_insert(0) += 1;
-}
-
 struct ComplexityVisitor {
-    cyclomatic_branches: u32,
-    cognitive: u32,
-    nesting: u32,
-    max_nesting: u32,
+    counters: ComplexityCounters,
     halstead: HalsteadAcc,
 }
 
 impl ComplexityVisitor {
     fn new() -> Self {
-        Self {
-            cyclomatic_branches: 0,
-            cognitive: 0,
-            nesting: 0,
-            max_nesting: 0,
-            halstead: HalsteadAcc::default(),
-        }
-    }
-
-    // Setting `max_nesting` is idempotent for repeated entries at the
-    // same depth; `>` and `>=` produce the same final value, just with
-    // a different number of writes. The `>` boundary is therefore
-    // listed under `exclude_re` in `.cargo/mutants.toml` — the
-    // mutation is equivalent, not a real test gap.
-    fn enter_nest(&mut self) {
-        self.nesting += 1;
-        if self.nesting > self.max_nesting {
-            self.max_nesting = self.nesting;
-        }
-    }
-
-    fn exit_nest(&mut self) {
-        self.nesting = self.nesting.saturating_sub(1);
+        Self::default()
     }
 }
 
@@ -251,53 +172,50 @@ impl ComplexityVisitor {
 
 impl ComplexityVisitor {
     fn visit_if(&mut self, stmt: &StmtIf) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         self.halstead.op("if");
         self.visit_expr(&stmt.test);
-        self.enter_nest();
+        self.counters.enter_nest();
         for s in &stmt.body {
             self.visit_stmt(s);
         }
-        self.exit_nest();
+        self.counters.exit_nest();
         for clause in &stmt.elif_else_clauses {
             match &clause.test {
                 // `elif` is its own branch in McCabe and a +1 in cognitive
                 // (no extra penalty for the bare `else`).
                 Some(test) => {
-                    self.cyclomatic_branches += 1;
-                    self.cognitive += 1 + self.nesting;
+                    self.counters.add_branch();
                     self.halstead.op("elif");
                     self.visit_expr(test);
-                    self.enter_nest();
+                    self.counters.enter_nest();
                     for s in &clause.body {
                         self.visit_stmt(s);
                     }
-                    self.exit_nest();
+                    self.counters.exit_nest();
                 }
                 None => {
-                    self.cognitive += 1;
+                    self.counters.add_cognitive(1);
                     self.halstead.op("else");
-                    self.enter_nest();
+                    self.counters.enter_nest();
                     for s in &clause.body {
                         self.visit_stmt(s);
                     }
-                    self.exit_nest();
+                    self.counters.exit_nest();
                 }
             }
         }
     }
 
     fn visit_while(&mut self, stmt: &StmtWhile) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         self.halstead.op("while");
         self.visit_expr(&stmt.test);
-        self.enter_nest();
+        self.counters.enter_nest();
         for s in &stmt.body {
             self.visit_stmt(s);
         }
-        self.exit_nest();
+        self.counters.exit_nest();
         // `else:` after a while/for runs when the loop completes without
         // break — it doesn't add a structural branch in cognitive
         // complexity, but we still walk it for Halstead operands.
@@ -307,16 +225,15 @@ impl ComplexityVisitor {
     }
 
     fn visit_for(&mut self, stmt: &StmtFor) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         self.halstead.op("for");
         self.visit_expr(&stmt.target);
         self.visit_expr(&stmt.iter);
-        self.enter_nest();
+        self.counters.enter_nest();
         for s in &stmt.body {
             self.visit_stmt(s);
         }
-        self.exit_nest();
+        self.counters.exit_nest();
         for s in &stmt.orelse {
             self.visit_stmt(s);
         }
@@ -325,45 +242,43 @@ impl ComplexityVisitor {
     fn visit_match(&mut self, stmt: &StmtMatch) {
         // McCabe: every arm beyond the first introduces a new path.
         let arms = u32::try_from(stmt.cases.len()).unwrap_or(u32::MAX);
-        self.cyclomatic_branches += arms.saturating_sub(1);
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branches(arms.saturating_sub(1));
         self.halstead.op("match");
         self.visit_expr(&stmt.subject);
-        self.enter_nest();
+        self.counters.enter_nest();
         for case in &stmt.cases {
             if let Some(guard) = &case.guard {
                 // A guard adds another conditional path.
-                self.cyclomatic_branches += 1;
+                self.counters.add_cyclomatic(1);
                 self.visit_expr(guard);
             }
             for s in &case.body {
                 self.visit_stmt(s);
             }
         }
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 
     fn visit_try(&mut self, stmt: &StmtTry) {
         self.halstead.op("try");
-        self.enter_nest();
+        self.counters.enter_nest();
         for s in &stmt.body {
             self.visit_stmt(s);
         }
-        self.exit_nest();
+        self.counters.exit_nest();
         for handler in &stmt.handlers {
             // Each `except` clause is one extra control-flow branch.
-            self.cyclomatic_branches += 1;
-            self.cognitive += 1 + self.nesting;
+            self.counters.add_branch();
             self.halstead.op("except");
             let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
             if let Some(t) = &h.type_ {
                 self.visit_expr(t);
             }
-            self.enter_nest();
+            self.counters.enter_nest();
             for s in &h.body {
                 self.visit_stmt(s);
             }
-            self.exit_nest();
+            self.counters.exit_nest();
         }
         for s in &stmt.orelse {
             self.visit_stmt(s);
@@ -395,17 +310,17 @@ impl ComplexityVisitor {
                 self.visit_expr(vars);
             }
         }
-        self.enter_nest();
+        self.counters.enter_nest();
         for s in &stmt.body {
             self.visit_stmt(s);
         }
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 
     fn visit_assert(&mut self, stmt: &StmtAssert) {
         // Treat `assert` as a branch: the failed-assert path is a
         // distinct control-flow exit point, like `?` in Rust.
-        self.cyclomatic_branches += 1;
+        self.counters.add_cyclomatic(1);
         self.halstead.op("assert");
         self.visit_expr(&stmt.test);
         if let Some(msg) = &stmt.msg {
@@ -419,8 +334,8 @@ impl ComplexityVisitor {
         // branches for McCabe and `len-1` cognitive bumps.
         let extra = u32::try_from(expr.values.len()).unwrap_or(u32::MAX);
         let extra = extra.saturating_sub(1);
-        self.cyclomatic_branches += extra;
-        self.cognitive += extra;
+        self.counters.add_cyclomatic(extra);
+        self.counters.add_cognitive(extra);
         let label = match expr.op {
             BoolOp::And => "and",
             BoolOp::Or => "or",
@@ -434,14 +349,13 @@ impl ComplexityVisitor {
     fn visit_ternary(&mut self, expr: &ExprIf) {
         // `x if cond else y` is a branching construct just like a
         // statement-level `if`.
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         self.halstead.op("if-expr");
         self.visit_expr(&expr.test);
-        self.enter_nest();
+        self.counters.enter_nest();
         self.visit_expr(&expr.body);
         self.visit_expr(&expr.orelse);
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 
     fn visit_compare(&mut self, expr: &ExprCompare) {
