@@ -25,6 +25,7 @@ mod candidates;
 mod corpus;
 mod doc;
 mod extract;
+mod paired;
 mod report;
 mod token;
 
@@ -34,7 +35,12 @@ use candidates::{
 #[cfg(test)]
 use candidates::{CheapFilter, tsed_upper_bound_filter};
 use corpus::{OwnedFunction, collect_corpus};
-use report::{ClusterView, Report, format_markdown};
+pub use paired::PairKey;
+use paired::{PairedCandidate, name_matched_pairs};
+use report::{
+    ClusterView, PairedReport, PairedReportInputs, Report, ScoredMatch, build_drift_groups,
+    format_markdown, format_paired_markdown,
+};
 use token::TokenProfile;
 
 /// Default similarity threshold. Picked to match the cutoff used by the
@@ -46,6 +52,16 @@ pub const DEFAULT_THRESHOLD: f64 = 0.85;
 /// `--min-lines` default in `similarity-ts`: tiny functions (one-liners,
 /// trivial getters) form too many spurious matches.
 pub const DEFAULT_MIN_LINES: usize = 5;
+
+/// Default floor for `--paired-by`. A name-matched pair scoring below
+/// this shares a name and essentially nothing else, which in practice
+/// means two unrelated functions that happen to be called the same thing
+/// (every analyzer's own `format_markdown`, every type's `new`) rather
+/// than one implementation that drifted from another. Drift lives in the
+/// band between this floor and the threshold; below it the report would
+/// be dominated by namesakes and the ascending sort would put them first.
+/// Pass `--drift-floor 0` to see them anyway.
+pub const DEFAULT_DRIFT_FLOOR: f64 = 0.3;
 
 const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
 const BODY_SIMILARITY_WEIGHT: f64 = 0.8;
@@ -138,6 +154,8 @@ pub struct SimilarityAnalyzer {
     method: SimilarityMethod,
     sweep: Option<Vec<f64>>,
     doc_overlap: bool,
+    paired_by: Option<PairKey>,
+    drift_floor: f64,
 }
 
 /// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
@@ -165,6 +183,8 @@ impl SimilarityAnalyzer {
             method: SimilarityMethod::default(),
             sweep: None,
             doc_overlap: false,
+            paired_by: None,
+            drift_floor: DEFAULT_DRIFT_FLOOR,
         }
     }
 
@@ -213,6 +233,21 @@ impl SimilarityAnalyzer {
         fn with_doc_overlap, doc_overlap: bool
     }
 
+    with_setter! {
+        /// Switch to name-anchored pairing: match functions by the given
+        /// [`PairKey`] first, score second, and report every matched pair
+        /// regardless of threshold. `None` (the default) keeps the
+        /// threshold-clustering report.
+        fn with_paired_by, paired_by: Option<PairKey>
+    }
+
+    with_setter! {
+        /// Drop name-matched pairs scoring below this from the
+        /// `--paired-by` report. Defaults to [`DEFAULT_DRIFT_FLOOR`];
+        /// `0.0` reports every match. Ignored outside paired mode.
+        fn with_drift_floor, drift_floor: f64
+    }
+
     /// Enable multi-threshold sweep mode. Pairs are scored and clustered
     /// once at the lowest rung of `ladder` (the floor), and every reported
     /// cluster is annotated with the highest rung at which its complete-link
@@ -250,6 +285,9 @@ impl SimilarityAnalyzer {
         let started = Instant::now();
         let corpus = collect_corpus(path, &self.filter.path_filter(), self.selection)?;
         let function_count = corpus.len();
+        if let Some(key) = self.paired_by {
+            return self.analyze_paired(path, &corpus, key, format, started);
+        }
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
             path,
@@ -271,6 +309,115 @@ impl SimilarityAnalyzer {
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.doc_overlap)
         })
+    }
+
+    /// Name-anchored counterpart to [`Self::find_clusters`]: pair first
+    /// by name key, score second, and report every matched pair whether
+    /// or not it clears the threshold.
+    ///
+    /// The threshold stops being a filter here and becomes a label —
+    /// clustering can only report pairs that are *still* similar, so it
+    /// structurally cannot surface a pair of siblings that has drifted
+    /// apart, which is the pair most likely to be a missed sync.
+    fn analyze_paired(
+        &self,
+        path: &Path,
+        corpus: &[OwnedFunction],
+        key: PairKey,
+        format: OutputFormat,
+        started: Instant,
+    ) -> Result<String, AnalyzerError> {
+        let candidates = name_matched_pairs(corpus, self.min_lines, key);
+        let changed_by_file = self.changed_ranges_for_run(corpus);
+        let matched = self.paired_pairs_to_score(corpus, &candidates.pairs, &changed_by_file);
+        enforce_candidate_pair_limit(
+            candidates.eligible_function_count,
+            matched.len(),
+            MAX_CANDIDATE_PAIRS,
+            self.min_lines,
+            key.as_str(),
+        )?;
+
+        let profiles = match self.method {
+            SimilarityMethod::Tsed => build_tree_profiles(corpus, self.min_lines),
+            SimilarityMethod::Token => Vec::new(),
+        };
+        let index_pairs: Vec<(usize, usize)> = matched.iter().map(|c| (c.i, c.j)).collect();
+        // Threshold 0 keeps every scored pair: in this mode the cut
+        // labels drift instead of filtering the report.
+        let mut score_stats = self.score_pairs(corpus, &profiles, &index_pairs, 0.0);
+        annotate_doc_overlap(corpus, &mut score_stats.pairs);
+
+        let key_by_pair: HashMap<(usize, usize), usize> = matched
+            .iter()
+            .map(|c| (sorted_pair_key(c.i, c.j), c.key))
+            .collect();
+        let kept: Vec<ScoredMatch> = score_stats
+            .pairs
+            .iter()
+            .filter(|pair| pair.components.similarity >= self.drift_floor)
+            .filter_map(|pair| {
+                Some(ScoredMatch {
+                    key: *key_by_pair.get(&sorted_pair_key(pair.i, pair.j))?,
+                    i: pair.i,
+                    j: pair.j,
+                    components: pair.components,
+                })
+            })
+            .collect();
+        let below_floor_count = score_stats.pairs.len() - kept.len();
+        let groups = build_drift_groups(corpus, &candidates.keys, &kept, self.threshold);
+
+        let report = PairedReport::new(
+            PairedReportInputs {
+                path,
+                method: self.method.as_str(),
+                paired_by: key.as_str(),
+                threshold: self.threshold,
+                drift_floor: self.drift_floor,
+                min_lines: self.min_lines,
+                function_count: corpus.len(),
+                same_file_pair_count: candidates.same_file_pair_count,
+                below_floor_count,
+            },
+            groups,
+        );
+        debug!(
+            target: PROFILE_TARGET,
+            path = %path.display(),
+            paired_by = key.as_str(),
+            function_count = corpus.len(),
+            name_matched_pair_count = matched.len(),
+            same_file_pair_count = candidates.same_file_pair_count,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "analyze similarity --paired-by finished"
+        );
+        render_report(&report, format, || {
+            format_paired_markdown(&report, self.top)
+        })
+    }
+
+    /// `--diff-only` for the paired path. Same rule as the clustering
+    /// path: keep a pair when either side overlaps a changed line range.
+    fn paired_pairs_to_score(
+        &self,
+        corpus: &[OwnedFunction],
+        pairs: &[PairedCandidate],
+        changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
+    ) -> Vec<PairedCandidate> {
+        if !self.filter.diff_only() {
+            return pairs.to_vec();
+        }
+        pairs
+            .iter()
+            .copied()
+            .filter(|c| {
+                corpus
+                    .get(c.i)
+                    .zip(corpus.get(c.j))
+                    .is_some_and(|(a, b)| pair_touches_changes(a, b, changed_by_file))
+            })
+            .collect()
     }
 
     /// Pairwise scoring over the corpus (TSED or token, per
@@ -2646,6 +2793,278 @@ def beta(ys):
             "similarity {} should be {expected}",
             score.components.similarity,
         );
+    }
+
+    /// The NAPI side of the drift fixture: a conversion carrying four
+    /// fields.
+    const NAPI_SIBLING: &str = r#"
+pub struct Summary;
+
+impl Summary {
+    pub fn from_raw(raw: &Raw) -> Summary {
+        let title = raw.title.clone();
+        let authors = raw.authors.clone();
+        let keywords = raw.keywords.clone();
+        let year = raw.year;
+        Summary { title, authors, keywords, year }
+    }
+}
+"#;
+
+    /// The WASM mirror of [`NAPI_SIBLING`], already drifted: same role,
+    /// same name modulo the binding prefix, two fields dropped. This is
+    /// the pair threshold clustering cannot report — the drift that made
+    /// it dangerous is the same drift that pushes it under the cut.
+    const WASM_SIBLING: &str = r#"
+pub struct JsSummary;
+
+impl JsSummary {
+    pub fn from_raw(raw: &Raw) -> JsSummary {
+        let title = raw.title.clone();
+        let year = raw.year;
+        JsSummary { title, year }
+    }
+}
+"#;
+
+    fn drift_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "napi.rs", NAPI_SIBLING);
+        write_file(dir.path(), "wasm.rs", WASM_SIBLING);
+        dir
+    }
+
+    /// The regression the mode exists for. Clustering at the default
+    /// threshold reports nothing, because the pair drifted below the cut;
+    /// name-anchored pairing reports it, because it matched on the name
+    /// before it ever looked at the score.
+    #[test]
+    fn paired_mode_reports_siblings_that_clustering_drops() {
+        let dir = drift_fixture();
+
+        let clustered: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(clustered["cluster_count"], 0);
+
+        let paired: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .with_paired_by(Some(PairKey::Qualified))
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(paired["paired_by"], "qualified");
+        assert_eq!(paired["key_count"], 1);
+        assert_eq!(paired["pair_count"], 1);
+        assert_eq!(paired["drifted_pair_count"], 1);
+        let group = &paired["groups"][0];
+        // The `Js` prefix is stripped, so the two mirror types match.
+        assert_eq!(group["key"], "summary::from_raw");
+        assert_eq!(group["size"], 2);
+        let files: Vec<&str> = group["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert_eq!(files, vec!["napi.rs", "wasm.rs"]);
+        let similarity = group["pairs"][0]["similarity"].as_f64().unwrap();
+        assert!(
+            (DEFAULT_DRIFT_FLOOR..DEFAULT_THRESHOLD).contains(&similarity),
+            "fixture should drift within the reportable band, got {similarity}",
+        );
+        // The per-pair score components carry over from the clustering
+        // path unchanged, so a consumer reads one pair shape either way.
+        assert!(group["pairs"][0]["body_similarity"].as_f64().is_some());
+        assert!(group["pairs"][0]["signature_similarity"].as_f64().is_some());
+    }
+
+    #[test]
+    fn paired_markdown_names_the_key_and_both_siblings() {
+        let dir = drift_fixture();
+
+        let out = SimilarityAnalyzer::new()
+            .with_paired_by(Some(PairKey::Qualified))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+
+        assert!(out.contains("paired by qualified"), "{out}");
+        assert!(out.contains("`summary::from_raw`"), "{out}");
+        assert!(out.contains("napi.rs:`Summary::from_raw`"), "{out}");
+        assert!(out.contains("wasm.rs:`JsSummary::from_raw`"), "{out}");
+        assert!(out.contains("pair(s) drifted"), "{out}");
+    }
+
+    /// A floor at 1.0 admits nothing, so the same fixture must come back
+    /// empty *and* say the match was dropped rather than never found.
+    #[test]
+    fn drift_floor_drops_matches_and_counts_them() {
+        let dir = drift_fixture();
+
+        let json: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .with_paired_by(Some(PairKey::Qualified))
+                .with_drift_floor(1.0)
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(json["pair_count"], 0);
+        assert_eq!(json["key_count"], 0);
+        assert_eq!(json["below_floor_count"], 1);
+    }
+
+    /// The partial case, which the all-or-nothing one above cannot pin:
+    /// three functions share the `method` key, one of them shares nothing
+    /// else with the other two. The kept pair and the dropped ones have
+    /// to be accounted for separately.
+    #[test]
+    fn drift_floor_counts_only_the_matches_it_dropped() {
+        let dir = drift_fixture();
+        write_file(
+            dir.path(),
+            "unrelated.rs",
+            r#"
+pub struct Counter;
+
+impl Counter {
+    pub fn from_raw(raw: &Raw) -> Counter {
+        for entry in raw.entries.iter() {
+            if entry.enabled {
+                return Counter::new(entry.id);
+            }
+        }
+        Counter::empty()
+    }
+}
+"#,
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .with_paired_by(Some(PairKey::Method))
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+
+        // Three functions share `from_raw`, so three pairs were scored:
+        // the drifted mirror pair survives, the two involving the
+        // unrelated namesake do not.
+        assert_eq!(json["pair_count"], 1);
+        assert_eq!(json["below_floor_count"], 2);
+    }
+
+    /// The loose key drops the owner, so two conversions on unrelated
+    /// types still pair. Same fixture, and `from_raw` is the only name
+    /// either file defines, so the difference is purely the key.
+    #[test]
+    fn method_key_matches_across_unrelated_owners() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "napi.rs", NAPI_SIBLING);
+        write_file(
+            dir.path(),
+            "wasm.rs",
+            &WASM_SIBLING.replace("JsSummary", "WebArticle"),
+        );
+
+        let qualified: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .with_paired_by(Some(PairKey::Qualified))
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(qualified["pair_count"], 0);
+
+        let method: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .with_paired_by(Some(PairKey::Method))
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(method["pair_count"], 1);
+        assert_eq!(method["groups"][0]["key"], "from_raw");
+    }
+
+    /// Siblings are a cross-file pattern; two same-named functions in one
+    /// file are not drift. They must be excluded and counted, so an empty
+    /// report can say which of the two reasons it is empty for.
+    #[test]
+    fn paired_mode_skips_and_counts_same_file_namesakes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "lib.rs",
+            &format!("{NAPI_SIBLING}{}", WASM_SIBLING.replace("Js", "Wasm")),
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .with_paired_by(Some(PairKey::Qualified))
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(json["pair_count"], 0);
+        assert_eq!(json["same_file_pair_count"], 1);
+    }
+
+    /// `--diff-only` narrows the paired report the same way it narrows
+    /// the clustering one: a pair survives only when an edit touched one
+    /// of its two sides.
+    #[test]
+    fn paired_mode_honors_diff_only() {
+        let dir = drift_fixture();
+        write_file(
+            dir.path(),
+            "other.rs",
+            &NAPI_SIBLING.replace("Summary", "Note"),
+        );
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let analyzer = SimilarityAnalyzer::new().with_paired_by(Some(PairKey::Method));
+        let before: serde_json::Value =
+            serde_json::from_str(&analyzer.analyze(dir.path(), OutputFormat::Json).unwrap())
+                .unwrap();
+        assert_eq!(before["pair_count"], 3);
+
+        // Touch one side of one pair only.
+        write_file(
+            dir.path(),
+            "wasm.rs",
+            &WASM_SIBLING.replace("let year = raw.year;", "let year = raw.year + 1;"),
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &analyzer
+                .clone()
+                .with_diff_only(true)
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(json["pair_count"], 2);
+        let files: Vec<&str> = json["groups"][0]["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert!(files.contains(&"wasm.rs"), "{files:?}");
     }
 
     #[test]

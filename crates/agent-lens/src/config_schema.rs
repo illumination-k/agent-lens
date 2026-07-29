@@ -146,6 +146,18 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Roll the per-pair doc-comment overlap up into the markdown report. Diagnostic only; it never feeds the similarity score, and JSON output carries the per-pair values either way.",
             },
             Field {
+                key: "paired-by",
+                ty: "\"qualified\" or \"method\"",
+                presence: "optional",
+                desc: "Match functions by name key first and score second, reporting every cross-file match regardless of threshold, most drifted first. qualified keys on the normalized owner-qualified name; method keys on the method segment alone.",
+            },
+            Field {
+                key: "drift-floor",
+                ty: "float",
+                presence: "default: 0.30",
+                desc: "Floor for paired-by: name matches scoring below this are dropped as unrelated namesakes rather than reported as drift. Only read when paired-by is set.",
+            },
+            Field {
                 key: "diff-only",
                 ty: "bool",
                 presence: "default: false",

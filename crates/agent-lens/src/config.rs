@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::analyze::{GraphDirection, GraphQueryKind, OutputFormat, SimilarityMethod};
+use crate::analyze::{GraphDirection, GraphQueryKind, OutputFormat, PairKey, SimilarityMethod};
 
 /// File name searched for when discovering a project config.
 pub const CONFIG_FILE_NAME: &str = "agent-lens.toml";
@@ -203,6 +203,14 @@ pub struct SimilarityOptions {
     /// the per-pair values either way.
     #[serde(default)]
     pub doc_overlap: bool,
+    /// Name-anchored pairing key: `qualified` (alias `name`) or
+    /// `method`. Mirrors the `--paired-by` CLI flag; when set the report
+    /// lists name-matched pairs instead of threshold clusters.
+    pub paired_by: Option<PairKey>,
+    /// Floor below which a name match is treated as an unrelated
+    /// namesake instead of drift. Mirrors the `--drift-floor` CLI flag;
+    /// only read when `paired-by` is set.
+    pub drift_floor: Option<f64>,
     #[serde(default)]
     pub diff_only: bool,
 }
@@ -464,6 +472,26 @@ since = "90.days.ago"
         // Absent `doc-overlap` is off, not "unset" — the markdown rollup
         // is opt-in from both the CLI and the config file.
         assert!(!similarity.doc_overlap);
+        // Absent `paired-by` leaves the clustering report in place.
+        assert_eq!(similarity.paired_by, None);
+        assert_eq!(similarity.drift_floor, None);
+    }
+
+    #[rstest]
+    #[case::qualified("qualified", PairKey::Qualified)]
+    // The CLI takes `name` as an alias for the tight key; the config
+    // file has to accept the same spelling or a profile cannot express
+    // what a command line can.
+    #[case::name_alias("name", PairKey::Qualified)]
+    #[case::method("method", PairKey::Method)]
+    fn parses_similarity_paired_by(#[case] value: &str, #[case] expected: PairKey) {
+        let config: Config = toml::from_str(&format!(
+            "[profile.web]\npath = \"web/\"\ntools = [\"similarity\"]\n\n[profile.web.similarity]\npaired-by = \"{value}\"\ndrift-floor = 0.4\n",
+        ))
+        .unwrap();
+        let similarity = config.profile("web").unwrap().similarity.as_ref().unwrap();
+        assert_eq!(similarity.paired_by, Some(expected));
+        assert_eq!(similarity.drift_floor, Some(0.4));
     }
 
     #[test]
