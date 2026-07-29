@@ -436,6 +436,46 @@ fn run_profile_drives_visibility_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_delegation_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "pub mod api {
+    pub fn save(id: usize) -> usize { crate::service::save(id) }
+}
+pub mod service {
+    pub fn save(id: usize) -> usize { crate::db::insert(id) }
+}
+pub mod db {
+    pub fn insert(id: usize) -> usize { id + 1 }
+    pub fn other(id: usize) -> usize { id }
+}
+",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.layers]\npath = \"src\"\ntools = [\"delegation\"]\n\n\
+         [profile.layers.delegation]\ntop = 5\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "layers"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "delegation");
+    let chain = &json["results"][0]["report"]["chains"][0];
+    assert_eq!(chain["depth"], 2);
+    assert_eq!(chain["terminus"]["qualified_name"], "crate::db::insert");
+    let hops: Vec<&str> = chain["hops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hop| hop["qualified_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(hops, ["crate::api::save", "crate::service::save"]);
+}
+
+#[test]
 fn run_profile_rejects_graph_query_without_options_table() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);

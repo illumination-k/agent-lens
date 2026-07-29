@@ -19,7 +19,7 @@ pub(crate) mod resolve;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use lens_domain::{CallShape, FunctionComplexity, FunctionShape};
+use lens_domain::{CallShape, FunctionComplexity, FunctionShape, WrapperFinding};
 use lens_rust::CallIndexOptions;
 
 use super::cargo_meta::CrateNameCache;
@@ -28,8 +28,9 @@ use super::{
     collect_source_files, read_source,
 };
 use model::{
-    CallGraphEdge, CallGraphNode, EdgeWeights, GraphLanguage, ModuleResolutionSummary,
-    NodeVisibility, NodeWeights, Resolution, ResolutionCallCounts, node_id, node_local_name,
+    CallGraphEdge, CallGraphNode, DelegationFacts, EdgeWeights, GraphLanguage,
+    ModuleResolutionSummary, NodeVisibility, NodeWeights, Resolution, ResolutionCallCounts,
+    node_id, node_local_name,
 };
 use resolve::{CallerIndex, Resolver};
 
@@ -131,6 +132,7 @@ pub(crate) fn match_symbol(graph: &CallGraph, symbol: &str) -> Vec<usize> {
 pub(crate) struct CallGraphBuilder {
     only_tests: bool,
     exclude_tests: bool,
+    delegation_facts: bool,
     path_filter: AnalyzePathFilter,
 }
 
@@ -139,8 +141,17 @@ impl CallGraphBuilder {
         Self {
             only_tests: false,
             exclude_tests: false,
+            delegation_facts: false,
             path_filter: AnalyzePathFilter::new(),
         }
+    }
+
+    /// Attach [`DelegationFacts`] to every node. Off by default: the
+    /// `pass_through` fact runs each language's thin-wrapper detector,
+    /// which is one more parse per file than the graph itself needs.
+    pub(crate) fn with_delegation_facts(mut self, delegation_facts: bool) -> Self {
+        self.delegation_facts = delegation_facts;
+        self
     }
 
     pub(crate) fn with_only_tests(mut self, only_tests: bool) -> Self {
@@ -231,6 +242,10 @@ impl CallGraphBuilder {
         functions.retain(|f| self.includes_function(f, path_is_test));
         let calls = extract_call_shapes(lang, &source, &module, !self.exclude_tests)?;
         let complexity = extract_complexity(lang, &source)?;
+        let wrappers = self
+            .delegation_facts
+            .then(|| extract_wrappers(lang, &source))
+            .transpose()?;
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -240,6 +255,7 @@ impl CallGraphBuilder {
             functions,
             calls,
             complexity,
+            wrappers,
         })
     }
 
@@ -324,6 +340,13 @@ fn extract_complexity(
     }
 }
 
+/// Thin-wrapper findings for one file, from the same detector `analyze
+/// wrapper` reports. Only collected when the builder was asked for
+/// delegation facts.
+fn extract_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, AnalyzerError> {
+    super::dispatch_lens!(lang, source, find_wrappers).map_err(AnalyzerError::Parse)
+}
+
 /// Everything the graph needs from one scanned source file.
 pub(crate) struct FileGraphInput {
     pub(crate) file: String,
@@ -335,6 +358,9 @@ pub(crate) struct FileGraphInput {
     pub(crate) functions: Vec<FunctionShape>,
     pub(crate) calls: Vec<CallShape>,
     pub(crate) complexity: Vec<FunctionComplexity>,
+    /// Thin-wrapper findings for this file, or `None` when delegation
+    /// facts were not requested.
+    pub(crate) wrappers: Option<Vec<WrapperFinding>>,
 }
 
 impl SourceLang {
@@ -364,6 +390,7 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<CallGraphNode> {
     let mut nodes = Vec::new();
     for file in files {
         let complexity = ComplexityIndex::new(&file.complexity);
+        let wrappers = file.wrappers.as_deref().map(WrapperIndex::new);
         for f in &file.functions {
             let metrics = complexity.get(f);
             nodes.push(CallGraphNode {
@@ -396,6 +423,9 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<CallGraphNode> {
                     ..NodeWeights::default()
                 },
                 outgoing_calls: ResolutionCallCounts::default(),
+                delegation: wrappers
+                    .as_ref()
+                    .map(|wrappers| delegation_facts(f, wrappers)),
             });
         }
     }
@@ -429,6 +459,71 @@ impl<'a> ComplexityIndex<'a> {
                 f.span.end_line,
             ))
             .copied()
+    }
+}
+
+fn delegation_facts(f: &FunctionShape, wrappers: &WrapperIndex<'_>) -> DelegationFacts {
+    DelegationFacts {
+        statement_count: body_statement_count(f),
+        pass_through: wrappers.contains(f),
+        deprecated_doc: f.doc.as_deref().is_some_and(doc_says_deprecated),
+    }
+}
+
+/// Root labels the adapters give a function body whose children are its
+/// statements: Rust, Python, and Go emit `"Block"`, TypeScript emits
+/// `"FunctionBody"`.
+const BODY_BLOCK_LABELS: [&str; 2] = ["Block", "FunctionBody"];
+
+/// Top-level statements in a body, when the adapter emitted one of the
+/// statement blocks in [`BODY_BLOCK_LABELS`]. Anything else is `None` —
+/// an unrecognised body shape is "cannot tell", and the delegation
+/// analyzer treats that as a reason not to classify.
+fn body_statement_count(f: &FunctionShape) -> Option<usize> {
+    let body = f.body_tree();
+    BODY_BLOCK_LABELS
+        .contains(&body.label.as_str())
+        .then_some(body.children.len())
+}
+
+/// Whether a doc comment announces the function as deprecated. Matching
+/// the word anywhere in the doc is deliberately loose: the exemption is
+/// there to keep the report off code already on its way out, and a
+/// false exemption only costs a finding.
+fn doc_says_deprecated(doc: &str) -> bool {
+    doc.to_lowercase().contains("deprecated")
+}
+
+/// File-local lookup of thin-wrapper findings by the same
+/// `Owner::name` spelling node ids use.
+///
+/// The join is by name plus overlapping lines rather than an exact
+/// start line: a [`WrapperFinding`] spans signature-to-body while a
+/// [`FunctionShape`] span can start earlier (attributes, doc comments),
+/// and the two only have to agree on *which* function they describe.
+struct WrapperIndex<'a> {
+    by_name: HashMap<&'a str, Vec<&'a WrapperFinding>>,
+}
+
+impl<'a> WrapperIndex<'a> {
+    fn new(findings: &'a [WrapperFinding]) -> Self {
+        let mut by_name: HashMap<&'a str, Vec<&'a WrapperFinding>> = HashMap::new();
+        for finding in findings {
+            by_name
+                .entry(finding.name.as_str())
+                .or_default()
+                .push(finding);
+        }
+        Self { by_name }
+    }
+
+    fn contains(&self, f: &FunctionShape) -> bool {
+        let name = node_local_name(f);
+        self.by_name.get(name.as_str()).is_some_and(|findings| {
+            findings
+                .iter()
+                .any(|w| w.start_line <= f.span.end_line && f.span.start_line <= w.end_line)
+        })
     }
 }
 

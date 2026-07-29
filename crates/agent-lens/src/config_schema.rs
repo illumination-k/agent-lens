@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 15] = [
+const TOOL_ORDER: [ToolName; 16] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
@@ -33,6 +33,7 @@ const TOOL_ORDER: [ToolName; 15] = [
     ToolName::Layers,
     ToolName::Untested,
     ToolName::Visibility,
+    ToolName::Delegation,
     ToolName::GraphQuery,
     ToolName::ContextSpan,
     ToolName::Wrapper,
@@ -72,7 +73,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, function-graph, graph-query, hotspot, hubs, impact, layers, similarity, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, similarity, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -249,6 +250,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             presence: "optional",
             desc: "Cap the markdown module listing to the top N modules.",
         }],
+        ToolName::Delegation => &[
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown chain and module listings to the top N rows.",
+            },
+            Field {
+                key: "diff-only",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Keep only chains with a hop or terminus on an unstaged changed line.",
+            },
+        ],
         // The only tool whose options table is mandatory when the tool
         // is listed: a traversal needs a verb and a start symbol.
         ToolName::GraphQuery => &[
@@ -467,9 +482,9 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        CohesionOptions, ComplexityOptions, ContextSpanOptions, GraphQueryOptions, HotspotOptions,
-        HubsOptions, ImpactOptions, LayersOptions, Profile, SimilarityOptions, UntestedOptions,
-        VisibilityOptions, WrapperOptions,
+        CohesionOptions, ComplexityOptions, ContextSpanOptions, DelegationOptions,
+        GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
+        SimilarityOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -498,6 +513,7 @@ mod tests {
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
         assert_tool_parity::<UntestedOptions>(ToolName::Untested);
         assert_tool_parity::<VisibilityOptions>(ToolName::Visibility);
+        assert_tool_parity::<DelegationOptions>(ToolName::Delegation);
         assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);

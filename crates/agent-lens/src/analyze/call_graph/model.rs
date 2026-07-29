@@ -34,6 +34,36 @@ pub(crate) struct CallGraphNode {
     /// the per-node confidence signal: a node with many unresolved
     /// outgoing calls has an undercounted fan-out.
     pub(crate) outgoing_calls: ResolutionCallCounts,
+    /// Body facts only the delegation analyzer reads. Absent — and
+    /// omitted from JSON — unless the graph was built with
+    /// [`super::CallGraphBuilder::with_delegation_facts`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) delegation: Option<DelegationFacts>,
+}
+
+/// What "this function only forwards" needs beyond the call edges: how
+/// much body there is, whether the arguments are the parameters
+/// untouched, and whether the doc already says the function is on its
+/// way out.
+///
+/// Attached per node only on request because `pass_through` costs one
+/// extra parse per file — every other analyzer would pay it for a fact
+/// it never reads.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DelegationFacts {
+    /// Top-level statements in the body. `None` means the adapter's
+    /// body tree was not the statement block every adapter emits, i.e.
+    /// "could not tell" rather than "no statements".
+    pub(crate) statement_count: Option<usize>,
+    /// The language's own thin-wrapper detector matched this function:
+    /// after peeling trivial adapters the body is one forwarding call
+    /// whose arguments are the parameters, passed straight through.
+    pub(crate) pass_through: bool,
+    /// The doc text says the function is deprecated. No adapter
+    /// extracts deprecation *attributes* (`#[deprecated]`,
+    /// `@deprecated`, `Deprecated:`), so the doc text is the v1
+    /// approximation of that exemption.
+    pub(crate) deprecated_doc: bool,
 }
 
 /// Language-neutral projection of [`VisibilityShape`] for graph nodes.

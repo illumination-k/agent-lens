@@ -118,6 +118,8 @@ pub struct Profile {
     #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
     #[serde(default)]
+    pub delegation: Option<DelegationOptions>,
+    #[serde(default)]
     pub untested: Option<UntestedOptions>,
     #[serde(default)]
     pub visibility: Option<VisibilityOptions>,
@@ -146,6 +148,7 @@ pub enum ToolName {
     Coupling,
     ContextSpan,
     Cycles,
+    Delegation,
     FunctionGraph,
     GraphQuery,
     Hotspot,
@@ -167,6 +170,7 @@ impl ToolName {
             Self::Coupling => "coupling",
             Self::ContextSpan => "context-span",
             Self::Cycles => "cycles",
+            Self::Delegation => "delegation",
             Self::FunctionGraph => "function-graph",
             Self::GraphQuery => "graph-query",
             Self::Hotspot => "hotspot",
@@ -254,6 +258,15 @@ pub struct ImpactOptions {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct LayersOptions {
     pub top: Option<usize>,
+}
+
+/// `[profile.<name>.delegation]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct DelegationOptions {
+    pub top: Option<usize>,
+    #[serde(default)]
+    pub diff_only: bool,
 }
 
 /// `[profile.<name>.untested]` overrides.

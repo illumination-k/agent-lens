@@ -1,16 +1,17 @@
 ---
 name: find-duplicates
-description: Use when the user asks to find duplicated, near-duplicate, copy-pasted, or forwarding-only functions in this codebase — or before adding a new function, to check whether something similar already exists. Wraps `agent-lens analyze similarity` and `agent-lens analyze wrapper`.
+description: Use when the user asks to find duplicated, near-duplicate, copy-pasted, or forwarding-only functions in this codebase, or how many forwarding hops sit between an entry point and the real work — or before adding a new function, to check whether something similar already exists. Wraps `agent-lens analyze similarity`, `agent-lens analyze wrapper`, and `agent-lens analyze delegation`.
 ---
 
 # Find duplicate and forwarding functions
 
-Two analyzers cover the "is this already written?" question:
+Three analyzers cover the "is this already written?" and "why does this take four files?" questions:
 
 - `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ). Functions shorter than `--min-lines` (default `5`) are skipped to keep getters and one-liners out of the report.
 - `wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
+- `delegation` — what `wrapper` becomes when it stacks: chains where every hop only forwards, reported with the terminus (the function doing the work) as the headline, plus a per-module roll-up that flags modules built almost entirely out of forwarders.
 
-Both analyzers parse Rust, TypeScript / JavaScript, Python, and Go (parser is selected from the file extension). Both accept either a single file or a directory; in directory mode they walk recursively (respecting `.gitignore` like ripgrep) and group findings per file. `similarity` additionally reports cross-file pairs alongside in-file ones.
+All three parse Rust, TypeScript / JavaScript, Python, and Go (parser is selected from the file extension). All accept either a single file or a directory; in directory mode they walk recursively (respecting `.gitignore` like ripgrep). `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file; `delegation` needs a directory to see across files at all.
 
 ## Workflow
 
@@ -31,15 +32,17 @@ Restrict to the changed functions only — the rest of the file is noise:
 ```bash
 agent-lens analyze similarity <path> --diff-only --format md
 agent-lens analyze wrapper    <path> --diff-only --format md
+agent-lens analyze delegation <dir>  --diff-only --format md
 ```
 
 ### 3. If the user is auditing a whole file or crate
 
-Both analyzers accept a directory, so you don't need to loop manually. `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file:
+All three accept a directory, so you don't need to loop manually. `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file; `delegation` needs the directory to follow a chain across files:
 
 ```bash
 agent-lens analyze similarity crates/<name>/src --format md
 agent-lens analyze wrapper    crates/<name>/src --format md
+agent-lens analyze delegation crates/<name>/src --format md
 ```
 
 ## Tuning the threshold
@@ -82,6 +85,8 @@ This drops `#[test]` / `#[rstest]` / `#[<runner>::test]` free functions and ever
   The markdown rollup reads `doc overlap 20–80% (3/3 pairs documented)`: the range across the cluster's pairs, then how many of them had doc text on both sides. `n/a (0/N pairs documented)` means nothing in the cluster is documented — the tiebreaker is unavailable, not zero.
 - **wrapper hit, single call site** — inline it.
 - **wrapper hit, many call sites** — keep, but verify the indirection is doing real work (lifetime adjustment, trait dispatch, error mapping). If not, the function is a tax.
+- **delegation chain** — open the terminus first; every hop above it is a file you would otherwise read for nothing. Weigh the fix by the per-hop `other caller(s) to move`: a chain whose hops have no other callers collapses to a direct call in one edit, while a hop with many callers means repointing all of them. Trust hops marked `args forwarded verbatim` most; an unmarked hop was classified from body shape alone and may be composing (a constructor calling a constructor) rather than forwarding.
+- **delegation module flagged `layer candidate`** — the module is mostly forwarders aimed at one other module. That is an architectural finding, not a per-function one: inline the layer or give it a reason to exist.
 
 ## Confirming call-site count for a wrapper hit
 
