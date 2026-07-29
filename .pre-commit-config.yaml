@@ -8,6 +8,10 @@ repos:
       - id: check-json
       - id: check-toml
       - id: check-merge-conflict
+      # The only large-file gate in the repo. A second, looser (1 MB) check
+      # used to run as its own workflow by re-checking out every commit in the
+      # PR; `prek run --all-files` in `lint_base.yml` covers the same ground
+      # from the merge result without the force-push fragility.
       - id: check-added-large-files
         args: [--maxkb=500]
       - id: check-case-conflict

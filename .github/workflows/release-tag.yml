@@ -1,0 +1,25 @@
+name: Release (tag)
+
+# Deliberately unfiltered: a `v*` tag must always produce a release. When this
+# shared a `push` trigger with the rolling release, the rolling release's
+# `paths` filter applied to tag pushes too, so a tagged commit whose diff
+# touched nothing on that list published nothing at all.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-build.yml

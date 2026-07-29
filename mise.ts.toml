@@ -36,6 +36,17 @@ depends = ["install:ts"]
 
 run = "pnpm --dir web exec vitest run --coverage"
 
+# The Pages deploy builds the same way (`pages.yml`), and its prerender runs
+# with `failOnError: true`. Building here is what keeps a broken build from
+# merging green and only surfacing on the deploy. The function-graph JSON is
+# not generated: `readGraphReportFromDisk` returns `null` when it is absent,
+# so the build stays Rust-free and the TS job needs no Rust toolchain.
+[tasks."build:ts"]
+description = "Build the web app, including the prerender pass"
+depends = ["install:ts"]
+
+run = "pnpm --dir web run build"
+
 [tasks."ci:ts"]
-description = "Run TypeScript lint, type-check, and test tasks"
-depends = ["lint:ts", "test:ts"]
+description = "Run TypeScript lint, type-check, test, and build tasks"
+depends = ["lint:ts", "test:ts", "build:ts"]

@@ -31,8 +31,23 @@ jobs:
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
 
+      # mise-action caches the tools it installs (node, pnpm), not the packages
+      # they download. Without the two steps below every run re-fetches the
+      # whole dependency tree, the way the Rust job would without rust-cache.
+      - name: Resolve pnpm store path
+        run: echo "PNPM_STORE_PATH=$(pnpm store path --silent)" >> "${GITHUB_ENV}"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.PNPM_STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
       # `ci:ts` installs the web dependencies itself via the `install:ts` task
-      # dependency, so there is no separate install step to keep in sync.
+      # dependency, so there is no separate install step to keep in sync. It
+      # also runs `build:ts`, so a PR that breaks the TanStack Start build (or
+      # its `failOnError` prerender) fails here instead of on the Pages deploy.
       - name: CI
         run: mise run ci:ts
 
