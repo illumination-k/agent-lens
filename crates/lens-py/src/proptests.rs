@@ -1,0 +1,93 @@
+//! Property-based tests for the Python complexity extractor.
+//!
+//! Same laws as the other adapters (see `lens-rust`'s `proptests`):
+//! McCabe counts one branch per `if`, cognitive complexity weights each
+//! by its nesting, and max nesting is the depth reached. Python is the
+//! adapter where line numbers come from an explicit `LineIndex` rather
+//! than the parser, so the span property here doubles as a check on
+//! that offset→line conversion.
+
+use lens_domain::FunctionComplexity;
+use proptest::prelude::*;
+
+use crate::complexity::extract_complexity_units;
+
+/// Deepest generated nesting.
+const MAX_DEPTH: usize = 6;
+/// Widest generated flat branch count.
+const MAX_WIDTH: usize = 8;
+
+fn indent(level: usize) -> String {
+    "    ".repeat(level + 1)
+}
+
+/// `def f(c)` whose body is `depth` nested `if`s.
+fn nested_ifs(depth: usize, pad: usize) -> String {
+    let mut body = String::new();
+    for level in 0..depth {
+        body.push_str(&format!("{}if c:\n", indent(level)));
+    }
+    body.push_str(&format!("{}x = 1\n", indent(depth)));
+    format!("{}def f(c):\n{body}", "\n".repeat(pad))
+}
+
+/// `def f(c)` whose body is `count` sibling `if`s. With `count == 0`
+/// the body still needs a statement, so it degenerates to the same
+/// single assignment `nested_ifs(0, _)` produces.
+fn flat_ifs(count: usize, pad: usize) -> String {
+    let mut body = String::new();
+    for _ in 0..count {
+        body.push_str("    if c:\n        x = 1\n");
+    }
+    if count == 0 {
+        body.push_str("    x = 1\n");
+    }
+    format!("{}def f(c):\n{body}", "\n".repeat(pad))
+}
+
+fn only_unit(source: &str) -> FunctionComplexity {
+    let mut units = extract_complexity_units(source).expect("generated source must parse");
+    assert_eq!(units.len(), 1, "generator must emit exactly one function");
+    units.remove(0)
+}
+
+proptest! {
+    #[test]
+    fn nested_ifs_score_by_depth(depth in 0usize..=MAX_DEPTH) {
+        let unit = only_unit(&nested_ifs(depth, 0));
+        let depth = u32::try_from(depth).expect("depth fits in u32");
+        prop_assert_eq!(unit.cyclomatic, 1 + depth);
+        prop_assert_eq!(unit.max_nesting, depth);
+        prop_assert_eq!(unit.cognitive, depth * (depth + 1) / 2);
+    }
+
+    #[test]
+    fn flat_ifs_score_by_count(count in 0usize..=MAX_WIDTH) {
+        let unit = only_unit(&flat_ifs(count, 0));
+        let count = u32::try_from(count).expect("count fits in u32");
+        prop_assert_eq!(unit.cyclomatic, 1 + count);
+        prop_assert_eq!(unit.cognitive, count);
+        prop_assert_eq!(unit.max_nesting, count.min(1));
+    }
+
+    #[test]
+    fn nesting_never_scores_below_flat(n in 2usize..=MAX_DEPTH) {
+        let nested = only_unit(&nested_ifs(n, 0));
+        let flat = only_unit(&flat_ifs(n, 0));
+        prop_assert_eq!(nested.cyclomatic, flat.cyclomatic);
+        prop_assert!(nested.cognitive > flat.cognitive);
+        prop_assert!(nested.max_nesting > flat.max_nesting);
+    }
+
+    #[test]
+    fn line_spans_shift_with_padding(depth in 0usize..=MAX_DEPTH, pad in 0usize..=5) {
+        let base = only_unit(&nested_ifs(depth, 0));
+        let padded_source = nested_ifs(depth, pad);
+        let padded = only_unit(&padded_source);
+        prop_assert_eq!(padded.start_line, base.start_line + pad);
+        prop_assert_eq!(padded.end_line, base.end_line + pad);
+        prop_assert!(padded.start_line >= 1);
+        prop_assert!(padded.start_line <= padded.end_line);
+        prop_assert!(padded.end_line <= padded_source.lines().count());
+    }
+}

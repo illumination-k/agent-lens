@@ -19,5 +19,6 @@ ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18", v
 thiserror = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }

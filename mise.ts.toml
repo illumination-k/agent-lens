@@ -28,6 +28,14 @@ depends = ["install:ts"]
 
 run = "pnpm --dir web exec vitest run"
 
+# Separate from `test:ts` so the fast local loop stays instrumentation-free.
+# CI runs this one and uploads `web/coverage/lcov.info` under the `web` flag.
+[tasks."test:ts:coverage"]
+description = "Run tests with vitest and emit an lcov coverage report"
+depends = ["install:ts"]
+
+run = "pnpm --dir web exec vitest run --coverage"
+
 [tasks."ci:ts"]
 description = "Run TypeScript lint, type-check, and test tasks"
 depends = ["lint:ts", "test:ts"]

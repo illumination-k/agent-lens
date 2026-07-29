@@ -7,9 +7,11 @@
 //! each analyzer keeps only its own per-language extraction and report
 //! shape.
 
+use std::marker::PhantomData;
 use std::path::Path;
 
 use serde::Serialize;
+use serde::ser::{SerializeStruct, Serializer};
 
 use super::{
     AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, changed_line_ranges,
@@ -130,6 +132,142 @@ pub(super) fn render_report<R: Serialize>(
             serde_json::to_string_pretty(report).map_err(AnalyzerError::Serialize)
         }
         OutputFormat::Md => Ok(md()),
+    }
+}
+
+/// Names the two report fields that differ between otherwise-identical
+/// per-file analyzers: cohesion counts `unit_count` / `units`,
+/// complexity `function_count` / `functions`, wrapper `wrapper_count` /
+/// `wrappers`. Implemented by a zero-sized marker per analyzer so
+/// [`PerFileReport`] can emit each analyzer's established JSON shape
+/// without a bespoke struct per analyzer.
+pub(super) trait PerFileShape {
+    /// Field name for the item count, at both report and file level.
+    const COUNT_FIELD: &'static str;
+    /// Field name for the per-file item list.
+    const ITEMS_FIELD: &'static str;
+}
+
+/// One file's slice of a per-file report: the display path plus that
+/// file's item views. The count is derived from `items` on serialisation
+/// rather than stored, so the two can never drift apart.
+#[derive(Debug)]
+pub(super) struct FileView<'a, S, V> {
+    file: &'a str,
+    items: Vec<V>,
+    shape: PhantomData<S>,
+}
+
+impl<'a, S, V> FileView<'a, S, V> {
+    pub fn new(file: &'a str, items: Vec<V>) -> Self {
+        Self {
+            file,
+            items,
+            shape: PhantomData,
+        }
+    }
+
+    pub fn file(&self) -> &'a str {
+        self.file
+    }
+
+    pub fn items(&self) -> &[V] {
+        &self.items
+    }
+
+    pub fn count(&self) -> usize {
+        self.items.len()
+    }
+}
+
+impl<S: PerFileShape, V: Serialize> Serialize for FileView<'_, S, V> {
+    fn serialize<Z: Serializer>(&self, serializer: Z) -> Result<Z::Ok, Z::Error> {
+        let mut state = serializer.serialize_struct("FileView", 3)?;
+        state.serialize_field("file", self.file)?;
+        state.serialize_field(S::COUNT_FIELD, &self.items.len())?;
+        state.serialize_field(S::ITEMS_FIELD, &self.items)?;
+        state.end()
+    }
+}
+
+/// The report shape every per-file analyzer emits: the walked root, a
+/// file count, a total item count, an optional corpus-wide summary, and
+/// the per-file breakdown.
+///
+/// `X` carries the analyzer-specific summary block (only complexity has
+/// one today) and defaults to `()`, which is never serialised because
+/// summary-less reports leave it `None`.
+#[derive(Debug)]
+pub(super) struct PerFileReport<'a, S, V, X = ()> {
+    root: String,
+    files: Vec<FileView<'a, S, V>>,
+    summary: Option<X>,
+}
+
+impl<'a, S, V, X> PerFileReport<'a, S, V, X> {
+    /// Build a report with no corpus summary.
+    pub fn new(root: &Path, files: Vec<FileView<'a, S, V>>) -> Self {
+        Self {
+            root: root.display().to_string(),
+            files,
+            summary: None,
+        }
+    }
+
+    /// Attach a corpus-wide summary block, serialised between the item
+    /// count and the per-file breakdown.
+    pub fn with_summary(mut self, summary: X) -> Self {
+        self.summary = Some(summary);
+        self
+    }
+
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Total items across every file — the value serialised under the
+    /// shape's count field.
+    pub fn item_count(&self) -> usize {
+        self.files.iter().map(FileView::count).sum()
+    }
+
+    pub fn files(&self) -> &[FileView<'a, S, V>] {
+        &self.files
+    }
+
+    pub fn summary(&self) -> Option<&X> {
+        self.summary.as_ref()
+    }
+
+    /// Number of fields [`Serialize`] will emit: the four fixed ones
+    /// plus `summary` when present.
+    ///
+    /// Split out and excluded from cargo-mutants (`.cargo/mutants.toml`)
+    /// because `serialize_struct`'s length argument is a capacity hint
+    /// for length-prefixed formats. Reports are only ever rendered as
+    /// JSON, and `serde_json` ignores the hint entirely, so an off-by-one
+    /// here produces byte-identical output — an equivalent mutant, not a
+    /// test gap.
+    fn field_count(&self) -> usize {
+        4 + usize::from(self.summary.is_some())
+    }
+}
+
+impl<S: PerFileShape, V: Serialize, X: Serialize> Serialize for PerFileReport<'_, S, V, X> {
+    fn serialize<Z: Serializer>(&self, serializer: Z) -> Result<Z::Ok, Z::Error> {
+        let mut state = serializer.serialize_struct("Report", self.field_count())?;
+        state.serialize_field("root", &self.root)?;
+        state.serialize_field("file_count", &self.files.len())?;
+        state.serialize_field(S::COUNT_FIELD, &self.item_count())?;
+        if let Some(summary) = &self.summary {
+            state.serialize_field("summary", summary)?;
+        }
+        state.serialize_field("files", &self.files)?;
+        state.end()
     }
 }
 
@@ -273,5 +411,95 @@ mod tests {
         struct Sample;
         let s = render_report(&Sample, OutputFormat::Md, || "hello md".to_owned()).unwrap();
         assert_eq!(s, "hello md");
+    }
+
+    /// Stand-in for a real analyzer's shape marker. The names differ
+    /// from every production shape so a test asserting on them can't
+    /// pass by accident against the wrong constant.
+    struct TestShape;
+
+    impl PerFileShape for TestShape {
+        const COUNT_FIELD: &'static str = "widget_count";
+        const ITEMS_FIELD: &'static str = "widgets";
+    }
+
+    type TestReport<'a, X = ()> = PerFileReport<'a, TestShape, &'static str, X>;
+
+    fn sample_files<'a>() -> Vec<FileView<'a, TestShape, &'static str>> {
+        vec![
+            FileView::new("a.rs", vec!["one", "two"]),
+            FileView::new("b.rs", vec!["three"]),
+        ]
+    }
+
+    fn to_json<S: Serialize>(value: &S) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    #[test]
+    fn per_file_report_serializes_under_the_shape_field_names() {
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), sample_files());
+        let json = to_json(&report);
+
+        assert_eq!(json["root"], "/src");
+        assert_eq!(json["file_count"], 2);
+        assert_eq!(json["widget_count"], 3);
+        assert_eq!(json["files"][0]["file"], "a.rs");
+        assert_eq!(json["files"][0]["widget_count"], 2);
+        assert_eq!(
+            json["files"][0]["widgets"],
+            serde_json::json!(["one", "two"])
+        );
+        assert_eq!(json["files"][1]["widget_count"], 1);
+    }
+
+    #[test]
+    fn per_file_report_omits_summary_when_absent() {
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), sample_files());
+        let json = to_json(&report);
+        assert!(report.summary().is_none());
+        assert!(
+            json.get("summary").is_none(),
+            "summary-less report must not emit the key: {json}"
+        );
+    }
+
+    #[test]
+    fn per_file_report_emits_attached_summary() {
+        let report = TestReport::new(Path::new("/src"), sample_files()).with_summary("corpus-wide");
+        let json = to_json(&report);
+        assert_eq!(report.summary().copied(), Some("corpus-wide"));
+        assert_eq!(json["summary"], "corpus-wide");
+        // The summary sits between the count and the per-file
+        // breakdown, so both neighbours must survive its insertion.
+        assert_eq!(json["widget_count"], 3);
+        assert_eq!(json["files"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn per_file_report_counts_are_derived_from_the_files() {
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), sample_files());
+        assert_eq!(report.file_count(), 2);
+        assert_eq!(report.item_count(), 3);
+        assert_eq!(report.root(), "/src");
+        assert_eq!(report.files().len(), 2);
+    }
+
+    #[test]
+    fn empty_report_counts_zero() {
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), Vec::new());
+        let json = to_json(&report);
+        assert_eq!(report.item_count(), 0);
+        assert_eq!(json["file_count"], 0);
+        assert_eq!(json["widget_count"], 0);
+        assert_eq!(json["files"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn file_view_accessors_expose_path_and_items() {
+        let view: FileView<'_, TestShape, &'static str> = FileView::new("a.rs", vec!["one", "two"]);
+        assert_eq!(view.file(), "a.rs");
+        assert_eq!(view.items(), ["one", "two"]);
+        assert_eq!(view.count(), 2);
     }
 }

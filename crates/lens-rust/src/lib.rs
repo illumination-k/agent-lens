@@ -17,6 +17,8 @@ mod complexity;
 mod coupling;
 mod method_names;
 mod parser;
+#[cfg(test)]
+mod proptests;
 mod wrapper;
 
 pub use call_index::{

@@ -337,22 +337,20 @@ fn file_to_module_path(file: &Path, root_dir: &Path) -> ModulePath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
-    fn mk_temp_project() -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "lens_ts_coupling_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&base).expect("create temp project");
-        base
+    /// A throwaway project root. `TempDir` removes the tree on drop,
+    /// including when a test panics mid-assert, which the previous
+    /// hand-rolled helper (create + explicit `remove_dir_all` on the
+    /// success path only) leaked.
+    fn mk_temp_project() -> TempDir {
+        tempfile::tempdir().expect("create temp project")
     }
 
     #[test]
     fn builds_graph_and_extracts_use_edges_from_imports_and_reexports() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let entry = root.join("src").join("main.ts");
         let util = root.join("src").join("util.ts");
         let shared = root.join("src").join("shared").join("index.ts");
@@ -386,13 +384,12 @@ mod tests {
             && e.to.as_str() == "crate::shared"
             && e.symbol == "*"
             && e.kind == EdgeKind::Use));
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn extracts_use_edges_from_named_reexports() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let entry = root.join("src").join("main.ts");
         let util = root.join("src").join("util.ts");
         std::fs::create_dir_all(entry.parent().expect("parent")).expect("mkdir src");
@@ -411,13 +408,12 @@ mod tests {
             && e.to.as_str() == "crate::util"
             && e.symbol == "add"
             && e.kind == EdgeKind::Use));
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn ignores_non_relative_imports_and_reexports() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let entry = root.join("src").join("main.ts");
         let util = root.join("src").join("util.ts");
         std::fs::create_dir_all(entry.parent().expect("parent")).expect("mkdir src");
@@ -441,13 +437,12 @@ mod tests {
             edges.is_empty(),
             "non-relative imports/re-exports must not create local coupling edges"
         );
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn skips_relative_non_code_asset_imports() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let entry = root.join("src").join("main.ts");
         let util = root.join("src").join("util.ts");
         let css = root.join("src").join("styles.css");
@@ -472,13 +467,12 @@ mod tests {
         );
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].to.as_str(), "crate::util");
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn follows_static_dynamic_imports() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let route = root.join("src").join("routes").join("index.tsx");
         let main = root.join("src").join("main.ts");
         std::fs::create_dir_all(route.parent().expect("parent")).expect("mkdir routes");
@@ -500,13 +494,12 @@ mod tests {
             && e.to.as_str() == "crate::main"
             && e.symbol == "*"
             && e.kind == EdgeKind::Use));
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn follows_no_substitution_template_dynamic_imports() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let route = root.join("src").join("routes").join("index.tsx");
         let main = root.join("src").join("main.ts");
         std::fs::create_dir_all(route.parent().expect("parent")).expect("mkdir routes");
@@ -523,13 +516,12 @@ mod tests {
             modules.iter().any(|m| m.path.as_str() == "crate::main"),
             "template literal without substitutions is a static import target"
         );
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
     fn ignores_template_dynamic_imports_with_substitutions() {
-        let root = mk_temp_project();
+        let project = mk_temp_project();
+        let root = project.path();
         let route = root.join("src").join("routes").join("index.tsx");
         let main = root.join("src").join("main.ts");
         std::fs::create_dir_all(route.parent().expect("parent")).expect("mkdir routes");
@@ -545,8 +537,6 @@ mod tests {
 
         assert!(!modules.iter().any(|m| m.path.as_str() == "crate::main"));
         assert!(edges.is_empty());
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

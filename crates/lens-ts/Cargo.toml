@@ -18,4 +18,6 @@ oxc_syntax = "0.140"
 thiserror = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }
 rstest = { workspace = true }
+tempfile = { workspace = true }

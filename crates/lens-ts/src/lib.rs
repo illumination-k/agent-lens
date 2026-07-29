@@ -19,6 +19,8 @@ mod context_span;
 mod coupling;
 mod method_names;
 mod parser;
+#[cfg(test)]
+mod proptests;
 mod tree;
 mod walk;
 mod wrapper;

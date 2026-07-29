@@ -1,0 +1,28 @@
+# Both CI workflows are path-filtered, so a Rust-only PR never runs the
+# TypeScript job and vice versa. `carryforward` reuses the last known
+# report for the flag that did not run, otherwise every single-language
+# PR would look like the other language's coverage dropped to zero.
+flags:
+  rust:
+    paths:
+      - crates/
+    carryforward: true
+  web:
+    paths:
+      - web/
+    carryforward: true
+
+coverage:
+  status:
+    project:
+      default:
+        # Report the delta without failing the build on noise; the
+        # signal we want from Codecov today is the trend, not a gate.
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: "condensed_header, flags, files"
+  require_changes: true

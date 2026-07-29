@@ -26,6 +26,8 @@ mod method_names;
 mod node_text;
 mod parser;
 #[cfg(test)]
+mod proptests;
+#[cfg(test)]
 mod test_support;
 mod wrapper;
 
