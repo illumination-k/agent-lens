@@ -2920,6 +2920,47 @@ impl JsSummary {
         assert_eq!(json["below_floor_count"], 1);
     }
 
+    /// The partial case, which the all-or-nothing one above cannot pin:
+    /// three functions share the `method` key, one of them shares nothing
+    /// else with the other two. The kept pair and the dropped ones have
+    /// to be accounted for separately.
+    #[test]
+    fn drift_floor_counts_only_the_matches_it_dropped() {
+        let dir = drift_fixture();
+        write_file(
+            dir.path(),
+            "unrelated.rs",
+            r#"
+pub struct Counter;
+
+impl Counter {
+    pub fn from_raw(raw: &Raw) -> Counter {
+        for entry in raw.entries.iter() {
+            if entry.enabled {
+                return Counter::new(entry.id);
+            }
+        }
+        Counter::empty()
+    }
+}
+"#,
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &SimilarityAnalyzer::new()
+                .with_paired_by(Some(PairKey::Method))
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+
+        // Three functions share `from_raw`, so three pairs were scored:
+        // the drifted mirror pair survives, the two involving the
+        // unrelated namesake do not.
+        assert_eq!(json["pair_count"], 1);
+        assert_eq!(json["below_floor_count"], 2);
+    }
+
     /// The loose key drops the owner, so two conversions on unrelated
     /// types still pair. Same fixture, and `from_raw` is the only name
     /// either file defines, so the difference is purely the key.

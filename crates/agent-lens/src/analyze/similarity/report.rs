@@ -928,6 +928,27 @@ mod tests {
         );
     }
 
+    /// A pair sitting exactly on the threshold still matches — the
+    /// clustering path keeps `similarity == threshold`, and the drift
+    /// label has to agree with it or the same score reads two ways.
+    #[test]
+    fn build_drift_groups_excludes_pairs_exactly_on_the_threshold() {
+        let corpus = vec![
+            sibling("Summary::from", "a.rs"),
+            sibling("JsSummary::from", "b.rs"),
+            sibling("PySummary::from", "c.rs"),
+        ];
+        let keys = vec!["summary::from".to_owned()];
+        let matches = [
+            scored_match(0, 0, 1, 0.85),
+            scored_match(0, 0, 2, 0.8499999),
+        ];
+
+        let groups = build_drift_groups(&corpus, &keys, &matches, 0.85);
+
+        assert_eq!(groups[0].drifted_pair_count, 1);
+    }
+
     #[test]
     fn build_drift_groups_splits_by_key_and_drops_unknown_keys() {
         let corpus = vec![

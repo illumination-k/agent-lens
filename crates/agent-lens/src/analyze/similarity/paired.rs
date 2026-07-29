@@ -144,6 +144,10 @@ pub(super) fn name_matched_pairs(
         }
     }
 
+    // Dropping singletons here is a pure optimization — the pair loop
+    // below emits nothing for a one-member group and never records its
+    // key — but it keeps the sort off every distinct name in the corpus,
+    // which on a large tree is most of them.
     let mut grouped: Vec<(String, Vec<usize>)> = by_key
         .into_iter()
         .filter(|(_, members)| members.len() > 1)
