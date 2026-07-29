@@ -194,6 +194,12 @@ agent-lens analyze similarity crates/lens-rust/src --format md --sweep 0.6,0.75,
 # from functions that merely share a shape. JSON carries it per pair either way
 agent-lens analyze similarity crates/lens-rust/src --format md --doc-overlap
 
+# Invert the question: instead of "what is still similar?", ask "what should
+# be similar but no longer is?". Functions are matched by name first and
+# scored second, so parallel implementations that have drifted apart — the
+# ones a threshold report structurally cannot reach — surface worst-first
+agent-lens analyze similarity . --format md --paired-by name
+
 # All analyzers accept path filters: focus tests, drop tests, or exclude globs
 agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
@@ -342,24 +348,27 @@ recursively with `.gitignore` semantics.
 
 Analyzer-specific options today:
 
-| Analyzer         | Extra options                                                                                                                                                   |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…` (conflicts with `--threshold`), `--min-lines N`, `--method tsed\|token`, `--diff-only`, `--top N` |
-| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                       |
-| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                       |
-| `wrapper`        | `--diff-only`                                                                                                                                                   |
-| `delegation`     | `--diff-only`, `--top N`                                                                                                                                        |
-| `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                      |
-| `hubs`           | `--top N`                                                                                                                                                       |
-| `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                        |
-| `layers`         | `--top N`                                                                                                                                                       |
-| `untested`       | `--top N`                                                                                                                                                       |
-| `visibility`     | `--top N`                                                                                                                                                       |
-| `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                         |
-| `coupling`       | shared analyzer options only                                                                                                                                    |
-| `cycles`         | shared analyzer options only                                                                                                                                    |
-| `function-graph` | shared analyzer options only                                                                                                                                    |
-| `context-span`   | shared analyzer options only                                                                                                                                    |
+| Analyzer         | Extra options                                                                                                                                                                            |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--diff-only`, `--top N` |
+| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
+| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
+| `wrapper`        | `--diff-only`                                                                                                                                                                            |
+| `delegation`     | `--diff-only`, `--top N`                                                                                                                                                                 |
+| `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                               |
+| `hubs`           | `--top N`                                                                                                                                                                                |
+| `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                                                 |
+| `layers`         | `--top N`                                                                                                                                                                                |
+| `untested`       | `--top N`                                                                                                                                                                                |
+| `visibility`     | `--top N`                                                                                                                                                                                |
+| `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                                                  |
+| `coupling`       | shared analyzer options only                                                                                                                                                             |
+| `cycles`         | shared analyzer options only                                                                                                                                                             |
+| `function-graph` | shared analyzer options only                                                                                                                                                             |
+| `context-span`   | shared analyzer options only                                                                                                                                                             |
+
+`--sweep` conflicts with `--threshold`, `--paired-by` conflicts with `--sweep`,
+and `--drift-floor` requires `--paired-by`.
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,

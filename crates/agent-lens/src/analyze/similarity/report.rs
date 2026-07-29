@@ -143,16 +143,7 @@ fn cluster_pair_views<'a>(
             let Some(b) = corpus.get(j).map(FunctionRef::from) else {
                 continue;
             };
-            pairs.push(PairView {
-                a,
-                b,
-                similarity: components.similarity,
-                body_similarity: components.body_similarity,
-                signature_similarity: components.signature_similarity,
-                type_overlap: components.type_overlap,
-                identifier_overlap: components.identifier_overlap,
-                doc_overlap: components.doc_overlap,
-            });
+            pairs.push(PairView::new(a, b, components));
         }
     }
     pairs.sort_by(|a, b| {
@@ -168,7 +159,7 @@ fn sorted_pair_key(i: usize, j: usize) -> (usize, usize) {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-struct FunctionRef<'a> {
+pub(super) struct FunctionRef<'a> {
     file: &'a str,
     name: &'a str,
     start_line: usize,
@@ -189,7 +180,7 @@ impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct PairView<'a> {
+pub(super) struct PairView<'a> {
     a: FunctionRef<'a>,
     b: FunctionRef<'a>,
     similarity: f64,
@@ -206,6 +197,25 @@ struct PairView<'a> {
     /// coincidences that likely should not be merged.
     #[serde(skip_serializing_if = "Option::is_none")]
     doc_overlap: Option<f64>,
+}
+
+impl<'a> PairView<'a> {
+    pub(super) fn new(
+        a: FunctionRef<'a>,
+        b: FunctionRef<'a>,
+        components: SimilarityComponents,
+    ) -> Self {
+        Self {
+            a,
+            b,
+            similarity: components.similarity,
+            body_similarity: components.body_similarity,
+            signature_similarity: components.signature_similarity,
+            type_overlap: components.type_overlap,
+            identifier_overlap: components.identifier_overlap,
+            doc_overlap: components.doc_overlap,
+        }
+    }
 }
 
 /// Cluster-level rollup of the per-pair doc overlap, for the markdown
@@ -335,6 +345,261 @@ fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool) -> String {
 fn format_ladder(ladder: &[f64]) -> String {
     let rungs: Vec<String> = ladder.iter().map(|r| format!("{r:.2}")).collect();
     format!("[{}]", rungs.join(", "))
+}
+
+/// Report shape for `--paired-by`: name keys and the functions that
+/// share them, instead of threshold clusters. Pairing happens before
+/// scoring, so every match is reported whether or not it clears the
+/// threshold — the point of the mode is the pairs clustering cannot
+/// reach.
+#[derive(Debug, Serialize)]
+pub(super) struct PairedReport<'a> {
+    root: String,
+    method: &'static str,
+    /// Key that decided which functions are siblings: `qualified` or
+    /// `method`.
+    paired_by: &'static str,
+    /// Score below which a matched pair is called drifted. Unlike the
+    /// clustering threshold it filters nothing — it only labels.
+    threshold: f64,
+    /// Score below which a matched pair was dropped as a namesake rather
+    /// than reported as drift.
+    drift_floor: f64,
+    min_lines: usize,
+    function_count: usize,
+    /// Distinct name keys that produced at least one reported pair.
+    key_count: usize,
+    pair_count: usize,
+    drifted_pair_count: usize,
+    /// Same-key functions skipped because both sides sit in one file.
+    /// Present so an empty report distinguishes "no siblings anywhere"
+    /// from "siblings, but all in-file".
+    same_file_pair_count: usize,
+    /// Name matches dropped by `drift_floor`. Reported rather than
+    /// silently swallowed: a large count means the key is matching a lot
+    /// of unrelated namesakes, which is worth knowing before trusting the
+    /// groups that did survive.
+    below_floor_count: usize,
+    groups: Vec<DriftGroupView<'a>>,
+}
+
+/// Everything [`PairedReport::new`] needs beyond the groups themselves.
+/// Grouped into one struct because the run configuration is threaded
+/// through verbatim and a nine-argument constructor is easy to
+/// mis-order at the call site.
+pub(super) struct PairedReportInputs<'p> {
+    pub path: &'p Path,
+    pub method: &'static str,
+    pub paired_by: &'static str,
+    pub threshold: f64,
+    pub drift_floor: f64,
+    pub min_lines: usize,
+    pub function_count: usize,
+    pub same_file_pair_count: usize,
+    pub below_floor_count: usize,
+}
+
+impl<'a> PairedReport<'a> {
+    pub(super) fn new(inputs: PairedReportInputs<'_>, mut groups: Vec<DriftGroupView<'a>>) -> Self {
+        sort_by_drift(&mut groups);
+        Self {
+            root: inputs.path.display().to_string(),
+            method: inputs.method,
+            paired_by: inputs.paired_by,
+            threshold: inputs.threshold,
+            drift_floor: inputs.drift_floor,
+            min_lines: inputs.min_lines,
+            function_count: inputs.function_count,
+            key_count: groups.len(),
+            pair_count: groups.iter().map(|g| g.pairs.len()).sum(),
+            drifted_pair_count: groups.iter().map(|g| g.drifted_pair_count).sum(),
+            same_file_pair_count: inputs.same_file_pair_count,
+            below_floor_count: inputs.below_floor_count,
+            groups,
+        }
+    }
+}
+
+/// Every function sharing one name key, with the pairwise scores between
+/// them. Deliberately shaped like [`ClusterView`] — same member list,
+/// same similarity band, same per-pair components — so a consumer that
+/// already reads clusters needs no second parser. The difference is how
+/// membership was decided: a cluster is functions that scored alike, a
+/// group is functions that were *named* alike.
+#[derive(Debug, Serialize)]
+pub(super) struct DriftGroupView<'a> {
+    key: &'a str,
+    size: usize,
+    min_similarity: f64,
+    max_similarity: f64,
+    /// How many of this group's pairs fell below the threshold: same
+    /// name, no longer the same implementation. Either a deliberate
+    /// divergence or a missed sync — the report labels rather than
+    /// judges, because it cannot tell which.
+    drifted_pair_count: usize,
+    functions: Vec<FunctionRef<'a>>,
+    pairs: Vec<PairView<'a>>,
+}
+
+/// One name-matched pair after scoring, before it is folded into its
+/// group. `key` indexes the key list the pairing pass produced.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScoredMatch {
+    pub key: usize,
+    pub i: usize,
+    pub j: usize,
+    pub components: SimilarityComponents,
+}
+
+/// Fold scored name matches into one [`DriftGroupView`] per key.
+///
+/// Members are the distinct functions that appear in the key's surviving
+/// pairs, in corpus order: a pair dropped by the drift floor takes its
+/// endpoints with it unless another pair keeps them, so the member list
+/// always matches the pairs actually shown.
+pub(super) fn build_drift_groups<'a>(
+    corpus: &'a [OwnedFunction],
+    keys: &'a [String],
+    matches: &[ScoredMatch],
+    threshold: f64,
+) -> Vec<DriftGroupView<'a>> {
+    let mut by_key: HashMap<usize, Vec<ScoredMatch>> = HashMap::new();
+    for scored in matches {
+        by_key.entry(scored.key).or_default().push(*scored);
+    }
+    let mut groups: Vec<DriftGroupView<'a>> = by_key
+        .into_iter()
+        .filter_map(|(key_index, mut scored)| {
+            scored.sort_by_key(|m| (m.i, m.j));
+            let mut members: Vec<usize> = scored.iter().flat_map(|m| [m.i, m.j]).collect();
+            members.sort_unstable();
+            members.dedup();
+            let functions: Vec<FunctionRef<'a>> = members
+                .iter()
+                .filter_map(|i| corpus.get(*i).map(FunctionRef::from))
+                .collect();
+            let pairs: Vec<PairView<'a>> = scored
+                .iter()
+                .filter_map(|m| {
+                    Some(PairView::new(
+                        corpus.get(m.i).map(FunctionRef::from)?,
+                        corpus.get(m.j).map(FunctionRef::from)?,
+                        m.components,
+                    ))
+                })
+                .collect();
+            let scores: Vec<f64> = pairs.iter().map(|p| p.similarity).collect();
+            let (min_similarity, max_similarity) = min_max(&scores)?;
+            Some(DriftGroupView {
+                key: keys.get(key_index)?.as_str(),
+                size: functions.len(),
+                min_similarity,
+                max_similarity,
+                drifted_pair_count: scores.iter().filter(|s| **s < threshold).count(),
+                functions,
+                pairs,
+            })
+        })
+        .collect();
+    for group in &mut groups {
+        group.pairs.sort_by(|a, b| {
+            a.similarity
+                .partial_cmp(&b.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    groups
+}
+
+/// Ascending by the group's worst pair — the whole point of the mode is
+/// that the most-drifted siblings come first. Ties break on the band's
+/// upper end and then the key, so the order is total and reproducible.
+fn sort_by_drift(groups: &mut [DriftGroupView<'_>]) {
+    groups.sort_by(|a, b| {
+        a.min_similarity
+            .partial_cmp(&b.min_similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.max_similarity
+                    .partial_cmp(&b.max_similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then_with(|| a.key.cmp(b.key))
+    });
+}
+
+pub(super) fn format_paired_markdown(report: &PairedReport<'_>, top: Option<usize>) -> String {
+    let mut out = format!(
+        "# Similarity report: {} (paired by {}, {} method, {} function(s), drift threshold {:.2}, floor {:.2}, min lines {})\n",
+        report.root,
+        report.paired_by,
+        report.method,
+        report.function_count,
+        report.threshold,
+        report.drift_floor,
+        report.min_lines,
+    );
+    if report.groups.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n_No name-matched functions above the floor ({} match(es) below floor, {} same-file namesake pair(s) skipped)._",
+            report.below_floor_count, report.same_file_pair_count,
+        );
+        return out;
+    }
+    let groups = top.map_or(report.groups.as_slice(), |limit| {
+        &report.groups[..report.groups.len().min(limit)]
+    });
+    let heading = match top {
+        Some(limit) => format!(
+            "## Most drifted {} of {} name key(s)",
+            limit.min(report.key_count),
+            report.key_count,
+        ),
+        None => format!(
+            "## {} name key(s) with cross-file siblings",
+            report.key_count
+        ),
+    };
+    let _ = writeln!(out, "\n{heading}");
+    let _ = writeln!(
+        out,
+        "\n{} of {} pair(s) scored below {:.2}: matched by name, no longer matching in body. Keys are ordered by their worst pair, so the widest drift comes first. {} further match(es) fell below the {:.2} floor and are treated as unrelated namesakes rather than drift.",
+        report.drifted_pair_count,
+        report.pair_count,
+        report.threshold,
+        report.below_floor_count,
+        report.drift_floor,
+    );
+    for group in groups {
+        // writeln! into a String cannot fail; the result is swallowed
+        // deliberately rather than unwrapped to satisfy the workspace's
+        // `unwrap_used` lint.
+        let _ = writeln!(out, "\n- {}", drift_headline(group));
+        for f in &group.functions {
+            let _ = writeln!(
+                out,
+                "  - {}:`{}` (L{}-{})",
+                f.file, f.name, f.start_line, f.end_line,
+            );
+        }
+    }
+    out
+}
+
+/// The one-line summary heading a key's member list: the key, how many
+/// functions share it, their similarity band, and how many of the pairs
+/// between them count as drifted.
+fn drift_headline(group: &DriftGroupView<'_>) -> String {
+    format!(
+        "`{}` — {} functions, similarity {:.0}–{:.0}%, {}/{} pair(s) drifted",
+        group.key,
+        group.size,
+        group.min_similarity * 100.0,
+        group.max_similarity * 100.0,
+        group.drifted_pair_count,
+        group.pairs.len(),
+    )
 }
 
 #[cfg(test)]
@@ -609,5 +874,216 @@ mod tests {
     #[case::unordered(&[0.5, 0.1, 0.9, 0.4], Some((0.1, 0.9)))]
     fn min_max_spans_the_values(#[case] values: &[f64], #[case] expected: Option<(f64, f64)>) {
         assert_eq!(min_max(values), expected);
+    }
+
+    fn sibling(name: &str, rel_path: &str) -> OwnedFunction {
+        OwnedFunction {
+            rel_path: rel_path.to_owned(),
+            file: PathBuf::from(rel_path),
+            ..owned_function(name)
+        }
+    }
+
+    fn scored_match(key: usize, i: usize, j: usize, similarity: f64) -> ScoredMatch {
+        ScoredMatch {
+            key,
+            i,
+            j,
+            components: components(similarity),
+        }
+    }
+
+    /// Three siblings of one key, one pair of which is missing (it fell
+    /// below the drift floor before grouping). The member list must
+    /// follow the surviving pairs rather than the key's original group,
+    /// so the functions shown are exactly the ones the scores describe.
+    #[test]
+    fn build_drift_groups_collects_members_from_surviving_pairs() {
+        let corpus = vec![
+            sibling("Summary::from", "napi.rs"),
+            sibling("JsSummary::from", "wasm.rs"),
+            sibling("PySummary::from", "py.rs"),
+            sibling("Article::parse", "napi.rs"),
+        ];
+        let keys = vec!["summary::from".to_owned()];
+        let matches = [scored_match(0, 0, 1, 0.4), scored_match(0, 0, 2, 0.9)];
+
+        let groups = build_drift_groups(&corpus, &keys, &matches, 0.85);
+
+        assert_eq!(groups.len(), 1);
+        let group = &groups[0];
+        assert_eq!(group.key, "summary::from");
+        assert_eq!(group.size, 3);
+        assert_eq!(group.min_similarity, 0.4);
+        assert_eq!(group.max_similarity, 0.9);
+        assert_eq!(group.drifted_pair_count, 1);
+        assert_eq!(
+            group.functions.iter().map(|f| f.file).collect::<Vec<_>>(),
+            vec!["napi.rs", "wasm.rs", "py.rs"],
+        );
+        // Pairs ascend so the worst sibling reads first.
+        assert_eq!(
+            group.pairs.iter().map(|p| p.similarity).collect::<Vec<_>>(),
+            vec![0.4, 0.9],
+        );
+    }
+
+    #[test]
+    fn build_drift_groups_splits_by_key_and_drops_unknown_keys() {
+        let corpus = vec![
+            sibling("Summary::from", "a.rs"),
+            sibling("Summary::from", "b.rs"),
+            sibling("Article::parse", "a.rs"),
+            sibling("Article::parse", "b.rs"),
+        ];
+        let keys = vec!["article::parse".to_owned(), "summary::from".to_owned()];
+        let matches = [
+            scored_match(0, 2, 3, 0.5),
+            scored_match(1, 0, 1, 0.7),
+            // A key index past the end of `keys` cannot be rendered and
+            // must be dropped rather than panic the report.
+            scored_match(9, 0, 3, 0.6),
+        ];
+
+        let groups = build_drift_groups(&corpus, &keys, &matches, 0.85);
+
+        let mut rendered: Vec<(&str, f64)> =
+            groups.iter().map(|g| (g.key, g.min_similarity)).collect();
+        rendered.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(
+            rendered,
+            vec![("article::parse", 0.5), ("summary::from", 0.7)],
+        );
+    }
+
+    fn group(key: &'static str, min: f64, max: f64) -> DriftGroupView<'static> {
+        DriftGroupView {
+            key,
+            size: 2,
+            min_similarity: min,
+            max_similarity: max,
+            drifted_pair_count: 1,
+            functions: Vec::new(),
+            pairs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sort_by_drift_puts_the_worst_pair_first() {
+        // Input order is scrambled and the tightest key carries the
+        // highest max, so a passing assertion proves the min-keyed sort
+        // ran rather than the order surviving by accident.
+        let mut groups = vec![
+            group("beta", 0.80, 0.99),
+            group("alpha", 0.35, 0.40),
+            group("gamma", 0.35, 0.99),
+        ];
+
+        sort_by_drift(&mut groups);
+
+        assert_eq!(
+            groups.iter().map(|g| g.key).collect::<Vec<_>>(),
+            vec!["alpha", "gamma", "beta"],
+        );
+    }
+
+    #[test]
+    fn drift_headline_reports_band_and_drifted_share() {
+        let mut wide = group("render_modules", 0.34, 0.98);
+        wide.size = 4;
+        wide.drifted_pair_count = 3;
+        wide.pairs = vec![PairView::new(
+            FunctionRef {
+                file: "a.rs",
+                name: "render_modules",
+                start_line: 1,
+                end_line: 5,
+                is_test: false,
+            },
+            FunctionRef {
+                file: "b.rs",
+                name: "render_modules",
+                start_line: 1,
+                end_line: 5,
+                is_test: false,
+            },
+            components(0.34),
+        )];
+
+        assert_eq!(
+            drift_headline(&wide),
+            "`render_modules` — 4 functions, similarity 34–98%, 3/1 pair(s) drifted",
+        );
+    }
+
+    fn paired_report(groups: Vec<DriftGroupView<'static>>) -> PairedReport<'static> {
+        PairedReport::new(
+            PairedReportInputs {
+                path: Path::new("src"),
+                method: "tsed",
+                paired_by: "qualified",
+                threshold: 0.85,
+                drift_floor: 0.3,
+                min_lines: 5,
+                function_count: 40,
+                same_file_pair_count: 2,
+                below_floor_count: 7,
+            },
+            groups,
+        )
+    }
+
+    /// An empty paired report has to say *why* it is empty: "nothing
+    /// shares a name" and "everything that did was a namesake or in-file"
+    /// call for different next steps.
+    #[test]
+    fn empty_paired_markdown_reports_what_was_excluded() {
+        let out = format_paired_markdown(&paired_report(Vec::new()), None);
+        assert!(out.contains("paired by qualified"));
+        assert!(out.contains("7 match(es) below floor"));
+        assert!(out.contains("2 same-file namesake pair(s) skipped"));
+    }
+
+    #[test]
+    fn paired_markdown_caps_at_top_and_says_so() {
+        let report = paired_report(vec![group("alpha", 0.35, 0.40), group("beta", 0.80, 0.99)]);
+
+        let capped = format_paired_markdown(&report, Some(1));
+        assert!(capped.contains("## Most drifted 1 of 2 name key(s)"));
+        assert!(capped.contains("`alpha`"));
+        assert!(!capped.contains("`beta`"));
+
+        let full = format_paired_markdown(&report, None);
+        assert!(full.contains("## 2 name key(s) with cross-file siblings"));
+        assert!(full.contains("`beta`"));
+    }
+
+    #[test]
+    fn paired_report_totals_roll_up_from_the_groups() {
+        let mut first = group("alpha", 0.35, 0.40);
+        first.pairs = vec![PairView::new(
+            FunctionRef {
+                file: "a.rs",
+                name: "alpha",
+                start_line: 1,
+                end_line: 5,
+                is_test: false,
+            },
+            FunctionRef {
+                file: "b.rs",
+                name: "alpha",
+                start_line: 1,
+                end_line: 5,
+                is_test: false,
+            },
+            components(0.35),
+        )];
+        let second = group("beta", 0.80, 0.99);
+
+        let report = paired_report(vec![first, second]);
+
+        assert_eq!(report.key_count, 2);
+        assert_eq!(report.pair_count, 1);
+        assert_eq!(report.drifted_pair_count, 2);
     }
 }

@@ -57,9 +57,10 @@ pub use layers::LayersAnalyzer;
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
 pub type CouplingAnalyzerError = CrateAnalyzerError;
 pub use similarity::{
+    DEFAULT_DRIFT_FLOOR as DEFAULT_SIMILARITY_DRIFT_FLOOR,
     DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
-    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, FunctionSelection, SimilarityAnalyzer,
-    SimilarityMethod,
+    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, FunctionSelection, PairKey,
+    SimilarityAnalyzer, SimilarityMethod,
 };
 pub use untested::UntestedAnalyzer;
 pub use visibility::VisibilityAnalyzer;

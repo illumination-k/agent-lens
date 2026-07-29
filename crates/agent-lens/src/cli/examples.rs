@@ -205,6 +205,7 @@ Examples:
     agent-lens analyze similarity . --diff-only --format md
     agent-lens analyze similarity src/ --doc-overlap --format md
     agent-lens analyze similarity src/ --method token --min-lines 10
+    agent-lens analyze similarity . --paired-by name --format md
 ";
 
 pub const WRAPPER: &str = "\

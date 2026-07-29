@@ -61,6 +61,56 @@ agent-lens analyze similarity <path> --format md --sweep 0.6,0.75,0.85
 
 This clusters once at the lowest rung (`0.6`) and tags each cluster with the highest rung at which its complete-link structure survives. A cluster tagged `[survives ≥0.85]` is a near-verbatim clone (extract now); `[survives ≥0.6]` is a structural parallel that needs a shared abstraction rather than a literal extraction. `--sweep` conflicts with `--threshold` (it replaces the single cut). Reach for it when the default run reports _nothing_ between two files you suspect are duplicated — the looser pairs only show up at the lower rungs.
 
+## Finding siblings that drifted apart (`--paired-by`)
+
+Everything above answers "what is still similar?". That question has a
+built-in blind spot: two implementations of the same thing that have drifted
+apart score _lower_, so the more urgently a sync was missed, the less likely
+the report is to mention it. The report is always a lower bound, and it
+degrades exactly when the situation gets worse.
+
+`--paired-by` inverts it — match by name first, score second:
+
+```bash
+agent-lens analyze similarity <dir> --format md --paired-by name
+```
+
+Every cross-file name match is reported regardless of threshold, grouped by
+key and ordered worst-pair-first. Reach for it when the codebase maintains
+parallel implementations on purpose — language bindings (NAPI / WASM /
+PyO3), a server and client copy of the same model, per-analyzer boilerplate —
+and you want to know which copy fell behind.
+
+Two keys:
+
+- `name` (a.k.a. `qualified`) — the normalized owner-qualified name. Case and
+  separator conventions fold away (`getUser` = `get_user`) and binding affixes
+  are stripped from the owner, so `Summary::from` matches `JsSummary::from`.
+  Start here.
+- `method` — the method segment alone, so every `::from` in the tree groups
+  together. Use it when the mirror types were renamed past recognition; expect
+  unrelated same-named functions in the output.
+
+Reading the output: a group headed
+`` `render_modules` — 4 functions, similarity 34–98%, 3/4 pair(s) drifted ``
+means four functions share the name, some pair of them is 98% identical, and
+some other pair is down at 34%. That spread _is_ the finding — the 98% pair
+shows what the shared implementation is supposed to look like, and the 34%
+member is the one that fell behind.
+
+Pairs scoring below `--drift-floor` (default `0.30`) are dropped as unrelated
+namesakes rather than reported as drift — two functions that merely happen to
+share a common name (`new`, `format_markdown`) are not a missed sync. The
+count of what was dropped is printed, so a big number is itself a signal that
+the key is too loose. Pass `--drift-floor 0` to see everything.
+
+Same-file namesakes are excluded: siblings are a cross-file pattern, and a
+file's own overloads would otherwise dominate the `method` key. The skipped
+count is reported too, so an empty report tells you which kind of empty it is.
+
+`--paired-by` conflicts with `--sweep` (which annotates clusters; this mode
+doesn't cluster).
+
 ## Excluding tests
 
 Table-driven tests dominate similarity reports. If a Rust file is mostly tests, add `--exclude-tests`:

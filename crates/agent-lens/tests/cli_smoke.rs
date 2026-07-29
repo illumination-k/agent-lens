@@ -108,6 +108,84 @@ fn analyze_similarity_sweep_clusters_at_floor_and_tags_survival() {
     assert!(stdout.contains("[survives ≥0.75]"), "got: {stdout}");
 }
 
+const NAPI_SIBLING_RS: &str = r#"
+pub struct Summary;
+
+impl Summary {
+    pub fn from_raw(raw: &Raw) -> Summary {
+        let title = raw.title.clone();
+        let authors = raw.authors.clone();
+        let keywords = raw.keywords.clone();
+        let year = raw.year;
+        Summary { title, authors, keywords, year }
+    }
+}
+"#;
+
+const WASM_SIBLING_RS: &str = r#"
+pub struct JsSummary;
+
+impl JsSummary {
+    pub fn from_raw(raw: &Raw) -> JsSummary {
+        let title = raw.title.clone();
+        let year = raw.year;
+        JsSummary { title, year }
+    }
+}
+"#;
+
+/// Name-anchored pairing has to be reachable both ways an analyzer is
+/// driven: the `--paired-by` flag and the `paired-by` profile key. The
+/// fixture is a pair that clustering cannot report at all — it drifted
+/// below the default threshold — so a passing assertion also proves the
+/// mode is doing something the default report cannot.
+#[rstest]
+#[case::flag(None)]
+#[case::profile_key(Some(
+    "[profile.drift]\npath = \".\"\nformat = \"md\"\ntools = [\"similarity\"]\n\n[profile.drift.similarity]\npaired-by = \"name\"\n"
+))]
+fn analyze_similarity_paired_by_reports_drifted_siblings(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "napi.rs", NAPI_SIBLING_RS);
+    write_file(dir.path(), "wasm.rs", WASM_SIBLING_RS);
+
+    let output = match config {
+        None => agent_lens(
+            &[
+                "analyze",
+                "similarity",
+                ".",
+                "--format",
+                "md",
+                "--paired-by",
+                "name",
+            ],
+            dir.path(),
+            None,
+        ),
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            agent_lens(&["run", "drift"], dir.path(), None)
+        }
+    };
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("paired by qualified"), "got: {stdout}");
+    assert!(stdout.contains("`summary::from_raw`"), "got: {stdout}");
+    assert!(
+        stdout.contains("napi.rs:`Summary::from_raw`"),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains("wasm.rs:`JsSummary::from_raw`"),
+        "got: {stdout}"
+    );
+}
+
 const DOCUMENTED_PAIR_RS: &str = r#"
 /// Validate the user id before persisting.
 fn validate_user(id: u64) -> bool {

@@ -18,10 +18,11 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
-    DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD, DelegationAnalyzer,
-    FunctionGraphAnalyzer, FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind,
-    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat,
-    SimilarityAnalyzer, SimilarityMethod, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD,
+    DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphDirection,
+    GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer,
+    LayersAnalyzer, OutputFormat, PairKey, SimilarityAnalyzer, SimilarityMethod, UntestedAnalyzer,
+    VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -881,6 +882,25 @@ struct AnalyzeSimilarityArgs {
     /// `--threshold`, which it conflicts with.
     #[arg(long, value_delimiter = ',', conflicts_with = "threshold")]
     sweep: Vec<f64>,
+    /// Invert the report: match functions by name *first*, score second,
+    /// and list every cross-file match regardless of threshold, most
+    /// drifted first. Threshold clustering can only report what is still
+    /// similar, so two parallel implementations that have drifted apart —
+    /// the likeliest missed sync — silently drop out of it. `qualified`
+    /// (alias `name`) keys on the normalized owner-qualified name, so
+    /// `Summary::from` matches `JsSummary::from`; `method` keys on the
+    /// method segment alone, which finds siblings whose types were
+    /// renamed at the cost of grouping unrelated same-named functions.
+    #[arg(long, value_enum, value_name = "KEY", conflicts_with = "sweep")]
+    paired_by: Option<PairKey>,
+    /// Floor for `--paired-by`: name matches scoring below this are
+    /// dropped as unrelated namesakes rather than reported as drift.
+    /// Drift lives between this floor and `--threshold`; below it a
+    /// shared name means two different functions that happen to be
+    /// called the same thing. Pass `0` to report every match. No effect
+    /// without `--paired-by`.
+    #[arg(long, default_value_t = DEFAULT_SIMILARITY_DRIFT_FLOOR, requires = "paired_by")]
+    drift_floor: f64,
     /// Minimum source line count for a function to be considered.
     /// Functions shorter than this are dropped before pairwise
     /// comparison; keeps trivial getters / one-liners out of the
@@ -1252,6 +1272,8 @@ fn build_analyze_command(
                 min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
                 method: opts.method.unwrap_or_default(),
                 doc_overlap: opts.doc_overlap,
+                paired_by: opts.paired_by,
+                drift_floor: opts.drift_floor.unwrap_or(DEFAULT_SIMILARITY_DRIFT_FLOOR),
             })
         }
         config::ToolName::Delegation => {
@@ -1478,6 +1500,8 @@ impl AnalyzeCommand {
                     .with_min_lines(args.min_lines)
                     .with_method(args.method)
                     .with_doc_overlap(args.doc_overlap)
+                    .with_paired_by(args.paired_by)
+                    .with_drift_floor(args.drift_floor)
                     .with_top(args.ranking.top)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
@@ -2019,6 +2043,83 @@ mod tests {
             "0.7",
         ])
         .expect_err("--sweep and --threshold are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// `--paired-by` takes either spelling of the tight key — the issue
+    /// that asked for the mode named it `name`, the value enum calls it
+    /// `qualified` — plus the loose `method` key.
+    #[rstest]
+    #[case::qualified("qualified", PairKey::Qualified)]
+    #[case::name_alias("name", PairKey::Qualified)]
+    #[case::method("method", PairKey::Method)]
+    fn parses_analyze_similarity_paired_by(#[case] value: &str, #[case] expected: PairKey) {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--paired-by",
+            value,
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.paired_by, Some(expected));
+        assert!((args.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_drift_floor() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--paired-by",
+            "method",
+            "--drift-floor",
+            "0",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.drift_floor, 0.0);
+    }
+
+    /// Without `--paired-by` there is nothing for a floor to filter, so
+    /// a lone `--drift-floor` is a mistake worth reporting rather than
+    /// silently ignoring.
+    #[test]
+    fn analyze_similarity_rejects_drift_floor_without_paired_by() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--drift-floor",
+            "0.5",
+        ])
+        .expect_err("--drift-floor requires --paired-by");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// Sweeping annotates clusters; pairing does not cluster at all.
+    #[test]
+    fn analyze_similarity_rejects_paired_by_with_sweep() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--sweep",
+            "0.6,0.85",
+            "--paired-by",
+            "name",
+        ])
+        .expect_err("--sweep and --paired-by are mutually exclusive");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
@@ -2689,7 +2790,7 @@ fn dispatch(n: i32) -> i32 {
     #[test]
     fn build_analyze_command_maps_similarity_options() {
         let profile: config::Profile = toml::from_str(
-            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\nmethod = \"token\"\ndoc-overlap = true\ndiff-only = true\n",
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.7\nmin-lines = 9\ntop = 4\nmethod = \"token\"\ndoc-overlap = true\npaired-by = \"method\"\ndrift-floor = 0.5\ndiff-only = true\n",
         )
         .unwrap();
         let cmd = build_analyze_command(
@@ -2709,6 +2810,8 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.ranking.top, Some(4));
         assert_eq!(args.method, SimilarityMethod::Token);
         assert!(args.doc_overlap);
+        assert_eq!(args.paired_by, Some(PairKey::Method));
+        assert!((args.drift_floor - 0.5).abs() < f64::EPSILON);
         assert!(args.diff.diff_only);
     }
 
@@ -2731,6 +2834,11 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.ranking.top, None);
         assert_eq!(args.method, SimilarityMethod::Tsed);
         assert!(!args.doc_overlap);
+        // Absent `paired-by` keeps the clustering report; the floor falls
+        // back to its default so it is well-defined if pairing is turned
+        // on from the command line over the same profile.
+        assert_eq!(args.paired_by, None);
+        assert!((args.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
         assert!(!args.diff.diff_only);
     }
 
