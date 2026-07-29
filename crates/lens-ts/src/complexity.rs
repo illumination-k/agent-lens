@@ -113,6 +113,29 @@ impl ComplexityVisitor {
     fn new() -> Self {
         Self::default()
     }
+
+    /// Score one loop: `+1` McCabe branch, `+(1 + nesting)` cognitive,
+    /// one Halstead operator, then the optional header expression
+    /// (`while`'s condition, `for-in` / `for-of`'s right-hand side)
+    /// outside the nesting and the body inside it.
+    ///
+    /// `while`, `do`, `for-in` and `for-of` differ only in `label` and
+    /// which node is the header; mirrors `lens-rust`'s `visit_loop`.
+    fn visit_loop<'a>(
+        &mut self,
+        label: &str,
+        header: Option<&Expression<'a>>,
+        body: &Statement<'a>,
+    ) {
+        self.counters.add_branch();
+        self.halstead.op(label);
+        if let Some(header) = header {
+            self.visit_expression(header);
+        }
+        self.counters.enter_nest();
+        self.visit_statement(body);
+        self.counters.exit_nest();
+    }
 }
 
 impl<'a> Visit<'a> for ComplexityVisitor {
@@ -141,20 +164,13 @@ impl<'a> Visit<'a> for ComplexityVisitor {
     }
 
     fn visit_while_statement(&mut self, it: &WhileStatement<'a>) {
-        self.counters.add_branch();
-        self.halstead.op("while");
-        self.visit_expression(&it.test);
-        self.counters.enter_nest();
-        self.visit_statement(&it.body);
-        self.counters.exit_nest();
+        self.visit_loop("while", Some(&it.test), &it.body);
     }
 
     fn visit_do_while_statement(&mut self, it: &DoWhileStatement<'a>) {
-        self.counters.add_branch();
-        self.halstead.op("do");
-        self.counters.enter_nest();
-        self.visit_statement(&it.body);
-        self.counters.exit_nest();
+        // The header runs *after* the body here, so it is walked last
+        // rather than through `visit_loop`'s header slot.
+        self.visit_loop("do", None, &it.body);
         self.visit_expression(&it.test);
     }
 
@@ -176,21 +192,11 @@ impl<'a> Visit<'a> for ComplexityVisitor {
     }
 
     fn visit_for_in_statement(&mut self, it: &ForInStatement<'a>) {
-        self.counters.add_branch();
-        self.halstead.op("for-in");
-        self.visit_expression(&it.right);
-        self.counters.enter_nest();
-        self.visit_statement(&it.body);
-        self.counters.exit_nest();
+        self.visit_loop("for-in", Some(&it.right), &it.body);
     }
 
     fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
-        self.counters.add_branch();
-        self.halstead.op("for-of");
-        self.visit_expression(&it.right);
-        self.counters.enter_nest();
-        self.visit_statement(&it.body);
-        self.counters.exit_nest();
+        self.visit_loop("for-of", Some(&it.right), &it.body);
     }
 
     fn visit_switch_statement(&mut self, it: &SwitchStatement<'a>) {
