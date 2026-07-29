@@ -39,12 +39,10 @@ jobs:
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
 
-      # mise's rust plugin doesn't reliably honour the `components`
-      # setting in mise.rust.toml when `version = "latest"` resolves to a
-      # toolchain rustup hasn't seen before, so install them explicitly.
-      - name: Ensure Rust components
-        run: rustup component add clippy rustfmt llvm-tools-preview
-
+      # No explicit `rustup component add` step: mise.rust.toml pins an exact
+      # toolchain and declares `components = "rustfmt,clippy,llvm-tools-preview"`,
+      # which mise installs with the toolchain. The workaround this replaces was
+      # written for `version = "latest"`, which the manifest no longer uses.
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Build

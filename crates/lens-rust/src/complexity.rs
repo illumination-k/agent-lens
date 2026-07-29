@@ -22,9 +22,7 @@
 //! enclosing function's score. That matches how a reader actually
 //! experiences the code.
 
-use std::collections::HashMap;
-
-use lens_domain::{FunctionComplexity, HalsteadCounts, qualify};
+use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, HalsteadCounts, qualify};
 
 use crate::common::{WalkOptions, walk_fn_items};
 use proc_macro2::{TokenStream, TokenTree};
@@ -61,41 +59,23 @@ fn analyze_fn(name: String, sig: &syn::Signature, block: &Block) -> FunctionComp
         name,
         start_line: sig.span().start().line,
         end_line: block.span().end().line,
-        cyclomatic: 1 + visitor.cyclomatic_branches,
-        cognitive: visitor.cognitive,
-        max_nesting: visitor.max_nesting,
+        cyclomatic: visitor.counters.cyclomatic(),
+        cognitive: visitor.counters.cognitive(),
+        max_nesting: visitor.counters.max_nesting(),
         halstead,
     }
 }
 
+/// Rust-specific half of the complexity walk: which `syn` node counts as
+/// a branch. The scoring itself lives in [`ComplexityCounters`].
+#[derive(Default)]
 struct ComplexityVisitor {
-    cyclomatic_branches: u32,
-    cognitive: u32,
-    nesting: u32,
-    max_nesting: u32,
+    counters: ComplexityCounters,
 }
 
 impl ComplexityVisitor {
     fn new() -> Self {
-        Self {
-            cyclomatic_branches: 0,
-            cognitive: 0,
-            nesting: 0,
-            max_nesting: 0,
-        }
-    }
-
-    fn enter_nest(&mut self) {
-        self.nesting += 1;
-        if self.nesting > self.max_nesting {
-            self.max_nesting = self.nesting;
-        }
-    }
-
-    fn exit_nest(&mut self) {
-        // Paired with enter_nest; saturating to keep the invariant even if
-        // a future visitor change introduces an imbalance.
-        self.nesting = self.nesting.saturating_sub(1);
+        Self::default()
     }
 
     /// Score one loop: `+1` McCabe branch, `+(1 + nesting)` cognitive,
@@ -106,39 +86,37 @@ impl ComplexityVisitor {
     /// `visit_expr_loop` — those three used to spell this out
     /// individually with TSED 1.0 between each pair.
     fn visit_loop<'ast>(&mut self, header: Option<&'ast Expr>, body: &'ast Block) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         if let Some(header) = header {
             self.visit_expr(header);
         }
-        self.enter_nest();
+        self.counters.enter_nest();
         self.visit_block(body);
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 }
 
 impl<'ast> Visit<'ast> for ComplexityVisitor {
     fn visit_expr_if(&mut self, e: &'ast ExprIf) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
 
         // Condition contributes its own logical operators but no nesting.
         self.visit_expr(&e.cond);
 
-        self.enter_nest();
+        self.counters.enter_nest();
         self.visit_block(&e.then_branch);
-        self.exit_nest();
+        self.counters.exit_nest();
 
         if let Some((_, else_expr)) = &e.else_branch {
             // `else if` is rendered by Sonar as the chained if's own +1
             // (no extra penalty for the bare `else`); a plain `else`
             // counts as +1.
             if !matches!(&**else_expr, Expr::If(_)) {
-                self.cognitive += 1;
+                self.counters.add_cognitive(1);
             }
-            self.enter_nest();
+            self.counters.enter_nest();
             self.visit_expr(else_expr);
-            self.exit_nest();
+            self.counters.exit_nest();
         }
     }
 
@@ -157,25 +135,23 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
     fn visit_expr_match(&mut self, e: &'ast ExprMatch) {
         // McCabe: every arm beyond the first introduces a new path.
         let arms = u32::try_from(e.arms.len()).unwrap_or(u32::MAX);
-        self.cyclomatic_branches += arms.saturating_sub(1);
         // Sonar: the match itself is one structure, regardless of arm count.
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branches(arms.saturating_sub(1));
 
         self.visit_expr(&e.expr);
-        self.enter_nest();
+        self.counters.enter_nest();
         for arm in &e.arms {
             if let Some((_, guard)) = &arm.guard {
                 self.visit_expr(guard);
             }
             self.visit_expr(&arm.body);
         }
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 
     fn visit_expr_binary(&mut self, e: &'ast ExprBinary) {
         if matches!(e.op, BinOp::And(_) | BinOp::Or(_)) {
-            self.cyclomatic_branches += 1;
-            self.cognitive += 1;
+            self.counters.add_flat_branch();
         }
         // Default traversal would recurse into both sides; do it ourselves
         // since we override the method.
@@ -186,47 +162,31 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
     fn visit_expr_try(&mut self, e: &'ast ExprTry) {
         // `?` is an early return and so adds a path; Sonar does not count
         // it as a structural complexity bump, only McCabe does.
-        self.cyclomatic_branches += 1;
+        self.counters.add_cyclomatic(1);
         visit::visit_expr_try(self, e);
     }
 }
 
-#[derive(Default)]
-struct HalsteadAccumulator {
-    operators: HashMap<String, usize>,
-    operands: HashMap<String, usize>,
-}
-
 fn halstead_counts(block: &Block) -> HalsteadCounts {
-    let mut acc = HalsteadAccumulator::default();
+    let mut acc = HalsteadAcc::default();
     walk_tokens(block.to_token_stream(), &mut acc);
-    HalsteadCounts {
-        distinct_operators: acc.operators.len(),
-        distinct_operands: acc.operands.len(),
-        total_operators: acc.operators.values().sum(),
-        total_operands: acc.operands.values().sum(),
-    }
+    acc.counts()
 }
 
-fn walk_tokens(stream: TokenStream, acc: &mut HalsteadAccumulator) {
+fn walk_tokens(stream: TokenStream, acc: &mut HalsteadAcc) {
     for tt in stream {
         match tt {
             TokenTree::Group(g) => walk_tokens(g.stream(), acc),
             TokenTree::Ident(ident) => {
                 let s = ident.to_string();
                 if is_rust_keyword(&s) {
-                    *acc.operators.entry(s).or_insert(0) += 1;
+                    acc.op(&s);
                 } else {
-                    *acc.operands.entry(s).or_insert(0) += 1;
+                    acc.operand(&s);
                 }
             }
-            TokenTree::Punct(p) => {
-                let s = p.as_char().to_string();
-                *acc.operators.entry(s).or_insert(0) += 1;
-            }
-            TokenTree::Literal(lit) => {
-                *acc.operands.entry(lit.to_string()).or_insert(0) += 1;
-            }
+            TokenTree::Punct(p) => acc.op(&p.as_char().to_string()),
+            TokenTree::Literal(lit) => acc.operand(&lit.to_string()),
         }
     }
 }

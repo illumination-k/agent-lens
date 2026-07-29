@@ -17,11 +17,11 @@
 
 use lens_domain::{LineIndex, WrapperFinding, args_pass_through_by, qualify};
 use ruff_python_ast::{
-    Expr, ExprAttribute, ExprCall, Parameters, Stmt, StmtClassDef, StmtFunctionDef, StmtReturn,
+    Expr, ExprAttribute, ExprCall, Parameters, Stmt, StmtFunctionDef, StmtReturn,
 };
 use ruff_python_parser::{ParseError, parse_module};
 
-use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
+use crate::walk::walk_module_fns;
 
 /// Method names with no arguments that we treat as "no semantic
 /// content": stringification / coercion shims.
@@ -60,52 +60,17 @@ pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, WrapperError> 
     let module = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
-    for stmt in &module.body {
-        collect_stmt(stmt, None, &lines, &mut out);
-    }
-    Ok(out)
-}
-
-fn collect_stmt(
-    stmt: &Stmt,
-    owner: Option<&str>,
-    lines: &LineIndex,
-    out: &mut Vec<WrapperFinding>,
-) {
-    match stmt {
-        Stmt::FunctionDef(func) => {
-            // Stub-shaped functions (Protocol / abstract / overload /
-            // pass / ... / docstring / raise NotImplementedError) carry
-            // no body to forward — flagging them is noise.
-            if is_stub_function(func) {
-                return;
-            }
-            if is_test_function(func) {
-                return;
-            }
-            if let Some(finding) = analyze(func, owner, lines) {
-                out.push(finding);
-            }
+    walk_module_fns(&module.body, &mut |site| {
+        // A forwarding test is not a refactoring target, and neither is
+        // anything inside a test class. Stub bodies (Protocol / abstract
+        // / overload / `pass` / `...`) have nothing to forward and are
+        // already dropped by the walk.
+        if site.is_test {
+            return;
         }
-        Stmt::ClassDef(class) => collect_class(class, lines, out),
-        _ => {}
-    }
-}
-
-fn collect_class(class: &StmtClassDef, lines: &LineIndex, out: &mut Vec<WrapperFinding>) {
-    // Protocol classes are pure declarations; every method is a stub by
-    // definition. Drop the whole subtree the same way test classes are
-    // dropped above.
-    if inherits_protocol(class) {
-        return;
-    }
-    if is_test_class(class) {
-        return;
-    }
-    let class_name = class.name.as_str();
-    for inner in &class.body {
-        collect_stmt(inner, Some(class_name), lines, out);
-    }
+        out.extend(analyze(site.func, site.owner, &lines));
+    });
+    Ok(out)
 }
 
 fn analyze(

@@ -694,11 +694,16 @@ diff or omit the argument to compare against `main`. If the changed code has
 Criterion benchmarks, report whether benchmark regression was checked and what
 the result was.
 
-CI (`.github/workflows/`) runs Rust lint/test (`ci_rust.yml`), the base
-toolchain lints (`lint_base.yml`), GitHub Actions lint (`lint_gha.yml`),
-CodeQL, dependency review, Trivy, TruffleHog, SBOM generation, the flake build
-(`nix.yml` — on nix/lockfile changes plus a weekly run), and PR-diff mutation testing
-(`mutants.yml` — full runs are available via `workflow_dispatch`).
+CI (`.github/workflows/`) runs Rust lint/test (`ci_rust.yml`), TypeScript
+lint/test/build (`ci_ts.yml`), the base toolchain lints (`lint_base.yml`),
+GitHub Actions lint (`lint_gha.yml`), CodeQL (Rust, TypeScript, and the
+workflows themselves), dependency review, Trivy, TruffleHog, SBOM generation,
+the flake build (`nix.yml` — on nix/lockfile changes plus a weekly run), and
+PR-diff mutation testing (`mutants.yml` — full runs are available via
+`workflow_dispatch`). Releases share one reusable workflow
+(`release-build.yml`) behind two triggers: `release-latest.yml` for the rolling
+prerelease from `main` and `release-tag.yml` for `v*` tags, which publishes
+build-provenance attestations alongside the archives.
 
 ## Design principles
 

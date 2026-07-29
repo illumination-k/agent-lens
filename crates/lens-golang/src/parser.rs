@@ -22,6 +22,7 @@ use tree_sitter::{Node, Parser};
 
 use crate::attrs::name_looks_like_test_function;
 use crate::node_text::{node_str, node_text_or_empty};
+use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Tree-sitter-backed Go parser.
 ///
@@ -82,23 +83,9 @@ fn extract_with(source: &str) -> Result<Vec<FunctionDef>, GoParseError> {
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let mut out = Vec::new();
-    let mut cursor = tree.root_node().walk();
-    for child in tree.root_node().named_children(&mut cursor) {
-        match child.kind() {
-            "function_declaration" => {
-                if let Some(def) = function_def_from(child, bytes, None) {
-                    out.push(def);
-                }
-            }
-            "method_declaration" => {
-                let owner = method_receiver_type(child, bytes);
-                if let Some(def) = function_def_from(child, bytes, owner.as_deref()) {
-                    out.push(def);
-                }
-            }
-            _ => {}
-        }
-    }
+    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+        out.push(function_def_from(&site, source.as_bytes()));
+    });
     Ok(out)
 }
 
@@ -114,26 +101,20 @@ pub(crate) fn parse_tree(source: &str) -> Result<tree_sitter::Tree, GoParseError
     Ok(tree)
 }
 
-/// Lower a `function_declaration` or `method_declaration` node into a
-/// [`FunctionDef`]. Returns `None` when the declaration has no body
-/// (forward declarations or syntax errors below the root).
-fn function_def_from(node: Node<'_>, source: &[u8], owner: Option<&str>) -> Option<FunctionDef> {
-    let body = node.child_by_field_name("body")?;
-    let raw_name = function_name_text(node, source)?;
-    let is_test = owner.is_none() && name_looks_like_test_function(raw_name);
-    let qualified = qualify_name(owner, raw_name);
-    let start_line = node.start_position().row + 1;
-    let end_line = node.end_position().row + 1;
-    let tree = build_tree(body, source, /* is_root = */ true);
-    Some(FunctionDef {
-        name: qualified,
-        start_line,
-        end_line,
+/// Lower one walked declaration into a [`FunctionDef`].
+fn function_def_from(site: &FnSite<'_, '_>, source: &[u8]) -> FunctionDef {
+    let owner = site.owner.as_deref();
+    let is_test = owner.is_none() && name_looks_like_test_function(site.name);
+    let node = site.node;
+    FunctionDef {
+        name: qualify_name(owner, site.name),
+        start_line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
         is_test,
-        signature: Some(signature_info(node, source, raw_name)),
+        signature: Some(signature_info(node, source, site.name)),
         doc: doc_comment_text(node, source),
-        tree,
-    })
+        tree: build_tree(site.body, source, /* is_root = */ true),
+    }
 }
 
 /// Project a `function_declaration` / `method_declaration` into the

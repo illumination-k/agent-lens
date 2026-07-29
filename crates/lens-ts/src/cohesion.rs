@@ -228,22 +228,13 @@ fn method_cohesion(
     let name = method_name(method)?;
     let mut visitor = ThisRefVisitor::default();
     visitor.visit_function_body(body);
-    let mut fields = visitor.fields;
-    fields.sort();
-    fields.dedup();
-    let mut calls: Vec<String> = visitor
-        .calls
-        .into_iter()
-        .filter(|c| siblings.contains(c))
-        .collect();
-    calls.sort();
-    calls.dedup();
-    Some(MethodCohesion::new(
+    Some(MethodCohesion::from_refs(
         name,
         line_index.line(method.span.start),
         line_index.line(method.span.end),
-        fields,
-        calls,
+        visitor.fields,
+        visitor.calls,
+        siblings,
     ))
 }
 
@@ -563,13 +554,14 @@ fn module_function_cohesion(
         in_callee: false,
     };
     visitor.visit_function_body(func.body);
-    let mut fields = visitor.fields;
-    fields.sort();
-    fields.dedup();
-    let mut calls = visitor.calls;
-    calls.sort();
-    calls.dedup();
-    MethodCohesion::new(&func.name, func.start_line, func.end_line, fields, calls)
+    MethodCohesion::from_refs(
+        &func.name,
+        func.start_line,
+        func.end_line,
+        visitor.fields,
+        visitor.calls,
+        siblings,
+    )
 }
 
 /// Function-local bindings: parameters plus any `var` / `let` / `const`,

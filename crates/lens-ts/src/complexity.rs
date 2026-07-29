@@ -29,9 +29,7 @@
 //! a [`FunctionComplexity`] by running [`ComplexityVisitor`] against its
 //! body.
 
-use std::collections::HashMap;
-
-use lens_domain::{FunctionComplexity, HalsteadCounts, LineIndex};
+use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, LineIndex};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
@@ -91,126 +89,93 @@ fn analyze(
 ) -> FunctionComplexity {
     let mut visitor = ComplexityVisitor::new();
     visitor.visit_function_body(body);
-    let halstead = HalsteadCounts {
-        distinct_operators: visitor.halstead.operators.len(),
-        distinct_operands: visitor.halstead.operands.len(),
-        total_operators: visitor.halstead.operators.values().sum(),
-        total_operands: visitor.halstead.operands.values().sum(),
-    };
     FunctionComplexity {
         name,
         start_line,
         end_line,
-        cyclomatic: 1 + visitor.cyclomatic_branches,
-        cognitive: visitor.cognitive,
-        max_nesting: visitor.max_nesting,
-        halstead,
+        cyclomatic: visitor.counters.cyclomatic(),
+        cognitive: visitor.counters.cognitive(),
+        max_nesting: visitor.counters.max_nesting(),
+        halstead: visitor.halstead.counts(),
     }
 }
 
+/// TypeScript-specific half of the complexity walk: which oxc node counts
+/// as a branch and which Halstead label it carries. The scoring rules live
+/// in [`ComplexityCounters`] / [`HalsteadAcc`].
 #[derive(Default)]
-struct HalsteadAcc {
-    operators: HashMap<String, usize>,
-    operands: HashMap<String, usize>,
-}
-
-impl HalsteadAcc {
-    fn op(&mut self, s: &str) {
-        bump_count(&mut self.operators, s);
-    }
-    fn operand(&mut self, s: &str) {
-        bump_count(&mut self.operands, s);
-    }
-}
-
-/// Increment the count for `s` in `map`, or insert it at 1 if absent.
-/// Centralises the inner body that `op` and `operand` used to repeat
-/// verbatim — the methods stay as semantic markers but no longer share
-/// a structurally identical body for the similarity analyser to flag.
-fn bump_count(map: &mut HashMap<String, usize>, s: &str) {
-    *map.entry(s.to_owned()).or_insert(0) += 1;
-}
-
 struct ComplexityVisitor {
-    cyclomatic_branches: u32,
-    cognitive: u32,
-    nesting: u32,
-    max_nesting: u32,
+    counters: ComplexityCounters,
     halstead: HalsteadAcc,
 }
 
 impl ComplexityVisitor {
     fn new() -> Self {
-        Self {
-            cyclomatic_branches: 0,
-            cognitive: 0,
-            nesting: 0,
-            max_nesting: 0,
-            halstead: HalsteadAcc::default(),
-        }
+        Self::default()
     }
 
-    fn enter_nest(&mut self) {
-        self.nesting += 1;
-        if self.nesting > self.max_nesting {
-            self.max_nesting = self.nesting;
+    /// Score one loop: `+1` McCabe branch, `+(1 + nesting)` cognitive,
+    /// one Halstead operator, then the optional header expression
+    /// (`while`'s condition, `for-in` / `for-of`'s right-hand side)
+    /// outside the nesting and the body inside it.
+    ///
+    /// `while`, `do`, `for-in` and `for-of` differ only in `label` and
+    /// which node is the header; mirrors `lens-rust`'s `visit_loop`.
+    fn visit_loop<'a>(
+        &mut self,
+        label: &str,
+        header: Option<&Expression<'a>>,
+        body: &Statement<'a>,
+    ) {
+        self.counters.add_branch();
+        self.halstead.op(label);
+        if let Some(header) = header {
+            self.visit_expression(header);
         }
-    }
-
-    fn exit_nest(&mut self) {
-        self.nesting = self.nesting.saturating_sub(1);
+        self.counters.enter_nest();
+        self.visit_statement(body);
+        self.counters.exit_nest();
     }
 }
 
 impl<'a> Visit<'a> for ComplexityVisitor {
     fn visit_if_statement(&mut self, it: &IfStatement<'a>) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         self.halstead.op("if");
 
         self.visit_expression(&it.test);
 
-        self.enter_nest();
+        self.counters.enter_nest();
         self.visit_statement(&it.consequent);
-        self.exit_nest();
+        self.counters.exit_nest();
 
         if let Some(alt) = &it.alternate {
             // `else if` is rendered by Sonar as the chained if's own +1
             // (no extra penalty for the bare `else`); a plain `else`
             // counts as +1.
             if !matches!(alt, Statement::IfStatement(_)) {
-                self.cognitive += 1;
+                self.counters.add_cognitive(1);
                 self.halstead.op("else");
             }
-            self.enter_nest();
+            self.counters.enter_nest();
             self.visit_statement(alt);
-            self.exit_nest();
+            self.counters.exit_nest();
         }
     }
 
     fn visit_while_statement(&mut self, it: &WhileStatement<'a>) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
-        self.halstead.op("while");
-        self.visit_expression(&it.test);
-        self.enter_nest();
-        self.visit_statement(&it.body);
-        self.exit_nest();
+        self.visit_loop("while", Some(&it.test), &it.body);
     }
 
     fn visit_do_while_statement(&mut self, it: &DoWhileStatement<'a>) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
-        self.halstead.op("do");
-        self.enter_nest();
-        self.visit_statement(&it.body);
-        self.exit_nest();
+        // The header runs *after* the body here, so it is walked last
+        // rather than through `visit_loop`'s header slot.
+        self.visit_loop("do", None, &it.body);
         self.visit_expression(&it.test);
     }
 
     fn visit_for_statement(&mut self, it: &ForStatement<'a>) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         self.halstead.op("for");
         if let Some(init) = &it.init {
             self.visit_for_statement_init(init);
@@ -221,29 +186,17 @@ impl<'a> Visit<'a> for ComplexityVisitor {
         if let Some(update) = &it.update {
             self.visit_expression(update);
         }
-        self.enter_nest();
+        self.counters.enter_nest();
         self.visit_statement(&it.body);
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 
     fn visit_for_in_statement(&mut self, it: &ForInStatement<'a>) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
-        self.halstead.op("for-in");
-        self.visit_expression(&it.right);
-        self.enter_nest();
-        self.visit_statement(&it.body);
-        self.exit_nest();
+        self.visit_loop("for-in", Some(&it.right), &it.body);
     }
 
     fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
-        self.halstead.op("for-of");
-        self.visit_expression(&it.right);
-        self.enter_nest();
-        self.visit_statement(&it.body);
-        self.exit_nest();
+        self.visit_loop("for-of", Some(&it.right), &it.body);
     }
 
     fn visit_switch_statement(&mut self, it: &SwitchStatement<'a>) {
@@ -251,12 +204,11 @@ impl<'a> Visit<'a> for ComplexityVisitor {
         // count cases that have a `test` (default arms don't add a path).
         let arms = it.cases.iter().filter(|c| c.test.is_some()).count();
         let arms = u32::try_from(arms).unwrap_or(u32::MAX);
-        self.cyclomatic_branches += arms.saturating_sub(1);
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branches(arms.saturating_sub(1));
         self.halstead.op("switch");
 
         self.visit_expression(&it.discriminant);
-        self.enter_nest();
+        self.counters.enter_nest();
         for case in &it.cases {
             if let Some(t) = &case.test {
                 self.visit_expression(t);
@@ -265,33 +217,31 @@ impl<'a> Visit<'a> for ComplexityVisitor {
                 self.visit_statement(stmt);
             }
         }
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 
     fn visit_try_statement(&mut self, it: &TryStatement<'a>) {
         self.halstead.op("try");
-        self.enter_nest();
+        self.counters.enter_nest();
         self.visit_block_statement(&it.block);
-        self.exit_nest();
+        self.counters.exit_nest();
         if let Some(handler) = &it.handler {
-            self.cyclomatic_branches += 1;
-            self.cognitive += 1 + self.nesting;
+            self.counters.add_branch();
             self.halstead.op("catch");
-            self.enter_nest();
+            self.counters.enter_nest();
             self.visit_block_statement(&handler.body);
-            self.exit_nest();
+            self.counters.exit_nest();
         }
         if let Some(finalizer) = &it.finalizer {
             self.halstead.op("finally");
-            self.enter_nest();
+            self.counters.enter_nest();
             self.visit_block_statement(finalizer);
-            self.exit_nest();
+            self.counters.exit_nest();
         }
     }
 
     fn visit_logical_expression(&mut self, it: &LogicalExpression<'a>) {
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1;
+        self.counters.add_flat_branch();
         self.halstead.op(it.operator.as_str());
         self.visit_expression(&it.left);
         self.visit_expression(&it.right);
@@ -299,14 +249,13 @@ impl<'a> Visit<'a> for ComplexityVisitor {
 
     fn visit_conditional_expression(&mut self, it: &ConditionalExpression<'a>) {
         // `cond ? a : b` is a branching construct just like `if`.
-        self.cyclomatic_branches += 1;
-        self.cognitive += 1 + self.nesting;
+        self.counters.add_branch();
         self.halstead.op("?:");
         self.visit_expression(&it.test);
-        self.enter_nest();
+        self.counters.enter_nest();
         self.visit_expression(&it.consequent);
         self.visit_expression(&it.alternate);
-        self.exit_nest();
+        self.counters.exit_nest();
     }
 
     fn visit_binary_expression(&mut self, it: &BinaryExpression<'a>) {
