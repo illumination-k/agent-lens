@@ -319,7 +319,7 @@ impl CallGraphBuilder {
 ///
 /// Analyzers that also need the flag's value at report time (to phrase
 /// the output differently, say) name the field to mirror it into:
-/// `only_tests => self.only_tests`.
+/// `only_tests => only_tests`.
 macro_rules! delegate_call_graph_builders {
     (
         $field:ident,
