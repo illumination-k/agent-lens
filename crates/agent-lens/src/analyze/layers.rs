@@ -62,8 +62,9 @@ use super::call_graph::algo::{Condensation, condense};
 use super::call_graph::model::{
     ModuleResolutionSummary, NodeVisibility, Resolution, ResolutionMethod,
 };
-use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
+use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -104,20 +105,10 @@ impl LayersAnalyzer {
         Self::default()
     }
 
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.only_tests = only_tests;
-        self.builder = self.builder.with_only_tests(only_tests);
-        self
-    }
-
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.builder = self.builder.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.builder = self.builder.with_exclude_patterns(exclude);
-        self
+    delegate_call_graph_builders! {
+        builder,
+        only_tests => only_tests,
+        exclude_tests,
     }
 
     /// Cap the markdown listings to the top-N entries. JSON output always
@@ -130,12 +121,7 @@ impl LayersAnalyzer {
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let graph = self.builder.build(path)?;
         let report = Report::build(path, &graph, self.only_tests);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report, self.top)),
-        }
+        render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
 

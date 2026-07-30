@@ -62,6 +62,71 @@ pub(crate) fn render_module_confidence(
     }
 }
 
+/// One module's worth of findings in a per-module markdown listing.
+/// Implemented by the analyzer's own group type so
+/// [`render_module_sections`] owns the truncation bookkeeping while the
+/// analyzer keeps its own wording and row shape.
+pub(crate) trait ModuleSection {
+    /// Module path, rendered as the section heading.
+    fn module(&self) -> &str;
+
+    /// Total findings in this module, including any not rendered — the
+    /// count the overflow line is computed against.
+    fn item_count(&self) -> usize;
+
+    /// Prose after the module name in the heading, e.g.
+    /// `"7 function(s), 210 LOC"`.
+    fn heading_detail(&self) -> String;
+
+    /// Write up to `limit` findings, one markdown bullet each.
+    fn render_items(&self, out: &mut String, limit: usize);
+}
+
+/// Render a "findings grouped by module" listing: an `## ` heading
+/// stating how much of the corpus is shown, one `### ` section per
+/// module, and the two overflow lines that tell an agent where the rest
+/// went. Both caps truncate rather than drop silently, and both say
+/// where the untruncated data lives.
+///
+/// `heading` is the section title including its ordering note, e.g.
+/// `"Untested by module (largest body first"` — the counts and closing
+/// parenthesis are appended.
+pub(crate) fn render_module_sections<G: ModuleSection>(
+    out: &mut String,
+    heading: &str,
+    groups: &[G],
+    module_limit: usize,
+    items_per_module: usize,
+) {
+    let shown = groups.len().min(module_limit);
+    let _ = writeln!(
+        out,
+        "\n## {heading}; {shown} of {} module(s))",
+        groups.len(),
+    );
+    for group in groups.iter().take(module_limit) {
+        let _ = writeln!(
+            out,
+            "\n### `{}` — {}",
+            group.module(),
+            group.heading_detail(),
+        );
+        group.render_items(out, items_per_module);
+        let overflow = group.item_count().saturating_sub(items_per_module);
+        if overflow > 0 {
+            let _ = writeln!(out, "- +{overflow} more (JSON output carries every row)");
+        }
+    }
+    let module_overflow = groups.len() - shown;
+    if module_overflow > 0 {
+        let _ = writeln!(
+            out,
+            "\n+{module_overflow} more module(s) not shown (raise `--top`; JSON carries every \
+             row)."
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +213,117 @@ mod tests {
         #[case] expected: &str,
     ) {
         assert_eq!(format_optional_f64(value, precision), expected);
+    }
+
+    /// A group carrying more findings than it renders — the case both
+    /// overflow lines exist for.
+    struct Group {
+        module: &'static str,
+        item_count: usize,
+        rendered: usize,
+    }
+
+    impl ModuleSection for Group {
+        fn module(&self) -> &str {
+            self.module
+        }
+
+        fn item_count(&self) -> usize {
+            self.item_count
+        }
+
+        fn heading_detail(&self) -> String {
+            format!("{} item(s)", self.item_count)
+        }
+
+        fn render_items(&self, out: &mut String, limit: usize) {
+            for i in 0..self.rendered.min(limit) {
+                let _ = writeln!(out, "- item {i}");
+            }
+        }
+    }
+
+    fn group(module: &'static str, item_count: usize) -> Group {
+        Group {
+            module,
+            item_count,
+            rendered: item_count,
+        }
+    }
+
+    fn sections(groups: &[Group], module_limit: usize, items_per_module: usize) -> String {
+        let mut out = String::new();
+        render_module_sections(
+            &mut out,
+            "Heading (note",
+            groups,
+            module_limit,
+            items_per_module,
+        );
+        out
+    }
+
+    #[test]
+    fn every_group_and_item_renders_when_nothing_is_capped() {
+        let out = sections(&[group("a", 2), group("b", 1)], 10, 10);
+        assert!(
+            out.contains("## Heading (note; 2 of 2 module(s))"),
+            "got: {out}"
+        );
+        assert!(out.contains("### `a` — 2 item(s)"), "got: {out}");
+        assert!(out.contains("### `b` — 1 item(s)"), "got: {out}");
+        assert_eq!(out.matches("- item ").count(), 3, "got: {out}");
+        assert!(!out.contains("more"), "no overflow line is due, got: {out}");
+    }
+
+    #[test]
+    fn the_module_cap_truncates_and_says_how_many_are_left() {
+        let out = sections(&[group("a", 1), group("b", 1), group("c", 1)], 2, 10);
+        assert!(
+            out.contains("## Heading (note; 2 of 3 module(s))"),
+            "got: {out}"
+        );
+        assert!(!out.contains("`c`"), "got: {out}");
+        assert!(
+            out.contains("+1 more module(s) not shown (raise `--top`"),
+            "got: {out}",
+        );
+    }
+
+    #[test]
+    fn the_per_module_cap_truncates_and_points_at_the_json() {
+        let out = sections(&[group("a", 5)], 10, 2);
+        assert_eq!(out.matches("- item ").count(), 2, "got: {out}");
+        assert!(
+            out.contains("- +3 more (JSON output carries every row)"),
+            "got: {out}",
+        );
+    }
+
+    /// The overflow count is computed from `item_count`, not from how
+    /// many rows the group chose to write, so a group holding rows it
+    /// declines to render still accounts for them.
+    #[test]
+    fn the_overflow_count_follows_the_declared_item_count() {
+        let out = sections(
+            &[Group {
+                module: "a",
+                item_count: 9,
+                rendered: 1,
+            }],
+            10,
+            4,
+        );
+        assert_eq!(out.matches("- item ").count(), 1, "got: {out}");
+        assert!(
+            out.contains("- +5 more (JSON output carries every row)"),
+            "got: {out}",
+        );
+    }
+
+    #[test]
+    fn an_empty_group_list_still_states_the_zero() {
+        let out = sections(&[], 10, 10);
+        assert_eq!(out, "\n## Heading (note; 0 of 0 module(s))\n");
     }
 }

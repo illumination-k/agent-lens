@@ -57,8 +57,9 @@ use super::call_graph::model::{
     CallGraphNode, GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
     name_last_segment,
 };
-use super::call_graph::{CallGraph, CallGraphBuilder};
-use super::format::render_module_confidence;
+use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
+use super::format::{ModuleSection, render_module_confidence, render_module_sections};
+use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat, SourceLang};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -98,26 +99,17 @@ impl VisibilityAnalyzer {
         Self::default()
     }
 
-    /// Accepted for CLI uniformity. Test functions are never audited —
-    /// a `pub fn` in a test module is not an API surface — so this
-    /// leaves only test code to call the (now absent) findings.
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.builder = self.builder.with_only_tests(only_tests);
-        self
-    }
-
-    /// Drops test files from the graph, and with them the callers that
-    /// live there. A function called only from tests then looks
-    /// uncalled rather than test-called, so the report says how many
-    /// callers were tests when they are in scope.
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.builder = self.builder.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.builder = self.builder.with_exclude_patterns(exclude);
-        self
+    delegate_call_graph_builders! {
+        builder,
+        /// Accepted for CLI uniformity. Test functions are never audited —
+        /// a `pub fn` in a test module is not an API surface — so this
+        /// leaves only test code to call the (now absent) findings.
+        only_tests,
+        /// Drops test files from the graph, and with them the callers that
+        /// live there. A function called only from tests then looks
+        /// uncalled rather than test-called, so the report says how many
+        /// callers were tests when they are in scope.
+        exclude_tests,
     }
 
     /// Cap the markdown module sections to the top-N entries. JSON
@@ -130,12 +122,7 @@ impl VisibilityAnalyzer {
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let graph = self.builder.build(path)?;
         let report = Report::build(path, &graph);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report, self.top)),
-        }
+        render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
 
@@ -347,7 +334,7 @@ impl Report {
             .filter(|&(idx, _)| !re_exports.covers(&graph.nodes[idx]))
             .collect();
 
-        let callers = resolved_callers(graph);
+        let callers = graph.resolved_callers();
         let mut findings: Vec<(usize, Finding)> = Vec::new();
         for &(idx, lang) in &audited {
             if let Some(finding) = classify(graph, idx, lang, callers.get(&idx)) {
@@ -647,27 +634,6 @@ fn normalize_use_path(path: &str) -> &str {
     path.strip_prefix("crate::")
         .or_else(|| path.strip_prefix("self::"))
         .unwrap_or(path)
-}
-
-/// Distinct resolved callers per callee node index.
-fn resolved_callers(graph: &CallGraph) -> BTreeMap<usize, BTreeSet<usize>> {
-    let index_by_id = graph.node_index_by_id();
-    let mut callers: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for edge in &graph.edges {
-        if edge.resolution != Resolution::Resolved {
-            continue;
-        }
-        let (Some(from), Some(to)) = (edge.from.as_deref(), edge.to.as_deref()) else {
-            continue;
-        };
-        let (Some(&from_idx), Some(&to_idx)) = (index_by_id.get(from), index_by_id.get(to)) else {
-            continue;
-        };
-        if from_idx != to_idx {
-            callers.entry(to_idx).or_default().insert(from_idx);
-        }
-    }
-    callers
 }
 
 /// Fold the caller modules into the narrowest scope containing all of
@@ -1003,7 +969,13 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     }
 
     render_counts(&mut out, summary);
-    render_modules(&mut out, &report.modules, limit);
+    render_module_sections(
+        &mut out,
+        "Over-exposed by module (most called findings first",
+        &report.modules,
+        limit,
+        FINDINGS_PER_MODULE,
+    );
     render_module_confidence(
         &mut out,
         &report.resolution,
@@ -1071,34 +1043,26 @@ fn render_counts(out: &mut String, summary: &Summary) {
     );
 }
 
-fn render_modules(out: &mut String, modules: &[ModuleGroup], limit: usize) {
-    let shown = modules.len().min(limit);
-    let _ = writeln!(
-        out,
-        "\n## Over-exposed by module (most called findings first; {shown} of {} module(s))",
-        modules.len(),
-    );
-    for group in modules.iter().take(limit) {
-        let _ = writeln!(
-            out,
-            "\n### `{}` — {} finding(s), {} with resolved callers",
-            group.module, group.finding_count, group.called_count,
-        );
-        for finding in group.findings.iter().take(FINDINGS_PER_MODULE) {
+impl ModuleSection for ModuleGroup {
+    fn module(&self) -> &str {
+        &self.module
+    }
+
+    fn item_count(&self) -> usize {
+        self.finding_count
+    }
+
+    fn heading_detail(&self) -> String {
+        format!(
+            "{} finding(s), {} with resolved callers",
+            self.finding_count, self.called_count,
+        )
+    }
+
+    fn render_items(&self, out: &mut String, limit: usize) {
+        for finding in self.findings.iter().take(limit) {
             let _ = writeln!(out, "- {}", render_finding(finding));
         }
-        let overflow = group.finding_count.saturating_sub(FINDINGS_PER_MODULE);
-        if overflow > 0 {
-            let _ = writeln!(out, "- +{overflow} more (JSON output carries every row)");
-        }
-    }
-    let module_overflow = modules.len() - shown;
-    if module_overflow > 0 {
-        let _ = writeln!(
-            out,
-            "\n+{module_overflow} more module(s) not shown (raise `--top`; JSON carries every \
-             row)."
-        );
     }
 }
 

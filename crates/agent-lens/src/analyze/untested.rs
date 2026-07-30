@@ -47,8 +47,9 @@ use serde::Serialize;
 
 use super::call_graph::algo::bfs;
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
-use super::call_graph::{CallGraph, CallGraphBuilder};
-use super::format::render_module_confidence;
+use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
+use super::format::{ModuleSection, render_module_confidence, render_module_sections};
+use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -83,23 +84,14 @@ impl UntestedAnalyzer {
         Self::default()
     }
 
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.builder = self.builder.with_only_tests(only_tests);
-        self
-    }
-
-    /// Accepted for CLI uniformity, but it removes the traversal's own
-    /// starting points: with no test functions in the graph every
-    /// production function is untested by construction, and the report
-    /// says so instead of presenting the whole codebase as a finding.
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.builder = self.builder.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.builder = self.builder.with_exclude_patterns(exclude);
-        self
+    delegate_call_graph_builders! {
+        builder,
+        only_tests,
+        /// Accepted for CLI uniformity, but it removes the traversal's own
+        /// starting points: with no test functions in the graph every
+        /// production function is untested by construction, and the report
+        /// says so instead of presenting the whole codebase as a finding.
+        exclude_tests,
     }
 
     /// Cap the markdown module sections to the top-N entries. JSON output
@@ -112,12 +104,7 @@ impl UntestedAnalyzer {
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let graph = self.builder.build(path)?;
         let report = Report::build(path, &graph);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report, self.top)),
-        }
+        render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
 
@@ -465,7 +452,13 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     }
 
     render_bounds(&mut out, &report.bounds);
-    render_modules(&mut out, &report.modules, limit);
+    render_module_sections(
+        &mut out,
+        "Untested by module (largest body first",
+        &report.modules,
+        limit,
+        FUNCTIONS_PER_MODULE,
+    );
     render_module_confidence(
         &mut out,
         &report.resolution,
@@ -488,34 +481,23 @@ fn render_bounds(out: &mut String, bounds: &Bounds) {
     );
 }
 
-fn render_modules(out: &mut String, modules: &[ModuleGroup], limit: usize) {
-    let shown = modules.len().min(limit);
-    let _ = writeln!(
-        out,
-        "\n## Untested by module (largest body first; {shown} of {} module(s))",
-        modules.len(),
-    );
-    for group in modules.iter().take(limit) {
-        let _ = writeln!(
-            out,
-            "\n### `{}` — {} function(s), {} LOC",
-            group.module, group.function_count, group.loc,
-        );
-        for f in group.functions.iter().take(FUNCTIONS_PER_MODULE) {
+impl ModuleSection for ModuleGroup {
+    fn module(&self) -> &str {
+        &self.module
+    }
+
+    fn item_count(&self) -> usize {
+        self.function_count
+    }
+
+    fn heading_detail(&self) -> String {
+        format!("{} function(s), {} LOC", self.function_count, self.loc)
+    }
+
+    fn render_items(&self, out: &mut String, limit: usize) {
+        for f in self.functions.iter().take(limit) {
             let _ = writeln!(out, "- {}", render_function(f));
         }
-        let overflow = group.function_count.saturating_sub(FUNCTIONS_PER_MODULE);
-        if overflow > 0 {
-            let _ = writeln!(out, "- +{overflow} more (JSON output carries every row)");
-        }
-    }
-    let module_overflow = modules.len() - shown;
-    if module_overflow > 0 {
-        let _ = writeln!(
-            out,
-            "\n+{module_overflow} more module(s) not shown (raise `--top`; JSON carries every \
-             row)."
-        );
     }
 }
 

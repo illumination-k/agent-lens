@@ -16,7 +16,7 @@ pub(crate) mod model;
 pub(crate) mod module_path;
 pub(crate) mod resolve;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use lens_domain::{CallShape, FunctionComplexity, FunctionShape, WrapperFinding};
@@ -102,6 +102,37 @@ impl CallGraph {
             neighbors.dedup();
         }
         adjacency
+    }
+
+    /// Reverse of [`Self::resolved_adjacency`], as distinct caller sets
+    /// keyed by callee index: who *could be observed* calling each
+    /// function. Self-recursion is excluded — a function is not its own
+    /// caller for the purpose of "who needs this?" questions — and
+    /// callees with no resolved caller are absent rather than present
+    /// with an empty set, so `get` returning `None` and an empty set
+    /// mean the same thing.
+    ///
+    /// Only resolved edges contribute, so a caller set is a lower bound:
+    /// an ambiguous or unresolved call site is invisible here. Consult
+    /// [`Self::module_summary`] for how much that hides.
+    pub(crate) fn resolved_callers(&self) -> BTreeMap<usize, BTreeSet<usize>> {
+        let index_by_id = self.node_index_by_id();
+        let mut callers: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        for edge in &self.edges {
+            if edge.resolution != Resolution::Resolved {
+                continue;
+            }
+            let (Some(&from), Some(&to)) = (
+                edge.from.as_deref().and_then(|id| index_by_id.get(id)),
+                edge.to.as_deref().and_then(|id| index_by_id.get(id)),
+            ) else {
+                continue;
+            };
+            if from != to {
+                callers.entry(to).or_default().insert(from);
+            }
+        }
+        callers
     }
 }
 
@@ -270,6 +301,52 @@ impl CallGraphBuilder {
         true
     }
 }
+
+/// Generate the three path/test filter builders every call-graph
+/// analyzer exposes, forwarding to a [`CallGraphBuilder`]-typed field.
+/// The per-analyzer copies differed only in their doc comments, which the
+/// macro takes as arguments so an analyzer can still explain what the
+/// flag means for its particular report:
+///
+/// ```ignore
+/// delegate_call_graph_builders! {
+///     builder,
+///     /// Test functions are never audited, so this leaves nothing to report.
+///     only_tests,
+///     exclude_tests,
+/// }
+/// ```
+///
+/// Analyzers that also need the flag's value at report time (to phrase
+/// the output differently, say) name the field to mirror it into:
+/// `only_tests => self.only_tests`.
+macro_rules! delegate_call_graph_builders {
+    (
+        $field:ident,
+        $(#[$only_tests_doc:meta])* only_tests $(=> $only_tests_mirror:ident)?,
+        $(#[$exclude_tests_doc:meta])* exclude_tests,
+    ) => {
+        $(#[$only_tests_doc])*
+        pub fn with_only_tests(mut self, only_tests: bool) -> Self {
+            $(self.$only_tests_mirror = only_tests;)?
+            self.$field = self.$field.with_only_tests(only_tests);
+            self
+        }
+
+        $(#[$exclude_tests_doc])*
+        pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+            self.$field = self.$field.with_exclude_tests(exclude_tests);
+            self
+        }
+
+        pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
+            self.$field = self.$field.with_exclude_patterns(exclude);
+            self
+        }
+    };
+}
+
+pub(crate) use delegate_call_graph_builders;
 
 fn parse_err<E>(e: E) -> AnalyzerError
 where
@@ -998,6 +1075,66 @@ mod tests {
             .map(|v| v.node)
             .collect();
         assert_eq!(callers_of_c, vec![c, b, a]);
+    }
+
+    /// The three properties the caller sets carry beyond being the
+    /// reverse of the adjacency: self-recursion is not a caller,
+    /// duplicate call sites collapse to one caller, and a callee with no
+    /// resolved caller is absent rather than empty.
+    #[test]
+    fn resolved_callers_reverses_the_adjacency_without_self_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn a() { c(); c(); }\nfn b() { c(); }\nfn c() { c(); }\n",
+        );
+
+        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        let index = graph.node_index_by_id();
+        let a = index["src/lib.rs:a:1"];
+        let b = index["src/lib.rs:b:2"];
+        let c = index["src/lib.rs:c:3"];
+
+        let callers = graph.resolved_callers();
+        assert_eq!(
+            callers.get(&c).map(|s| s.iter().copied().collect()),
+            Some(vec![a, b]),
+            "two call sites from `a` count once; `c` calling itself is not a caller",
+        );
+        assert!(
+            !callers.contains_key(&a) && !callers.contains_key(&b),
+            "callees with no resolved caller stay absent, got {callers:?}",
+        );
+    }
+
+    /// Unresolved and ambiguous call sites are not traversable, so they
+    /// contribute no caller — the same lower-bound rule
+    /// [`CallGraph::resolved_adjacency`] follows.
+    #[test]
+    fn resolved_callers_ignores_call_sites_that_did_not_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub fn target() {} }\n\
+             mod b { pub fn target() {} }\n\
+             fn ambiguous() { target(); }\n\
+             fn unresolved() { nowhere(); }\n",
+        );
+
+        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.resolution != Resolution::Resolved),
+            "fixture must produce at least one non-resolved edge",
+        );
+        assert!(
+            graph.resolved_callers().is_empty(),
+            "only resolved edges contribute callers",
+        );
     }
 
     #[test]

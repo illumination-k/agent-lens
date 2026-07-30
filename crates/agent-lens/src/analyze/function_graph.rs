@@ -30,7 +30,8 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::call_graph::model::{CallGraphEdge, CallGraphNode, ModuleResolutionSummary, Resolution};
-use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
+use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 2;
@@ -42,35 +43,19 @@ pub struct FunctionGraphAnalyzer {
 
 impl FunctionGraphAnalyzer {
     pub fn new() -> Self {
-        Self {
-            builder: CallGraphBuilder::new(),
-        }
+        Self::default()
     }
 
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.builder = self.builder.with_only_tests(only_tests);
-        self
-    }
-
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.builder = self.builder.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.builder = self.builder.with_exclude_patterns(exclude);
-        self
+    delegate_call_graph_builders! {
+        builder,
+        only_tests,
+        exclude_tests,
     }
 
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
         let graph = self.builder.build(path)?;
         let report = Report::build(path, graph);
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report)),
-        }
+        render_report(&report, format, || format_markdown(&report))
     }
 }
 
