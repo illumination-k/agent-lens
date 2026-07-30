@@ -55,8 +55,9 @@ use serde::Serialize;
 use super::call_graph::model::{
     CallGraphNode, GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
 };
-use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
+use super::runner::render_report;
 use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, overlaps_any};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -124,24 +125,15 @@ impl DelegationAnalyzer {
         Self::default()
     }
 
-    /// Accepted for CLI uniformity. Test functions are never
-    /// delegators — forwarding is what a test helper is for — so this
-    /// leaves a report with nothing in it.
-    pub fn with_only_tests(mut self, only_tests: bool) -> Self {
-        self.builder = self.builder.with_only_tests(only_tests);
-        self
-    }
-
-    /// Drops test files from the graph. Chains are unaffected in shape:
-    /// test callers are never hops, they only call into one.
-    pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
-        self.builder = self.builder.with_exclude_tests(exclude_tests);
-        self
-    }
-
-    pub fn with_exclude_patterns(mut self, exclude: Vec<String>) -> Self {
-        self.builder = self.builder.with_exclude_patterns(exclude);
-        self
+    delegate_call_graph_builders! {
+        builder,
+        /// Accepted for CLI uniformity. Test functions are never
+        /// delegators — forwarding is what a test helper is for — so this
+        /// leaves a report with nothing in it.
+        only_tests,
+        /// Drops test files from the graph. Chains are unaffected in shape:
+        /// test callers are never hops, they only call into one.
+        exclude_tests,
     }
 
     /// Cap the markdown listings to the top-N entries. JSON output
@@ -166,12 +158,7 @@ impl DelegationAnalyzer {
             .then(|| self.builder.changed_line_ranges_by_display_path(path))
             .transpose()?;
         let report = Report::build(path, &graph, changed.as_ref());
-        match format {
-            OutputFormat::Json => {
-                serde_json::to_string_pretty(&report).map_err(AnalyzerError::Serialize)
-            }
-            OutputFormat::Md => Ok(format_markdown(&report, self.top)),
-        }
+        render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
 
@@ -324,7 +311,7 @@ impl Report {
     ) -> Self {
         let classified = classify_nodes(graph);
         let walk = walk_chains(graph, &classified.next);
-        let callers = resolved_callers(graph);
+        let callers = graph.resolved_callers();
 
         let all_chains: Vec<Chain> = walk
             .chains
@@ -608,27 +595,6 @@ fn facade_nodes(graph: &CallGraph) -> HashSet<usize> {
         })
         .flat_map(|(_, public)| public)
         .collect()
-}
-
-/// Distinct resolved callers per node index.
-fn resolved_callers(graph: &CallGraph) -> BTreeMap<usize, BTreeSet<usize>> {
-    let index_by_id = graph.node_index_by_id();
-    let mut callers: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for edge in &graph.edges {
-        if edge.resolution != Resolution::Resolved {
-            continue;
-        }
-        let (Some(&from), Some(&to)) = (
-            edge.from.as_deref().and_then(|id| index_by_id.get(id)),
-            edge.to.as_deref().and_then(|id| index_by_id.get(id)),
-        ) else {
-            continue;
-        };
-        if from != to {
-            callers.entry(to).or_default().insert(from);
-        }
-    }
-    callers
 }
 
 /// One maximal path through the delegator subgraph, by node index.
