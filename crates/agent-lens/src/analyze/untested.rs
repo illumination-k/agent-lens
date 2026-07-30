@@ -934,6 +934,35 @@ mod tests {
         );
     }
 
+    /// The module section heading is how an agent knows *where* the
+    /// untested bodies are and how much is there, so both halves of it
+    /// are asserted: the module path, and the function/LOC counts.
+    #[test]
+    fn each_module_section_is_headed_by_its_path_and_untested_size() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod thing {\n\
+             pub fn wide() {\n\
+             let _ = 1;\n\
+             }\n\
+             pub fn narrow() {}\n\
+             }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+             #[test]\n\
+             fn t() {}\n\
+             }\n",
+        );
+
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains("### `crate::thing` — 2 function(s), 4 LOC"),
+            "got: {md}",
+        );
+    }
+
     #[test]
     fn markdown_states_the_bounds_and_caps_the_listing() {
         let dir = tempfile::tempdir().unwrap();

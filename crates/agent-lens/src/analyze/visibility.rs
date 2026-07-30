@@ -1932,6 +1932,33 @@ mod tests {
         assert_eq!(render_caller_modules(&modules), expected);
     }
 
+    /// The module section heading is what tells an agent which module
+    /// the findings below belong to and how many of them carry caller
+    /// evidence, so both halves of it are asserted.
+    #[test]
+    fn each_module_section_is_headed_by_its_path_and_finding_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "app",
+            &[
+                ("lib.rs", "pub mod inner;\n"),
+                (
+                    "inner.rs",
+                    "pub fn called() -> usize { 1 }\n\
+                     pub fn uncalled() -> usize { 2 }\n\
+                     pub fn local() -> usize { called() }\n",
+                ),
+            ],
+        );
+
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains("### `app::inner` — 3 finding(s), 1 with resolved callers"),
+            "got: {md}",
+        );
+    }
+
     /// Both sides of the per-module row cap: a module over it announces
     /// the remainder, a module at it announces nothing.
     #[test]
