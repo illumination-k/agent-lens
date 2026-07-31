@@ -35,7 +35,7 @@ agent-lens analyze coupling ./src/mypkg --format md
 Look for, in order:
 
 1. **Cycles** (non-empty `cycles` field). Always a smell. The SCC tells you exactly which modules form the cycle — break the weakest edge.
-2. **High Fan-In** with high churn (cross-reference with `hotspot`). A hub everyone depends on that keeps changing is a serialization point for the team.
+2. **High Fan-In** with high churn (`agent-lens analyze risk <path> --format md` does that cross-reference for you, at file granularity). A hub everyone depends on that keeps changing is a serialization point for the team.
 3. **High Fan-Out**. A module that depends on too many others is hard to test in isolation. Often a sign the module is doing orchestration that should be pushed up.
 4. **High Instability with high Fan-In**. Martin's diagnostic: stable hubs (low Instability) are good; unstable hubs (high Instability) are fragile.
 

@@ -33,7 +33,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::call_graph::algo::pagerank;
+use super::call_graph::algo::{
+    PAGERANK_DAMPING, PAGERANK_ITERATIONS, pagerank, percentile_buckets,
+};
 use super::call_graph::model::{
     CallGraphNode, ModuleResolutionSummary, Resolution, ResolutionMethod,
 };
@@ -47,13 +49,6 @@ const SCHEMA_VERSION: u32 = 1;
 /// Markdown ranking cap when `--top` is not given. JSON always carries
 /// every flagged entry.
 const DEFAULT_TOP: usize = 20;
-
-/// PageRank damping factor (standard value).
-const PAGERANK_DAMPING: f64 = 0.85;
-
-/// Fixed PageRank iteration count. No epsilon-based early exit: a fixed
-/// count is what makes the scores bit-stable across runs.
-const PAGERANK_ITERATIONS: usize = 100;
 
 /// Cross-module pull above which a function lands on the "misplaced?"
 /// list.
@@ -478,21 +473,6 @@ impl NodeMetrics {
             })
             .collect()
     }
-}
-
-/// Percentile bucket (1–100) of each score within the whole score set:
-/// the share of scores at or below it. Ties share a bucket, so the
-/// output is independent of node order.
-fn percentile_buckets(scores: &[f64]) -> Vec<u32> {
-    let mut sorted: Vec<f64> = scores.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    scores
-        .iter()
-        .map(|score| {
-            let at_or_below = sorted.partition_point(|s| s.total_cmp(score).is_le());
-            ((at_or_below * 100) / scores.len().max(1)) as u32
-        })
-        .collect()
 }
 
 /// Robust outlier cutoff: `Q3 + 1.5·IQR` over the natural logs of the
@@ -1054,13 +1034,5 @@ mod tests {
     fn log_outlier_cutoff_ignores_zeros_and_handles_empty() {
         assert_eq!(log_outlier_cutoff(std::iter::empty()), None);
         assert_eq!(log_outlier_cutoff([0.0, 0.0].into_iter()), None);
-    }
-
-    #[rstest]
-    #[case::unique_scores(vec![0.1, 0.4, 0.2], vec![33, 100, 66])]
-    #[case::all_tied(vec![0.5, 0.5], vec![100, 100])]
-    #[case::single(vec![0.9], vec![100])]
-    fn percentile_buckets_rank_scores(#[case] scores: Vec<f64>, #[case] expected: Vec<u32>) {
-        assert_eq!(percentile_buckets(&scores), expected);
     }
 }

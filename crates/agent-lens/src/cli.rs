@@ -21,8 +21,8 @@ use agent_lens::analyze::{
     DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD,
     DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphDirection,
     GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer,
-    LayersAnalyzer, OutputFormat, PairKey, SimilarityAnalyzer, SimilarityMethod, UntestedAnalyzer,
-    VisibilityAnalyzer, WrapperAnalyzer,
+    LayersAnalyzer, OutputFormat, PairKey, RiskAnalyzer, SimilarityAnalyzer, SimilarityMethod,
+    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -618,6 +618,31 @@ enum AnalyzeCommand {
     /// inside a git working tree.
     #[command(after_long_help = examples::HOTSPOT)]
     Hotspot(AnalyzeHotspotArgs),
+    /// Rank files by churn × blast radius: where an edit is most likely
+    /// to be both frequent and far-reaching.
+    ///
+    /// The blast-radius sibling of `hotspot`. Where `hotspot` multiplies
+    /// churn by intra-function complexity — which cannot separate "hot
+    /// but leaf" from "hot and load-bearing" — this joins the same git
+    /// churn (`--since` window included) with call-graph centrality:
+    /// the max and sum of PageRank importance over each file's
+    /// functions, from the same deterministic pass `analyze hubs`
+    /// reports, plus transitive caller counts (VFI) as a second raw
+    /// component. The composite is a rank product
+    /// (`churn_rank × centrality_rank`), so no scale normalisation is
+    /// needed and **lower is riskier**; every raw component is printed
+    /// alongside it, together with the file's highest-PageRank function
+    /// as the concrete reason it ranks. This is a blast-radius signal,
+    /// not a defect signal: a high row means check callers and tests
+    /// before editing. Ranking granularity is per file, since git
+    /// attributes commits to files. Centrality follows resolved call
+    /// edges only, so it is a lower bound and the report cites
+    /// per-module resolution confidence. `path` must be inside a git
+    /// working tree. The parser is chosen from each file extension
+    /// (Rust, TypeScript/JavaScript, Python, or Go). JSON is the
+    /// default; `--format md` caps the table at `--top` (default 20).
+    #[command(after_long_help = examples::RISK)]
+    Risk(AnalyzeRiskArgs),
     /// Report clusters of near-duplicate functions.
     ///
     /// Accepts either a single source file or a directory; in directory
@@ -854,6 +879,20 @@ struct AnalyzeHotspotArgs {
     /// Restrict churn to commits in this `--since=` window. Accepts
     /// anything git's approxidate parser does (e.g. `90.days.ago`,
     /// `2024-01-01`).
+    #[arg(long)]
+    since: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AnalyzeRiskArgs {
+    #[command(flatten)]
+    common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    ranking: AnalyzeRankingArgs,
+    /// Restrict the churn axis to commits in this `--since=` window.
+    /// Accepts anything git's approxidate parser does (e.g.
+    /// `90.days.ago`, `2024-01-01`). Centrality is a property of the
+    /// current source and is unaffected.
     #[arg(long)]
     since: Option<String>,
 }
@@ -1138,6 +1177,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.complexity.is_some(), config::ToolName::Complexity),
         (profile.cohesion.is_some(), config::ToolName::Cohesion),
         (profile.hotspot.is_some(), config::ToolName::Hotspot),
+        (profile.risk.is_some(), config::ToolName::Risk),
         (profile.hubs.is_some(), config::ToolName::Hubs),
         (profile.impact.is_some(), config::ToolName::Impact),
         (profile.layers.is_some(), config::ToolName::Layers),
@@ -1231,6 +1271,14 @@ fn build_analyze_command(
         config::ToolName::Hotspot => {
             let opts = profile.hotspot.clone().unwrap_or_default();
             AnalyzeCommand::Hotspot(AnalyzeHotspotArgs {
+                common,
+                ranking: AnalyzeRankingArgs { top: opts.top },
+                since: opts.since,
+            })
+        }
+        config::ToolName::Risk => {
+            let opts = profile.risk.clone().unwrap_or_default();
+            AnalyzeCommand::Risk(AnalyzeRiskArgs {
                 common,
                 ranking: AnalyzeRankingArgs { top: opts.top },
                 since: opts.since,
@@ -1380,6 +1428,7 @@ impl_with_analyze_path_args!(
     HubsAnalyzer,
     ImpactAnalyzer,
     LayersAnalyzer,
+    RiskAnalyzer,
     UntestedAnalyzer,
     VisibilityAnalyzer,
     WrapperAnalyzer,
@@ -1485,6 +1534,14 @@ impl AnalyzeCommand {
             Self::Hotspot(args) => {
                 let (path, format, path_filter) = args.common.into_parts();
                 HotspotAnalyzer::new()
+                    .with_top(args.ranking.top)
+                    .with_since_opt(args.since)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Risk(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                RiskAnalyzer::new()
                     .with_top(args.ranking.top)
                     .with_since_opt(args.since)
                     .with_analyze_path_args(path_filter)
@@ -2238,6 +2295,29 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
+    fn parses_analyze_risk_with_since_and_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "risk",
+            ".",
+            "--since",
+            "90.days.ago",
+            "--top",
+            "5",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Risk(args)) = cli.command else {
+            panic!("expected analyze risk");
+        };
+        assert_eq!(args.since.as_deref(), Some("90.days.ago"));
+        assert_eq!(args.ranking.top, Some(5));
+        assert!(args.common.path_filter.exclude_tests);
+        assert_eq!(args.common.format, OutputFormat::Json);
+    }
+
+    #[test]
     fn parses_analyze_graph_query_with_flags() {
         let cli = Cli::try_parse_from([
             "agent-lens",
@@ -2858,6 +2938,27 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.ranking.top, Some(7));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_risk_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"risk\"]\n\n[risk]\nsince = \"30.days.ago\"\ntop = 11\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Risk,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::Risk(args) = cmd else {
+            panic!("expected analyze risk");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.since.as_deref(), Some("30.days.ago"));
+        assert_eq!(args.ranking.top, Some(11));
     }
 
     #[test]

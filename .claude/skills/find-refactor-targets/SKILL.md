@@ -31,6 +31,14 @@ The path must lie inside a git working tree. For a single crate:
 agent-lens analyze hotspot crates/agent-lens --since=180.days.ago --format md
 ```
 
+If the question is "how carefully should I edit this?" rather than "where should I refactor?", run `risk` instead — it swaps the complexity axis for call-graph centrality, so a hot file nothing depends on stops outranking a hot file half the codebase calls:
+
+```bash
+agent-lens analyze risk crates --since=180.days.ago --top 15 --format md
+```
+
+Note the inverted direction: `risk` ranks by a rank product, so **lower is riskier**.
+
 ### 2. Drill into the top entries
 
 For each top-ranked file, get per-function complexity:

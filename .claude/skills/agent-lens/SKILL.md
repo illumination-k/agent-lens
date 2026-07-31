@@ -29,8 +29,9 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | Which code has no test path guarding it?                | `untested`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Is this `pub` wider than its callers need?              | `visibility`     | `.rs` / `.go` file or dir                         |
 | Where do churn and complexity collide?                  | `hotspot`        | git-tracked file or directory                     |
+| How carefully should I treat this edit?                 | `risk`           | git-tracked file or directory                     |
 
-`similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` judges Rust and Go only — TypeScript and Python carry no extracted export status, and it says how many functions it skipped for that reason. `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` requires a git working tree.
+`similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` judges Rust and Go only — TypeScript and Python carry no extracted export status, and it says how many functions it skipped for that reason. `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` and `risk` require a git working tree.
 
 ## Output format
 
@@ -106,6 +107,9 @@ agent-lens analyze delegation crates/agent-lens/src --format md
 
 # Where is the next refactor likely to pay off?
 agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
+
+# Which files are both changing often and load-bearing (edit them carefully)?
+agent-lens analyze risk crates --since=180.days.ago --top 10 --format md
 ```
 
 ## Reading the output
@@ -126,6 +130,7 @@ agent-lens analyze hotspot crates --since=180.days.ago --top 10 --format md
 - **untested**: production functions the forward walk from every test function never reaches, grouped by module and ranked by untested LOC — start at the top, it is the largest unguarded body. Read it as "no resolved call path from a test", not "uncovered": integration tests that drive the built binary reach functions with no in-graph test caller, and those are listed here anyway. The listing is an upper bound — a row flagged `may be test-reached` is named by an ambiguous call site leaving test-reached code, so check it before writing a test. `fan_in: 0` means no production caller either, which is a dead-code question rather than a testing one. `--exclude-tests` removes the traversal's starting points and makes the report meaningless; the output says so when it happens.
 - **visibility**: each row is a `pub` / exported function plus the visibility its resolved callers would still permit, so the row is an edit you can apply and let the compiler check — a wrong one costs a failed build, never lost code. Rows with resolved callers come first in a module section; `verify: no resolved caller in the analyzed tree` means nothing in scope calls it at all, which is a dead-code or external-API question rather than a narrowing one. A row flagged `verify first` is named by a call site the resolver could not attribute (an ambiguous call, or a receiver call on a name like `.clone()`), so confirm that caller before narrowing. Run it at the workspace root: callers outside the analyzed path do not exist for this analyzer, and the report says so when only one crate is in scope. `pub use` re-exports in a crate root are excluded as intended API; a package with both `lib.rs` and `main.rs` is called out, because a `pub(crate)` whose caller sits in the binary will not compile.
 - **hotspot**: rows are sorted by `commits × cognitive_max`. The top of the list is where bugs concentrate; refactor budget is best spent there first.
+- **risk**: the blast-radius sibling of `hotspot`, and the one place in the tool where **lower is riskier** — `rank_product = churn_rank × centrality_rank`, so rank 1 on both axes gives 1. It answers "how carefully should I treat this edit?", not "what should I fix": a top row means read the callers and run the listed tests first. `churn_rank` and `centrality_rank` show which axis drove the row; a file high on churn but low on centrality is hot-but-leaf and safe to move fast on. `hottest_function` names the member whose PageRank carried the file, and `vfi_max` is how many functions transitively call it. Centrality follows resolved edges only, so modules listed under resolution confidence are ranked lower than they deserve.
 
 ## Don't reach for it when
 

@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use agent_lens::test_support::write_file;
+use agent_lens::test_support::{run_git, write_file};
 use rstest::rstest;
 
 fn agent_lens(args: &[&str], cwd: &Path, stdin: Option<&str>) -> Output {
@@ -662,9 +662,41 @@ fn help_md_emits_markdown_reference() {
     assert!(stdout.contains("## `agent-lens skills`"), "got: {stdout}");
 }
 
+/// `analyze risk` is the only analyzer that needs *both* a git working
+/// tree and a call graph, so its end-to-end wiring is worth spawning the
+/// binary for: a missing subcommand registration or a broken path-space
+/// join both show up as an empty or zero-churn report here.
+#[test]
+fn analyze_risk_ranks_a_git_tracked_crate() {
+    let dir = tempfile::tempdir().unwrap();
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    write_file(dir.path(), "src/lib.rs", "pub mod core;\npub mod app;\n");
+    write_file(dir.path(), "src/core.rs", "pub fn sink() {}\n");
+    write_file(
+        dir.path(),
+        "src/app.rs",
+        "pub fn one() { crate::core::sink(); }\npub fn two() { crate::core::sink(); }\n",
+    );
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+    let json = stdout_json(&agent_lens(&["analyze", "risk", "."], dir.path(), None));
+    let files = json["files"].as_array().unwrap();
+    let core = files
+        .iter()
+        .find(|f| f["path"] == "src/core.rs")
+        .unwrap_or_else(|| panic!("no src/core.rs row in {json}"));
+    assert_eq!(core["centrality_rank"], 1, "got {json}");
+    assert!(core["commits"].as_u64().unwrap() >= 1, "got {json}");
+    assert_eq!(core["rank_product"], 1, "got {json}");
+}
+
 #[rstest]
 #[case::index("## Command index")]
 #[case::index_row("| `agent-lens analyze hotspot` |")]
+#[case::risk_index_row("| `agent-lens analyze risk` |")]
 #[case::routing("Pick an analyzer by question:")]
 #[case::conventions("Reports go to stdout")]
 #[case::root_example("    agent-lens help --md")]

@@ -108,6 +108,8 @@ pub struct Profile {
     #[serde(default)]
     pub hotspot: Option<HotspotOptions>,
     #[serde(default)]
+    pub risk: Option<RiskOptions>,
+    #[serde(default)]
     pub hubs: Option<HubsOptions>,
     #[serde(default)]
     pub impact: Option<ImpactOptions>,
@@ -155,6 +157,7 @@ pub enum ToolName {
     Hubs,
     Impact,
     Layers,
+    Risk,
     Similarity,
     Untested,
     Visibility,
@@ -177,6 +180,7 @@ impl ToolName {
             Self::Hubs => "hubs",
             Self::Impact => "impact",
             Self::Layers => "layers",
+            Self::Risk => "risk",
             Self::Similarity => "similarity",
             Self::Untested => "untested",
             Self::Visibility => "visibility",
@@ -239,6 +243,16 @@ pub struct CohesionOptions {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HotspotOptions {
+    pub since: Option<String>,
+    pub top: Option<usize>,
+}
+
+/// `[profile.<name>.risk]` overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RiskOptions {
+    /// Git window for the churn axis only; centrality always reflects
+    /// the current source.
     pub since: Option<String>,
     pub top: Option<usize>,
 }

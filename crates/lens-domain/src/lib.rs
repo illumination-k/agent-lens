@@ -36,6 +36,9 @@
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
+//! * [`risk`] — the churn × blast-radius sibling of [`hotspot`]: the
+//!   same churn table joined with per-file call-graph centrality by
+//!   rank product, for "how carefully should I treat this edit?".
 //! * [`method_names`] — the [`UbiquitousMethodNames`] and
 //!   [`BuiltinFunctionNames`] lookup shapes. Adapters own the actual
 //!   name tables (`.clone()`, `.map()`, `append(…)`, `len(…)`, …); the
@@ -60,6 +63,7 @@ pub mod line_index;
 pub mod lsh;
 pub mod method_names;
 pub mod naming;
+pub mod risk;
 pub mod syntax;
 pub mod tree;
 pub mod tsed;
@@ -88,6 +92,7 @@ pub use line_index::LineIndex;
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use method_names::{BuiltinFunctionNames, UbiquitousMethodNames};
 pub use naming::{identifier_tokens, qualify, qualify_module, starts_uppercase};
+pub use risk::{FileCentrality, RiskEntry, compute_risk};
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
     OwnerShape, ParameterShape, ReceiverExprKind, ReceiverKind, SignatureShape, SourceSpan,

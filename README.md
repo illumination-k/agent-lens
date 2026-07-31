@@ -239,6 +239,10 @@ agent-lens analyze context-span crates/agent-lens
 # Hotspots: rank files by `commits × cognitive_max` (must be in a git tree)
 agent-lens analyze hotspot crates/agent-lens --since 90.days.ago --top 20
 
+# Risk: the blast-radius sibling of hotspot — rank-product of churn and
+# call-graph centrality, so "hot and load-bearing" beats "hot but leaf"
+agent-lens analyze risk crates/agent-lens --since 90.days.ago --top 20
+
 # Forwarding wrappers (functions that are just `other(args).into()?` etc.)
 agent-lens analyze wrapper src/foo.rs
 
@@ -301,15 +305,15 @@ without reading the source.
 The current binary exposes three top-level command trees plus `run`,
 `skills`, `config`, and `help`:
 
-| Command tree | Commands                                                                                                                                                                                                |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                               |
-| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                               |
-| `analyze`    | `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `untested`, `visibility`, `context-span`, `hotspot` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                           |
-| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                     |
-| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                |
-| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                      |
+| Command tree | Commands                                                                                                                                                                                                        |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                       |
+| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                       |
+| `analyze`    | `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `untested`, `visibility`, `context-span`, `hotspot`, `risk` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                   |
+| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                             |
+| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                        |
+| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                              |
 
 `agent-lens --help` opens with a question-to-analyzer routing table
 ("what breaks if I change this?" → `analyze impact`) plus the output
@@ -356,6 +360,7 @@ Analyzer-specific options today:
 | `wrapper`        | `--diff-only`                                                                                                                                                                            |
 | `delegation`     | `--diff-only`, `--top N`                                                                                                                                                                 |
 | `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                               |
+| `risk`           | `--since VALUE`, `--top N`                                                                                                                                                               |
 | `hubs`           | `--top N`                                                                                                                                                                                |
 | `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                                                 |
 | `layers`         | `--top N`                                                                                                                                                                                |
@@ -372,10 +377,11 @@ and `--drift-floor` requires `--paired-by`.
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
-`wrapper`, `delegation`, `cohesion`, `hotspot`, `function-graph`, `cycles`,
-`graph-query`, `hubs`, `impact`, `layers`, `untested`, `context-span`, and
-`coupling` cover all four language families. `visibility` judges Rust and Go,
-the two adapters that extract export status, and counts the rest as skipped.
+`wrapper`, `delegation`, `cohesion`, `hotspot`, `risk`, `function-graph`,
+`cycles`, `graph-query`, `hubs`, `impact`, `layers`, `untested`,
+`context-span`, and `coupling` cover all four language families.
+`visibility` judges Rust and Go, the two adapters that extract export
+status, and counts the rest as skipped.
 `delegation` runs on all four, but only Rust and Go can exempt a module
 facade, and its confidence is highest on Rust.
 
@@ -555,6 +561,7 @@ new handlers to plug into the same plumbing.
 | `graph-query`    | One canned call-graph traversal per run: `callers`, `callees`, `neighborhood`, or the shortest `path` between two symbols, with the call lines of every hop.                                                                                                                                                                                                                         | Rust, TS / JS, Python, Go |
 | `context-span`   | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                                                                                                                                                                            | Rust, TS / JS, Python, Go |
 | `hotspot`        | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                                                                                                                                                                     | Rust, TS / JS, Python, Go |
+| `risk`           | Files ranked by the rank product of git churn and call-graph centrality (max/sum PageRank over the file's functions, plus transitive caller counts), lower being riskier — the "how carefully should I treat this edit?" prior that separates "hot but leaf" from "hot and load-bearing". Each row carries its raw components and the file's highest-PageRank function.              | Rust, TS / JS, Python, Go |
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
 Markdown summary tuned to drop straight into an LLM prompt.
@@ -575,9 +582,9 @@ TS/JS and Python modules are one-per-file, so their labels are the file's
 path relative to the module tree's source root. The same spelling is used
 in the `SessionStart` coupling thumbnail.
 
-For `complexity`, `cohesion`, `similarity`, `hotspot`, `hubs`, `impact`,
-`layers`, `untested`, `visibility`, and `delegation`, `--top` caps the
-Markdown ranking while JSON stays complete. `--min-score` filters the Markdown
+For `complexity`, `cohesion`, `similarity`, `hotspot`, `risk`, `hubs`,
+`impact`, `layers`, `untested`, `visibility`, and `delegation`, `--top` caps
+the Markdown ranking while JSON stays complete. `--min-score` filters the Markdown
 ranking for `complexity` (cognitive score) and `cohesion` (LCOM4); for
 `similarity` it is an alias of `--threshold`.
 
@@ -603,7 +610,7 @@ Adding a language means writing one adapter crate and wiring it into the
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
 `similarity`, `complexity`, `wrapper`, `delegation`, `cohesion`, `hotspot`,
-`function-graph`, `cycles`, `graph-query`, `hubs`, `impact`, `layers`,
+`risk`, `function-graph`, `cycles`, `graph-query`, `hubs`, `impact`, `layers`,
 `untested`, `context-span`, and `coupling` are wired through the Rust,
 TypeScript / JavaScript, Python, and Go adapters. `visibility` is wired
 through the Rust and Go adapters only, because TypeScript and Python carry
@@ -731,8 +738,8 @@ build-provenance attestations alongside the archives.
 The near-term direction is to keep improving the analyzer surfaces that help
 agents make better edit decisions: duplication, wrappers,
 delegation chains, cohesion, complexity, coupling, context span, hotspots,
-and call-graph structure (hubs, cycles, queries, impact, layers, untested,
-visibility).
+change risk, and call-graph structure (hubs, cycles, queries, impact, layers,
+untested, visibility).
 
 New metrics are prioritised by _does this change how an agent decides what to
 do?_ rather than _does it look nice in a dashboard?_
