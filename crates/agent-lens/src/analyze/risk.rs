@@ -747,6 +747,7 @@ mod tests {
         assert_eq!(entry["hottest_function"]["qualified_name"], "crate::hub");
         assert_eq!(entry["hottest_function"]["vfi"], 3);
         assert_eq!(entry["function_count"], 5);
+        assert_eq!(entry["loc"], 5, "five one-line functions: {report}");
         assert_eq!(entry["vfi_max"], 3);
         assert_eq!(
             entry["vfi_sum"], 3,

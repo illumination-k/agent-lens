@@ -1012,6 +1012,40 @@ mod tests {
         );
     }
 
+    /// The ancestor bitsets hold one `usize` word per 64 components, so
+    /// every index into them is `component * words` — arithmetic that is
+    /// indistinguishable from nonsense while `words == 1`. Anything
+    /// under 64 components stays in that blind spot, so this walks a
+    /// two-word graph and checks each count against `reverse_bfs`.
+    #[rstest]
+    #[case::chain(chain_graph(100))]
+    #[case::chain_with_a_cycle_spanning_both_words(chain_graph_with_back_edge(100, 30))]
+    fn transitive_caller_counts_span_multiple_bitset_words(#[case] adjacency: Vec<Vec<usize>>) {
+        let counts = transitive_caller_counts(&adjacency, usize::MAX).expect("no cap was set");
+        for (v, &count) in counts.iter().enumerate() {
+            assert_eq!(count, reverse_bfs(&adjacency, &[v]).len() - 1, "node {v}");
+        }
+        // Pin one hand-worked value per shape so a jointly-wrong oracle
+        // cannot pass: in a chain the last node is called by every
+        // earlier one.
+        assert_eq!(counts[99], 99);
+    }
+
+    /// `0 -> 1 -> ... -> n-1`.
+    fn chain_graph(n: usize) -> Vec<Vec<usize>> {
+        (0..n)
+            .map(|i| if i + 1 < n { vec![i + 1] } else { Vec::new() })
+            .collect()
+    }
+
+    /// A chain whose tail loops back to `back_to`, folding
+    /// `back_to..n` into one SCC that straddles the word boundary.
+    fn chain_graph_with_back_edge(n: usize, back_to: usize) -> Vec<Vec<usize>> {
+        let mut adjacency = chain_graph(n);
+        adjacency[n - 1].push(back_to);
+        adjacency
+    }
+
     /// The closure declines rather than allocating a quadratic bitset:
     /// a graph with more components than the cap yields `None`.
     #[test]
