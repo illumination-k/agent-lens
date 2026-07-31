@@ -485,10 +485,19 @@ pub(crate) fn transitive_caller_counts(
             let base = component * words;
             let mut callers_above = 0usize;
             for (word_idx, &word) in ancestors[base..base + words].iter().enumerate() {
-                let mut bits = word;
-                while bits != 0 {
-                    callers_above += sizes[word_idx * BITS + bits.trailing_zeros() as usize];
-                    bits &= bits - 1;
+                if word == 0 {
+                    continue;
+                }
+                // Scanning every bit position rather than clearing the
+                // lowest set bit (`bits &= bits - 1`): the clearing form
+                // is a loop whose termination depends on the very
+                // arithmetic being tested, so a mutant there hangs
+                // instead of failing. Whole-zero words are the common
+                // case and skip out above.
+                for bit in 0..BITS {
+                    if word & (1 << bit) != 0 {
+                        callers_above += sizes[word_idx * BITS + bit];
+                    }
                 }
             }
             // Cycle members call each other, so they count — but a node
