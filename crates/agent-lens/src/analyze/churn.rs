@@ -170,7 +170,7 @@ fn git_repo_root(path: &Path) -> Result<PathBuf, ChurnError> {
 /// Express `target` as a `/`-separated path relative to `base`,
 /// returning `None` when `target == base` (i.e. the caller pointed at
 /// the base itself).
-pub(crate) fn relative_to(target: &Path, base: &Path) -> Option<String> {
+fn relative_to(target: &Path, base: &Path) -> Option<String> {
     let rel = target.strip_prefix(base).ok()?;
     if rel.as_os_str().is_empty() {
         return None;

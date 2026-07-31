@@ -721,6 +721,110 @@ mod tests {
         assert!(entry["commits"].as_u64().unwrap() >= 3, "got {report}");
     }
 
+    /// The rollup keeps the file's *most* important member, not the
+    /// first one it meets: `quiet` is declared above `hub` and has no
+    /// callers at all.
+    #[test]
+    fn hottest_function_is_the_file_maximum_not_the_first_member() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn quiet() {}\n\
+             pub fn hub() {}\n\
+             pub fn c1() { hub(); }\n\
+             pub fn c2() { hub(); }\n\
+             pub fn c3() { hub(); }\n",
+        );
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let report = analyze_json(&RiskAnalyzer::new(), dir.path());
+        let entry = file_entry(&report, "src/lib.rs");
+        assert_eq!(entry["hottest_function"]["qualified_name"], "crate::hub");
+        assert_eq!(entry["hottest_function"]["vfi"], 3);
+        assert_eq!(entry["function_count"], 5);
+        assert_eq!(entry["vfi_max"], 3);
+        assert_eq!(
+            entry["vfi_sum"], 3,
+            "only `hub` has callers, so the file's total is its own: {report}",
+        );
+        assert_eq!(
+            report["resolved_edge_count"], 3,
+            "the three calls into `hub` are the resolved edges: {report}",
+        );
+        assert_eq!(report["node_count"], 5);
+        assert_eq!(report["candidate_count"], 5);
+        assert_eq!(
+            entry["pagerank_max"], entry["hottest_function"]["pagerank"],
+            "the ranked max must be the named function's score: {report}",
+        );
+        assert!(
+            entry["pagerank_sum"].as_f64().unwrap() > entry["pagerank_max"].as_f64().unwrap(),
+            "five functions must sum above any single one: {report}",
+        );
+    }
+
+    /// `alpha` and `beta` are called identically, so their PageRank is
+    /// symmetric and the pick is a pure tie-break. Nodes arrive in
+    /// (file, line, name) order and the earlier one has to win, or the
+    /// named evidence would drift between runs.
+    #[test]
+    fn tied_members_resolve_to_the_earlier_function() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn alpha() {}\n\
+             pub fn beta() {}\n\
+             pub fn caller() { alpha(); beta(); }\n",
+        );
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let report = analyze_json(&RiskAnalyzer::new(), dir.path());
+        let entry = file_entry(&report, "src/lib.rs");
+        assert_eq!(entry["hottest_function"]["qualified_name"], "crate::alpha");
+        assert_eq!(entry["hottest_function"]["start_line"], 1);
+    }
+
+    #[test]
+    fn since_option_is_applied_only_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        init_split_repo(dir.path());
+
+        let applied = analyze_json(
+            &RiskAnalyzer::new().with_since_opt(Some("2099-01-01".to_owned())),
+            dir.path(),
+        );
+        assert_eq!(applied["since"], "2099-01-01");
+        assert!(
+            applied["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["commits"] == 0),
+            "got {applied}",
+        );
+
+        let untouched = analyze_json(&RiskAnalyzer::new().with_since_opt(None), dir.path());
+        assert_eq!(untouched.get("since"), None, "got {untouched}");
+        assert!(
+            untouched["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["commits"].as_u64().unwrap() > 0),
+            "got {untouched}",
+        );
+    }
+
     #[test]
     fn files_absent_from_history_rank_on_centrality_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -830,8 +934,33 @@ mod tests {
         assert!(md.contains("Granularity is per file"), "got: {md}");
         assert!(md.contains("lower bound"), "got: {md}");
         assert!(md.contains("Top 1 by risk"), "got: {md}");
-        assert!(md.contains("| src/core.rs |"), "got: {md}");
+        // The row is the evidence, so every cell that explains the rank
+        // has to be rendered: the percentile, the VFI, and the named
+        // function that carried the file.
+        assert!(
+            md.contains("| src/core.rs | 2 | 2 | 1 | "),
+            "rp=2 from churn rank 2 and centrality rank 1 — second on churn, \
+             first on blast radius, and still the riskiest row: {md}",
+        );
+        assert!(md.contains("| p100 |"), "got: {md}");
+        assert!(md.contains("`crate::core::sink`:1"), "got: {md}");
         assert!(!md.contains("| src/leaf.rs |"), "top 1 must cap: {md}");
+    }
+
+    /// With `--top 0` nothing is rendered but the caveats still are, so
+    /// an empty table can never be mistaken for "no risk".
+    #[test]
+    fn markdown_summary_survives_a_zero_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        init_split_repo(dir.path());
+
+        let md = RiskAnalyzer::new()
+            .with_top(Some(0))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("- files_ranked: 3"), "got: {md}");
+        assert!(md.contains("transitive caller(s)"), "got: {md}");
+        assert!(!md.contains("| src/core.rs |"), "got: {md}");
     }
 
     #[test]
