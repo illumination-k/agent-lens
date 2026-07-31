@@ -1022,22 +1022,28 @@ mod tests {
     }
 
     /// The ancestor bitsets hold one `usize` word per 64 components, so
-    /// every index into them is `component * words` — arithmetic that is
-    /// indistinguishable from nonsense while `words == 1`. Anything
-    /// under 64 components stays in that blind spot, so this walks a
-    /// two-word graph and checks each count against `reverse_bfs`.
+    /// every index into them is `component * words` or
+    /// `word_idx * BITS` — arithmetic indistinguishable from nonsense
+    /// while `words == 1`, which is every graph under 64 components.
+    ///
+    /// The last shape is the one that catches an aliased *word* index:
+    /// with uniform component sizes, reading `sizes[bit]` instead of
+    /// `sizes[64 + bit]` still returns 1, so the sum comes out right by
+    /// accident. Scattered two-node cycles break that symmetry.
     #[rstest]
     #[case::chain(chain_graph(100))]
     #[case::chain_with_a_cycle_spanning_both_words(chain_graph_with_back_edge(100, 30))]
+    #[case::mixed_component_sizes_across_words(chain_graph_with_paired_cycles(140, 10))]
     fn transitive_caller_counts_span_multiple_bitset_words(#[case] adjacency: Vec<Vec<usize>>) {
         let counts = transitive_caller_counts(&adjacency, usize::MAX).expect("no cap was set");
         for (v, &count) in counts.iter().enumerate() {
             assert_eq!(count, reverse_bfs(&adjacency, &[v]).len() - 1, "node {v}");
         }
         // Pin one hand-worked value per shape so a jointly-wrong oracle
-        // cannot pass: in a chain the last node is called by every
-        // earlier one.
-        assert_eq!(counts[99], 99);
+        // cannot pass: every one of these is a chain, so the last node
+        // is called by every other.
+        let last = adjacency.len() - 1;
+        assert_eq!(counts[last], last);
     }
 
     /// `0 -> 1 -> ... -> n-1`.
@@ -1052,6 +1058,19 @@ mod tests {
     fn chain_graph_with_back_edge(n: usize, back_to: usize) -> Vec<Vec<usize>> {
         let mut adjacency = chain_graph(n);
         adjacency[n - 1].push(back_to);
+        adjacency
+    }
+
+    /// A chain where every `every`-th node also calls its predecessor,
+    /// pairing the two into one component. The result keeps enough
+    /// components to need several bitset words *and* mixes component
+    /// sizes, so the size read at each set bit has to use the right
+    /// component index.
+    fn chain_graph_with_paired_cycles(n: usize, every: usize) -> Vec<Vec<usize>> {
+        let mut adjacency = chain_graph(n);
+        for i in (every..n).step_by(every) {
+            adjacency[i].push(i - 1);
+        }
         adjacency
     }
 
