@@ -20,6 +20,7 @@ macro_rules! routing {
 Pick an analyzer by question:
 
     where should I refactor first?        analyze hotspot
+    how carefully should I edit this?     analyze risk
     is this function too complex?         analyze complexity
     did I already write this?             analyze similarity
     is this body just a forwarder?        analyze wrapper
@@ -195,6 +196,14 @@ Examples:
     agent-lens analyze hotspot src/ --format md --top 15
     agent-lens analyze hotspot . --since 90.days.ago --format md
     agent-lens analyze hotspot . --exclude-tests --exclude '*.gen.ts'
+";
+
+pub const RISK: &str = "\
+Examples:
+
+    agent-lens analyze risk . --format md --top 15
+    agent-lens analyze risk . --since 90.days.ago --format md
+    agent-lens analyze risk crates/ --exclude-tests --format md
 ";
 
 pub const SIMILARITY: &str = "\

@@ -424,6 +424,121 @@ pub(crate) fn pagerank(
     rank
 }
 
+/// Transitive caller counts for every node: how many *other* nodes can
+/// reach it over `adjacency`. This is the graph-wide form of the
+/// per-seed "VFI" `analyze impact` reports.
+///
+/// Computed exactly, on the SCC condensation, by one reverse-topological
+/// pass with a bitset of ancestor components per component — `condense`
+/// emits components in reverse topological order, so every caller of a
+/// component has a higher index and is already final when the walk
+/// reaches it. Members of a node's own cycle count as callers (they do
+/// call it); the node itself never does.
+///
+/// The ancestor bitsets cost `components²/8` bytes, so the pass declines
+/// rather than balloons: `None` means the condensation had more than
+/// `max_components` components and callers should report VFI as
+/// unavailable instead of substituting a cheaper approximation.
+pub(crate) fn transitive_caller_counts(
+    adjacency: &[Vec<usize>],
+    max_components: usize,
+) -> Option<Vec<usize>> {
+    const BITS: usize = usize::BITS as usize;
+
+    let condensation = condense(adjacency);
+    let component_count = condensation.components.len();
+    if component_count > max_components {
+        return None;
+    }
+
+    // `edges[c]` lists what `c` calls; ancestry needs the other direction.
+    let mut callers: Vec<Vec<usize>> = vec![Vec::new(); component_count];
+    for (from, callees) in condensation.edges.iter().enumerate() {
+        for &to in callees {
+            callers[to].push(from);
+        }
+    }
+
+    let words = component_count.div_ceil(BITS);
+    let mut ancestors = vec![0usize; component_count * words];
+    for component in (0..component_count).rev() {
+        let base = component * words;
+        for &caller in &callers[component] {
+            // Guaranteed by the reverse-topological ordering, which is
+            // also what makes this single pass exact.
+            debug_assert!(caller > component);
+            let caller_base = caller * words;
+            let (below, at_caller) = ancestors.split_at_mut(caller_base);
+            for (slot, inherited) in below[base..base + words]
+                .iter_mut()
+                .zip(&at_caller[..words])
+            {
+                *slot |= *inherited;
+            }
+            below[base + caller / BITS] |= 1 << (caller % BITS);
+        }
+    }
+
+    let sizes: Vec<usize> = condensation.components.iter().map(Vec::len).collect();
+    let per_component: Vec<usize> = (0..component_count)
+        .map(|component| {
+            let base = component * words;
+            let mut callers_above = 0usize;
+            for (word_idx, &word) in ancestors[base..base + words].iter().enumerate() {
+                if word == 0 {
+                    continue;
+                }
+                // Scanning every bit position rather than clearing the
+                // lowest set bit (`bits &= bits - 1`): the clearing form
+                // is a loop whose termination depends on the very
+                // arithmetic being tested, so a mutant there hangs
+                // instead of failing. Whole-zero words are the common
+                // case and skip out above.
+                for bit in 0..BITS {
+                    if word & (1 << bit) != 0 {
+                        callers_above += sizes[word_idx * BITS + bit];
+                    }
+                }
+            }
+            // Cycle members call each other, so they count — but a node
+            // is never its own caller.
+            callers_above + sizes[component] - 1
+        })
+        .collect();
+
+    Some(
+        condensation
+            .component_of
+            .iter()
+            .map(|&component| per_component[component])
+            .collect(),
+    )
+}
+
+/// PageRank damping factor (standard value). Shared so every analyzer
+/// that reports a PageRank number reports the *same* number.
+pub(crate) const PAGERANK_DAMPING: f64 = 0.85;
+
+/// Fixed PageRank iteration count. No epsilon-based early exit: a fixed
+/// count is what makes the scores bit-stable across runs.
+pub(crate) const PAGERANK_ITERATIONS: usize = 100;
+
+/// Percentile bucket (1–100) of each score within the whole score set:
+/// the share of scores at or below it. Ties share a bucket, so the
+/// output is independent of node order. Buckets rather than raw scores
+/// because the PageRank distribution is heavy-tailed.
+pub(crate) fn percentile_buckets(scores: &[f64]) -> Vec<u32> {
+    let mut sorted: Vec<f64> = scores.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    scores
+        .iter()
+        .map(|score| {
+            let at_or_below = sorted.partition_point(|s| s.total_cmp(score).is_le());
+            ((at_or_below * 100) / scores.len().max(1)) as u32
+        })
+        .collect()
+}
+
 /// Reverse every edge, keeping neighbor lists sorted.
 pub(crate) fn reverse_adjacency(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let mut reversed: Vec<Vec<usize>> = vec![Vec::new(); adjacency.len()];
@@ -879,5 +994,115 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[rstest]
+    #[case::empty(vec![], vec![])]
+    #[case::isolated(vec![vec![], vec![]], vec![0, 0])]
+    #[case::self_loop_is_not_its_own_caller(vec![vec![0]], vec![0])]
+    #[case::chain_accumulates_callers(vec![vec![1], vec![2], vec![]], vec![0, 1, 2])]
+    #[case::two_cycle_members_call_each_other(vec![vec![1], vec![0]], vec![1, 1])]
+    #[case::cycle_members_share_their_ancestry(
+        // 0 -> 1 <-> 2 -> 3: the cycle sees 0, and 3 sees all three.
+        vec![vec![1], vec![2], vec![1, 3], vec![]],
+        vec![0, 2, 2, 3]
+    )]
+    #[case::diamond_counts_each_caller_once(
+        vec![vec![1, 2], vec![3], vec![3], vec![]],
+        vec![0, 1, 1, 3]
+    )]
+    fn transitive_caller_counts_match_hand_worked_graphs(
+        #[case] adjacency: Vec<Vec<usize>>,
+        #[case] expected: Vec<usize>,
+    ) {
+        assert_eq!(
+            transitive_caller_counts(&adjacency, usize::MAX),
+            Some(expected),
+        );
+    }
+
+    /// The ancestor bitsets hold one `usize` word per 64 components, so
+    /// every index into them is `component * words` or
+    /// `word_idx * BITS` — arithmetic indistinguishable from nonsense
+    /// while `words == 1`, which is every graph under 64 components.
+    ///
+    /// The last shape is the one that catches an aliased *word* index:
+    /// with uniform component sizes, reading `sizes[bit]` instead of
+    /// `sizes[64 + bit]` still returns 1, so the sum comes out right by
+    /// accident. Scattered two-node cycles break that symmetry.
+    #[rstest]
+    #[case::chain(chain_graph(100))]
+    #[case::chain_with_a_cycle_spanning_both_words(chain_graph_with_back_edge(100, 30))]
+    #[case::mixed_component_sizes_across_words(chain_graph_with_paired_cycles(140, 10))]
+    fn transitive_caller_counts_span_multiple_bitset_words(#[case] adjacency: Vec<Vec<usize>>) {
+        let counts = transitive_caller_counts(&adjacency, usize::MAX).expect("no cap was set");
+        for (v, &count) in counts.iter().enumerate() {
+            assert_eq!(count, reverse_bfs(&adjacency, &[v]).len() - 1, "node {v}");
+        }
+        // Pin one hand-worked value per shape so a jointly-wrong oracle
+        // cannot pass: every one of these is a chain, so the last node
+        // is called by every other.
+        let last = adjacency.len() - 1;
+        assert_eq!(counts[last], last);
+    }
+
+    /// `0 -> 1 -> ... -> n-1`.
+    fn chain_graph(n: usize) -> Vec<Vec<usize>> {
+        (0..n)
+            .map(|i| if i + 1 < n { vec![i + 1] } else { Vec::new() })
+            .collect()
+    }
+
+    /// A chain whose tail loops back to `back_to`, folding
+    /// `back_to..n` into one SCC that straddles the word boundary.
+    fn chain_graph_with_back_edge(n: usize, back_to: usize) -> Vec<Vec<usize>> {
+        let mut adjacency = chain_graph(n);
+        adjacency[n - 1].push(back_to);
+        adjacency
+    }
+
+    /// A chain where every `every`-th node also calls its predecessor,
+    /// pairing the two into one component. The result keeps enough
+    /// components to need several bitset words *and* mixes component
+    /// sizes, so the size read at each set bit has to use the right
+    /// component index.
+    fn chain_graph_with_paired_cycles(n: usize, every: usize) -> Vec<Vec<usize>> {
+        let mut adjacency = chain_graph(n);
+        for i in (every..n).step_by(every) {
+            adjacency[i].push(i - 1);
+        }
+        adjacency
+    }
+
+    /// The closure declines rather than allocating a quadratic bitset:
+    /// a graph with more components than the cap yields `None`.
+    #[test]
+    fn transitive_caller_counts_decline_above_the_component_cap() {
+        let adjacency = vec![vec![], vec![], vec![]];
+        assert_eq!(transitive_caller_counts(&adjacency, 2), None);
+        assert!(transitive_caller_counts(&adjacency, 3).is_some());
+    }
+
+    proptest! {
+        /// `reverse_bfs` is the oracle: the transitive caller count is
+        /// exactly the reverse-reachable set minus the node itself.
+        #[test]
+        fn transitive_caller_counts_agree_with_reverse_bfs(adjacency in arb_graph()) {
+            let counts = transitive_caller_counts(&adjacency, usize::MAX)
+                .expect("no cap was set");
+            for (v, &count) in counts.iter().enumerate() {
+                let expected = reverse_bfs(&adjacency, &[v]).len() - 1;
+                prop_assert_eq!(count, expected, "node {}", v);
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::unique_scores(vec![0.1, 0.4, 0.2], vec![33, 100, 66])]
+    #[case::all_tied(vec![0.5, 0.5], vec![100, 100])]
+    #[case::single(vec![0.9], vec![100])]
+    #[case::empty(vec![], vec![])]
+    fn percentile_buckets_rank_scores(#[case] scores: Vec<f64>, #[case] expected: Vec<u32>) {
+        assert_eq!(percentile_buckets(&scores), expected);
     }
 }

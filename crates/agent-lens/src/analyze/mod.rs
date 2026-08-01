@@ -1,13 +1,14 @@
 //! On-demand analyzers that emit LLM-friendly context.
 //!
 //! Each submodule is one analyzer (cohesion, complexity, coupling,
-//! similarity, wrapper, hotspot, …) and is wired to a clap subcommand so
+//! similarity, wrapper, hotspot, risk, …) and is wired to a clap subcommand so
 //! typos surface at parse time. Output is always written to stdout as JSON
 //! by default; analyzers can opt in to a `--format md` mode for a more
 //! compact human-readable summary.
 
 pub(crate) mod call_graph;
 mod cargo_meta;
+mod churn;
 pub mod cohesion;
 pub mod complexity;
 pub mod context_span;
@@ -27,6 +28,7 @@ pub mod layers;
 mod module_graph;
 pub(crate) mod module_label;
 mod path_filter;
+pub mod risk;
 mod runner;
 pub mod similarity;
 mod source_files;
@@ -53,6 +55,7 @@ pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use hubs::HubsAnalyzer;
 pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
 pub use layers::LayersAnalyzer;
+pub use risk::{RiskAnalyzer, RiskError};
 
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
 pub type CouplingAnalyzerError = CrateAnalyzerError;

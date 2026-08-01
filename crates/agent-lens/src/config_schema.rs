@@ -23,11 +23,12 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 16] = [
+const TOOL_ORDER: [ToolName; 17] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
     ToolName::Hotspot,
+    ToolName::Risk,
     ToolName::Hubs,
     ToolName::Impact,
     ToolName::Layers,
@@ -73,7 +74,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, similarity, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, similarity, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -216,6 +217,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "int",
                 presence: "optional",
                 desc: "Cap the report to the top N results.",
+            },
+        ],
+        ToolName::Risk => &[
+            Field {
+                key: "since",
+                ty: "string",
+                presence: "optional",
+                desc: "Git revision window for the churn axis, e.g. \"90.days.ago\". Centrality reflects the current source either way.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown table to the top N riskiest files.",
             },
         ],
         ToolName::Hubs => &[Field {
@@ -496,7 +511,7 @@ mod tests {
     use crate::config::{
         CohesionOptions, ComplexityOptions, ContextSpanOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        SimilarityOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
+        RiskOptions, SimilarityOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -520,6 +535,7 @@ mod tests {
         assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
+        assert_tool_parity::<RiskOptions>(ToolName::Risk);
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
         assert_tool_parity::<ImpactOptions>(ToolName::Impact);
         assert_tool_parity::<LayersOptions>(ToolName::Layers);

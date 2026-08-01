@@ -19,15 +19,14 @@
 //! * Files that fail to parse are reported on stderr and retained with
 //!   zero complexity so the report still reflects current source files.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use lens_domain::{FileChurn, FileComplexity, FunctionComplexity, HotspotEntry, compute_hotspots};
+use lens_domain::{FileComplexity, FunctionComplexity, HotspotEntry, compute_hotspots};
 use serde::Serialize;
 use tracing::warn;
 
+use super::churn::{ChurnError, ChurnScope};
 use super::{
     AnalyzePathFilter, AnalyzerError, CompiledPathFilter, OutputFormat, PathFilterError,
     SourceLang, collect_source_files,
@@ -53,6 +52,19 @@ pub enum HotspotError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+}
+
+/// Churn extraction lives in [`super::churn`] so `analyze risk` shares
+/// it verbatim; its failures map one-for-one onto the variants this
+/// analyzer has always exposed.
+impl From<ChurnError> for HotspotError {
+    fn from(error: ChurnError) -> Self {
+        match error {
+            ChurnError::Io { path, source } => Self::Io { path, source },
+            ChurnError::Git { stderr } => Self::Git { stderr },
+            ChurnError::NotInGitRepo { path } => Self::NotInGitRepo { path },
+        }
+    }
 }
 
 /// Stateful hotspot runner. `since` is plumbed through to git's
@@ -111,17 +123,20 @@ impl HotspotAnalyzer {
     }
 
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, HotspotError> {
-        let abs = canonicalize(path)?;
-        let repo_root = git_repo_root(&abs)?;
-        let scope_rel = relative_to(&abs, &repo_root);
-        let filter = self.path_filter.compile(&repo_root)?;
+        let scope = ChurnScope::resolve(path)?;
+        let filter = self.path_filter.compile(scope.repo_root())?;
 
-        let mut churn = collect_churn(&repo_root, scope_rel.as_deref(), self.since.as_deref())?;
+        let mut churn = scope.collect(self.since.as_deref())?;
         churn.retain(|c| filter.includes_relative(&c.path));
-        let complexity = collect_complexity(&abs, &repo_root, &filter)?;
+        let complexity = collect_complexity(&scope, &filter)?;
         let entries = compute_hotspots(churn, complexity);
 
-        let view = ReportView::new(&abs, &repo_root, self.since.as_deref(), &entries);
+        let view = ReportView::new(
+            scope.target(),
+            scope.repo_root(),
+            self.since.as_deref(),
+            &entries,
+        );
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(HotspotError::Serialize)
@@ -131,90 +146,11 @@ impl HotspotAnalyzer {
     }
 }
 
-fn canonicalize(path: &Path) -> Result<PathBuf, HotspotError> {
-    path.canonicalize().map_err(|source| HotspotError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-/// Walk parents of `path` looking for a `.git` entry. Returns the
-/// directory containing it, which is what git would call the working
-/// tree root.
-fn git_repo_root(path: &Path) -> Result<PathBuf, HotspotError> {
-    let start = if path.is_file() {
-        path.parent().unwrap_or(path)
-    } else {
-        path
-    };
-    for ancestor in start.ancestors() {
-        if ancestor.join(".git").exists() {
-            return Ok(ancestor.to_path_buf());
-        }
-    }
-    Err(HotspotError::NotInGitRepo {
-        path: path.to_path_buf(),
-    })
-}
-
-/// Express `target` as a path relative to `base`, returning `None` when
-/// `target == base` (i.e. the user pointed at the repo root).
-fn relative_to(target: &Path, base: &Path) -> Option<String> {
-    let rel = target.strip_prefix(base).ok()?;
-    if rel.as_os_str().is_empty() {
-        return None;
-    }
-    Some(rel.to_string_lossy().replace('\\', "/"))
-}
-
-fn collect_churn(
-    repo_root: &Path,
-    scope: Option<&str>,
-    since: Option<&str>,
-) -> Result<Vec<FileChurn>, HotspotError> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(repo_root)
-        .arg("log")
-        .arg("--pretty=format:")
-        .arg("--name-only");
-    if let Some(s) = since {
-        cmd.arg(format!("--since={s}"));
-    }
-    if let Some(scope) = scope {
-        cmd.arg("--").arg(scope);
-    }
-
-    let output = cmd.output().map_err(|source| HotspotError::Io {
-        path: repo_root.to_path_buf(),
-        source,
-    })?;
-    if !output.status.success() {
-        return Err(HotspotError::Git {
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        *counts.entry(trimmed.to_owned()).or_insert(0) += 1;
-    }
-    Ok(counts
-        .into_iter()
-        .map(|(path, commits)| FileChurn { path, commits })
-        .collect())
-}
-
 fn collect_complexity(
-    target: &Path,
-    repo_root: &Path,
+    scope: &ChurnScope,
     filter: &CompiledPathFilter,
 ) -> Result<Vec<FileComplexity>, HotspotError> {
+    let target = scope.target();
     let files = collect_source_files(target, filter)
         .map_err(|error| source_collection_error(target, error))?;
 
@@ -232,7 +168,7 @@ fn collect_complexity(
             }
         };
         let units = extract_units(&file, &source).unwrap_or_default();
-        let key = relative_to(&file, repo_root).unwrap_or_else(|| file.display().to_string());
+        let key = scope.key_for_absolute(&file);
         let function_count = units.len();
         let loc = units.iter().map(|f| f.loc()).sum();
         let cyclomatic_max = units.iter().map(|f| f.cyclomatic).max().unwrap_or(0);
