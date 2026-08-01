@@ -468,6 +468,94 @@ mod tests {
         assert!(!path_call.has_receiver_expression());
     }
 
+    /// `Unknown` means "the adapter does not track scopes", which must
+    /// read as not-shadowed — the same as an explicit `Known(false)`.
+    #[test]
+    fn callee_is_locally_bound_treats_unknown_as_not_bound() {
+        let call = CallShape {
+            callee_is_locally_bound: SyntaxFact::Known(true),
+            ..call_shape()
+        };
+        let not_bound = CallShape {
+            callee_is_locally_bound: SyntaxFact::Known(false),
+            ..call_shape()
+        };
+        let unknown = CallShape {
+            callee_is_locally_bound: SyntaxFact::Unknown,
+            ..call_shape()
+        };
+
+        assert!(call.callee_is_locally_bound());
+        assert!(!not_bound.callee_is_locally_bound());
+        assert!(!unknown.callee_is_locally_bound());
+    }
+
+    #[test]
+    fn callee_names_local_binding_matches_only_bare_calls_on_a_bound_name() {
+        let bound: std::collections::HashSet<String> = ["emit".to_owned()].into_iter().collect();
+        let empty = std::collections::HashSet::new();
+        let bare = ["emit".to_owned()];
+        let other = ["send".to_owned()];
+        let path = ["pkg".to_owned(), "emit".to_owned()];
+
+        // A bare call on a bound name is the one shadowed shape.
+        assert!(callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&bare),
+            &bound
+        ));
+        // A receiver call names a method on the receiver's type, and a
+        // multi-segment path is anchored by its prefix — a local of the
+        // same name shadows neither.
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::Expression,
+            Some(&bare),
+            &bound
+        ));
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::SelfValue,
+            Some(&bare),
+            &bound
+        ));
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&path),
+            &bound
+        ));
+        // Nothing bound under that name, or nothing bound at all.
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&other),
+            &bound
+        ));
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&bare),
+            &empty
+        ));
+        // An anonymous callee has no name to shadow.
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            None,
+            &bound
+        ));
+    }
+
+    fn call_shape() -> CallShape {
+        CallShape {
+            caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),
+            caller_module: SyntaxFact::Known("crate::m".to_owned()),
+            caller_owner: SyntaxFact::Known(None),
+            callee_display_name: SyntaxFact::Known(Some("emit".to_owned())),
+            callee_path_segments: SyntaxFact::Known(vec!["emit".to_owned()]),
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            callee_is_locally_bound: SyntaxFact::Unknown,
+            lexical_resolution: LexicalResolutionStatus::NotAttempted,
+            visible_imports: Vec::new(),
+            line: 1,
+        }
+    }
+
     fn signature() -> FunctionSignature {
         FunctionSignature {
             name_tokens: vec!["parse".to_owned(), "user".to_owned()],

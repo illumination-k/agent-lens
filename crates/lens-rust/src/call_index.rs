@@ -805,8 +805,15 @@ mod tests {
         "fn pump() { let emit = |e: u8| {}; run(|| emit(1)); }",
         true
     )]
+    #[case::parenthesised_fn_pointer_param("fn pump(emit: (fn(u8))) { emit(1); }", true)]
+    #[case::reference_pattern_param("fn pump(&emit: &fn(u8)) { emit(1); }", true)]
+    #[case::parenthesised_pattern_local("fn pump() { let (emit) = |e: u8| {}; emit(1); }", true)]
     #[case::plain_local("fn pump() { let emit = compute(); emit(1); }", false)]
     #[case::value_param("fn pump(emit: u8) { emit(1); }", false)]
+    // A generic bound that is not an `Fn` trait says nothing about
+    // callability, so the parameter is an ordinary value.
+    #[case::non_fn_generic_param("fn pump<T: Clone>(emit: T) { emit(1); }", false)]
+    #[case::non_fn_impl_trait_param("fn pump(emit: impl Clone) { emit(1); }", false)]
     #[case::unbound_name("fn pump() { emit(1); }", false)]
     fn local_callable_bindings_shadow_bare_calls(#[case] src: &str, #[case] expected: bool) {
         let sites = run(src);
@@ -815,6 +822,24 @@ mod tests {
             .find(|site| site.callee_name.as_deref() == Some("emit"))
             .expect("emit call site");
         assert_eq!(site.callee_is_locally_bound, expected);
+    }
+
+    /// `Type::Group` wraps a type that arrived through a macro's token
+    /// stream, so it never appears in a file parsed from source — build
+    /// one directly to pin that the wrapper is peeled like `Type::Paren`.
+    #[test]
+    fn grouped_types_are_peeled_when_deciding_callability() {
+        let grouped = Type::Group(syn::TypeGroup {
+            group_token: Default::default(),
+            elem: Box::new(syn::parse_str("fn(u8)").unwrap()),
+        });
+        let grouped_value = Type::Group(syn::TypeGroup {
+            group_token: Default::default(),
+            elem: Box::new(syn::parse_str("u8").unwrap()),
+        });
+
+        assert!(type_is_callable(&grouped, &HashSet::new()));
+        assert!(!type_is_callable(&grouped_value, &HashSet::new()));
     }
 
     /// A qualified path names its owner, so a local `emit` does not
