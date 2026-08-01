@@ -243,6 +243,15 @@ pub struct CallShape {
     pub callee_display_name: SyntaxFact<Option<String>>,
     pub callee_path_segments: SyntaxFact<Vec<String>>,
     pub receiver_expr_kind: SyntaxFact<ReceiverExprKind>,
+    /// Whether the callee name is bound in the caller's own local scope
+    /// — a closure or nested function assigned to a local name, or a
+    /// function-typed parameter. Such a call targets the local binding,
+    /// which shadows anything the workspace defines under that name, so
+    /// resolution must not attribute it to a global definition.
+    ///
+    /// `Unknown` when the adapter does not track local scopes; consumers
+    /// then behave as if the callee were not locally bound.
+    pub callee_is_locally_bound: SyntaxFact<bool>,
     pub lexical_resolution: LexicalResolutionStatus,
     pub visible_imports: Vec<ImportShape>,
     pub line: usize,
@@ -280,6 +289,14 @@ impl CallShape {
             .map(String::as_str)
     }
 
+    /// True only when the adapter positively determined that the callee
+    /// name is bound in the caller's local scope. [`SyntaxFact::Unknown`]
+    /// reads as "not locally bound", keeping adapters that do not track
+    /// scopes on the pre-existing resolution path.
+    pub fn callee_is_locally_bound(&self) -> bool {
+        matches!(self.callee_is_locally_bound, SyntaxFact::Known(true))
+    }
+
     pub fn has_receiver_expression(&self) -> bool {
         matches!(
             self.receiver_expr_kind,
@@ -293,6 +310,25 @@ pub enum ReceiverExprKind {
     None,
     SelfValue,
     Expression,
+}
+
+/// Whether a call site's callee is a bare name that the caller's own
+/// scope binds to a callable — the fact [`CallShape::callee_is_locally_bound`]
+/// carries.
+///
+/// Only single-segment plain calls qualify. A receiver call (`emit.run()`)
+/// names a method, not the binding, and a multi-segment path
+/// (`pkg::run()`) is already anchored by its prefix, so neither is
+/// shadowed by a local of that name.
+pub fn callee_names_local_binding(
+    receiver: ReceiverExprKind,
+    callee_path_segments: Option<&[String]>,
+    locally_bound: &std::collections::HashSet<String>,
+) -> bool {
+    if receiver != ReceiverExprKind::None || locally_bound.is_empty() {
+        return false;
+    }
+    matches!(callee_path_segments, Some([only]) if locally_bound.contains(only))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -413,6 +449,7 @@ mod tests {
                 "parse".to_owned(),
             ]),
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::Expression),
+            callee_is_locally_bound: SyntaxFact::Known(false),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 12,
