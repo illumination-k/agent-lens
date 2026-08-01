@@ -18,11 +18,11 @@ use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
-    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD,
-    DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphDirection,
-    GraphQueryAnalyzer, GraphQueryKind, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer,
-    LayersAnalyzer, OutputFormat, PairKey, RiskAnalyzer, SimilarityAnalyzer, SimilarityMethod,
-    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, DelegationAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, GraphDirection, GraphQueryAnalyzer, GraphQueryKind,
+    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, PairKey,
+    RiskAnalyzer, SimilarityAnalyzer, SimilarityMethod, SimilarityTarget, UntestedAnalyzer,
+    VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 use agent_lens::hooks::codex::post_tool_use::{
@@ -940,12 +940,23 @@ struct AnalyzeSimilarityArgs {
     /// without `--paired-by`.
     #[arg(long, default_value_t = DEFAULT_SIMILARITY_DRIFT_FLOOR, requires = "paired_by")]
     drift_floor: f64,
-    /// Minimum source line count for a function to be considered.
-    /// Functions shorter than this are dropped before pairwise
-    /// comparison; keeps trivial getters / one-liners out of the
-    /// report.
-    #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
-    min_lines: usize,
+    /// Minimum source line count for a unit to be considered. Units
+    /// shorter than this are dropped before pairwise comparison; keeps
+    /// trivial getters / one-liners out of the report. Defaults per
+    /// target: 5 for `--target functions`, 3 for `--target types`.
+    #[arg(long)]
+    min_lines: Option<usize>,
+    /// Comparison unit. `functions` (default) compares function bodies.
+    /// `types` compares type definitions instead — Rust struct/enum/type
+    /// alias, TS interface/type alias/enum, Python annotated classes /
+    /// dataclasses / Enum subclasses, Go struct/alias — by their member
+    /// shape (field names and types, enum variants, alias targets), so
+    /// duplicated DTOs and drifted mirror structs surface the same way
+    /// duplicated functions do. With `--paired-by`, only the
+    /// `qualified`/`name` key applies; `method` has no meaning for a
+    /// type and is rejected.
+    #[arg(long, value_enum, default_value_t = SimilarityTarget::Functions)]
+    target: SimilarityTarget,
     /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
     /// distance over the body AST. `token` compares preorder token
     /// k-gram multisets — faster and more tolerant of reordered code,
@@ -1317,8 +1328,9 @@ fn build_analyze_command(
                 ranking: AnalyzeRankingArgs { top: opts.top },
                 threshold: opts.threshold.unwrap_or(DEFAULT_SIMILARITY_THRESHOLD),
                 sweep: opts.sweep.unwrap_or_default(),
-                min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
+                min_lines: opts.min_lines,
                 method: opts.method.unwrap_or_default(),
+                target: opts.target.unwrap_or_default(),
                 doc_overlap: opts.doc_overlap,
                 paired_by: opts.paired_by,
                 drift_floor: opts.drift_floor.unwrap_or(DEFAULT_SIMILARITY_DRIFT_FLOOR),
@@ -1554,7 +1566,8 @@ impl AnalyzeCommand {
                     .with_threshold(args.threshold)
                     .with_sweep(sweep)
                     .with_diff_only(args.diff.diff_only)
-                    .with_min_lines(args.min_lines)
+                    .with_min_lines_opt(args.min_lines)
+                    .with_target(args.target)
                     .with_method(args.method)
                     .with_doc_overlap(args.doc_overlap)
                     .with_paired_by(args.paired_by)
@@ -1845,7 +1858,7 @@ mod tests {
                 .analyze(&file, OutputFormat::Json)
                 .unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-            parsed["function_count"].as_u64().unwrap()
+            parsed["unit_count"].as_u64().unwrap()
         };
 
         assert_eq!(run(AnalyzePathArgs::default()), 2, "All keeps both");
@@ -2029,7 +2042,7 @@ mod tests {
         assert!(args.common.path_filter.exclude_tests);
         assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
         assert!((args.threshold - 0.85).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, 8);
+        assert_eq!(args.min_lines, Some(8));
         assert_eq!(args.ranking.top, Some(3));
         // `--method` is omitted above, so it defaults to TSED.
         assert_eq!(args.method, SimilarityMethod::Tsed);
@@ -2886,7 +2899,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.common.path, PathBuf::from("/repo/web"));
         assert_eq!(args.common.format, OutputFormat::Md);
         assert!((args.threshold - 0.7).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, 9);
+        assert_eq!(args.min_lines, Some(9));
         assert_eq!(args.ranking.top, Some(4));
         assert_eq!(args.method, SimilarityMethod::Token);
         assert!(args.doc_overlap);
@@ -2910,9 +2923,12 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze similarity");
         };
         assert!((args.threshold - DEFAULT_SIMILARITY_THRESHOLD).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, DEFAULT_SIMILARITY_MIN_LINES);
+        // An absent `min-lines` stays unset so the analyzer can apply the
+        // target-specific default.
+        assert_eq!(args.min_lines, None);
         assert_eq!(args.ranking.top, None);
         assert_eq!(args.method, SimilarityMethod::Tsed);
+        assert_eq!(args.target, SimilarityTarget::Functions);
         assert!(!args.doc_overlap);
         // Absent `paired-by` keeps the clustering report; the floor falls
         // back to its default so it is well-defined if pairing is turned

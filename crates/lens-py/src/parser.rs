@@ -174,7 +174,7 @@ fn record_param(
 /// `list[int]` contributes `list` and `int`, `a.B` contributes `B`,
 /// `X | Y` contributes both. Best-effort — shapes we don't model
 /// contribute nothing rather than raw text.
-fn annotation_paths(expr: &Expr, out: &mut Vec<String>) {
+pub(crate) fn annotation_paths(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::Name(name) => out.push(name.id.as_str().to_owned()),
         Expr::Attribute(attr) => out.push(attr.attr.as_str().to_owned()),

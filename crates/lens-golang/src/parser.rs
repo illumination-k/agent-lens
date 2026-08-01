@@ -206,7 +206,7 @@ fn collect_result_types(result: Node<'_>, source: &[u8], out: &mut Vec<String>) 
 
 /// Collect generic type-parameter declarations (`[T any]`), if any, as
 /// their raw text.
-fn collect_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
+pub(crate) fn collect_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let Some(params) = node.child_by_field_name("type_parameters") else {
         return Vec::new();
     };

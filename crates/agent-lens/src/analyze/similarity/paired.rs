@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use lens_domain::identifier_tokens;
 
-use super::OwnedFunction;
+use super::OwnedUnit;
 
 /// How two functions are decided to be siblings — i.e. parallel
 /// implementations that ought to stay in sync.
@@ -54,8 +54,15 @@ const BINDING_AFFIXES: &[&str] = &["js", "ts", "py", "python", "wasm", "napi", "
 
 /// Sibling key for `function`, or `None` when its name has no usable
 /// tokens (an anonymous or synthetic entry).
-pub(super) fn pair_key(function: &OwnedFunction, key: PairKey) -> Option<String> {
+pub(super) fn pair_key(function: &OwnedUnit, key: PairKey) -> Option<String> {
     let name = function.name();
+    // A type unit's name is the type itself, so it gets the owner
+    // treatment: binding affixes stripped, making `Summary` /
+    // `JsSummary` / `PySummary` siblings. `PairKey::Method` is rejected
+    // for the types target before pairing starts.
+    if function.is_type() {
+        return normalize_owner(name);
+    }
     let (owner, method) = match name.rsplit_once("::") {
         Some((owner, method)) => (Some(owner), method),
         None => (None, name),
@@ -128,7 +135,7 @@ pub(super) struct PairedCandidates {
 ///
 /// Output order is deterministic: keys ascending, then corpus index.
 pub(super) fn name_matched_pairs(
-    corpus: &[OwnedFunction],
+    corpus: &[OwnedUnit],
     min_lines: usize,
     key: PairKey,
 ) -> PairedCandidates {
@@ -189,11 +196,12 @@ mod tests {
     use rstest::rstest;
     use std::path::PathBuf;
 
-    fn function(name: &str, rel_path: &str, line_count: usize) -> OwnedFunction {
-        OwnedFunction {
+    fn function(name: &str, rel_path: &str, line_count: usize) -> OwnedUnit {
+        OwnedUnit {
             file: PathBuf::from(rel_path),
             rel_path: rel_path.to_owned(),
             is_test: false,
+            kind: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -229,6 +237,28 @@ mod tests {
     fn pair_key_normalizes_names(#[case] name: &str, #[case] key: PairKey, #[case] expected: &str) {
         assert_eq!(
             pair_key(&function(name, "lib.rs", 10), key).as_deref(),
+            Some(expected)
+        );
+    }
+
+    fn type_unit(name: &str) -> OwnedUnit {
+        OwnedUnit {
+            kind: Some("struct"),
+            ..function(name, "lib.rs", 10)
+        }
+    }
+
+    /// Type units key on the affix-stripped type name itself, so mirror
+    /// structs named per binding share a key.
+    #[rstest]
+    #[case::plain("Summary", "summary")]
+    #[case::js_prefixed("JsSummary", "summary")]
+    #[case::py_prefixed("PySummary", "summary")]
+    #[case::napi_suffixed("SummaryNapi", "summary")]
+    #[case::all_affix_keeps_tokens("Js", "js")]
+    fn pair_key_strips_binding_affixes_from_type_names(#[case] name: &str, #[case] expected: &str) {
+        assert_eq!(
+            pair_key(&type_unit(name), PairKey::Qualified).as_deref(),
             Some(expected)
         );
     }

@@ -67,6 +67,7 @@ pub mod risk;
 pub mod syntax;
 pub mod tree;
 pub mod tsed;
+pub mod type_shape;
 pub mod wrapper;
 
 pub use apted::{
@@ -100,4 +101,7 @@ pub use syntax::{
 };
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};
+pub use type_shape::{
+    TypeDefKind, TypeMemberShape, TypeShape, TypeVariantShape, normalize_type_text,
+};
 pub use wrapper::{ReuseMetrics, WrapperFinding, args_pass_through_by};
