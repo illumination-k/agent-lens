@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-lens-domain = { path = "../lens-domain", version = "0.1.0" }
+lens-domain = { path = "../lens-domain", version = "0.2.0" }
 # The ruff crates are not published to crates.io, so they are pinned by git tag
 # and all three must be bumped together (see the `allow-git` note in deny.toml).
 # A git dependency makes `cargo publish` impossible for the whole workspace;
