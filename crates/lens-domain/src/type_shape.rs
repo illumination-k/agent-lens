@@ -8,9 +8,10 @@
 //! language emits the same label vocabulary and cross-language pairs pay
 //! no spurious edit cost.
 
+use crate::function::ReceiverShape;
 use crate::naming::identifier_tokens;
 use crate::syntax::{
-    BodyShape, FunctionShape, ParameterShape, ReceiverKind, SignatureShape, SourceSpan, SyntaxFact,
+    BodyShape, FunctionShape, ParameterShape, SignatureShape, SourceSpan, SyntaxFact,
 };
 use crate::tree::TreeNode;
 
@@ -115,7 +116,7 @@ impl TypeShape {
             params,
             return_type: SyntaxFact::Known(None),
             return_type_paths: Vec::new(),
-            receiver: SyntaxFact::Known(ReceiverKind::None),
+            receiver: SyntaxFact::Known(ReceiverShape::None),
             generics: SyntaxFact::Known(self.generics.clone()),
             bounds: SyntaxFact::Unknown,
         }
@@ -359,7 +360,7 @@ mod tests {
             sig.parameter_type_paths().collect::<Vec<_>>(),
             ["UserId", "Vec", "Email"],
         );
-        assert_eq!(sig.receiver_kind(), Some(ReceiverKind::None));
+        assert_eq!(sig.receiver_shape(), Some(ReceiverShape::None));
     }
 
     #[test]

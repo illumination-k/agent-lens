@@ -337,6 +337,26 @@ export enum Level {
         assert!(shape.variants.iter().all(|v| v.members.is_empty()));
     }
 
+    /// Every declaration form must be reachable both bare and behind
+    /// `export`: the two walkers have separate match arms, and dropping
+    /// any one of them silently loses a whole category.
+    #[rstest]
+    #[case::bare_enum("enum Level { Low, High }\n", "Level")]
+    #[case::exported_alias("export type Id = string | number;\n", "Id")]
+    #[case::exported_namespace(
+        "export namespace api {\n    export interface Request { url: string }\n}\n",
+        "Request"
+    )]
+    fn bare_and_exported_declaration_forms_are_extracted(
+        #[case] source: &str,
+        #[case] expected_name: &str,
+    ) {
+        let shapes = extract(source);
+
+        assert_eq!(shapes.len(), 1, "got {shapes:?}");
+        assert_eq!(shapes[0].display_name, expected_name);
+    }
+
     #[test]
     fn recurses_into_namespaces_and_handles_default_export() {
         let shapes = extract(

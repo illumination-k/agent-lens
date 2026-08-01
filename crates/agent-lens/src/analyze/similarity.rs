@@ -964,7 +964,7 @@ fn signature_components(
     let parameter_name_overlap = token_overlap(a.parameter_names(), b.parameter_names());
     let generic_overlap = token_overlap(a.generics(), b.generics());
     let parameter_count = count_similarity(a.parameter_count(), b.parameter_count());
-    let receiver = if a.receiver_kind() == b.receiver_kind() {
+    let receiver = if a.receiver_shape() == b.receiver_shape() {
         1.0
     } else {
         0.0

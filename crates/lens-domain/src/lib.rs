@@ -96,8 +96,8 @@ pub use naming::{identifier_tokens, qualify, qualify_module, starts_uppercase};
 pub use risk::{FileCentrality, RiskEntry, compute_risk};
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ParameterShape, ReceiverExprKind, ReceiverKind, SignatureShape, SourceSpan,
-    SyntaxFact, VisibilityShape,
+    OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
+    VisibilityShape,
 };
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};

@@ -129,23 +129,12 @@ fn member(name: Option<String>, type_text: Option<String>) -> TypeMemberShape {
 }
 
 fn field_names(field: Node<'_>, source: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
     let mut cursor = field.walk();
-    if !cursor.goto_first_child() {
-        return names;
-    }
-    loop {
-        if cursor.field_name() == Some("name")
-            && cursor.node().kind() == "field_identifier"
-            && let Some(text) = node_str(cursor.node(), source)
-        {
-            names.push(text.to_owned());
-        }
-        if !cursor.goto_next_sibling() {
-            break;
-        }
-    }
-    names
+    field
+        .children_by_field_name("name", &mut cursor)
+        .filter(|node| node.kind() == "field_identifier")
+        .filter_map(|node| node_str(node, source).map(str::to_owned))
+        .collect()
 }
 
 #[cfg(test)]

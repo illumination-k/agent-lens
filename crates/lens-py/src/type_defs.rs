@@ -287,6 +287,16 @@ class Mode(IntEnum):
         assert_eq!(shapes[1].variants.len(), 1);
     }
 
+    /// A base whose tail is `Enum` but whose root is not the `enum`
+    /// module must not classify the class: `models.Enum`-style bases
+    /// from ORMs are not stdlib enums.
+    #[test]
+    fn non_enum_rooted_enum_base_is_not_an_enum() {
+        let shapes = extract("class Fake(models.Enum):\n    A = 1\n");
+
+        assert!(shapes.is_empty(), "got {shapes:?}");
+    }
+
     #[test]
     fn extracts_pep695_type_alias() {
         let shapes = extract("type UserId = int | str\n");
