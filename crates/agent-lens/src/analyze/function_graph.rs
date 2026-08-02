@@ -990,6 +990,83 @@ mod tests {
         assert_eq!(report["language"], "go");
     }
 
+    /// Regression: a local closure named after a method in another
+    /// package used to resolve to that method through the last-segment
+    /// fallback, minting a cross-package edge the program cannot make —
+    /// package `b` does not even import package `a`. One such edge is
+    /// enough to turn a cleanly layered pair of modules into a reported
+    /// module cycle.
+    #[test]
+    fn go_local_closure_does_not_resolve_to_a_same_named_method_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "a/a.go",
+            concat!(
+                "package a\n\n",
+                "type emitter struct{}\n\n",
+                "func (e *emitter) emit(ev int) {}\n",
+            ),
+        );
+        write_file(
+            dir.path(),
+            "b/b.go",
+            concat!(
+                "package b\n\n",
+                "func pump(first int) {\n",
+                "    emit := func(ev int) bool { return true }\n",
+                "    emit(first)\n",
+                "}\n",
+            ),
+        );
+
+        let report = analyze_json(dir.path());
+        let edges = report["edges"].as_array().unwrap();
+        let fabricated: Vec<&Value> = edges
+            .iter()
+            .filter(|edge| edge["callee_name"] == "emit" && edge["resolution"] != "unresolved")
+            .collect();
+        assert!(
+            fabricated.is_empty(),
+            "local closure must not resolve to a::emitter::emit, got {fabricated:?}",
+        );
+    }
+
+    /// The suppression is scoped to the shadowed name: a genuine
+    /// cross-package call in the same function still resolves.
+    #[test]
+    fn go_shadowed_name_does_not_suppress_other_calls_in_the_same_function() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "pkg/util/util.go",
+            "package util\n\nfunc Run() {}\n",
+        );
+        write_file(
+            dir.path(),
+            "b/b.go",
+            concat!(
+                "package b\n\n",
+                "import \"github.com/x/proj/pkg/util\"\n\n",
+                "func pump(first int) {\n",
+                "    emit := func(ev int) bool { return true }\n",
+                "    emit(first)\n",
+                "    util.Run()\n",
+                "}\n",
+            ),
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "Run");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("pkg::util::Run"),
+        );
+    }
+
     #[test]
     fn go_method_calls_carry_owner_qualified_caller() {
         let dir = tempfile::tempdir().unwrap();
