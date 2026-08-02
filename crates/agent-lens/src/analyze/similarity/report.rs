@@ -95,11 +95,15 @@ impl<'a> ClusterView<'a> {
         pair_scores: &HashMap<(usize, usize), SimilarityComponents>,
         target: SimilarityTarget,
     ) -> Self {
-        let units: Vec<UnitRef<'a>> = cluster
+        // Members and units are built in one pass so they stay index
+        // aligned: `representative` reads the corpus index that goes
+        // with a chosen unit, and a `filter_map` that dropped one side
+        // only would silently quote the wrong occurrence.
+        let (members, units): (Vec<usize>, Vec<UnitRef<'a>>) = cluster
             .members
             .iter()
-            .filter_map(|i| corpus.get(*i).map(UnitRef::from))
-            .collect();
+            .filter_map(|i| corpus.get(*i).map(|unit| (*i, UnitRef::from(unit))))
+            .unzip();
         // Block clusters routinely run to dozens of members, and a
         // pairwise view list is quadratic in that: 55 occurrences would
         // emit 1,485 pair objects carrying nothing the min/max band does
@@ -110,22 +114,30 @@ impl<'a> ClusterView<'a> {
             SimilarityTarget::Blocks => Vec::new(),
             _ => cluster_pair_views(corpus, &cluster.members, pair_scores),
         };
+        let size = units.len();
         Self {
-            size: units.len(),
+            size,
             min_similarity: cluster.min_similarity,
             max_similarity: cluster.max_similarity,
             survives_at_threshold: None,
             units,
             pairs,
             snippet: None,
-            members: cluster.members,
+            members,
         }
     }
 
-    /// Corpus index of the occurrence quoted in the report: the
-    /// earliest-collected member, so the snippet is stable across runs.
+    /// Corpus index of the occurrence the report quotes. Must agree
+    /// with [`Self::quoted_unit`] — the markdown prints that unit's
+    /// location above the snippet, so reading the text from a different
+    /// member would caption the wrong file and line.
     pub(super) fn representative(&self) -> Option<usize> {
-        self.members.iter().copied().min()
+        let quoted = self.quoted_unit()?;
+        self.members
+            .iter()
+            .zip(&self.units)
+            .find(|(_, unit)| *unit == quoted)
+            .map(|(index, _)| *index)
     }
 
     pub(super) fn set_snippet(&mut self, snippet: Vec<String>) {
@@ -944,8 +956,28 @@ mod tests {
                 .collect(),
             pairs: Vec::new(),
             snippet: None,
-            members: Vec::new(),
+            members: (0..units.len()).collect(),
         }
+    }
+
+    /// The snippet is read from the member `representative` names while
+    /// the caption comes from `quoted_unit`; if they can disagree, the
+    /// report quotes one occurrence under another's file and line. The
+    /// corpus index deliberately does not follow source order here.
+    #[test]
+    fn representative_is_the_corpus_index_of_the_quoted_unit() {
+        let mut cluster = block_cluster(&[
+            ("b.rs", "second", 30, 32),
+            ("a.rs", "first", 20, 22),
+            ("a.rs", "first", 10, 12),
+        ]);
+        cluster.members = vec![7, 4, 9];
+
+        assert_eq!(
+            cluster.quoted_unit().map(|u| (u.file, u.start_line)),
+            Some(("a.rs", 10)),
+        );
+        assert_eq!(cluster.representative(), Some(9));
     }
 
     fn cluster_spans(clusters: &[ClusterView<'_>]) -> Vec<Vec<(usize, usize)>> {

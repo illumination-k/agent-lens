@@ -416,6 +416,11 @@ impl SimilarityAnalyzer {
     /// trees are small enough that a single member change flips most
     /// preorder shingles, so MinHash misses exactly the near-duplicates
     /// the run is looking for. Types always take the cartesian path.
+    ///
+    /// Blocks keep LSH. Their trees are held above the same size by the
+    /// window node floor, and windowing multiplies the corpus several
+    /// times over — a cartesian pass would hit the scope guardrail on
+    /// any repo worth running this on.
     fn allow_lsh(&self) -> bool {
         self.target != SimilarityTarget::Types
     }
@@ -3495,6 +3500,72 @@ impl Counter {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed["unit_count"].as_u64().unwrap() > 1, "got {parsed}");
         assert_eq!(parsed["cluster_count"], 0, "got {parsed}");
+    }
+
+    /// A window in a test *path* inherits the path's classification even
+    /// when the enclosing function carries no test marker of its own.
+    /// Both halves matter: the filter has to keep it under
+    /// `--only-tests` and drop it under `--exclude-tests`, and the
+    /// reported unit has to be labelled a test rather than silently
+    /// presented as production code.
+    #[test]
+    fn blocks_target_marks_windows_in_test_paths_as_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "tests/helper.rs",
+            "fn build_one() {\n    let client = build_client();\n    let url = base_url();\n    let request = client.get(&url);\n    drop(request);\n}\n\nfn build_two(extra: u8) {\n    let n = extra;\n    let client = build_client();\n    let url = base_url();\n    let request = client.get(&url);\n    drop((request, n));\n}\n",
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .with_function_selection(FunctionSelection::OnlyTests)
+            .with_only_tests(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cluster_count"], 1, "got {parsed}");
+        let units = parsed["clusters"][0]["units"].as_array().unwrap();
+        assert!(units.iter().all(|u| u["is_test"] == true), "got {parsed}");
+
+        let production = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .with_function_selection(FunctionSelection::ExcludeTests)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let production: serde_json::Value = serde_json::from_str(&production).unwrap();
+        assert_eq!(production["unit_count"], 0, "got {production}");
+    }
+
+    /// `--min-lines` has to reach the windowing, not just the report
+    /// header: it is what bounds the block corpus, and a window
+    /// population that ignores it is an order of magnitude larger than
+    /// the one the caller asked for.
+    #[test]
+    fn blocks_target_min_lines_bounds_the_window_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            "fn f(id: u64) -> u64 {\n    let a = id + 1;\n    let b = a * 2;\n    let c = b - 3;\n    let d = c + 4;\n    d\n}\n",
+        );
+
+        let counts: Vec<u64> = [3usize, 5]
+            .into_iter()
+            .map(|min_lines| {
+                let json = SimilarityAnalyzer::new()
+                    .with_target(SimilarityTarget::Blocks)
+                    .with_min_lines(min_lines)
+                    .analyze(dir.path(), OutputFormat::Json)
+                    .unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed["min_lines"], min_lines, "got {parsed}");
+                parsed["unit_count"].as_u64().unwrap()
+            })
+            .collect();
+
+        assert!(counts[0] > counts[1], "got {counts:?}");
+        assert!(counts[1] > 0, "got {counts:?}");
     }
 
     #[test]
