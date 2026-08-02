@@ -62,18 +62,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::{InterfaceShape, UbiquitousMethodNames};
 use serde::Serialize;
 
 use super::call_graph::model::{
-    CallGraphNode, GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
-    name_last_segment,
+    CallGraphNode, ModuleResolutionSummary, NodeVisibility, Resolution, name_last_segment,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
+use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::{ModuleSection, render_module_confidence, render_module_sections};
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat, SourceLang};
+use super::{AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -316,54 +315,6 @@ enum CallerScope {
     NoResolvedCallers,
 }
 
-/// Method sets of the interfaces declared in the analyzed tree, keyed
-/// for the structural question every exported Go method gets asked:
-/// could its calls dispatch through an interface?
-struct InterfaceIndex {
-    /// Method name → parameter count → interfaces declaring such a
-    /// method, by qualified name, sorted.
-    by_method: BTreeMap<String, BTreeMap<usize, BTreeSet<String>>>,
-}
-
-impl InterfaceIndex {
-    fn new(interfaces: &[InterfaceShape]) -> Self {
-        let mut by_method: BTreeMap<String, BTreeMap<usize, BTreeSet<String>>> = BTreeMap::new();
-        for interface in interfaces {
-            let Some(name) = interface.qualified_name.known_value() else {
-                continue;
-            };
-            for method in &interface.methods {
-                by_method
-                    .entry(method.name.clone())
-                    .or_default()
-                    .entry(method.param_count)
-                    .or_default()
-                    .insert(name.clone());
-            }
-        }
-        Self { by_method }
-    }
-
-    /// Interfaces this node could satisfy: a method (never a free
-    /// function — only method sets satisfy interfaces) matching one of
-    /// their methods by name and parameter count. Go only, because the
-    /// method sets come from Go declarations; a Rust method sharing a
-    /// name with one is no dispatch candidate.
-    fn matching(&self, node: &CallGraphNode, lang: AuditLang) -> Vec<String> {
-        if lang != AuditLang::Go || node.impl_owner.is_none() {
-            return Vec::new();
-        }
-        let Some(param_count) = node.param_count else {
-            return Vec::new();
-        };
-        self.by_method
-            .get(&node.name)
-            .and_then(|by_arity| by_arity.get(&param_count))
-            .map(|names| names.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct Summary {
     over_exposed_count: usize,
@@ -384,58 +335,12 @@ struct Summary {
     module_count: usize,
 }
 
-/// The two languages whose adapters extract export status. Everything
-/// else is counted as skipped instead of being judged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuditLang {
-    /// Private items are visible in the defining module *and its
-    /// descendants*, and the intermediate `pub(in …)` scopes exist.
-    Rust,
-    /// The package is the only boundary: a caller one directory down is
-    /// as external as one in another repository.
-    Go,
-}
-
-impl AuditLang {
-    fn of(node: &CallGraphNode) -> Option<Self> {
-        match SourceLang::from_path(Path::new(&node.file)) {
-            Some(SourceLang::Rust) => Some(Self::Rust),
-            Some(SourceLang::Go) => Some(Self::Go),
-            _ => None,
-        }
-    }
-
-    /// The visibility that exposes a function beyond its own compilation
-    /// unit in this language.
-    fn public(self) -> NodeVisibility {
-        match self {
-            Self::Rust => NodeVisibility::Public,
-            Self::Go => NodeVisibility::Exported,
-        }
-    }
-
-    /// Whether a scope module also covers the modules below it. Rust
-    /// visibility is inherited downward; Go packages are flat.
-    fn scope_covers_descendants(self) -> bool {
-        matches!(self, Self::Rust)
-    }
-
-    /// The method names this language's resolver refuses to attribute
-    /// from a receiver call alone.
-    fn ubiquitous_names(self) -> UbiquitousMethodNames {
-        match self {
-            Self::Rust => GraphLanguage::Rust.ubiquitous_method_names(),
-            Self::Go => GraphLanguage::Go.ubiquitous_method_names(),
-        }
-    }
-}
-
 impl Report {
     fn build(root: &Path, graph: &CallGraph) -> Self {
         let crate_dirs = rust_crate_dirs(graph);
         let re_exports = ReExports::scan(root, &crate_dirs);
         let public = public_nodes(graph);
-        let audited: Vec<(usize, AuditLang)> = public
+        let audited: Vec<(usize, ExportLang)> = public
             .iter()
             .copied()
             .filter(|&(idx, _)| !re_exports.covers(&graph.nodes[idx]))
@@ -469,14 +374,14 @@ impl Report {
 
 /// Non-test functions declared public in a language that records the
 /// fact, paired with that language.
-fn public_nodes(graph: &CallGraph) -> Vec<(usize, AuditLang)> {
+fn public_nodes(graph: &CallGraph) -> Vec<(usize, ExportLang)> {
     graph
         .nodes
         .iter()
         .enumerate()
         .filter(|(_, node)| !node.is_test)
         .filter_map(|(idx, node)| {
-            let lang = AuditLang::of(node)?;
+            let lang = ExportLang::of(node)?;
             (node.visibility == lang.public()).then_some((idx, lang))
         })
         .collect()
@@ -488,7 +393,7 @@ fn public_nodes(graph: &CallGraph) -> Vec<(usize, AuditLang)> {
 fn rust_crate_dirs(graph: &CallGraph) -> BTreeMap<&str, &str> {
     let mut dirs: BTreeMap<&str, &str> = BTreeMap::new();
     for node in &graph.nodes {
-        if AuditLang::of(node) != Some(AuditLang::Rust) {
+        if ExportLang::of(node) != Some(ExportLang::Rust) {
             continue;
         }
         if let Some(crate_dir) = crate_dir_of(&node.file) {
@@ -508,7 +413,7 @@ fn audit_scope(
     let crates: BTreeSet<&str> = graph
         .nodes
         .iter()
-        .filter(|node| AuditLang::of(node) == Some(AuditLang::Rust))
+        .filter(|node| ExportLang::of(node) == Some(ExportLang::Rust))
         .map(|node| crate_of(&node.module))
         .collect();
     Audit {
@@ -524,7 +429,7 @@ fn audit_scope(
         unsupported_language_function_count: graph
             .nodes
             .iter()
-            .filter(|node| !node.is_test && AuditLang::of(node).is_none())
+            .filter(|node| !node.is_test && ExportLang::of(node).is_none())
             .count(),
     }
 }
@@ -752,7 +657,7 @@ fn normalize_use_path(path: &str) -> &str {
 fn classify(
     graph: &CallGraph,
     idx: usize,
-    lang: AuditLang,
+    lang: ExportLang,
     callers: Option<&BTreeSet<usize>>,
 ) -> Option<Finding> {
     let node = &graph.nodes[idx];
@@ -765,8 +670,8 @@ fn classify(
         .collect();
 
     let (scope, scope_module) = match lang {
-        AuditLang::Rust => rust_scope(&node.module, &caller_modules)?,
-        AuditLang::Go => go_scope(&node.module, &caller_modules)?,
+        ExportLang::Rust => rust_scope(&node.module, &caller_modules)?,
+        ExportLang::Go => go_scope(&node.module, &caller_modules)?,
     };
     Some(Finding {
         id: node.id.clone(),
@@ -836,15 +741,15 @@ fn go_scope<'a>(
 
 /// The declaration that would still compile, spelled the way the
 /// language writes it.
-fn suggest(lang: AuditLang, scope: CallerScope, module: &str, scope_module: &str) -> String {
+fn suggest(lang: ExportLang, scope: CallerScope, module: &str, scope_module: &str) -> String {
     match (lang, scope) {
         (_, CallerScope::NoResolvedCallers) => {
             "verify: no resolved caller in the analyzed tree".to_owned()
         }
-        (AuditLang::Go, _) => "unexport: lowercase the initial letter".to_owned(),
-        (AuditLang::Rust, CallerScope::SameModule) => "drop `pub`".to_owned(),
-        (AuditLang::Rust, CallerScope::SameCrate) => "pub(crate)".to_owned(),
-        (AuditLang::Rust, CallerScope::AncestorModule) => {
+        (ExportLang::Go, _) => "unexport: lowercase the initial letter".to_owned(),
+        (ExportLang::Rust, CallerScope::SameModule) => "drop `pub`".to_owned(),
+        (ExportLang::Rust, CallerScope::SameCrate) => "pub(crate)".to_owned(),
+        (ExportLang::Rust, CallerScope::AncestorModule) => {
             if parent_of(module) == Some(scope_module) {
                 "pub(super)".to_owned()
             } else {
@@ -913,12 +818,12 @@ fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) 
         };
         for slot in slots {
             let (idx, finding) = &mut findings[slot];
-            let lang = AuditLang::of(&graph.nodes[*idx]);
+            let lang = ExportLang::of(&graph.nodes[*idx]);
             let inside = caller_module.is_some_and(|caller_module| {
                 in_scope(
                     caller_module,
                     &finding.scope_module,
-                    lang.is_some_and(AuditLang::scope_covers_descendants),
+                    lang.is_some_and(ExportLang::scope_covers_descendants),
                 )
             });
             if inside {
@@ -945,7 +850,7 @@ fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) 
 /// and it is worthless. Only that last class can still be a caller of
 /// `node`, and it is exactly the one this predicate keeps.
 fn gated_by_name(node: &CallGraphNode, callee: &str) -> bool {
-    AuditLang::of(node).is_some_and(|lang| lang.ubiquitous_names().contains(callee))
+    ExportLang::of(node).is_some_and(|lang| lang.ubiquitous_names().contains(callee))
 }
 
 fn summarize(modules: &[ModuleGroup], audited_function_count: usize) -> Summary {

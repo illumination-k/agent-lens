@@ -60,6 +60,14 @@ pub struct FunctionShape {
     /// Documentation text attached to the definition, comment markers
     /// stripped. `None` when absent or not extracted by the adapter.
     pub doc: Option<String>,
+    /// Non-doc annotations attached to the definition, as written and
+    /// without their arguments: Rust attribute paths (`no_mangle`,
+    /// `tokio::main`), Go compiler directives read off the doc comment
+    /// (`go:linkname`, `export`). `Known(vec![])` means the adapter
+    /// looked and found none; `Unknown` means it does not extract them,
+    /// which reachability analysis must read as "an entry marker may be
+    /// hiding here" rather than "there is none".
+    pub attributes: SyntaxFact<Vec<String>>,
     pub body: BodyShape,
     pub span: SourceSpan,
     pub is_test: bool,
@@ -93,6 +101,7 @@ impl From<FunctionDef> for FunctionShape {
                 .map(SignatureShape::from)
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             doc: def.doc,
+            attributes: SyntaxFact::Unknown,
             body: BodyShape { tree: body_tree },
             span: SourceSpan {
                 start_line: def.start_line,
@@ -136,8 +145,14 @@ pub struct OwnerShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerKind {
     Class,
+    /// An inherent `impl` block: the methods are reached by name.
     Impl,
+    /// A trait declaration: the methods are the interface itself.
     Trait,
+    /// A trait `impl` block (`impl Trait for Type`): the methods are
+    /// reachable through the trait, so a call site can name the trait
+    /// method and never this definition.
+    TraitImpl,
     Receiver,
     Namespace,
     Module,
@@ -380,6 +395,7 @@ mod tests {
             visibility: SyntaxFact::Unknown,
             signature: SyntaxFact::Unknown,
             doc: None,
+            attributes: SyntaxFact::Unknown,
             body: BodyShape {
                 tree: TreeNode::leaf("Block"),
             },

@@ -7,7 +7,7 @@ use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
     DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
     HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
-    SimilarityAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    SimilarityAnalyzer, UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -15,7 +15,8 @@ use super::args::{
     AnalyzeCohesionArgs, AnalyzeCommand, AnalyzeCommonArgs, AnalyzeComplexityArgs,
     AnalyzeContextSpanArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHotspotArgs,
     AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs,
-    AnalyzeSimilarityArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeSimilarityArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
+    AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -89,6 +90,10 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.similarity.clone().unwrap_or_default(),
         }),
+        config::ToolName::Unreachable => AnalyzeCommand::Unreachable(AnalyzeUnreachableArgs {
+            common,
+            opts: profile.unreachable.clone().unwrap_or_default(),
+        }),
         config::ToolName::Untested => AnalyzeCommand::Untested(AnalyzeUntestedArgs {
             common,
             opts: profile.untested.clone().unwrap_or_default(),
@@ -149,6 +154,7 @@ impl_with_analyze_path_args!(
     ImpactAnalyzer,
     LayersAnalyzer,
     RiskAnalyzer,
+    UnreachableAnalyzer,
     UntestedAnalyzer,
     VisibilityAnalyzer,
     WrapperAnalyzer,
@@ -246,6 +252,13 @@ impl AnalyzeCommand {
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
+            Self::Unreachable(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                UnreachableAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
             Self::Untested(args) => {
                 let (path, format, path_filter) = args.common.into_parts();
                 UntestedAnalyzer::new()
@@ -301,7 +314,7 @@ mod tests {
 
     use agent_lens::analyze::{
         DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphQueryKind, PairKey,
-        SimilarityMethod,
+        SimilarityMethod, UnreachableTier,
     };
     use agent_lens::test_support::write_file;
     use clap::Parser;
@@ -564,6 +577,28 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(7));
         assert!(args.opts.diff_only);
+    }
+
+    #[test]
+    fn build_analyze_command_maps_unreachable_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"unreachable\"]\n\n\
+             [unreachable]\ntop = 6\ntier = \"likely\"\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Unreachable,
+            &profile,
+            Path::new("crates"),
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::Unreachable(args) = cmd else {
+            panic!("expected analyze unreachable");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.top, Some(6));
+        assert_eq!(args.opts.tier, Some(UnreachableTier::Likely));
     }
 
     #[test]

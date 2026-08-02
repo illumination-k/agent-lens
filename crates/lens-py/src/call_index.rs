@@ -103,6 +103,9 @@ fn function_shape(site: &FnSite<'_>, module: &str, lines: &LineIndex) -> Functio
         visibility: SyntaxFact::Unknown,
         signature: SyntaxFact::Unknown,
         doc: crate::parser::docstring_text(func),
+        // Decorators are not extracted yet; `Unknown` keeps a
+        // framework-registered function from reading as unannotated.
+        attributes: SyntaxFact::Unknown,
         body: BodyShape {
             tree: function_body_tree(func),
         },

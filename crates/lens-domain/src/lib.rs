@@ -43,12 +43,15 @@
 //! * [`risk`] — the churn × blast-radius sibling of [`hotspot`]: the
 //!   same churn table joined with per-file call-graph centrality by
 //!   rank product, for "how carefully should I treat this edit?".
-//! * [`method_names`] — the [`UbiquitousMethodNames`] and
-//!   [`BuiltinFunctionNames`] lookup shapes. Adapters own the actual
-//!   name tables (`.clone()`, `.map()`, `append(…)`, `len(…)`, …); the
-//!   call-graph resolver consults them to avoid attributing a call to a
-//!   workspace function that merely shares a standard-library method
-//!   name or a language builtin.
+//! * [`method_names`] — the [`UbiquitousMethodNames`],
+//!   [`BuiltinFunctionNames`] and [`InertAttributeNames`] lookup shapes.
+//!   Adapters own the actual name tables (`.clone()`, `.map()`,
+//!   `append(…)`, `len(…)`, `#[inline]`, …); the call-graph resolver
+//!   consults the first two to avoid attributing a call to a workspace
+//!   function that merely shares a standard-library method name or a
+//!   language builtin, and reachability analysis consults the third to
+//!   tell a harmless annotation from one that can register a definition
+//!   with machinery no call site names.
 //! * [`wrapper`] — thin-wrapper finding shape. Adapters decide what
 //!   counts as a trivial adapter in their grammar; the result type is
 //!   shared so `agent-lens` can dispatch on language without per-adapter
@@ -100,7 +103,7 @@ pub use function::{
 pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use line_index::LineIndex;
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
-pub use method_names::{BuiltinFunctionNames, UbiquitousMethodNames};
+pub use method_names::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
 pub use naming::{identifier_tokens, qualify, qualify_module, starts_uppercase};
 pub use risk::{FileCentrality, RiskEntry, compute_risk};
 pub use syntax::{

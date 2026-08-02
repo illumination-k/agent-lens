@@ -101,6 +101,7 @@ fn function_shape(site: &FnSite<'_, '_>, source: &[u8], module: &str) -> Functio
         visibility: SyntaxFact::Known(visibility),
         signature: SyntaxFact::Known(parameter_signature(node, source)),
         doc: crate::parser::doc_comment_text(node, source),
+        attributes: SyntaxFact::Known(crate::parser::directive_names(node, source)),
         body: BodyShape {
             tree: crate::parser::function_body_tree(body, source),
         },

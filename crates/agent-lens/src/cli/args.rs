@@ -15,6 +15,7 @@ use agent_lens::analyze::impact::ImpactOptions;
 use agent_lens::analyze::layers::LayersOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
+use agent_lens::analyze::unreachable::UnreachableOptions;
 use agent_lens::analyze::untested::UntestedOptions;
 use agent_lens::analyze::visibility::VisibilityOptions;
 use agent_lens::analyze::wrapper::WrapperOptions;
@@ -617,6 +618,36 @@ pub(super) enum AnalyzeCommand {
     /// module listing at `--top` (default 20).
     #[command(after_long_help = examples::UNTESTED)]
     Untested(AnalyzeUntestedArgs),
+    /// Report functions no call path from an entry point reaches, in
+    /// confidence tiers.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`,
+    /// walks forward from every entry point (`main`, Go `init`, test
+    /// functions, `pub` / exported declarations, and anything carrying a
+    /// non-inert annotation), and reports what the walk never reaches.
+    /// The entry set is emitted with the report, because every verdict
+    /// is relative to it. Each candidate then goes through a raw
+    /// identifier-reference scan over the scanned sources — a name
+    /// written in a macro body, a string, or an expression the parser
+    /// did not attribute is a reason to stop trusting the graph — and
+    /// lands in one of three tiers: `confirmed` (private/unexported,
+    /// unreachable, unreferenced, no caveat: deletable on this evidence
+    /// alone), `likely` (nothing in the analyzed path uses it, but the
+    /// declaration reaches outside it), `unknown` (a lead, demoted by
+    /// trait or interface dispatch, an annotation, an ambiguous call
+    /// site, or a raw reference). The direction of soundness is
+    /// deliberate: dead code this misses is expected, a `confirmed` row
+    /// that is live is a bug. Clusters of unreachable functions that
+    /// only call each other are reported as islands with their total LOC
+    /// and a deletion order. Export status is extracted for Rust and Go
+    /// only; TypeScript and Python functions are treated as entry points
+    /// and never judged. `--exclude-tests` removes both the test entry
+    /// points and the references test bodies hold, and is reported as
+    /// such. JSON is the default and always carries every tier;
+    /// `--format md` leads with `confirmed` (`--tier` widens it) and
+    /// caps the module listing at `--top` (default 20).
+    #[command(after_long_help = examples::UNREACHABLE)]
+    Unreachable(AnalyzeUnreachableArgs),
     /// Report `pub` / exported functions no caller outside a narrower
     /// scope uses.
     ///
@@ -768,6 +799,14 @@ pub(super) struct AnalyzeSimilarityArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeUnreachableArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: UnreachableOptions,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(super) struct AnalyzeUntestedArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
@@ -816,6 +855,7 @@ mod tests {
     use super::*;
     use agent_lens::analyze::{
         DEFAULT_SIMILARITY_DRIFT_FLOOR, GraphDirection, GraphQueryKind, PairKey, SimilarityMethod,
+        UnreachableTier,
     };
     use clap::CommandFactory;
     use rstest::rstest;
@@ -1391,6 +1431,42 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("."));
         assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.opts.top, None);
+    }
+
+    #[test]
+    fn parses_analyze_unreachable_with_tier_and_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "unreachable",
+            "crates",
+            "--tier",
+            "unknown",
+            "--top",
+            "12",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Unreachable(args)) = cli.command else {
+            panic!("expected analyze unreachable");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.tier, Some(UnreachableTier::Unknown));
+        assert_eq!(args.opts.top, Some(12));
+    }
+
+    #[test]
+    fn parses_analyze_unreachable_defaults_to_json_and_no_tier() {
+        let cli = Cli::try_parse_from(["agent-lens", "analyze", "unreachable", "."])
+            .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Unreachable(args)) = cli.command else {
+            panic!("expected analyze unreachable");
+        };
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.opts.tier, None);
         assert_eq!(args.opts.top, None);
     }
 

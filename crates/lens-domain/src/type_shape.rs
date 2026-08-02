@@ -138,6 +138,7 @@ impl TypeShape {
             visibility: SyntaxFact::Unknown,
             signature: SyntaxFact::Known(signature),
             doc: self.doc,
+            attributes: SyntaxFact::Unknown,
             body: BodyShape { tree },
             span: self.span,
             is_test: self.is_test,
