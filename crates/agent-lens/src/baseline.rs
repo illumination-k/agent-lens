@@ -588,8 +588,34 @@ mod tests {
     fn aggregates_keep_whole_numbers_whole() {
         let report = json!({ "modules": [ { "transitive": 2 }, { "transitive": 3 } ] });
         let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
-        let rendered = serde_json::to_string(&metrics).unwrap();
-        assert!(rendered.contains("\"transitive_sum\":5"), "got: {rendered}");
+        // Exact, not a substring check: `5.0` would also contain `5`,
+        // and a count rendered as a float is the bug this guards.
+        assert_eq!(
+            serde_json::to_string(&metrics).unwrap(),
+            r#"{"transitive_max":3,"transitive_sum":5}"#,
+        );
+    }
+
+    #[test]
+    fn a_fractional_aggregate_keeps_its_fraction() {
+        let report = json!({ "modules": [ { "transitive": 0.5 }, { "transitive": 1.0 } ] });
+        let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
+        assert_eq!(metric(&metrics, "transitive_sum"), Some(1.5));
+        assert_eq!(
+            serde_json::to_string(&metrics).unwrap(),
+            r#"{"transitive_max":1,"transitive_sum":1.5}"#,
+        );
+    }
+
+    #[test]
+    fn an_aggregate_past_i64_stays_a_float_instead_of_saturating() {
+        // `as i64` saturates at `i64::MAX`, which would silently pin a
+        // runaway total to a fixed number that looks like a real
+        // measurement. Past that range the value stays a float.
+        let report = json!({ "modules": [ { "transitive": 1e19 } ] });
+        let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
+        assert_eq!(metric(&metrics, "transitive_sum"), Some(1e19));
+        assert_eq!(metric(&metrics, "transitive_max"), Some(1e19));
     }
 
     #[test]
