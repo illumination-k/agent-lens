@@ -2305,6 +2305,34 @@ mod tests {
         );
     }
 
+    /// An ambiguous call site in reachable code is evidence in its own
+    /// right: the resolver saw a call that might be this function and
+    /// could not decide which of the candidates it meant. The row names
+    /// that separately from the textual scan, because the two are
+    /// different reasons to go and look.
+    #[test]
+    fn an_ambiguous_call_from_reachable_code_is_named_as_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() { target(); }\n\
+             mod a { pub(super) fn target() -> usize { 1 } }\n\
+             mod b { pub(super) fn target() -> usize { 2 } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let row = row_for(&report, "a::target").expect("the candidate is reported");
+        assert_eq!(row["tier"], "unknown", "got {row}");
+        assert!(
+            row["demoted_by"]
+                .as_array()
+                .is_some_and(|reasons| reasons.contains(&Value::from("ambiguous_call"))),
+            "got {row}",
+        );
+        assert_eq!(row["ambiguous_inbound_count"], 1, "got {row}");
+    }
+
     /// With nothing to report the markdown says which of the two empty
     /// cases it is, rather than rendering an empty section.
     #[test]
