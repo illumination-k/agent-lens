@@ -1073,19 +1073,65 @@ mod tests {
         assert!(!md.contains("  - b.rs:`second`"), "got: {md}");
     }
 
-    #[test]
-    fn block_file_breakdown_collapses_the_tail_past_the_display_cap() {
-        let units: Vec<(&'static str, &'static str, usize, usize)> = [
-            "a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs", "h.rs",
-        ]
-        .iter()
-        .map(|file| (*file, "fn", 1usize, 3usize))
-        .collect();
+    /// A quoted occurrence is capped so one long window cannot swallow
+    /// the report, and the cut has to be announced — a silently
+    /// truncated snippet reads as the whole fragment.
+    #[rstest]
+    #[case::under_cap(MAX_SNIPPET_LINES - 1, MAX_SNIPPET_LINES - 1, None)]
+    #[case::exactly_at_cap(MAX_SNIPPET_LINES, MAX_SNIPPET_LINES, None)]
+    #[case::over_cap(MAX_SNIPPET_LINES + 3, MAX_SNIPPET_LINES, Some("… (3 more lines)"))]
+    fn block_snippet_is_capped_and_says_when_it_truncated(
+        #[case] snippet_len: usize,
+        #[case] expected_shown: usize,
+        #[case] expected_marker: Option<&str>,
+    ) {
+        let mut cluster = block_cluster(&[("a.rs", "f", 1, 3), ("b.rs", "g", 1, 3)]);
+        cluster.set_snippet((0..snippet_len).map(|i| format!("line{i};")).collect());
+        let mut out = String::new();
+
+        write_block_body(&mut out, &cluster);
+
+        let shown = (0..snippet_len)
+            .filter(|i| out.contains(&format!("    line{i};\n")))
+            .count();
+        assert_eq!(shown, expected_shown, "got: {out}");
+        match expected_marker {
+            Some(marker) => assert!(out.contains(marker), "got: {out}"),
+            None => assert!(!out.contains("more lines)"), "got: {out}"),
+        }
+    }
+
+    /// The occurrence breakdown names files up to a cap and then says
+    /// how many it left out. A cap that fires one file early would
+    /// report "+0 more file(s)" on a cluster that fits exactly.
+    #[rstest]
+    #[case::under_cap(MAX_BREAKDOWN_FILES - 1, None)]
+    #[case::exactly_at_cap(MAX_BREAKDOWN_FILES, None)]
+    #[case::over_cap(MAX_BREAKDOWN_FILES + 2, Some("(+2 more file(s))"))]
+    fn block_file_breakdown_collapses_the_tail_past_the_display_cap(
+        #[case] file_count: usize,
+        #[case] expected_marker: Option<&str>,
+    ) {
+        const FILES: [&str; 9] = [
+            "a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs", "h.rs", "i.rs",
+        ];
+        let units: Vec<(&'static str, &'static str, usize, usize)> = FILES[..file_count]
+            .iter()
+            .map(|file| (*file, "fn", 1usize, 3usize))
+            .collect();
 
         let line = file_breakdown(&block_cluster(&units));
 
         assert!(line.starts_with("a.rs ×1, b.rs ×1"), "got: {line}");
-        assert!(line.ends_with("(+2 more file(s))"), "got: {line}");
+        assert_eq!(
+            line.split(", ").count(),
+            file_count.min(MAX_BREAKDOWN_FILES),
+            "got: {line}",
+        );
+        match expected_marker {
+            Some(marker) => assert!(line.ends_with(marker), "got: {line}"),
+            None => assert!(!line.contains("more file(s)"), "got: {line}"),
+        }
     }
 
     #[test]

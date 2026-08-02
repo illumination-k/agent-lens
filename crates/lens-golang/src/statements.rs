@@ -188,10 +188,20 @@ mod tests {
         assert_eq!(seqs(src)[0].function_name, "C::Get");
     }
 
-    #[test]
-    fn test_functions_are_flagged_so_callers_can_filter_them() {
-        let src = "package p\n\nfunc TestThing(t *testing.T) {\n\ta := 1\n\tuse(a)\n}\n";
-        assert!(seqs(src).iter().all(|s| s.is_test));
+    /// `go test` only discovers *free* functions, so the test flag
+    /// needs both halves: a test-shaped name and no receiver. A method
+    /// called `TestThing` is production code with an unlucky name.
+    #[rstest]
+    #[case::free_test_function("package p\n\nfunc TestThing(t *testing.T) {\n\ta := 1\n\tuse(a)\n}\n", true)]
+    #[case::method_with_test_name(
+        "package p\n\ntype C struct{}\n\nfunc (c *C) TestThing() {\n\ta := 1\n\tuse(a)\n}\n",
+        false
+    )]
+    #[case::plain_free_function("package p\n\nfunc Thing() {\n\ta := 1\n\tuse(a)\n}\n", false)]
+    fn test_flag_needs_a_test_name_and_no_receiver(#[case] src: &str, #[case] expected: bool) {
+        let collected = seqs(src);
+        assert!(!collected.is_empty());
+        assert!(collected.iter().all(|s| s.is_test == expected));
     }
 
     #[test]

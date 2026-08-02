@@ -172,24 +172,65 @@ function handler(x: number): number {
         );
     }
 
+    /// One case per statement form that can enclose a statement list.
+    /// The body is always the same two statements on lines 3 and 4 (or
+    /// 4 and 5 where the head needs an extra line), so a missing
+    /// `descend` arm shows up as the nested list never being collected.
     #[rstest]
-    #[case::switch_case(
-        "function f(x: number) {\n  switch (x) {\n    case 1:\n      const a = 1;\n      return a;\n  }\n}\n",
-        vec![(4, 4), (5, 5)]
+    #[case::block("function f() {\n  {\n    a();\n    b();\n  }\n}\n", vec![(3, 3), (4, 4)])]
+    #[case::if_consequent(
+        "function f(x: number) {\n  if (x) {\n    a();\n    b();\n  }\n}\n",
+        vec![(3, 3), (4, 4)]
     )]
-    #[case::catch_block(
-        "function f() {\n  try {\n    go();\n  } catch (e) {\n    log(e);\n    rethrow(e);\n  }\n}\n",
+    #[case::else_branch(
+        "function f(x: number) {\n  if (x) {\n    c();\n  } else {\n    a();\n    b();\n  }\n}\n",
         vec![(5, 5), (6, 6)]
     )]
-    #[case::for_body(
-        "function f(xs: number[]) {\n  for (const x of xs) {\n    total += x;\n    count += 1;\n  }\n}\n",
+    #[case::while_body("function f(x: number) {\n  while (x) {\n    a();\n    b();\n  }\n}\n", vec![(3, 3), (4, 4)])]
+    #[case::do_while_body(
+        "function f(x: number) {\n  do {\n    a();\n    b();\n  } while (x);\n}\n",
         vec![(3, 3), (4, 4)]
+    )]
+    #[case::for_body(
+        "function f() {\n  for (let i = 0; i < 3; i++) {\n    a();\n    b();\n  }\n}\n",
+        vec![(3, 3), (4, 4)]
+    )]
+    #[case::for_in_body(
+        "function f(o: object) {\n  for (const k in o) {\n    a();\n    b();\n  }\n}\n",
+        vec![(3, 3), (4, 4)]
+    )]
+    #[case::for_of_body(
+        "function f(xs: number[]) {\n  for (const x of xs) {\n    a();\n    b();\n  }\n}\n",
+        vec![(3, 3), (4, 4)]
+    )]
+    #[case::labeled_body(
+        "function f() {\n  outer: {\n    a();\n    b();\n  }\n}\n",
+        vec![(3, 3), (4, 4)]
+    )]
+    #[case::switch_case(
+        "function f(x: number) {\n  switch (x) {\n    case 1:\n      a();\n      b();\n  }\n}\n",
+        vec![(4, 4), (5, 5)]
+    )]
+    #[case::try_block(
+        "function f() {\n  try {\n    a();\n    b();\n  } catch (e) {}\n}\n",
+        vec![(3, 3), (4, 4)]
+    )]
+    #[case::catch_block(
+        "function f() {\n  try {\n    go();\n  } catch (e) {\n    a();\n    b();\n  }\n}\n",
+        vec![(5, 5), (6, 6)]
+    )]
+    #[case::finally_block(
+        "function f() {\n  try {\n    go();\n  } finally {\n    a();\n    b();\n  }\n}\n",
+        vec![(5, 5), (6, 6)]
     )]
     fn nested_statement_lists_are_reached(
         #[case] src: &str,
         #[case] expected: Vec<(usize, usize)>,
     ) {
         let collected = seqs(src);
+        // The body plus at least the nested list under test; forms with
+        // two branches (if/else, try/catch) contribute a third.
+        assert!(collected.len() >= 2, "nested list was not collected");
         let last = collected.last().expect("at least one sequence");
         assert_eq!(
             last.statements
@@ -197,6 +238,27 @@ function handler(x: number): number {
                 .map(|st| (st.start_line, st.end_line))
                 .collect::<Vec<_>>(),
             expected,
+        );
+    }
+
+    /// `with` is a sloppy-mode-only form, so it needs a script dialect
+    /// rather than the module default the other cases use.
+    #[test]
+    fn with_statement_body_is_reached() {
+        let collected = extract_statement_seqs(
+            "function f(o) {\n  with (o) {\n    a();\n    b();\n  }\n}\n",
+            Dialect::Cjs,
+        )
+        .expect("parses");
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(
+            collected[1]
+                .statements
+                .iter()
+                .map(|st| (st.start_line, st.end_line))
+                .collect::<Vec<_>>(),
+            vec![(3, 3), (4, 4)],
         );
     }
 
