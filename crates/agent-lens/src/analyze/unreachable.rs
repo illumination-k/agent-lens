@@ -2205,6 +2205,13 @@ mod tests {
         );
     }
 
+    /// What a call site, a string, or a comment puts around a name.
+    /// Unicode letters and digits are deliberately absent: those *are*
+    /// identifier characters, so a name glued to one is a different
+    /// name — the property below would be asserting the opposite of
+    /// what the scan promises.
+    const SEPARATORS: &[&str] = &[" ", ".", "(", ")", ",", ";", "\t", "\"", "+", "::"];
+
     #[rstest]
     #[case::bare("orphan", vec!["orphan"])]
     #[case::call_expression("    orphan();", vec!["orphan"])]
@@ -2213,6 +2220,9 @@ mod tests {
     #[case::longer_identifier("orphaned()", vec!["orphaned"])]
     #[case::prefixed("my_orphan", vec!["my_orphan"])]
     #[case::non_ascii_name("café()", vec!["café"])]
+    // A Unicode digit is an identifier character like any other, so it
+    // glues rather than separates — the same rule as `orphaned`.
+    #[case::unicode_digit_glues("¹a", vec!["¹a"])]
     #[case::empty("", Vec::new())]
     fn identifiers_yields_whole_runs_only(#[case] line: &str, #[case] expected: Vec<&str>) {
         assert_eq!(identifiers(line).collect::<Vec<_>>(), expected);
@@ -2225,8 +2235,8 @@ mod tests {
         #[test]
         fn a_name_is_found_only_as_a_whole_run(
             name in "[a-z][a-z_]{0,8}",
-            left in "[^A-Za-z0-9_]{0,4}",
-            right in "[^A-Za-z0-9_]{0,4}",
+            left in prop::sample::select(SEPARATORS),
+            right in prop::sample::select(SEPARATORS),
             suffix in "[a-z]{1,4}",
         ) {
             let line = format!("{left}{name}{right}");
