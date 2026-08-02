@@ -5,19 +5,17 @@ use std::path::Path;
 
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
-    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, DelegationAnalyzer,
-    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer,
-    ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer, SimilarityAnalyzer,
-    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
+    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
+    SimilarityAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeCohesionArgs, AnalyzeCommand, AnalyzeCommonArgs, AnalyzeComplexityArgs,
-    AnalyzeContextSpanArgs, AnalyzeDelegationArgs, AnalyzeDiffArgs, AnalyzeGraphQueryArgs,
-    AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs,
-    AnalyzeRankingArgs, AnalyzeRiskArgs, AnalyzeSimilarityArgs, AnalyzeUntestedArgs,
-    AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeContextSpanArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHotspotArgs,
+    AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs,
+    AnalyzeSimilarityArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -26,11 +24,15 @@ pub(super) fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error:
 }
 
 /// Translate one profile tool entry into the [`AnalyzeCommand`] the
-/// `analyze` subcommand would build for the same options. Per-tool tables
-/// that are absent fall back to the analyzer's CLI defaults; `graph-query`
-/// has no defaults to fall back to (its `query` and `symbol` are
-/// required), so a missing table is an error — [`config::load`] already
-/// rejects such profiles, this is the seam-level guard.
+/// `analyze` subcommand would build for the same options.
+///
+/// Each analyzer's options table *is* its clap flag group, so a present
+/// table drops straight into the command with no field-by-field copy. An
+/// absent table means "run with the analyzer's CLI defaults", which is
+/// exactly its `Default`. `graph-query` is the one tool with no defaults
+/// to fall back to (its `query` and `symbol` are required), so a missing
+/// table is an error — [`config::load`] already rejects such profiles,
+/// this is the seam-level guard.
 pub(super) fn build_analyze_command(
     tool: config::ToolName,
     profile: &config::Profile,
@@ -47,145 +49,71 @@ pub(super) fn build_analyze_command(
         },
     };
     Ok(match tool {
-        config::ToolName::Cohesion => {
-            let opts = profile.cohesion.clone().unwrap_or_default();
-            AnalyzeCommand::Cohesion(AnalyzeCohesionArgs {
-                common,
-                diff: AnalyzeDiffArgs {
-                    diff_only: opts.diff_only,
-                },
-                ranking: AnalyzeRankingArgs { top: opts.top },
-                min_score: opts.min_score,
-            })
-        }
-        config::ToolName::Complexity => {
-            let opts = profile.complexity.clone().unwrap_or_default();
-            AnalyzeCommand::Complexity(AnalyzeComplexityArgs {
-                common,
-                diff: AnalyzeDiffArgs {
-                    diff_only: opts.diff_only,
-                },
-                ranking: AnalyzeRankingArgs { top: opts.top },
-                min_score: opts.min_score,
-            })
-        }
-        config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
-        config::ToolName::Cycles => AnalyzeCommand::Cycles(common),
-        config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
-        config::ToolName::GraphQuery => {
-            let opts = profile
+        config::ToolName::Cohesion => AnalyzeCommand::Cohesion(AnalyzeCohesionArgs {
+            common,
+            opts: profile.cohesion.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Complexity => AnalyzeCommand::Complexity(AnalyzeComplexityArgs {
+            common,
+            opts: profile.complexity.clone().unwrap_or_default(),
+        }),
+        config::ToolName::ContextSpan => AnalyzeCommand::ContextSpan(AnalyzeContextSpanArgs {
+            common,
+            opts: profile.context_span.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Delegation => AnalyzeCommand::Delegation(AnalyzeDelegationArgs {
+            common,
+            opts: profile.delegation.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Hotspot => AnalyzeCommand::Hotspot(AnalyzeHotspotArgs {
+            common,
+            opts: profile.hotspot.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Hubs => AnalyzeCommand::Hubs(AnalyzeHubsArgs {
+            common,
+            opts: profile.hubs.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Impact => AnalyzeCommand::Impact(AnalyzeImpactArgs {
+            common,
+            opts: profile.impact.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Layers => AnalyzeCommand::Layers(AnalyzeLayersArgs {
+            common,
+            opts: profile.layers.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Risk => AnalyzeCommand::Risk(AnalyzeRiskArgs {
+            common,
+            opts: profile.risk.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Similarity => AnalyzeCommand::Similarity(AnalyzeSimilarityArgs {
+            common,
+            opts: profile.similarity.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Untested => AnalyzeCommand::Untested(AnalyzeUntestedArgs {
+            common,
+            opts: profile.untested.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Visibility => AnalyzeCommand::Visibility(AnalyzeVisibilityArgs {
+            common,
+            opts: profile.visibility.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Wrapper => AnalyzeCommand::Wrapper(AnalyzeWrapperArgs {
+            common,
+            opts: profile.wrapper.clone().unwrap_or_default(),
+        }),
+        config::ToolName::GraphQuery => AnalyzeCommand::GraphQuery(AnalyzeGraphQueryArgs {
+            common,
+            opts: profile
                 .graph_query
                 .clone()
                 .ok_or(ConfigError::MissingToolOptions {
                     tool: config::ToolName::GraphQuery.as_str(),
-                })?;
-            AnalyzeCommand::GraphQuery(AnalyzeGraphQueryArgs {
-                common,
-                query: opts.query,
-                symbol: opts.symbol,
-                to: opts.to,
-                depth: opts.depth,
-                direction: opts.direction,
-                limit: opts.limit,
-            })
-        }
-        config::ToolName::ContextSpan => {
-            let opts = profile.context_span.clone().unwrap_or_default();
-            AnalyzeCommand::ContextSpan(AnalyzeContextSpanArgs {
-                common,
-                entry_glob: opts.entry_glob,
-            })
-        }
-        config::ToolName::Hotspot => {
-            let opts = profile.hotspot.clone().unwrap_or_default();
-            AnalyzeCommand::Hotspot(AnalyzeHotspotArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-                since: opts.since,
-            })
-        }
-        config::ToolName::Risk => {
-            let opts = profile.risk.clone().unwrap_or_default();
-            AnalyzeCommand::Risk(AnalyzeRiskArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-                since: opts.since,
-            })
-        }
-        config::ToolName::Hubs => {
-            let opts = profile.hubs.clone().unwrap_or_default();
-            AnalyzeCommand::Hubs(AnalyzeHubsArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-            })
-        }
-        config::ToolName::Impact => {
-            let opts = profile.impact.clone().unwrap_or_default();
-            AnalyzeCommand::Impact(AnalyzeImpactArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-                function: opts.function,
-                depth: opts.depth,
-            })
-        }
-        config::ToolName::Layers => {
-            let opts = profile.layers.clone().unwrap_or_default();
-            AnalyzeCommand::Layers(AnalyzeLayersArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-            })
-        }
-        config::ToolName::Similarity => {
-            let opts = profile.similarity.clone().unwrap_or_default();
-            AnalyzeCommand::Similarity(AnalyzeSimilarityArgs {
-                common,
-                diff: AnalyzeDiffArgs {
-                    diff_only: opts.diff_only,
-                },
-                ranking: AnalyzeRankingArgs { top: opts.top },
-                threshold: opts.threshold.unwrap_or(DEFAULT_SIMILARITY_THRESHOLD),
-                sweep: opts.sweep.unwrap_or_default(),
-                min_lines: opts.min_lines,
-                method: opts.method.unwrap_or_default(),
-                target: opts.target.unwrap_or_default(),
-                doc_overlap: opts.doc_overlap,
-                paired_by: opts.paired_by,
-                drift_floor: opts.drift_floor.unwrap_or(DEFAULT_SIMILARITY_DRIFT_FLOOR),
-            })
-        }
-        config::ToolName::Delegation => {
-            let opts = profile.delegation.clone().unwrap_or_default();
-            AnalyzeCommand::Delegation(AnalyzeDelegationArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-                diff: AnalyzeDiffArgs {
-                    diff_only: opts.diff_only,
-                },
-            })
-        }
-        config::ToolName::Untested => {
-            let opts = profile.untested.clone().unwrap_or_default();
-            AnalyzeCommand::Untested(AnalyzeUntestedArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-            })
-        }
-        config::ToolName::Visibility => {
-            let opts = profile.visibility.clone().unwrap_or_default();
-            AnalyzeCommand::Visibility(AnalyzeVisibilityArgs {
-                common,
-                ranking: AnalyzeRankingArgs { top: opts.top },
-            })
-        }
-        config::ToolName::Wrapper => {
-            let opts = profile.wrapper.clone().unwrap_or_default();
-            AnalyzeCommand::Wrapper(AnalyzeWrapperArgs {
-                common,
-                diff: AnalyzeDiffArgs {
-                    diff_only: opts.diff_only,
-                },
-            })
-        }
+                })?,
+        }),
+        // Analyzers with no options beyond the shared path/format args.
+        config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
+        config::ToolName::Cycles => AnalyzeCommand::Cycles(common),
+        config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
     })
 }
 
@@ -243,25 +171,105 @@ impl WithAnalyzePathArgs for SimilarityAnalyzer {
 
 impl AnalyzeCommand {
     /// Pick the right analyzer for this CLI variant and produce its
-    /// report. Shared CLI concepts are flattened into the command args
-    /// structs above; each arm only applies analyzer-specific options.
+    /// report. Every arm has the same shape: hand the analyzer its whole
+    /// options group, then the shared path filter. Which flags exist and
+    /// what they mean lives with the analyzer, not here.
     pub(super) fn run(self) -> Result<String, Box<dyn std::error::Error>> {
         Ok(match self {
             Self::Cohesion(args) => {
                 let (path, format, path_filter) = args.common.into_parts();
                 CohesionAnalyzer::new()
-                    .with_diff_only(args.diff.diff_only)
-                    .with_top(args.ranking.top)
-                    .with_min_score(args.min_score)
+                    .with_options(args.opts)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
             Self::Complexity(args) => {
                 let (path, format, path_filter) = args.common.into_parts();
                 ComplexityAnalyzer::new()
-                    .with_diff_only(args.diff.diff_only)
-                    .with_top(args.ranking.top)
-                    .with_min_score(args.min_score)
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::ContextSpan(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                ContextSpanAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Delegation(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                DelegationAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Hotspot(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                HotspotAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Hubs(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                HubsAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Impact(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                ImpactAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Layers(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                LayersAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Risk(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                RiskAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Similarity(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                SimilarityAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Untested(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                UntestedAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Visibility(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                VisibilityAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::Wrapper(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                WrapperAnalyzer::new()
+                    .with_options(args.opts)
+                    .with_analyze_path_args(path_filter)
+                    .analyze(&path, format)?
+            }
+            Self::GraphQuery(args) => {
+                let (path, format, path_filter) = args.common.into_parts();
+                GraphQueryAnalyzer::from_options(args.opts)
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
@@ -283,108 +291,6 @@ impl AnalyzeCommand {
                     .with_analyze_path_args(path_filter)
                     .analyze(&path, format)?
             }
-            Self::GraphQuery(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                GraphQueryAnalyzer::new(args.query, args.symbol)
-                    .with_to(args.to)
-                    .with_depth(args.depth)
-                    .with_direction(args.direction)
-                    .with_limit(args.limit)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::ContextSpan(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                ContextSpanAnalyzer::new()
-                    .with_analyze_path_args(path_filter)
-                    .with_entry_globs(args.entry_glob)
-                    .analyze(&path, format)?
-            }
-            Self::Hubs(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                HubsAnalyzer::new()
-                    .with_top(args.ranking.top)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Impact(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                ImpactAnalyzer::new()
-                    .with_functions(args.function)
-                    .with_depth(args.depth)
-                    .with_top(args.ranking.top)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Layers(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                LayersAnalyzer::new()
-                    .with_top(args.ranking.top)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Hotspot(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                HotspotAnalyzer::new()
-                    .with_top(args.ranking.top)
-                    .with_since_opt(args.since)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Risk(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                RiskAnalyzer::new()
-                    .with_top(args.ranking.top)
-                    .with_since_opt(args.since)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Similarity(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                let sweep = (!args.sweep.is_empty()).then_some(args.sweep);
-                SimilarityAnalyzer::new()
-                    .with_threshold(args.threshold)
-                    .with_sweep(sweep)
-                    .with_diff_only(args.diff.diff_only)
-                    .with_min_lines_opt(args.min_lines)
-                    .with_target(args.target)
-                    .with_method(args.method)
-                    .with_doc_overlap(args.doc_overlap)
-                    .with_paired_by(args.paired_by)
-                    .with_drift_floor(args.drift_floor)
-                    .with_top(args.ranking.top)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Delegation(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                DelegationAnalyzer::new()
-                    .with_top(args.ranking.top)
-                    .with_diff_only(args.diff.diff_only)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Untested(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                UntestedAnalyzer::new()
-                    .with_top(args.ranking.top)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Visibility(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                VisibilityAnalyzer::new()
-                    .with_top(args.ranking.top)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Wrapper(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                WrapperAnalyzer::new()
-                    .with_diff_only(args.diff.diff_only)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
         })
     }
 }
@@ -393,7 +299,10 @@ impl AnalyzeCommand {
 mod tests {
     use std::path::PathBuf;
 
-    use agent_lens::analyze::{GraphQueryKind, PairKey, SimilarityMethod, SimilarityTarget};
+    use agent_lens::analyze::{
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphQueryKind, PairKey,
+        SimilarityMethod,
+    };
     use agent_lens::test_support::write_file;
     use clap::Parser;
 
@@ -518,14 +427,14 @@ fn dispatch(n: i32) -> i32 {
         };
         assert_eq!(args.common.path, PathBuf::from("/repo/web"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert!((args.threshold - 0.7).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, Some(9));
-        assert_eq!(args.ranking.top, Some(4));
-        assert_eq!(args.method, SimilarityMethod::Token);
-        assert!(args.doc_overlap);
-        assert_eq!(args.paired_by, Some(PairKey::Method));
-        assert!((args.drift_floor - 0.5).abs() < f64::EPSILON);
-        assert!(args.diff.diff_only);
+        assert!((args.opts.threshold - 0.7).abs() < f64::EPSILON);
+        assert_eq!(args.opts.min_lines, Some(9));
+        assert_eq!(args.opts.top, Some(4));
+        assert_eq!(args.opts.method, SimilarityMethod::Token);
+        assert!(args.opts.doc_overlap);
+        assert_eq!(args.opts.paired_by, Some(PairKey::Method));
+        assert!((args.opts.drift_floor - 0.5).abs() < f64::EPSILON);
+        assert!(args.opts.diff_only);
     }
 
     #[test]
@@ -542,20 +451,19 @@ fn dispatch(n: i32) -> i32 {
         let AnalyzeCommand::Similarity(args) = cmd else {
             panic!("expected analyze similarity");
         };
-        assert!((args.threshold - DEFAULT_SIMILARITY_THRESHOLD).abs() < f64::EPSILON);
-        // An absent `min-lines` stays unset so the analyzer can apply the
-        // target-specific default.
-        assert_eq!(args.min_lines, None);
-        assert_eq!(args.ranking.top, None);
-        assert_eq!(args.method, SimilarityMethod::Tsed);
-        assert_eq!(args.target, SimilarityTarget::Functions);
-        assert!(!args.doc_overlap);
+        assert!((args.opts.threshold - DEFAULT_SIMILARITY_THRESHOLD).abs() < f64::EPSILON);
+        // Absent `min-lines` stays `None`: the effective floor depends on
+        // `--target`, so the analyzer resolves it rather than the seam.
+        assert_eq!(args.opts.min_lines, None);
+        assert_eq!(args.opts.top, None);
+        assert_eq!(args.opts.method, SimilarityMethod::Tsed);
+        assert!(!args.opts.doc_overlap);
         // Absent `paired-by` keeps the clustering report; the floor falls
         // back to its default so it is well-defined if pairing is turned
         // on from the command line over the same profile.
-        assert_eq!(args.paired_by, None);
-        assert!((args.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
-        assert!(!args.diff.diff_only);
+        assert_eq!(args.opts.paired_by, None);
+        assert!((args.opts.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
+        assert!(!args.opts.diff_only);
     }
 
     #[test]
@@ -573,7 +481,7 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze hubs");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(7));
+        assert_eq!(args.opts.top, Some(7));
     }
 
     #[test]
@@ -593,8 +501,8 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze risk");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.since.as_deref(), Some("30.days.ago"));
-        assert_eq!(args.ranking.top, Some(11));
+        assert_eq!(args.opts.since.as_deref(), Some("30.days.ago"));
+        assert_eq!(args.opts.top, Some(11));
     }
 
     #[test]
@@ -613,7 +521,7 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze layers");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(9));
+        assert_eq!(args.opts.top, Some(9));
     }
 
     #[test]
@@ -633,7 +541,7 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze visibility");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(9));
+        assert_eq!(args.opts.top, Some(9));
     }
 
     #[test]
@@ -654,8 +562,8 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze delegation");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(7));
-        assert!(args.diff.diff_only);
+        assert_eq!(args.opts.top, Some(7));
+        assert!(args.opts.diff_only);
     }
 
     #[test]
@@ -674,7 +582,7 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze untested");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(11));
+        assert_eq!(args.opts.top, Some(11));
     }
 
     #[test]
@@ -694,9 +602,9 @@ fn dispatch(n: i32) -> i32 {
         let AnalyzeCommand::Impact(args) = cmd else {
             panic!("expected analyze impact");
         };
-        assert_eq!(args.function, ["Resolver::resolve"]);
-        assert_eq!(args.depth, Some(3));
-        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.opts.function, ["Resolver::resolve"]);
+        assert_eq!(args.opts.depth, Some(3));
+        assert_eq!(args.opts.top, Some(5));
         assert_eq!(args.common.format, OutputFormat::Md);
     }
 
@@ -714,8 +622,8 @@ fn dispatch(n: i32) -> i32 {
         let AnalyzeCommand::Impact(args) = cmd else {
             panic!("expected analyze impact");
         };
-        assert!(args.function.is_empty());
-        assert_eq!(args.depth, None);
+        assert!(args.opts.function.is_empty());
+        assert_eq!(args.opts.depth, None);
     }
 
     #[test]
@@ -736,12 +644,12 @@ fn dispatch(n: i32) -> i32 {
         let AnalyzeCommand::GraphQuery(args) = cmd else {
             panic!("expected analyze graph-query");
         };
-        assert_eq!(args.query, GraphQueryKind::Path);
-        assert_eq!(args.symbol, "handler");
-        assert_eq!(args.to.as_deref(), Some("db_write"));
-        assert_eq!(args.depth, Some(3));
-        assert_eq!(args.direction, None);
-        assert_eq!(args.limit, Some(10));
+        assert_eq!(args.opts.query, GraphQueryKind::Path);
+        assert_eq!(args.opts.symbol, "handler");
+        assert_eq!(args.opts.to.as_deref(), Some("db_write"));
+        assert_eq!(args.opts.depth, Some(3));
+        assert_eq!(args.opts.direction, None);
+        assert_eq!(args.opts.limit, Some(10));
         assert_eq!(args.common.format, OutputFormat::Md);
     }
 

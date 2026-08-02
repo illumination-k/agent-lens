@@ -71,6 +71,7 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::{ModuleSection, render_module_confidence, render_module_sections};
+use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat, SourceLang};
 
@@ -106,6 +107,13 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
      name and parameter count) are annotated rather than trusted: their callers can dispatch \
      through the interface, which no static edge records, so a missing caller is expected there.";
 
+analyzer_options! {
+    /// `analyze visibility` flags, and the `[profile.<name>.visibility]` table.
+    pub struct VisibilityOptions {
+        @shared(ranking);
+    }
+}
+
 /// Analyzer entry point for `analyze visibility`.
 #[derive(Debug, Default, Clone)]
 pub struct VisibilityAnalyzer {
@@ -114,6 +122,13 @@ pub struct VisibilityAnalyzer {
 }
 
 impl VisibilityAnalyzer {
+    /// Apply a whole [`VisibilityOptions`] group. The CLI flags and the
+    /// `[profile.<name>.visibility]` table are the same type, so this is
+    /// the only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: VisibilityOptions) -> Self {
+        self.with_top(opts.top)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

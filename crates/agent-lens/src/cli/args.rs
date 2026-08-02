@@ -3,14 +3,25 @@
 
 use std::path::PathBuf;
 
-use agent_lens::analyze::{
-    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphDirection, GraphQueryKind,
-    OutputFormat, PairKey, SimilarityMethod, SimilarityTarget,
-};
+use agent_lens::analyze::OutputFormat;
+use agent_lens::analyze::cohesion::CohesionOptions;
+use agent_lens::analyze::complexity::ComplexityOptions;
+use agent_lens::analyze::context_span::ContextSpanOptions;
+use agent_lens::analyze::delegation::DelegationOptions;
+use agent_lens::analyze::graph_query::GraphQueryOptions;
+use agent_lens::analyze::hotspot::HotspotOptions;
+use agent_lens::analyze::hubs::HubsOptions;
+use agent_lens::analyze::impact::ImpactOptions;
+use agent_lens::analyze::layers::LayersOptions;
+use agent_lens::analyze::risk::RiskOptions;
+use agent_lens::analyze::similarity::SimilarityOptions;
+use agent_lens::analyze::untested::UntestedOptions;
+use agent_lens::analyze::visibility::VisibilityOptions;
+use agent_lens::analyze::wrapper::WrapperOptions;
 use agent_lens::hooks::codex::setup as codex_setup;
 use agent_lens::hooks::setup::SettingsScope;
 use agent_lens::skills;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
 use super::examples;
 
@@ -107,31 +118,16 @@ pub(super) enum SkillsCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct SkillsInstallArgs {
-    /// Where to install the skills. `project` writes to
-    /// `<cwd>/.claude/skills`; `user` writes to `$HOME/.claude/skills`.
-    #[arg(long, value_enum, default_value_t = SkillsScopeArg::Project)]
-    pub(super) scope: SkillsScopeArg,
+    /// Where to install the bundled skills. `project` is the current
+    /// directory.
+    #[arg(long, value_enum, default_value_t = skills::SkillsScope::Project)]
+    pub(super) scope: skills::SkillsScope,
     /// Show what would be written without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
     /// Overwrite skills that already exist on disk with different content.
     #[arg(long)]
     pub(super) force: bool,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(super) enum SkillsScopeArg {
-    Project,
-    User,
-}
-
-impl From<SkillsScopeArg> for skills::SkillsScope {
-    fn from(value: SkillsScopeArg) -> Self {
-        match value {
-            SkillsScopeArg::Project => Self::Project,
-            SkillsScopeArg::User => Self::User,
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -168,29 +164,12 @@ pub(super) enum HookCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct SetupArgs {
-    /// Where to install the hooks. `project` writes to
-    /// `<cwd>/.claude/settings.json`; `user` writes to
-    /// `$HOME/.claude/settings.json`.
-    #[arg(long, value_enum, default_value_t = SetupScope::Project)]
-    pub(super) scope: SetupScope,
+    /// Where to install the hooks. `project` is the current directory.
+    #[arg(long, value_enum, default_value_t = SettingsScope::Project)]
+    pub(super) scope: SettingsScope,
     /// Show the resulting JSON without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(super) enum SetupScope {
-    Project,
-    User,
-}
-
-impl From<SetupScope> for SettingsScope {
-    fn from(value: SetupScope) -> Self {
-        match value {
-            SetupScope::Project => Self::Project,
-            SetupScope::User => Self::User,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -268,31 +247,14 @@ pub(super) enum CodexHookCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct CodexSetupArgs {
-    /// Where to install the hooks. `user` writes to
-    /// `$HOME/.codex/config.toml` (Codex's canonical location);
-    /// `project` writes to `<repo-root>/.codex/config.toml`, where
-    /// `repo-root` comes from `git rev-parse --show-toplevel` and
-    /// falls back to the current directory outside a git tree.
-    #[arg(long, value_enum, default_value_t = CodexSetupScope::User)]
-    pub(super) scope: CodexSetupScope,
+    /// Where to install the hooks. `project` is the nearest ancestor
+    /// holding a `.git` entry, falling back to the current directory
+    /// outside a git tree.
+    #[arg(long, value_enum, default_value_t = codex_setup::ConfigScope::User)]
+    pub(super) scope: codex_setup::ConfigScope,
     /// Show the resulting TOML without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(super) enum CodexSetupScope {
-    Project,
-    User,
-}
-
-impl From<CodexSetupScope> for codex_setup::ConfigScope {
-    fn from(value: CodexSetupScope) -> Self {
-        match value {
-            CodexSetupScope::Project => Self::Project,
-            CodexSetupScope::User => Self::User,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -711,35 +673,18 @@ impl AnalyzeCommonArgs {
     }
 }
 
-#[derive(Debug, Clone, Args, Default)]
-pub(super) struct AnalyzeDiffArgs {
-    /// Restrict the report to units touching unstaged changed lines in
-    /// `git diff -U0`.
-    #[arg(long)]
-    pub(super) diff_only: bool,
-}
-
-#[derive(Debug, Clone, Args, Default)]
-pub(super) struct AnalyzeRankingArgs {
-    /// Cap the markdown ranking to the top-N entries. JSON output
-    /// always carries the full list.
-    #[arg(long)]
-    pub(super) top: Option<usize>,
-}
+// Each analyzer's flag group lives with the analyzer, as the same type
+// that deserializes its `[profile.<name>.<tool>]` table (see
+// `agent_lens::analyze::options`). These structs only bolt the shared
+// path/format arguments onto it, so a profile entry can be handed to
+// `AnalyzeCommand` without a field-by-field copy.
 
 #[derive(Debug, Clone, Args)]
 pub(super) struct AnalyzeCohesionArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) diff: AnalyzeDiffArgs,
-    #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-    /// Minimum LCOM4 score included in the markdown ranking. The
-    /// markdown default is 2, which hides cohesive LCOM4=1 units;
-    /// pass `--min-score 1` to include them.
-    #[arg(long)]
-    pub(super) min_score: Option<usize>,
+    pub(super) opts: CohesionOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -747,76 +692,15 @@ pub(super) struct AnalyzeComplexityArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) diff: AnalyzeDiffArgs,
-    #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-    /// Minimum cognitive complexity score included in the markdown
-    /// ranking. JSON output always carries the full list.
-    #[arg(long)]
-    pub(super) min_score: Option<u32>,
+    pub(super) opts: ComplexityOptions,
 }
 
 #[derive(Debug, Clone, Args)]
-pub(super) struct AnalyzeHubsArgs {
+pub(super) struct AnalyzeContextSpanArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(super) struct AnalyzeGraphQueryArgs {
-    #[command(flatten)]
-    pub(super) common: AnalyzeCommonArgs,
-    /// Traversal verb to run.
-    #[arg(long, value_enum)]
-    pub(super) query: GraphQueryKind,
-    /// Function to start from: a `::`-segment suffix of its qualified
-    /// name (e.g. `foo`, `module::foo`, `Owner::method`) or an exact
-    /// node id (`file:name:line`, as listed on ambiguity).
-    #[arg(long)]
-    pub(super) symbol: String,
-    /// Destination symbol for `--query path` (same matching rules as
-    /// `--symbol`).
-    #[arg(long)]
-    pub(super) to: Option<String>,
-    /// Traversal depth cap in call hops. Defaults to 1 for
-    /// callers/callees/neighborhood; for `path` it caps the search
-    /// (default unbounded).
-    #[arg(long)]
-    pub(super) depth: Option<usize>,
-    /// Traversal direction for `--query neighborhood` (default both).
-    #[arg(long, value_enum)]
-    pub(super) direction: Option<GraphDirection>,
-    /// Cap the result set by node count (default 50).
-    #[arg(long)]
-    pub(super) limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(super) struct AnalyzeImpactArgs {
-    #[command(flatten)]
-    pub(super) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-    /// Seed the query from this function instead of the working-tree
-    /// diff: a `::`-segment suffix of its qualified name (e.g. `foo`,
-    /// `module::foo`, `Owner::method`) or an exact node id
-    /// (`file:name:line`, as listed on ambiguity). Repeatable.
-    #[arg(long = "function", value_name = "SYMBOL")]
-    pub(super) function: Vec<String>,
-    /// Reverse-traversal depth cap in call hops (cycles count as one).
-    /// Callers beyond the cap are counted, not listed.
-    #[arg(long)]
-    pub(super) depth: Option<usize>,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(super) struct AnalyzeLayersArgs {
-    #[command(flatten)]
-    pub(super) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
+    pub(super) opts: ContextSpanOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -824,25 +708,15 @@ pub(super) struct AnalyzeDelegationArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-    #[command(flatten)]
-    pub(super) diff: AnalyzeDiffArgs,
+    pub(super) opts: DelegationOptions,
 }
 
 #[derive(Debug, Clone, Args)]
-pub(super) struct AnalyzeUntestedArgs {
+pub(super) struct AnalyzeGraphQueryArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(super) struct AnalyzeVisibilityArgs {
-    #[command(flatten)]
-    pub(super) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
+    pub(super) opts: GraphQueryOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -850,12 +724,31 @@ pub(super) struct AnalyzeHotspotArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-    /// Restrict churn to commits in this `--since=` window. Accepts
-    /// anything git's approxidate parser does (e.g. `90.days.ago`,
-    /// `2024-01-01`).
-    #[arg(long)]
-    pub(super) since: Option<String>,
+    pub(super) opts: HotspotOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeHubsArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: HubsOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeImpactArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: ImpactOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeLayersArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: LayersOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -863,13 +756,7 @@ pub(super) struct AnalyzeRiskArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-    /// Restrict the churn axis to commits in this `--since=` window.
-    /// Accepts anything git's approxidate parser does (e.g.
-    /// `90.days.ago`, `2024-01-01`). Centrality is a property of the
-    /// current source and is unaffected.
-    #[arg(long)]
-    pub(super) since: Option<String>,
+    pub(super) opts: RiskOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -877,79 +764,23 @@ pub(super) struct AnalyzeSimilarityArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) diff: AnalyzeDiffArgs,
+    pub(super) opts: SimilarityOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeUntestedArgs {
     #[command(flatten)]
-    pub(super) ranking: AnalyzeRankingArgs,
-    /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
-    /// this value are eligible for clustering, and the same threshold
-    /// is the complete-link cut so every pair inside a reported cluster
-    /// stays at or above it. Defaults to the same cutoff used by the
-    /// PostToolUse `similarity` hook.
-    #[arg(long, visible_alias = "min-score", default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
-    pub(super) threshold: f64,
-    /// Multi-threshold sweep: a comma-separated ascending ladder of
-    /// thresholds, e.g. `--sweep 0.6,0.75,0.85`. Pairs are scored and
-    /// clustered once at the lowest rung, and every reported cluster is
-    /// annotated with the highest rung at which its complete-link structure
-    /// survives intact — a coarse dendrogram in one run that separates
-    /// verbatim clones from merely structural parallels. Supersedes
-    /// `--threshold`, which it conflicts with.
-    #[arg(long, value_delimiter = ',', conflicts_with = "threshold")]
-    pub(super) sweep: Vec<f64>,
-    /// Invert the report: match functions by name *first*, score second,
-    /// and list every cross-file match regardless of threshold, most
-    /// drifted first. Threshold clustering can only report what is still
-    /// similar, so two parallel implementations that have drifted apart —
-    /// the likeliest missed sync — silently drop out of it. `qualified`
-    /// (alias `name`) keys on the normalized owner-qualified name, so
-    /// `Summary::from` matches `JsSummary::from`; `method` keys on the
-    /// method segment alone, which finds siblings whose types were
-    /// renamed at the cost of grouping unrelated same-named functions.
-    #[arg(long, value_enum, value_name = "KEY", conflicts_with = "sweep")]
-    pub(super) paired_by: Option<PairKey>,
-    /// Floor for `--paired-by`: name matches scoring below this are
-    /// dropped as unrelated namesakes rather than reported as drift.
-    /// Drift lives between this floor and `--threshold`; below it a
-    /// shared name means two different functions that happen to be
-    /// called the same thing. Pass `0` to report every match. No effect
-    /// without `--paired-by`.
-    #[arg(long, default_value_t = DEFAULT_SIMILARITY_DRIFT_FLOOR, requires = "paired_by")]
-    pub(super) drift_floor: f64,
-    /// Minimum source line count for a unit to be considered. Units
-    /// shorter than this are dropped before pairwise comparison; keeps
-    /// trivial getters / one-liners out of the report. Defaults per
-    /// target: 5 for `--target functions`, 3 for `--target types`.
-    #[arg(long)]
-    pub(super) min_lines: Option<usize>,
-    /// Comparison unit. `functions` (default) compares function bodies.
-    /// `types` compares type definitions instead — Rust struct/enum/type
-    /// alias, TS interface/type alias/enum, Python annotated classes /
-    /// dataclasses / Enum subclasses, Go struct/alias — by their member
-    /// shape (field names and types, enum variants, alias targets), so
-    /// duplicated DTOs and drifted mirror structs surface the same way
-    /// duplicated functions do. With `--paired-by`, only the
-    /// `qualified`/`name` key applies; `method` has no meaning for a
-    /// type and is rejected.
-    #[arg(long, value_enum, default_value_t = SimilarityTarget::Functions)]
-    pub(super) target: SimilarityTarget,
-    /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
-    /// distance over the body AST. `token` compares preorder token
-    /// k-gram multisets — faster and more tolerant of reordered code,
-    /// but less precise. Scores from the two methods are not directly
-    /// comparable.
-    #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
-    pub(super) method: SimilarityMethod,
-    /// Roll the per-pair doc-comment overlap up into the markdown
-    /// report, as a range plus how many of the cluster's pairs carried
-    /// doc text on both sides. Diagnostic only — it never feeds the
-    /// similarity score. High overlap on a high-similarity cluster means
-    /// the *stated intent* matches too (a strong merge candidate, often
-    /// a copy-paste that took the doc with it); low overlap flags a
-    /// structural coincidence that usually should not be merged. JSON
-    /// output always carries the per-pair values, with or without this
-    /// flag.
-    #[arg(long)]
-    pub(super) doc_overlap: bool,
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: UntestedOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeVisibilityArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: VisibilityOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -957,20 +788,7 @@ pub(super) struct AnalyzeWrapperArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(super) diff: AnalyzeDiffArgs,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(super) struct AnalyzeContextSpanArgs {
-    #[command(flatten)]
-    pub(super) common: AnalyzeCommonArgs,
-    /// Treat `path` as a project root and merge the TS/JS module trees
-    /// rooted at every file matching this gitignore-aware glob.
-    /// Repeatable: pass `--entry-glob 'app/**/page.tsx' --entry-glob
-    /// 'app/**/route.ts'` to cover Next.js App Router entries in one
-    /// invocation. Patterns are evaluated relative to `path`.
-    #[arg(long = "entry-glob", value_name = "GLOB")]
-    pub(super) entry_glob: Vec<String>,
+    pub(super) opts: WrapperOptions,
 }
 
 #[derive(Debug, Clone, Args, Default)]
@@ -996,6 +814,9 @@ pub(super) struct AnalyzePathArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_lens::analyze::{
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, GraphDirection, GraphQueryKind, PairKey, SimilarityMethod,
+    };
     use clap::CommandFactory;
     use rstest::rstest;
 
@@ -1104,7 +925,7 @@ mod tests {
         let Command::Hook(HookCommand::Setup(args)) = cli.command else {
             panic!("expected hook setup");
         };
-        assert!(matches!(args.scope, SetupScope::Project));
+        assert!(matches!(args.scope, SettingsScope::Project));
         assert!(!args.dry_run);
     }
 
@@ -1122,7 +943,7 @@ mod tests {
         let Command::Hook(HookCommand::Setup(args)) = cli.command else {
             panic!("expected hook setup");
         };
-        assert!(matches!(args.scope, SetupScope::User));
+        assert!(matches!(args.scope, SettingsScope::User));
         assert!(args.dry_run);
     }
 
@@ -1132,7 +953,7 @@ mod tests {
         let Command::CodexHook(CodexHookCommand::Setup(args)) = cli.command else {
             panic!("expected codex-hook setup");
         };
-        assert!(matches!(args.scope, CodexSetupScope::User));
+        assert!(matches!(args.scope, codex_setup::ConfigScope::User));
         assert!(!args.dry_run);
     }
 
@@ -1162,16 +983,16 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert!(args.diff.diff_only);
+        assert!(args.opts.diff_only);
         assert!(args.common.path_filter.exclude_tests);
         assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
-        assert!((args.threshold - 0.85).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, Some(8));
-        assert_eq!(args.ranking.top, Some(3));
+        assert!((args.opts.threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(args.opts.min_lines, Some(8));
+        assert_eq!(args.opts.top, Some(3));
         // `--method` is omitted above, so it defaults to TSED.
-        assert_eq!(args.method, SimilarityMethod::Tsed);
+        assert_eq!(args.opts.method, SimilarityMethod::Tsed);
         // `--doc-overlap` is omitted above; the markdown rollup is opt-in.
-        assert!(!args.doc_overlap);
+        assert!(!args.opts.doc_overlap);
     }
 
     #[test]
@@ -1187,7 +1008,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert!(args.doc_overlap);
+        assert!(args.opts.doc_overlap);
     }
 
     #[test]
@@ -1204,7 +1025,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(args.method, SimilarityMethod::Token);
+        assert_eq!(args.opts.method, SimilarityMethod::Token);
     }
 
     #[test]
@@ -1221,7 +1042,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(args.sweep, vec![0.6, 0.75, 0.85]);
+        assert_eq!(args.opts.sweep, vec![0.6, 0.75, 0.85]);
     }
 
     #[test]
@@ -1260,8 +1081,8 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(args.paired_by, Some(expected));
-        assert!((args.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
+        assert_eq!(args.opts.paired_by, Some(expected));
+        assert!((args.opts.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1280,7 +1101,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(args.drift_floor, 0.0);
+        assert_eq!(args.opts.drift_floor, 0.0);
     }
 
     /// Without `--paired-by` there is nothing for a floor to filter, so
@@ -1331,7 +1152,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert!((args.threshold - 0.91).abs() < f64::EPSILON);
+        assert!((args.opts.threshold - 0.91).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1350,8 +1171,8 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Complexity(args)) = cli.command else {
             panic!("expected analyze complexity");
         };
-        assert_eq!(args.ranking.top, Some(12));
-        assert_eq!(args.min_score, Some(8));
+        assert_eq!(args.opts.top, Some(12));
+        assert_eq!(args.opts.min_score, Some(8));
     }
 
     #[test]
@@ -1370,8 +1191,8 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Cohesion(args)) = cli.command else {
             panic!("expected analyze cohesion");
         };
-        assert_eq!(args.ranking.top, Some(7));
-        assert_eq!(args.min_score, Some(2));
+        assert_eq!(args.opts.top, Some(7));
+        assert_eq!(args.opts.min_score, Some(2));
     }
 
     #[test]
@@ -1390,8 +1211,8 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Hotspot(args)) = cli.command else {
             panic!("expected analyze hotspot");
         };
-        assert_eq!(args.since.as_deref(), Some("90.days.ago"));
-        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.opts.since.as_deref(), Some("90.days.ago"));
+        assert_eq!(args.opts.top, Some(5));
         assert_eq!(args.common.format, OutputFormat::Json);
     }
 
@@ -1412,8 +1233,8 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Risk(args)) = cli.command else {
             panic!("expected analyze risk");
         };
-        assert_eq!(args.since.as_deref(), Some("90.days.ago"));
-        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.opts.since.as_deref(), Some("90.days.ago"));
+        assert_eq!(args.opts.top, Some(5));
         assert!(args.common.path_filter.exclude_tests);
         assert_eq!(args.common.format, OutputFormat::Json);
     }
@@ -1440,12 +1261,12 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
             panic!("expected analyze graph-query");
         };
-        assert_eq!(args.query, GraphQueryKind::Path);
-        assert_eq!(args.symbol, "handler");
-        assert_eq!(args.to.as_deref(), Some("db_write"));
-        assert_eq!(args.depth, Some(4));
-        assert_eq!(args.direction, None);
-        assert_eq!(args.limit, Some(10));
+        assert_eq!(args.opts.query, GraphQueryKind::Path);
+        assert_eq!(args.opts.symbol, "handler");
+        assert_eq!(args.opts.to.as_deref(), Some("db_write"));
+        assert_eq!(args.opts.depth, Some(4));
+        assert_eq!(args.opts.direction, None);
+        assert_eq!(args.opts.limit, Some(10));
         assert_eq!(args.common.format, OutputFormat::Json);
     }
 
@@ -1467,8 +1288,8 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
             panic!("expected analyze graph-query");
         };
-        assert_eq!(args.query, GraphQueryKind::Neighborhood);
-        assert_eq!(args.direction, Some(GraphDirection::In));
+        assert_eq!(args.opts.query, GraphQueryKind::Neighborhood);
+        assert_eq!(args.opts.direction, Some(GraphDirection::In));
     }
 
     #[test]
@@ -1498,9 +1319,9 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Impact(args)) = cli.command else {
             panic!("expected analyze impact");
         };
-        assert_eq!(args.function, ["Resolver::resolve", "helper"]);
-        assert_eq!(args.depth, Some(3));
-        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.opts.function, ["Resolver::resolve", "helper"]);
+        assert_eq!(args.opts.depth, Some(3));
+        assert_eq!(args.opts.top, Some(5));
         assert_eq!(args.common.format, OutputFormat::Json);
     }
 
@@ -1511,8 +1332,8 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Impact(args)) = cli.command else {
             panic!("expected analyze impact");
         };
-        assert!(args.function.is_empty());
-        assert_eq!(args.depth, None);
+        assert!(args.opts.function.is_empty());
+        assert_eq!(args.opts.depth, None);
     }
 
     #[test]
@@ -1534,7 +1355,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("crates"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(10));
+        assert_eq!(args.opts.top, Some(10));
         assert!(args.common.path_filter.exclude_tests);
     }
 
@@ -1557,7 +1378,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("crates"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(8));
+        assert_eq!(args.opts.top, Some(8));
         assert!(args.common.path_filter.exclude_tests);
     }
 
@@ -1570,7 +1391,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("."));
         assert_eq!(args.common.format, OutputFormat::Json);
-        assert_eq!(args.ranking.top, None);
+        assert_eq!(args.opts.top, None);
     }
 
     #[test]
@@ -1593,7 +1414,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("crates"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(30));
+        assert_eq!(args.opts.top, Some(30));
         assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
     }
 
@@ -1606,7 +1427,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("."));
         assert_eq!(args.common.format, OutputFormat::Json);
-        assert_eq!(args.ranking.top, None);
+        assert_eq!(args.opts.top, None);
     }
 
     #[test]
@@ -1629,7 +1450,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("crates"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(30));
+        assert_eq!(args.opts.top, Some(30));
         assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
     }
 
@@ -1642,7 +1463,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("."));
         assert_eq!(args.common.format, OutputFormat::Json);
-        assert_eq!(args.ranking.top, None);
+        assert_eq!(args.opts.top, None);
     }
 
     #[test]
@@ -1664,8 +1485,8 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("crates"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.ranking.top, Some(30));
-        assert!(args.diff.diff_only);
+        assert_eq!(args.opts.top, Some(30));
+        assert!(args.opts.diff_only);
     }
 
     #[test]
@@ -1677,8 +1498,8 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("."));
         assert_eq!(args.common.format, OutputFormat::Json);
-        assert_eq!(args.ranking.top, None);
-        assert!(!args.diff.diff_only);
+        assert_eq!(args.opts.top, None);
+        assert!(!args.opts.diff_only);
     }
 
     #[test]
@@ -1768,7 +1589,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert!(args.entry_glob.is_empty());
+        assert!(args.opts.entry_glob.is_empty());
     }
 
     #[test]
@@ -1789,7 +1610,7 @@ mod tests {
         };
         assert_eq!(args.common.path, PathBuf::from("web"));
         assert_eq!(
-            args.entry_glob,
+            args.opts.entry_glob,
             vec!["app/**/page.tsx".to_owned(), "app/**/route.ts".to_owned()]
         );
     }
@@ -1853,20 +1674,28 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 
-    #[test]
-    fn setup_scope_into_settings_scope_round_trip() {
-        let project: SettingsScope = SetupScope::Project.into();
-        let user: SettingsScope = SetupScope::User.into();
-        assert!(matches!(project, SettingsScope::Project));
-        assert!(matches!(user, SettingsScope::User));
+    /// The three `--scope` flags used to parse into CLI-local enums that
+    /// were converted to the domain ones; clap now parses the domain
+    /// enums directly, so the accepted spellings come from their variant
+    /// names. Pin both spellings on all three commands: renaming a
+    /// variant is now a CLI-visible change.
+    #[rstest]
+    #[case::hook_project(&["agent-lens", "hook", "setup", "--scope", "project"])]
+    #[case::hook_user(&["agent-lens", "hook", "setup", "--scope", "user"])]
+    #[case::codex_project(&["agent-lens", "codex-hook", "setup", "--scope", "project"])]
+    #[case::codex_user(&["agent-lens", "codex-hook", "setup", "--scope", "user"])]
+    #[case::skills_project(&["agent-lens", "skills", "install", "--scope", "project"])]
+    #[case::skills_user(&["agent-lens", "skills", "install", "--scope", "user"])]
+    fn scope_flags_accept_project_and_user(#[case] argv: &[&str]) {
+        Cli::try_parse_from(argv).expect("clean parse");
     }
 
     #[test]
-    fn codex_setup_scope_into_config_scope_round_trip() {
-        let project: codex_setup::ConfigScope = CodexSetupScope::Project.into();
-        let user: codex_setup::ConfigScope = CodexSetupScope::User.into();
-        assert!(matches!(project, codex_setup::ConfigScope::Project));
-        assert!(matches!(user, codex_setup::ConfigScope::User));
+    fn scope_flags_reject_an_unknown_value() {
+        assert!(
+            Cli::try_parse_from(["agent-lens", "hook", "setup", "--scope", "global"]).is_err(),
+            "an unknown --scope value must not parse",
+        );
     }
 
     #[test]
@@ -1929,7 +1758,7 @@ mod tests {
         let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
             panic!("expected skills install");
         };
-        assert!(matches!(args.scope, SkillsScopeArg::Project));
+        assert!(matches!(args.scope, skills::SkillsScope::Project));
         assert!(!args.dry_run);
         assert!(!args.force);
     }
@@ -1949,17 +1778,9 @@ mod tests {
         let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
             panic!("expected skills install");
         };
-        assert!(matches!(args.scope, SkillsScopeArg::User));
+        assert!(matches!(args.scope, skills::SkillsScope::User));
         assert!(args.dry_run);
         assert!(args.force);
-    }
-
-    #[test]
-    fn skills_scope_arg_into_scope_round_trip() {
-        let project: skills::SkillsScope = SkillsScopeArg::Project.into();
-        let user: skills::SkillsScope = SkillsScopeArg::User.into();
-        assert!(matches!(project, skills::SkillsScope::Project));
-        assert!(matches!(user, skills::SkillsScope::User));
     }
 
     /// The routing table is hand-written, so it can drift the moment a new

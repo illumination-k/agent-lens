@@ -27,6 +27,7 @@ pub mod impact;
 pub mod layers;
 mod module_graph;
 pub(crate) mod module_label;
+mod options;
 mod path_filter;
 pub mod risk;
 mod runner;

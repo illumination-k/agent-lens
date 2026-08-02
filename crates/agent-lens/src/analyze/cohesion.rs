@@ -15,12 +15,25 @@ use std::path::Path;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
+use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
 use super::{
     AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64, read_source,
 };
+
+analyzer_options! {
+    /// `analyze cohesion` flags, and the `[profile.<name>.cohesion]` table.
+    pub struct CohesionOptions {
+        @shared(ranking, diff);
+        /// Minimum LCOM4 score included in the markdown ranking. The
+        /// markdown default is 2, which hides cohesive LCOM4=1 units;
+        /// pass `--min-score 1` to include them.
+        #[arg(long)]
+        pub min_score: Option<usize>,
+    }
+}
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -53,6 +66,15 @@ impl CohesionAnalyzer {
     }
 
     delegate_filter_builders!(filter);
+
+    /// Apply a whole [`CohesionOptions`] group. The CLI flags and the
+    /// `[profile.<name>.cohesion]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: CohesionOptions) -> Self {
+        self.with_top(opts.top)
+            .with_min_score(opts.min_score)
+            .with_diff_only(opts.diff_only)
+    }
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {

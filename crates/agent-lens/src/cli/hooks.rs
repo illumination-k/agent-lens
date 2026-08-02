@@ -2,7 +2,7 @@
 //! the setup commands that wire them into agent configs.
 
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::ClaudeCodeHookInput;
@@ -63,7 +63,7 @@ pub(super) fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn s
 
 pub(super) fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    let path = setup::resolve_path(args.scope.into(), &cwd)?;
+    let path = setup::resolve_path(args.scope, &cwd)?;
     let plan = setup::plan(path)?;
     let wrote = apply_setup_plan(
         args.dry_run,
@@ -87,8 +87,8 @@ pub(super) fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::
 
 pub(super) fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    let project_root = git_top_level(&cwd).unwrap_or(cwd);
-    let path = codex_setup::resolve_path(args.scope.into(), &project_root)?;
+    let project_root = agent_lens::paths::git_repo_root(&cwd).unwrap_or(cwd);
+    let path = codex_setup::resolve_path(args.scope, &project_root)?;
     let plan = codex_setup::plan(path)?;
     let wrote = apply_setup_plan(
         args.dry_run,
@@ -182,28 +182,6 @@ pub(super) fn run_codex_session_start(
     write_stdout_json(&output)
 }
 
-/// Resolve the enclosing git repository's top-level directory, or
-/// `None` when `cwd` is not inside a git tree (or `git` isn't on
-/// `PATH`). Used to anchor `--scope project` so the hook lands at the
-/// repo root no matter which subdirectory the user invoked from.
-fn git_top_level(cwd: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let trimmed = stdout.trim_end_matches(['\n', '\r']);
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(trimmed))
-    }
-}
-
 fn read_stdin_json<T: serde::de::DeserializeOwned>() -> Result<T, Box<dyn std::error::Error>> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
@@ -254,14 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn git_top_level_returns_none_outside_a_repo() {
+    fn scope_project_finds_no_root_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
         // tempdir() returns a fresh path; nothing inside it is git-tracked.
-        assert!(git_top_level(dir.path()).is_none());
+        assert!(agent_lens::paths::git_repo_root(dir.path()).is_none());
     }
 
     #[test]
-    fn git_top_level_finds_repo_root_from_subdirectory() {
+    fn scope_project_anchors_at_the_repo_root_from_a_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -271,7 +249,7 @@ mod tests {
         assert!(status.success());
         let nested = dir.path().join("nested/inner");
         std::fs::create_dir_all(&nested).unwrap();
-        let resolved = git_top_level(&nested).expect("inside the new repo");
+        let resolved = agent_lens::paths::git_repo_root(&nested).expect("inside the new repo");
         // Resolve symlinks on both sides — macOS tempdirs live under
         // /private/var/... while git emits /var/..., so a literal
         // comparison is fragile.

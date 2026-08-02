@@ -55,7 +55,7 @@ pub const SESSION_START_MATCHER: &str = setup_common::CODEX_SESSION_START_MATCHE
 pub const SESSION_START_COMMANDS: &[&str] = setup_common::CODEX_SESSION_START_COMMANDS;
 
 /// Where to install the hook entries.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum ConfigScope {
     /// `<project_root>/.codex/config.toml` (created if missing).
     Project,
@@ -121,7 +121,7 @@ pub fn resolve_path(scope: ConfigScope, project_root: &Path) -> Result<PathBuf, 
     match scope {
         ConfigScope::Project => Ok(project_root.join(CONFIG_RELATIVE)),
         ConfigScope::User => {
-            setup_common::home_scoped_path(CONFIG_RELATIVE).ok_or(SetupError::HomeNotFound)
+            crate::paths::home_scoped_path(CONFIG_RELATIVE).ok_or(SetupError::HomeNotFound)
         }
     }
 }

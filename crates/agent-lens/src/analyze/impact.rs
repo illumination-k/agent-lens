@@ -36,6 +36,7 @@ use serde::Serialize;
 use super::call_graph::algo::{bfs, condense, reverse_adjacency};
 use super::call_graph::model::{CallGraphNode, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders, match_symbol};
+use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat, overlaps_any};
 
@@ -56,6 +57,23 @@ const DEFAULT_TOP: usize = 20;
 const EXPLOSION_FLOOR: usize = 10;
 const EXPLOSION_RATIO: usize = 3;
 
+analyzer_options! {
+    /// `analyze impact` flags, and the `[profile.<name>.impact]` table.
+    pub struct ImpactOptions {
+        @shared(ranking);
+        /// Seed the query from this function instead of the working-tree
+        /// diff: a `::`-segment suffix of its qualified name (e.g. `foo`,
+        /// `module::foo`, `Owner::method`) or an exact node id
+        /// (`file:name:line`, as listed on ambiguity). Repeatable.
+        #[arg(long = "function", value_name = "SYMBOL")]
+        pub function: Vec<String>,
+        /// Reverse-traversal depth cap in call hops (cycles count as one).
+        /// Callers beyond the cap are counted, not listed.
+        #[arg(long)]
+        pub depth: Option<usize>,
+    }
+}
+
 /// Analyzer entry point for `analyze impact`.
 #[derive(Debug, Default, Clone)]
 pub struct ImpactAnalyzer {
@@ -66,6 +84,15 @@ pub struct ImpactAnalyzer {
 }
 
 impl ImpactAnalyzer {
+    /// Apply a whole [`ImpactOptions`] group. The CLI flags and the
+    /// `[profile.<name>.impact]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: ImpactOptions) -> Self {
+        self.with_functions(opts.function)
+            .with_depth(opts.depth)
+            .with_top(opts.top)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
