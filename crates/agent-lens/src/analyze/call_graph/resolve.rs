@@ -536,6 +536,7 @@ mod tests {
             end_line: 2,
             is_test: false,
             visibility: NodeVisibility::Unknown,
+            param_count: None,
             weights: NodeWeights::default(),
             outgoing_calls: ResolutionCallCounts::default(),
             delegation: None,

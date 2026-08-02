@@ -9,11 +9,13 @@
 //! types are just type aliases.
 
 use std::marker::PhantomData;
+use std::path::Path;
 
 use agent_hooks::Hook;
 
 use crate::hooks::core::cohesion::CohesionCore;
 use crate::hooks::core::complexity::ComplexityCore;
+use crate::hooks::core::session_summary::{SessionSummaryError, render_summary};
 use crate::hooks::core::similarity::SimilarityCore;
 use crate::hooks::core::wrapper::WrapperCore;
 use crate::hooks::core::{EditedSource, HookError, ReadEditedSourceError};
@@ -148,5 +150,77 @@ impl<E: HookEnvelope> CoreHook<SimilarityCore, E> {
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.core = self.core.with_threshold(threshold);
         self
+    }
+}
+
+/// Engine-specific glue between an agent's SessionStart payload and the
+/// engine-agnostic summary renderer.
+///
+/// SessionStart has no `EditedSource` list to prepare — the whole input
+/// contract is "where is the session anchored" — so it gets its own
+/// envelope rather than piggybacking on [`HookEnvelope`].
+pub trait SessionStartEnvelope {
+    /// Hook input type as it arrives from the agent.
+    type Input: serde::de::DeserializeOwned;
+    /// Hook output type the agent expects back. `Default` is the "no
+    /// signal, stay silent" response.
+    type Output: serde::Serialize + Default;
+
+    /// Working directory the session is anchored at.
+    fn cwd(input: &Self::Input) -> &Path;
+
+    /// Wrap a rendered summary body in the envelope shape this agent
+    /// uses (both agents inject via `additionalContext` today, but the
+    /// concrete output types are per-engine).
+    fn wrap_summary(body: String) -> Self::Output;
+}
+
+/// SessionStart summary hook generic over the engine envelope.
+///
+/// Renders [`render_summary`] for the session's cwd and wraps the body
+/// via the envelope, or returns the default no-op output when neither
+/// summary section produces signal.
+pub struct SummaryHook<E: SessionStartEnvelope> {
+    _envelope: PhantomData<fn() -> E>,
+}
+
+impl<E: SessionStartEnvelope> SummaryHook<E> {
+    pub fn new() -> Self {
+        Self {
+            _envelope: PhantomData,
+        }
+    }
+}
+
+impl<E: SessionStartEnvelope> Default for SummaryHook<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E: SessionStartEnvelope> std::fmt::Debug for SummaryHook<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SummaryHook").finish()
+    }
+}
+
+impl<E: SessionStartEnvelope> Clone for SummaryHook<E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E: SessionStartEnvelope> Copy for SummaryHook<E> {}
+
+impl<E: SessionStartEnvelope> Hook for SummaryHook<E> {
+    type Input = E::Input;
+    type Output = E::Output;
+    type Error = SessionSummaryError;
+
+    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
+        match render_summary(E::cwd(&input))? {
+            Some(body) => Ok(E::wrap_summary(body)),
+            None => Ok(E::Output::default()),
+        }
     }
 }

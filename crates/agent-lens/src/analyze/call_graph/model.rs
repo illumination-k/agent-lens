@@ -28,6 +28,12 @@ pub(crate) struct CallGraphNode {
     /// TypeScript and Python until their adapters extract export
     /// status.
     pub(crate) visibility: NodeVisibility,
+    /// Declared parameter slots, when the adapter extracted a
+    /// signature (currently Go). Read by the visibility analyzer to
+    /// match methods against interface method sets by arity; kept out
+    /// of the serialized graph until an analyzer reports it.
+    #[serde(skip)]
+    pub(crate) param_count: Option<usize>,
     pub(crate) weights: NodeWeights,
     /// Per-node counts of outgoing call sites by resolution outcome.
     /// Non-resolved edges carry no target endpoint to tag, so this is

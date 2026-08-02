@@ -167,7 +167,7 @@ fn signature_info(node: Node<'_>, source: &[u8], raw_name: &str) -> FunctionSign
 /// The `name:` identifiers of a parameter / spec declaration, in order.
 /// `func f(a, b int)` yields `["a", "b"]`; an unnamed parameter yields
 /// an empty list.
-fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
+pub(crate) fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {
@@ -185,6 +185,31 @@ fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     names
+}
+
+/// Per-slot parameter names of a `parameter_list`, with grouped
+/// declarations expanded — `(a, b int)` yields two slots — and unnamed
+/// parameters holding `None`. A variadic declaration is one slot. This
+/// slot expansion is what makes two Go signatures comparable by arity:
+/// `Do(a, b int)` and `Do(int, int)` both declare two parameters.
+pub(crate) fn parameter_slot_names(params: Node<'_>, source: &[u8]) -> Vec<Option<String>> {
+    let mut slots = Vec::new();
+    let mut cursor = params.walk();
+    for decl in params.named_children(&mut cursor) {
+        if !matches!(
+            decl.kind(),
+            "parameter_declaration" | "variadic_parameter_declaration"
+        ) {
+            continue;
+        }
+        let names = declaration_names(decl, source);
+        if names.is_empty() {
+            slots.push(None);
+        } else {
+            slots.extend(names.into_iter().map(Some));
+        }
+    }
+    slots
 }
 
 /// Collect return type texts from a `result:` node, which is either a

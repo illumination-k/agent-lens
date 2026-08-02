@@ -95,9 +95,9 @@ pub use method_names::{BuiltinFunctionNames, UbiquitousMethodNames};
 pub use naming::{identifier_tokens, qualify, qualify_module, starts_uppercase};
 pub use risk::{FileCentrality, RiskEntry, compute_risk};
 pub use syntax::{
-    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
-    VisibilityShape, callee_names_local_binding,
+    BodyShape, CallShape, FunctionShape, ImportShape, InterfaceMethodShape, InterfaceShape,
+    LexicalResolutionStatus, OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind,
+    SignatureShape, SourceSpan, SyntaxFact, VisibilityShape, callee_names_local_binding,
 };
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};

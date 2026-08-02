@@ -82,19 +82,27 @@ impl FilterConfig {
 
     /// Walk `path` and run `analyze_one` on every supported source
     /// file. Files for which `analyze_one` returns `Ok(None)` are
-    /// dropped so directory-mode reports stay signal-dense.
+    /// dropped so directory-mode reports stay signal-dense, but they
+    /// still count towards `scanned_file_count` — the report must be
+    /// able to say "N files were inspected, none had findings" rather
+    /// than the misleading "0 file(s)".
     pub fn collect_per_file<R>(
         &self,
         path: &Path,
         mut analyze_one: impl FnMut(&SourceFile) -> Result<Option<R>, AnalyzerError>,
-    ) -> Result<Vec<R>, AnalyzerError> {
-        let mut out = Vec::new();
+    ) -> Result<PerFileScan<R>, AnalyzerError> {
+        let mut reports = Vec::new();
+        let mut scanned_file_count = 0;
         for source_file in self.collect_source_files(path)? {
+            scanned_file_count += 1;
             if let Some(report) = analyze_one(&source_file)? {
-                out.push(report);
+                reports.push(report);
             }
         }
-        Ok(out)
+        Ok(PerFileScan {
+            reports,
+            scanned_file_count,
+        })
     }
 
     /// When `diff_only` is set, retain only items whose `[start, end]`
@@ -115,6 +123,17 @@ impl FilterConfig {
             overlaps_any(s, e, &changed)
         });
     }
+}
+
+/// Outcome of a per-file walk: the reports that produced findings plus
+/// the number of source files inspected to get them. The two counts
+/// diverge whenever a scanned file has no findings, and the report needs
+/// both to distinguish "nothing matched the filters" from "files were
+/// analyzed but came back clean".
+#[derive(Debug)]
+pub(super) struct PerFileScan<R> {
+    pub reports: Vec<R>,
+    pub scanned_file_count: usize,
 }
 
 /// Render a serializable report as JSON or markdown, deferring the
@@ -190,9 +209,9 @@ impl<S: PerFileShape, V: Serialize> Serialize for FileView<'_, S, V> {
     }
 }
 
-/// The report shape every per-file analyzer emits: the walked root, a
-/// file count, a total item count, an optional corpus-wide summary, and
-/// the per-file breakdown.
+/// The report shape every per-file analyzer emits: the walked root, the
+/// scanned-file count, a with-findings file count, a total item count,
+/// an optional corpus-wide summary, and the per-file breakdown.
 ///
 /// `X` carries the analyzer-specific summary block (only complexity has
 /// one today) and defaults to `()`, which is never serialised because
@@ -200,15 +219,20 @@ impl<S: PerFileShape, V: Serialize> Serialize for FileView<'_, S, V> {
 #[derive(Debug)]
 pub(super) struct PerFileReport<'a, S, V, X = ()> {
     root: String,
+    scanned_file_count: usize,
     files: Vec<FileView<'a, S, V>>,
     summary: Option<X>,
 }
 
 impl<'a, S, V, X> PerFileReport<'a, S, V, X> {
-    /// Build a report with no corpus summary.
-    pub fn new(root: &Path, files: Vec<FileView<'a, S, V>>) -> Self {
+    /// Build a report with no corpus summary. `scanned_file_count` is
+    /// the number of source files the walk inspected, which is at least
+    /// `files.len()` — files without findings are scanned but produce
+    /// no [`FileView`].
+    pub fn new(root: &Path, scanned_file_count: usize, files: Vec<FileView<'a, S, V>>) -> Self {
         Self {
             root: root.display().to_string(),
+            scanned_file_count,
             files,
             summary: None,
         }
@@ -225,8 +249,12 @@ impl<'a, S, V, X> PerFileReport<'a, S, V, X> {
         &self.root
     }
 
-    pub fn file_count(&self) -> usize {
-        self.files.len()
+    /// Number of source files the walk inspected, including files that
+    /// produced no findings and therefore have no entry in `files`.
+    /// The with-findings count is `files().len()`, serialised as
+    /// `file_count`.
+    pub fn scanned_file_count(&self) -> usize {
+        self.scanned_file_count
     }
 
     /// Total items across every file — the value serialised under the
@@ -243,7 +271,7 @@ impl<'a, S, V, X> PerFileReport<'a, S, V, X> {
         self.summary.as_ref()
     }
 
-    /// Number of fields [`Serialize`] will emit: the four fixed ones
+    /// Number of fields [`Serialize`] will emit: the five fixed ones
     /// plus `summary` when present.
     ///
     /// Split out and excluded from cargo-mutants (`.cargo/mutants.toml`)
@@ -253,7 +281,7 @@ impl<'a, S, V, X> PerFileReport<'a, S, V, X> {
     /// here produces byte-identical output — an equivalent mutant, not a
     /// test gap.
     fn field_count(&self) -> usize {
-        4 + usize::from(self.summary.is_some())
+        5 + usize::from(self.summary.is_some())
     }
 }
 
@@ -261,6 +289,7 @@ impl<S: PerFileShape, V: Serialize, X: Serialize> Serialize for PerFileReport<'_
     fn serialize<Z: Serializer>(&self, serializer: Z) -> Result<Z::Ok, Z::Error> {
         let mut state = serializer.serialize_struct("Report", self.field_count())?;
         state.serialize_field("root", &self.root)?;
+        state.serialize_field("scanned_file_count", &self.scanned_file_count)?;
         state.serialize_field("file_count", &self.files.len())?;
         state.serialize_field(S::COUNT_FIELD, &self.item_count())?;
         if let Some(summary) = &self.summary {
@@ -308,13 +337,13 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn collect_per_file_drops_none_results() {
+    fn collect_per_file_drops_none_results_but_counts_them_as_scanned() {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "keep.rs", "fn a() {}\n");
         write_file(dir.path(), "drop.rs", "fn b() {}\n");
 
         let cfg = FilterConfig::default();
-        let out: Vec<String> = cfg
+        let scan: PerFileScan<String> = cfg
             .collect_per_file(dir.path(), |sf| {
                 if sf.display_path.ends_with("drop.rs") {
                     Ok(None)
@@ -323,7 +352,8 @@ mod tests {
                 }
             })
             .unwrap();
-        assert_eq!(out, vec!["keep.rs".to_owned()]);
+        assert_eq!(scan.reports, vec!["keep.rs".to_owned()]);
+        assert_eq!(scan.scanned_file_count, 2);
     }
 
     #[test]
@@ -438,10 +468,11 @@ mod tests {
 
     #[test]
     fn per_file_report_serializes_under_the_shape_field_names() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), sample_files());
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 3, sample_files());
         let json = to_json(&report);
 
         assert_eq!(json["root"], "/src");
+        assert_eq!(json["scanned_file_count"], 3);
         assert_eq!(json["file_count"], 2);
         assert_eq!(json["widget_count"], 3);
         assert_eq!(json["files"][0]["file"], "a.rs");
@@ -455,7 +486,7 @@ mod tests {
 
     #[test]
     fn per_file_report_omits_summary_when_absent() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), sample_files());
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 3, sample_files());
         let json = to_json(&report);
         assert!(report.summary().is_none());
         assert!(
@@ -466,7 +497,8 @@ mod tests {
 
     #[test]
     fn per_file_report_emits_attached_summary() {
-        let report = TestReport::new(Path::new("/src"), sample_files()).with_summary("corpus-wide");
+        let report =
+            TestReport::new(Path::new("/src"), 3, sample_files()).with_summary("corpus-wide");
         let json = to_json(&report);
         assert_eq!(report.summary().copied(), Some("corpus-wide"));
         assert_eq!(json["summary"], "corpus-wide");
@@ -478,8 +510,8 @@ mod tests {
 
     #[test]
     fn per_file_report_counts_are_derived_from_the_files() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), sample_files());
-        assert_eq!(report.file_count(), 2);
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 3, sample_files());
+        assert_eq!(report.scanned_file_count(), 3);
         assert_eq!(report.item_count(), 3);
         assert_eq!(report.root(), "/src");
         assert_eq!(report.files().len(), 2);
@@ -487,9 +519,10 @@ mod tests {
 
     #[test]
     fn empty_report_counts_zero() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), Vec::new());
+        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 0, Vec::new());
         let json = to_json(&report);
         assert_eq!(report.item_count(), 0);
+        assert_eq!(json["scanned_file_count"], 0);
         assert_eq!(json["file_count"], 0);
         assert_eq!(json["widget_count"], 0);
         assert_eq!(json["files"], serde_json::json!([]));

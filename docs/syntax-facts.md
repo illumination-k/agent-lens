@@ -81,6 +81,20 @@ Languages without annotations should use `Known(None)` for individual missing
 annotations when they know the parameter exists, and `Unknown` only when the
 adapter does not inspect that part of the syntax.
 
+## InterfaceShape
+
+`InterfaceShape` records a named interface-like declaration — Go `interface`
+today; a Rust `trait` would project the same way — as its directly declared
+method set: per method, the name and the parameter-slot count (grouped names
+expanded, a variadic slot counting one). Embedded interfaces are not expanded:
+an embed declared in the analyzed tree contributes its methods through its own
+declaration, and an out-of-scope embed has no visible method set anyway.
+
+The visibility analyzer matches exported methods against these sets by name
+and arity to annotate rows whose calls can dispatch through an interface. The
+same sets could later feed the call-graph resolver (interface-aware candidate
+sets for receiver calls), so the extraction is not analyzer-specific.
+
 ## CallShape
 
 `CallShape` records:

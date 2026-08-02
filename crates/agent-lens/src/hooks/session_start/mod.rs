@@ -5,54 +5,52 @@
 //! files (hotspot) and a thumbnail of the crate's coupling graph (top
 //! Fan-In/Fan-Out modules, dependency cycles, most coupled pairs).
 //!
-//! Mirrors the Codex SessionStart handler — both share the same body
-//! renderer ([`crate::hooks::core::render_summary`]) and only differ in
-//! how the resulting string is wrapped into a hook response.
+//! The summary itself is rendered by
+//! [`crate::hooks::core::session_summary::render_summary`] and driven by the
+//! engine-agnostic [`crate::hooks::core::SummaryHook`]; this module is
+//! just the Claude Code envelope around it.
 
-use agent_hooks::Hook;
+use std::path::Path;
+
 use agent_hooks::claude_code::{
     SessionStartHookSpecificOutput, SessionStartInput, SessionStartOutput,
 };
 
-use crate::hooks::core::{SessionSummaryError, render_summary};
+use crate::hooks::core::SessionStartEnvelope;
 
 const HOOK_EVENT_NAME: &str = "SessionStart";
 
-/// Claude Code SessionStart handler that emits a hotspot + coupling summary.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SummaryHook;
+/// Claude Code's SessionStart adapter for the engine-agnostic summary
+/// hook.
+pub struct ClaudeCodeSessionStart;
 
-impl SummaryHook {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Hook for SummaryHook {
+impl SessionStartEnvelope for ClaudeCodeSessionStart {
     type Input = SessionStartInput;
     type Output = SessionStartOutput;
-    type Error = SessionSummaryError;
 
-    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
-        let Some(body) = render_summary(&input.context.cwd)? else {
-            return Ok(SessionStartOutput::default());
-        };
-        Ok(SessionStartOutput {
+    fn cwd(input: &Self::Input) -> &Path {
+        &input.context.cwd
+    }
+
+    fn wrap_summary(body: String) -> Self::Output {
+        SessionStartOutput {
             hook_specific_output: Some(SessionStartHookSpecificOutput {
                 hook_event_name: HOOK_EVENT_NAME.to_owned(),
                 additional_context: Some(body),
             }),
             ..SessionStartOutput::default()
-        })
+        }
     }
 }
+
+/// Claude Code SessionStart handler that emits a hotspot + coupling summary.
+pub type SummaryHook = crate::hooks::core::SummaryHook<ClaudeCodeSessionStart>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        init_repo_with_crate_for_session_summary, init_repo_with_loose_rust_file, write_file,
-    };
+    use crate::test_support::init_repo_with_crate_for_session_summary;
+    use agent_hooks::Hook;
     use agent_hooks::claude_code::{HookContext, SessionStartSource};
     use std::path::PathBuf;
 
@@ -82,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn injects_hotspot_and_coupling_sections() {
+    fn injects_summary_via_additional_context() {
         let dir = tempfile::tempdir().unwrap();
         init_repo_with_crate_for_session_summary(dir.path());
 
@@ -99,45 +97,6 @@ mod tests {
 
         assert!(body.starts_with("# agent-lens session-start"), "got {body}");
         assert!(body.contains("## Hotspots"), "want hotspot: {body}");
-        assert!(body.contains("src/b.rs"), "want churn target: {body}");
         assert!(body.contains("## Coupling"), "want coupling: {body}");
-        assert!(body.contains("crate::a"), "want modules: {body}");
-        assert!(body.contains("crate::b"), "want modules: {body}");
-    }
-
-    #[test]
-    fn coupling_only_when_no_git_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/lib.rs", "pub mod a;\n");
-        write_file(dir.path(), "src/a.rs", "pub fn solo() {}\n");
-
-        let out = SummaryHook::new()
-            .handle(input(dir.path().to_path_buf()))
-            .unwrap();
-        let body = out
-            .hook_specific_output
-            .and_then(|h| h.additional_context)
-            .expect("expected additionalContext");
-        assert!(body.contains("## Coupling"));
-        assert!(!body.contains("## Hotspots"), "should skip hotspot: {body}");
-    }
-
-    #[test]
-    fn hotspot_only_when_no_crate_root() {
-        let dir = tempfile::tempdir().unwrap();
-        init_repo_with_loose_rust_file(dir.path());
-
-        let out = SummaryHook::new()
-            .handle(input(dir.path().to_path_buf()))
-            .unwrap();
-        let body = out
-            .hook_specific_output
-            .and_then(|h| h.additional_context)
-            .expect("expected additionalContext");
-        assert!(body.contains("## Hotspots"));
-        assert!(
-            !body.contains("## Coupling"),
-            "should skip coupling: {body}"
-        );
     }
 }

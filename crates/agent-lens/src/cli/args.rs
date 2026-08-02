@@ -1,0 +1,2029 @@
+//! The clap surface: every argument struct and subcommand enum the
+//! `agent-lens` CLI parses.
+
+use std::path::PathBuf;
+
+use agent_lens::analyze::{
+    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphDirection, GraphQueryKind,
+    OutputFormat, PairKey, SimilarityMethod, SimilarityTarget,
+};
+use agent_lens::hooks::codex::setup as codex_setup;
+use agent_lens::hooks::setup::SettingsScope;
+use agent_lens::skills;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use super::examples;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "agent-lens",
+    about = "Hook handlers and analyzers that give coding agents a sharper view of the codebase.",
+    after_long_help = examples::ROOT,
+    version,
+    propagate_version = true,
+    // We ship our own `help` subcommand (with `--md`), so turn off clap's
+    // auto-generated one to avoid a name clash. `--help` flags are
+    // untouched and still work everywhere.
+    disable_help_subcommand = true
+)]
+pub(super) struct Cli {
+    #[command(subcommand)]
+    pub(super) command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum Command {
+    /// Run a handler for one of Claude Code's hook events.
+    #[command(subcommand)]
+    Hook(HookCommand),
+    /// Run a handler for one of Codex's hook events.
+    #[command(subcommand)]
+    CodexHook(CodexHookCommand),
+    /// Run an on-demand analyzer that emits LLM-friendly context.
+    #[command(subcommand, after_long_help = examples::ANALYZE)]
+    Analyze(AnalyzeCommand),
+    /// Run every analyzer in a named `agent-lens.toml` profile.
+    ///
+    /// A profile bundles a target path, shared path filters, an ordered
+    /// list of analyzers, and optional per-tool overrides. The config is
+    /// discovered by walking up from the current directory (or pointed
+    /// at with `--config`); each analyzer runs through the same path as
+    /// `agent-lens analyze`, and the per-tool reports are emitted as one
+    /// combined document.
+    #[command(after_long_help = examples::RUN)]
+    Run(RunArgs),
+    /// List or install the Claude Code skills bundled with this binary.
+    ///
+    /// The skills teach a coding agent which analyzer fits a given
+    /// question, so installing them into a project's `.claude/skills`
+    /// (or `$HOME/.claude/skills`) is how a fresh checkout gets
+    /// `agent-lens`-aware routing.
+    #[command(subcommand, after_long_help = examples::SKILLS)]
+    Skills(SkillsCommand),
+    /// Inspect the `agent-lens.toml` configuration format.
+    #[command(subcommand, after_long_help = examples::CONFIG)]
+    Config(ConfigCommand),
+    /// Print the command reference, optionally as agent-friendly Markdown.
+    ///
+    /// Without flags this prints the same long help clap renders for
+    /// `--help`. With `--md` it emits a dense Markdown document covering
+    /// every subcommand, its description, and its options in one place —
+    /// tuned for dropping into an LLM context.
+    #[command(after_long_help = examples::HELP)]
+    Help(HelpArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct HelpArgs {
+    /// Emit the full command reference as Markdown tuned for agent context.
+    #[arg(long)]
+    pub(super) md: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum ConfigCommand {
+    /// Print the `agent-lens.toml` schema as agent-friendly Markdown.
+    ///
+    /// Lists the `[profile.<name>]` keys and every per-tool override
+    /// table — their types, defaults, and meaning — plus a worked
+    /// example. The format lives only in the config structs, so this is
+    /// the canonical reference for writing or auditing an
+    /// `agent-lens.toml` without reading the source.
+    Schema,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum SkillsCommand {
+    /// List the bundled skills and what each one is for.
+    List,
+    /// Install the bundled skills into a `.claude/skills` directory.
+    ///
+    /// Conservative by default: a skill that already exists with
+    /// different content is reported as a conflict and left untouched.
+    /// Re-running once installed is a no-op; pass `--force` to overwrite
+    /// local edits.
+    Install(SkillsInstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct SkillsInstallArgs {
+    /// Where to install the skills. `project` writes to
+    /// `<cwd>/.claude/skills`; `user` writes to `$HOME/.claude/skills`.
+    #[arg(long, value_enum, default_value_t = SkillsScopeArg::Project)]
+    pub(super) scope: SkillsScopeArg,
+    /// Show what would be written without touching disk.
+    #[arg(long)]
+    pub(super) dry_run: bool,
+    /// Overwrite skills that already exist on disk with different content.
+    #[arg(long)]
+    pub(super) force: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(super) enum SkillsScopeArg {
+    Project,
+    User,
+}
+
+impl From<SkillsScopeArg> for skills::SkillsScope {
+    fn from(value: SkillsScopeArg) -> Self {
+        match value {
+            SkillsScopeArg::Project => Self::Project,
+            SkillsScopeArg::User => Self::User,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub(super) struct RunArgs {
+    /// Name of the `[profile.<name>]` table to run.
+    pub(super) profile: String,
+    /// Path to an explicit `agent-lens.toml`. Defaults to the nearest
+    /// one found by walking up from the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub(super) config: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum HookCommand {
+    /// Handle a `SessionStart` event.
+    #[command(subcommand)]
+    SessionStart(SessionStartCommand),
+    /// Handle a `PreToolUse` event.
+    #[command(subcommand)]
+    PreToolUse(PreToolUseCommand),
+    /// Handle a `PostToolUse` event.
+    #[command(subcommand)]
+    PostToolUse(PostToolUseCommand),
+    /// Wire `agent-lens`'s hook handlers into a Claude Code
+    /// `settings.json`.
+    ///
+    /// The merge is conservative: existing entries are preserved, and a
+    /// new block is appended only with the commands that aren't already
+    /// wired up. Re-running the command is a no-op once every handler
+    /// is installed.
+    #[command(after_long_help = examples::HOOK_SETUP)]
+    Setup(SetupArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct SetupArgs {
+    /// Where to install the hooks. `project` writes to
+    /// `<cwd>/.claude/settings.json`; `user` writes to
+    /// `$HOME/.claude/settings.json`.
+    #[arg(long, value_enum, default_value_t = SetupScope::Project)]
+    pub(super) scope: SetupScope,
+    /// Show the resulting JSON without touching disk.
+    #[arg(long)]
+    pub(super) dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(super) enum SetupScope {
+    Project,
+    User,
+}
+
+impl From<SetupScope> for SettingsScope {
+    fn from(value: SetupScope) -> Self {
+        match value {
+            SetupScope::Project => Self::Project,
+            SetupScope::User => Self::User,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum SessionStartCommand {
+    /// Inject a one-shot summary of the project's hotspots and
+    /// coupling thumbnail into the new Claude Code session.
+    ///
+    /// Runs once per session against `cwd`. Pieces that don't apply
+    /// (cwd outside a git working tree, or not anchored at a Rust
+    /// crate) are silently omitted; if neither applies, the hook
+    /// returns a no-op and Claude Code starts unchanged.
+    Summary,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum PreToolUseCommand {
+    /// Report functions whose pre-edit complexity (cyclomatic /
+    /// cognitive / nesting) crosses a non-trivial threshold in the
+    /// file the agent is about to edit.
+    ///
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently. `Write` against a brand-new path
+    /// is a silent no-op (no current state to read).
+    Complexity,
+    /// Report cohesion units (`impl` blocks, classes, or module units)
+    /// whose pre-edit LCOM4 is above 1 in the file the agent is about
+    /// to edit.
+    ///
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
+    Cohesion,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum PostToolUseCommand {
+    /// Report clusters of similar functions in the file that was just edited.
+    ///
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
+    Similarity,
+    /// Report functions whose body, after stripping a short chain of
+    /// trivial adapters, is just a forwarding call to another function.
+    ///
+    /// The parser is chosen from the file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
+    Wrapper,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum CodexHookCommand {
+    /// Handle a Codex `SessionStart` event.
+    #[command(subcommand)]
+    SessionStart(CodexSessionStartCommand),
+    /// Handle a Codex `PreToolUse` event.
+    #[command(subcommand)]
+    PreToolUse(CodexPreToolUseCommand),
+    /// Handle a Codex `PostToolUse` event.
+    #[command(subcommand)]
+    PostToolUse(CodexPostToolUseCommand),
+    /// Wire `agent-lens`'s Codex hook handlers into a Codex
+    /// `config.toml`.
+    ///
+    /// The merge is conservative: existing keys and comments are
+    /// preserved, and `[[hooks.SessionStart]]`, `[[hooks.PreToolUse]]`,
+    /// and `[[hooks.PostToolUse]]` blocks are appended only for handlers
+    /// that aren't already wired up. Re-running the
+    /// command is a no-op once every handler is installed.
+    #[command(after_long_help = examples::CODEX_HOOK_SETUP)]
+    Setup(CodexSetupArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct CodexSetupArgs {
+    /// Where to install the hooks. `user` writes to
+    /// `$HOME/.codex/config.toml` (Codex's canonical location);
+    /// `project` writes to `<repo-root>/.codex/config.toml`, where
+    /// `repo-root` comes from `git rev-parse --show-toplevel` and
+    /// falls back to the current directory outside a git tree.
+    #[arg(long, value_enum, default_value_t = CodexSetupScope::User)]
+    pub(super) scope: CodexSetupScope,
+    /// Show the resulting TOML without touching disk.
+    #[arg(long)]
+    pub(super) dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(super) enum CodexSetupScope {
+    Project,
+    User,
+}
+
+impl From<CodexSetupScope> for codex_setup::ConfigScope {
+    fn from(value: CodexSetupScope) -> Self {
+        match value {
+            CodexSetupScope::Project => Self::Project,
+            CodexSetupScope::User => Self::User,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum CodexPostToolUseCommand {
+    /// Report clusters of similar functions across every file Codex's
+    /// `apply_patch` just touched.
+    ///
+    /// The parser is chosen from each file's extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
+    Similarity,
+    /// Report functions whose body, after stripping a short chain of
+    /// trivial adapters, is just a forwarding call to another function.
+    ///
+    /// Runs against every file Codex's `apply_patch` just touched. The
+    /// parser is chosen from each file's extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
+    Wrapper,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum CodexPreToolUseCommand {
+    /// Report functions whose pre-patch complexity crosses a
+    /// non-trivial threshold across every file Codex's `apply_patch`
+    /// is about to update.
+    ///
+    /// `*** Add File:` entries are skipped (no current state on disk);
+    /// only `*** Update File:` paths are inspected.
+    /// The parser is chosen from each updated file's extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
+    Complexity,
+    /// Report cohesion units (`impl` blocks, classes, or module units)
+    /// whose pre-patch LCOM4 is above 1 across every file Codex's
+    /// `apply_patch` is about to update.
+    ///
+    /// `*** Add File:` entries are skipped (no current state on disk);
+    /// only `*** Update File:` paths are inspected.
+    /// The parser is chosen from each updated file's extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// extension are ignored silently.
+    Cohesion,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum CodexSessionStartCommand {
+    /// Inject a one-shot summary of the project's hotspots and
+    /// coupling thumbnail into the new Codex session.
+    ///
+    /// Runs once per session against `cwd`. Pieces that don't apply
+    /// (cwd outside a git working tree, or not anchored at a Rust
+    /// crate) are silently omitted; if neither applies, the hook
+    /// returns a no-op and Codex starts unchanged.
+    Summary,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum AnalyzeCommand {
+    /// Report LCOM4 cohesion units (`impl` blocks, classes, or module
+    /// units).
+    ///
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep) and groups findings per file. The parser is chosen from
+    /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
+    #[command(after_long_help = examples::COHESION)]
+    Cohesion(AnalyzeCohesionArgs),
+    /// Report per-function complexity metrics (Cyclomatic, Cognitive,
+    /// Max Nesting, Halstead Volume, Maintainability Index).
+    ///
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep), groups findings per file, and aggregates the top-level
+    /// summary across the whole corpus. The parser is chosen from each
+    /// file extension (Rust, TypeScript/JavaScript, Python, or Go).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
+    #[command(after_long_help = examples::COMPLEXITY)]
+    Complexity(AnalyzeComplexityArgs),
+    /// Report module-level coupling metrics for a Rust crate, a
+    /// TypeScript / JavaScript module graph, a Go module, or a Python
+    /// package tree.
+    ///
+    /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
+    /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
+    /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly
+    /// connected components of the dependency graph (cycles). `path`
+    /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
+    /// containing one, a TypeScript / JavaScript entry file
+    /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
+    /// `.cjs`) whose relative imports define the module graph, a
+    /// `.go` file or Go module directory (containing `go.mod`), or a
+    /// `.py` file or package directory whose in-tree imports define the
+    /// module graph.
+    #[command(after_long_help = examples::COUPLING)]
+    Coupling(AnalyzeCommonArgs),
+    /// Report function-level call cycles: groups of 2+ functions that
+    /// call each other, directly or transitively, with advisory
+    /// cheapest-cut suggestions for breaking each group.
+    ///
+    /// Builds the same heuristic static call graph as `analyze
+    /// function-graph` and reports its strongly connected components
+    /// over resolved call edges only. Each tangle lists its members
+    /// with file:line, whether it stays inside one file (likely
+    /// intentional mutual recursion — parsers, tree walkers — and
+    /// ranked below cross-file tangles), its internal call-site count,
+    /// and the number of nearby ambiguous edges as a confidence
+    /// warning. Break suggestions name the cheapest internal edges (by
+    /// static call-site count, greedy feedback-arc heuristic) whose
+    /// removal would break the cycle, with call lines as evidence —
+    /// advisory only, since a cheap edge can still be load-bearing.
+    /// The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` emits a
+    /// compact summary tuned for LLM context.
+    #[command(after_long_help = examples::CYCLES)]
+    Cycles(AnalyzeCommonArgs),
+    /// Report chains of functions that only forward, and the modules
+    /// built out of them.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and walks the subgraph of functions that add nothing of their
+    /// own: exactly one resolved outgoing target, no other call site
+    /// beyond the language's own trivial adapters (`.clone()`,
+    /// `.into()`, builtins), at most three body statements, and
+    /// `cyclomatic == 1`. `analyze wrapper` reports the one-hop case
+    /// with argument-level evidence; this reports what happens when it
+    /// stacks — `api::save -> service::save -> repo::save ->
+    /// db::insert`, where an agent opens four files to reach the one
+    /// doing the work, so the terminus is the headline of every row. A
+    /// module roll-up adds the "lasagna layer" half: how much of a
+    /// module is forwarding and how much of that forwarding points at
+    /// one other module. Classification under-reports on purpose — a
+    /// forwarder that also logs, locks, or validates is not a middle
+    /// man, and a function whose body facts were unavailable is
+    /// reported as unclassified rather than assumed thin. Test
+    /// functions, a module's sole public surface (a facade; Rust and Go
+    /// only, the two adapters that extract export status), and doc
+    /// comments saying "deprecated" are exempt, and a chain running
+    /// through an exempt function is cut there. Chains follow resolved
+    /// edges only, so depths are lower bounds; forwarding cycles have
+    /// no head to walk from and are counted rather than listed. The
+    /// parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` caps each
+    /// listing at `--top` (default 20).
+    #[command(after_long_help = examples::DELEGATION)]
+    Delegation(AnalyzeDelegationArgs),
+    /// Emit a static function call graph as visualization-ready data.
+    ///
+    /// The graph is heuristic and current-source only: nodes are functions,
+    /// edges are syntactic call sites, and callee resolution is limited to
+    /// exact extracted names or unique last-segment matches. The parser is
+    /// chosen from each file extension (Rust, TypeScript/JavaScript,
+    /// Python, or Go); other extensions are ignored silently. JSON is the
+    /// default; `--format md` emits a compact sanity summary.
+    #[command(after_long_help = examples::FUNCTION_GRAPH)]
+    FunctionGraph(AnalyzeCommonArgs),
+    /// Run one canned traversal on the static function call graph:
+    /// callers, callees, neighborhood, or path.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and answers one structural question per invocation. `--query
+    /// callers|callees|neighborhood` walks resolved call edges from the
+    /// function named by `--symbol` up to `--depth` (default 1;
+    /// `--direction in|out|both` picks the neighborhood orientation).
+    /// `--query path` reports the shortest call chain from `--symbol`
+    /// to `--to`, with the call lines of every hop as evidence.
+    /// Symbols match by `::`-segment suffix on the qualified name
+    /// (e.g. `Resolver::resolve`) or an exact node id; ambiguous
+    /// matches are listed, never guessed. Traversal follows resolved
+    /// edges only, so results are lower bounds — every row carries the
+    /// node's unresolved/ambiguous outgoing call-site counts — and the
+    /// result set is capped by node count (`--limit`, default 50). The
+    /// parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` renders
+    /// span and module detail for small result sets and compact id
+    /// rows for larger ones.
+    #[command(after_long_help = examples::GRAPH_QUERY)]
+    GraphQuery(AnalyzeGraphQueryArgs),
+    /// Report each module's transitive outgoing dependency closure
+    /// (its "context span").
+    ///
+    /// For every module in the graph, lists the directly-depended
+    /// modules, the modules reachable through one or more outgoing
+    /// edges, and the count of distinct source files those modules
+    /// span. Useful as an "onboarding cost" estimate — how many files
+    /// an agent must open to reason about a given module. `path` may
+    /// be a Rust crate root (or a directory containing one), a
+    /// TypeScript/JavaScript entry file, a Python file/directory, or a
+    /// Go file or module directory (containing `go.mod`). Frameworks
+    /// with many implicit entries (Next.js App Router, file-routed
+    /// Remix / Astro) can pass `--entry-glob` repeatedly to merge
+    /// several TS/JS entry trees into one report; in that mode `path`
+    /// must be a directory and the patterns are evaluated relative to
+    /// it.
+    #[command(after_long_help = examples::CONTEXT_SPAN)]
+    ContextSpan(AnalyzeContextSpanArgs),
+    /// Report hub smells on the static function call graph: god
+    /// functions, load-bearing utilities, bottlenecks, and misplaced
+    /// functions.
+    ///
+    /// Builds the same call graph as `function-graph` and flags, per
+    /// function: outlier fan-out (god functions, defect-prone), outlier
+    /// fan-in (load-bearing blast-radius signal — check callers before
+    /// editing, not a defect), Henry-Kafura information-flow spikes
+    /// (`loc × (fan_in × fan_out)²`), and cross-module pull (most
+    /// resolved call traffic lands in a different module). Fan-in is
+    /// split into prod vs test callers, and each function carries a
+    /// deterministic PageRank-importance percentile (damping 0.85,
+    /// fixed 100 iterations, call-count weights). Outliers are chosen
+    /// by a robust quartile rule on log-scaled metrics, never absolute
+    /// thresholds. Degrees count resolved edges only, so they are
+    /// lower bounds; the report cites per-module resolution confidence.
+    /// The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). JSON is the default;
+    /// `--format md` emits ranked lists capped at `--top` (default 20).
+    #[command(after_long_help = examples::HUBS)]
+    Hubs(AnalyzeHubsArgs),
+    /// Report the blast radius of a change: which functions
+    /// transitively call the changed ones, which tests reach them, and
+    /// where the impact concentrates.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and walks callers backwards from each seed over resolved call
+    /// edges, on the SCC condensation (a call cycle counts as one hop),
+    /// up to `--depth` hops (default 5). Seeds default to the functions
+    /// whose spans intersect the unstaged working-tree diff (`git diff
+    /// -U0`); pass `--function <symbol>` (repeatable) to query a
+    /// planned edit before making it. Symbols match by `::`-segment
+    /// suffix on the qualified name or an exact node id; ambiguous
+    /// matches are listed, never guessed. Per changed function the
+    /// report lists direct callers verbatim, folds deeper callers to
+    /// per-depth per-module counts, lists reachable test functions as a
+    /// verification checklist, and states the caller total (VFI) with
+    /// modules spanned. Counts follow resolved edges only and are
+    /// labeled as bounds: ambiguous and caller-unattributed call sites
+    /// are excluded and their counts reported. The parser is chosen
+    /// from each file extension (Rust, TypeScript/JavaScript, Python,
+    /// or Go); other extensions are ignored silently. JSON is the
+    /// default; `--format md` caps caller and test lists at `--top`
+    /// (default 20).
+    #[command(after_long_help = examples::IMPACT)]
+    Impact(AnalyzeImpactArgs),
+    /// Report an inferred layer map: what level each function and module
+    /// sits on, which modules are mutually dependent, and which
+    /// cross-module calls skip a level.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and levelizes it Lakos-style over resolved call edges, at two
+    /// granularities. A function level (`L`) is
+    /// `1 + max(level of its callees)`, computed on the SCC condensation
+    /// so a call cycle collapses to one node and its members share a
+    /// level. A module level (`M`) is the same computation on the module
+    /// graph induced by cross-module calls — levelizing that graph
+    /// directly, rather than averaging its members' function levels,
+    /// keeps module levels consistent with module edges, so a module's
+    /// level need not match its members'. Level 1 is leaf code that
+    /// calls nothing; the highest level is the entry side. Nothing is
+    /// declared — both layerings are inferred from the code. The
+    /// listings are structural facts, not errors, since callbacks and
+    /// dependency injection shape the graph the same way: module cycles
+    /// (mutually dependent modules, with the concrete call sites that
+    /// realise each cycle), skip-level calls (a downward call passing
+    /// over at least one module level), and modules whose members span
+    /// many function levels (a vertical cohesion smell). Zero-fan-in
+    /// `main`/exported functions are reported as the entry-point
+    /// orientation set; visibility is only extracted for Rust and Go, so
+    /// TypeScript and Python entries rest on zero fan-in alone. Levels
+    /// follow resolved edges only, so they are lower bounds and one
+    /// mis-resolved edge can lift a whole chain — per-level function and
+    /// edge counts, name-fallback provenance per call site, and
+    /// per-module resolution confidence are reported alongside. The
+    /// parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` caps each
+    /// listing at `--top` (default 20).
+    #[command(after_long_help = examples::LAYERS)]
+    Layers(AnalyzeLayersArgs),
+    /// Rank files by `commits × cognitive_max` to surface hotspots.
+    ///
+    /// Walks `path` for supported source files (Rust,
+    /// TypeScript/JavaScript, Python, or Go), asks `git` how many
+    /// commits each file has been touched in
+    /// (optionally scoped by `--since`), and joins the two with
+    /// cognitive complexity. The resulting ranking points at
+    /// "frequently changed *and* complex" code — where bugs concentrate
+    /// and where a refactor is most likely to pay off. `path` must be
+    /// inside a git working tree.
+    #[command(after_long_help = examples::HOTSPOT)]
+    Hotspot(AnalyzeHotspotArgs),
+    /// Rank files by churn × blast radius: where an edit is most likely
+    /// to be both frequent and far-reaching.
+    ///
+    /// The blast-radius sibling of `hotspot`. Where `hotspot` multiplies
+    /// churn by intra-function complexity — which cannot separate "hot
+    /// but leaf" from "hot and load-bearing" — this joins the same git
+    /// churn (`--since` window included) with call-graph centrality:
+    /// the max and sum of PageRank importance over each file's
+    /// functions, from the same deterministic pass `analyze hubs`
+    /// reports, plus transitive caller counts (VFI) as a second raw
+    /// component. The composite is a rank product
+    /// (`churn_rank × centrality_rank`), so no scale normalisation is
+    /// needed and **lower is riskier**; every raw component is printed
+    /// alongside it, together with the file's highest-PageRank function
+    /// as the concrete reason it ranks. This is a blast-radius signal,
+    /// not a defect signal: a high row means check callers and tests
+    /// before editing. Ranking granularity is per file, since git
+    /// attributes commits to files. Centrality follows resolved call
+    /// edges only, so it is a lower bound and the report cites
+    /// per-module resolution confidence. `path` must be inside a git
+    /// working tree. The parser is chosen from each file extension
+    /// (Rust, TypeScript/JavaScript, Python, or Go). JSON is the
+    /// default; `--format md` caps the table at `--top` (default 20).
+    #[command(after_long_help = examples::RISK)]
+    Risk(AnalyzeRiskArgs),
+    /// Report clusters of near-duplicate functions.
+    ///
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep) and reports cross-file clusters alongside in-file ones.
+    /// Function bodies are compared via TSED on their normalised AST;
+    /// pairs scoring at or above `--threshold` are folded into complete-link
+    /// clusters where every member is similar to every other (no chaining
+    /// through weaker links). Each reported pair also carries diagnostic
+    /// components that never feed the score, among them `doc_overlap` —
+    /// the word-level overlap of the two doc comments, which separates
+    /// "same stated intent" clones from functions that merely share a
+    /// shape. The parser is chosen from each file extension
+    /// (Rust, TypeScript/JavaScript, Python, or Go). The JSON format is
+    /// the default machine-readable output and always carries the
+    /// per-pair components; `--format md` emits a compact summary tuned
+    /// for LLM context, with the doc overlap rolled in under
+    /// `--doc-overlap`.
+    #[command(after_long_help = examples::SIMILARITY)]
+    Similarity(AnalyzeSimilarityArgs),
+    /// Report production functions with no static call path from any
+    /// test function.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and walks forward from every test function over resolved call
+    /// edges; the production functions the walk never reaches are the
+    /// report, grouped by module and ranked by untested LOC. This is a
+    /// structural complement to coverage — no execution, no
+    /// instrumentation — and it measures "no resolved call path from a
+    /// test function", not "uncovered": integration tests that drive the
+    /// built binary reach functions with no in-graph test caller, and
+    /// those are listed here anyway. Only resolved edges are traversable,
+    /// so the listing is an upper bound; unresolved and ambiguous call
+    /// sites leaving test-reached code are counted, and a function an
+    /// ambiguous site might reach is flagged on its own row.
+    /// `--exclude-tests` removes the traversal's starting points and is
+    /// reported as such. The parser is chosen from each file extension
+    /// (Rust, TypeScript/JavaScript, Python, or Go); other extensions are
+    /// ignored silently. JSON is the default; `--format md` caps the
+    /// module listing at `--top` (default 20).
+    #[command(after_long_help = examples::UNTESTED)]
+    Untested(AnalyzeUntestedArgs),
+    /// Report `pub` / exported functions no caller outside a narrower
+    /// scope uses.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and folds each public function's resolved callers into the
+    /// narrowest module containing all of them; when that is narrower
+    /// than the declaration, the function is listed with the visibility
+    /// its callers would still permit (`drop pub`, `pub(super)`,
+    /// `pub(in ...)`, `pub(crate)`, or unexporting for Go). Narrowing is
+    /// compiler-verified, so a wrong row costs a failed build rather
+    /// than lost code. Only resolved edges carry a caller module:
+    /// ambiguous and name-matching unresolved call sites from outside
+    /// the proposed scope are counted per row as the reason to check it
+    /// first. An exported Go method matching a method of an interface
+    /// declared in the analyzed tree (same name and parameter count) is
+    /// annotated `may satisfy interface ...` and ranked after the
+    /// unannotated rows of its bucket: its calls can dispatch through
+    /// the interface, so a missing caller is expected rather than
+    /// evidence. Callers outside the analyzed path are invisible, so a
+    /// single library crate's own API surface looks crate-internal —
+    /// the report says so when only one crate is in scope. Export status
+    /// is extracted for Rust and Go only; TypeScript and Python
+    /// functions are counted as skipped. JSON is the default;
+    /// `--format md` caps the module listing at `--top` (default 20).
+    #[command(after_long_help = examples::VISIBILITY)]
+    Visibility(AnalyzeVisibilityArgs),
+    /// Report functions whose body, after stripping a short chain of
+    /// trivial adapters, is just a forwarding call to another function.
+    ///
+    /// Accepts either a single source file or a directory; in directory
+    /// mode the analyzer walks recursively (respecting `.gitignore` like
+    /// ripgrep) and groups findings per file. The parser is chosen from
+    /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
+    /// The JSON format is the default machine-readable output;
+    /// `--format md` emits a compact summary tuned for LLM context.
+    #[command(after_long_help = examples::WRAPPER)]
+    Wrapper(AnalyzeWrapperArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeCommonArgs {
+    /// Path to a source file, Rust crate root, or directory to analyze.
+    pub(super) path: PathBuf,
+    /// Output format. Defaults to JSON.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    pub(super) format: OutputFormat,
+    #[command(flatten)]
+    pub(super) path_filter: AnalyzePathArgs,
+}
+
+impl AnalyzeCommonArgs {
+    pub(super) fn into_parts(self) -> (PathBuf, OutputFormat, AnalyzePathArgs) {
+        (self.path, self.format, self.path_filter)
+    }
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub(super) struct AnalyzeDiffArgs {
+    /// Restrict the report to units touching unstaged changed lines in
+    /// `git diff -U0`.
+    #[arg(long)]
+    pub(super) diff_only: bool,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub(super) struct AnalyzeRankingArgs {
+    /// Cap the markdown ranking to the top-N entries. JSON output
+    /// always carries the full list.
+    #[arg(long)]
+    pub(super) top: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeCohesionArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) diff: AnalyzeDiffArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+    /// Minimum LCOM4 score included in the markdown ranking. The
+    /// markdown default is 2, which hides cohesive LCOM4=1 units;
+    /// pass `--min-score 1` to include them.
+    #[arg(long)]
+    pub(super) min_score: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeComplexityArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) diff: AnalyzeDiffArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+    /// Minimum cognitive complexity score included in the markdown
+    /// ranking. JSON output always carries the full list.
+    #[arg(long)]
+    pub(super) min_score: Option<u32>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeHubsArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeGraphQueryArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    /// Traversal verb to run.
+    #[arg(long, value_enum)]
+    pub(super) query: GraphQueryKind,
+    /// Function to start from: a `::`-segment suffix of its qualified
+    /// name (e.g. `foo`, `module::foo`, `Owner::method`) or an exact
+    /// node id (`file:name:line`, as listed on ambiguity).
+    #[arg(long)]
+    pub(super) symbol: String,
+    /// Destination symbol for `--query path` (same matching rules as
+    /// `--symbol`).
+    #[arg(long)]
+    pub(super) to: Option<String>,
+    /// Traversal depth cap in call hops. Defaults to 1 for
+    /// callers/callees/neighborhood; for `path` it caps the search
+    /// (default unbounded).
+    #[arg(long)]
+    pub(super) depth: Option<usize>,
+    /// Traversal direction for `--query neighborhood` (default both).
+    #[arg(long, value_enum)]
+    pub(super) direction: Option<GraphDirection>,
+    /// Cap the result set by node count (default 50).
+    #[arg(long)]
+    pub(super) limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeImpactArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+    /// Seed the query from this function instead of the working-tree
+    /// diff: a `::`-segment suffix of its qualified name (e.g. `foo`,
+    /// `module::foo`, `Owner::method`) or an exact node id
+    /// (`file:name:line`, as listed on ambiguity). Repeatable.
+    #[arg(long = "function", value_name = "SYMBOL")]
+    pub(super) function: Vec<String>,
+    /// Reverse-traversal depth cap in call hops (cycles count as one).
+    /// Callers beyond the cap are counted, not listed.
+    #[arg(long)]
+    pub(super) depth: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeLayersArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeDelegationArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+    #[command(flatten)]
+    pub(super) diff: AnalyzeDiffArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeUntestedArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeVisibilityArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeHotspotArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+    /// Restrict churn to commits in this `--since=` window. Accepts
+    /// anything git's approxidate parser does (e.g. `90.days.ago`,
+    /// `2024-01-01`).
+    #[arg(long)]
+    pub(super) since: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeRiskArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+    /// Restrict the churn axis to commits in this `--since=` window.
+    /// Accepts anything git's approxidate parser does (e.g.
+    /// `90.days.ago`, `2024-01-01`). Centrality is a property of the
+    /// current source and is unaffected.
+    #[arg(long)]
+    pub(super) since: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeSimilarityArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) diff: AnalyzeDiffArgs,
+    #[command(flatten)]
+    pub(super) ranking: AnalyzeRankingArgs,
+    /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
+    /// this value are eligible for clustering, and the same threshold
+    /// is the complete-link cut so every pair inside a reported cluster
+    /// stays at or above it. Defaults to the same cutoff used by the
+    /// PostToolUse `similarity` hook.
+    #[arg(long, visible_alias = "min-score", default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
+    pub(super) threshold: f64,
+    /// Multi-threshold sweep: a comma-separated ascending ladder of
+    /// thresholds, e.g. `--sweep 0.6,0.75,0.85`. Pairs are scored and
+    /// clustered once at the lowest rung, and every reported cluster is
+    /// annotated with the highest rung at which its complete-link structure
+    /// survives intact — a coarse dendrogram in one run that separates
+    /// verbatim clones from merely structural parallels. Supersedes
+    /// `--threshold`, which it conflicts with.
+    #[arg(long, value_delimiter = ',', conflicts_with = "threshold")]
+    pub(super) sweep: Vec<f64>,
+    /// Invert the report: match functions by name *first*, score second,
+    /// and list every cross-file match regardless of threshold, most
+    /// drifted first. Threshold clustering can only report what is still
+    /// similar, so two parallel implementations that have drifted apart —
+    /// the likeliest missed sync — silently drop out of it. `qualified`
+    /// (alias `name`) keys on the normalized owner-qualified name, so
+    /// `Summary::from` matches `JsSummary::from`; `method` keys on the
+    /// method segment alone, which finds siblings whose types were
+    /// renamed at the cost of grouping unrelated same-named functions.
+    #[arg(long, value_enum, value_name = "KEY", conflicts_with = "sweep")]
+    pub(super) paired_by: Option<PairKey>,
+    /// Floor for `--paired-by`: name matches scoring below this are
+    /// dropped as unrelated namesakes rather than reported as drift.
+    /// Drift lives between this floor and `--threshold`; below it a
+    /// shared name means two different functions that happen to be
+    /// called the same thing. Pass `0` to report every match. No effect
+    /// without `--paired-by`.
+    #[arg(long, default_value_t = DEFAULT_SIMILARITY_DRIFT_FLOOR, requires = "paired_by")]
+    pub(super) drift_floor: f64,
+    /// Minimum source line count for a unit to be considered. Units
+    /// shorter than this are dropped before pairwise comparison; keeps
+    /// trivial getters / one-liners out of the report. Defaults per
+    /// target: 5 for `--target functions`, 3 for `--target types`.
+    #[arg(long)]
+    pub(super) min_lines: Option<usize>,
+    /// Comparison unit. `functions` (default) compares function bodies.
+    /// `types` compares type definitions instead — Rust struct/enum/type
+    /// alias, TS interface/type alias/enum, Python annotated classes /
+    /// dataclasses / Enum subclasses, Go struct/alias — by their member
+    /// shape (field names and types, enum variants, alias targets), so
+    /// duplicated DTOs and drifted mirror structs surface the same way
+    /// duplicated functions do. With `--paired-by`, only the
+    /// `qualified`/`name` key applies; `method` has no meaning for a
+    /// type and is rejected.
+    #[arg(long, value_enum, default_value_t = SimilarityTarget::Functions)]
+    pub(super) target: SimilarityTarget,
+    /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
+    /// distance over the body AST. `token` compares preorder token
+    /// k-gram multisets — faster and more tolerant of reordered code,
+    /// but less precise. Scores from the two methods are not directly
+    /// comparable.
+    #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
+    pub(super) method: SimilarityMethod,
+    /// Roll the per-pair doc-comment overlap up into the markdown
+    /// report, as a range plus how many of the cluster's pairs carried
+    /// doc text on both sides. Diagnostic only — it never feeds the
+    /// similarity score. High overlap on a high-similarity cluster means
+    /// the *stated intent* matches too (a strong merge candidate, often
+    /// a copy-paste that took the doc with it); low overlap flags a
+    /// structural coincidence that usually should not be merged. JSON
+    /// output always carries the per-pair values, with or without this
+    /// flag.
+    #[arg(long)]
+    pub(super) doc_overlap: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeWrapperArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) diff: AnalyzeDiffArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeContextSpanArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    /// Treat `path` as a project root and merge the TS/JS module trees
+    /// rooted at every file matching this gitignore-aware glob.
+    /// Repeatable: pass `--entry-glob 'app/**/page.tsx' --entry-glob
+    /// 'app/**/route.ts'` to cover Next.js App Router entries in one
+    /// invocation. Patterns are evaluated relative to `path`.
+    #[arg(long = "entry-glob", value_name = "GLOB")]
+    pub(super) entry_glob: Vec<String>,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub(super) struct AnalyzePathArgs {
+    /// Analyze only files that look like tests (`tests/`, `*_test.*`,
+    /// `*.test.*`, `test_*`, etc.). For similarity reports, this also
+    /// keeps language-level test functions inside non-test files, such
+    /// as Rust `#[cfg(test)]` modules.
+    #[arg(long, conflicts_with = "exclude_tests")]
+    pub(super) only_tests: bool,
+    /// Exclude files that look like tests. For similarity reports, this
+    /// also drops language-level test functions such as Rust
+    /// `#[cfg(test)]` modules.
+    #[arg(long, conflicts_with = "only_tests")]
+    pub(super) exclude_tests: bool,
+    /// Exclude paths matching this glob. Repeatable. Bare patterns also
+    /// match at any depth, so `--exclude generated.rs` matches
+    /// `src/generated.rs`.
+    #[arg(long = "exclude", value_name = "GLOB")]
+    pub(super) exclude: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use rstest::rstest;
+
+    #[test]
+    fn cli_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    fn help_for(args: &[&str]) -> String {
+        let mut argv = args.to_vec();
+        argv.push("--help");
+        let err = Cli::try_parse_from(argv).expect_err("help exits before parsing");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        err.to_string()
+    }
+
+    #[test]
+    fn cohesion_hook_help_describes_all_supported_unit_kinds() {
+        let help = help_for(&["agent-lens", "hook", "pre-tool-use", "cohesion"]);
+        assert!(help.contains("cohesion units"), "got: {help}");
+        assert!(help.contains("classes"), "got: {help}");
+        assert!(help.contains("module units"), "got: {help}");
+        assert!(help.contains("Python, or Go"), "got: {help}");
+    }
+
+    #[test]
+    fn similarity_help_does_not_mention_retired_tool_name() {
+        let help = help_for(&["agent-lens", "analyze", "similarity"]);
+        assert!(!help.contains("similarity-ts"), "got: {help}");
+        assert!(help.contains("keeps trivial getters"), "got: {help}");
+    }
+
+    #[test]
+    fn context_span_help_lists_non_rust_entry_shapes() {
+        let help = help_for(&["agent-lens", "analyze", "context-span"]);
+        assert!(
+            help.contains("TypeScript/JavaScript entry file"),
+            "got: {help}"
+        );
+        assert!(help.contains("Python file/directory"), "got: {help}");
+        assert!(help.contains("Go file or module directory"), "got: {help}");
+        assert!(help.contains("--entry-glob"), "got: {help}");
+    }
+
+    #[rstest]
+    #[case::hook_session_start_summary(
+        &["agent-lens", "hook", "session-start", "summary"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::SessionStart(SessionStartCommand::Summary))),
+    )]
+    #[case::hook_pre_tool_use_complexity(
+        &["agent-lens", "hook", "pre-tool-use", "complexity"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Complexity))),
+    )]
+    #[case::hook_pre_tool_use_cohesion(
+        &["agent-lens", "hook", "pre-tool-use", "cohesion"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Cohesion))),
+    )]
+    #[case::hook_post_tool_use_similarity(
+        &["agent-lens", "hook", "post-tool-use", "similarity"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Similarity))),
+    )]
+    #[case::hook_post_tool_use_wrapper(
+        &["agent-lens", "hook", "post-tool-use", "wrapper"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Wrapper))),
+    )]
+    #[case::codex_hook_post_tool_use_similarity(
+        &["agent-lens", "codex-hook", "post-tool-use", "similarity"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::PostToolUse(CodexPostToolUseCommand::Similarity)),
+        ),
+    )]
+    #[case::codex_hook_pre_tool_use_complexity(
+        &["agent-lens", "codex-hook", "pre-tool-use", "complexity"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::PreToolUse(CodexPreToolUseCommand::Complexity)),
+        ),
+    )]
+    #[case::codex_hook_pre_tool_use_cohesion(
+        &["agent-lens", "codex-hook", "pre-tool-use", "cohesion"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::PreToolUse(CodexPreToolUseCommand::Cohesion)),
+        ),
+    )]
+    #[case::codex_hook_session_start_summary(
+        &["agent-lens", "codex-hook", "session-start", "summary"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::SessionStart(CodexSessionStartCommand::Summary)),
+        ),
+    )]
+    fn parses_hook_subcommand(#[case] argv: &[&str], #[case] expected: fn(&Command) -> bool) {
+        let cli = Cli::try_parse_from(argv).expect("clean parse");
+        assert!(
+            expected(&cli.command),
+            "unexpected command: {:?}",
+            cli.command
+        );
+    }
+
+    #[test]
+    fn parses_hook_setup_with_default_scope() {
+        let cli = Cli::try_parse_from(["agent-lens", "hook", "setup"]).expect("clean parse");
+        let Command::Hook(HookCommand::Setup(args)) = cli.command else {
+            panic!("expected hook setup");
+        };
+        assert!(matches!(args.scope, SetupScope::Project));
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn parses_hook_setup_with_user_scope_and_dry_run() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "hook",
+            "setup",
+            "--scope",
+            "user",
+            "--dry-run",
+        ])
+        .expect("clean parse");
+        let Command::Hook(HookCommand::Setup(args)) = cli.command else {
+            panic!("expected hook setup");
+        };
+        assert!(matches!(args.scope, SetupScope::User));
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_codex_hook_setup_defaults_to_user_scope() {
+        let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "setup"]).expect("clean parse");
+        let Command::CodexHook(CodexHookCommand::Setup(args)) = cli.command else {
+            panic!("expected codex-hook setup");
+        };
+        assert!(matches!(args.scope, CodexSetupScope::User));
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_with_threshold() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--threshold",
+            "0.85",
+            "--format",
+            "md",
+            "--diff-only",
+            "--exclude-tests",
+            "--exclude",
+            "generated/**",
+            "--min-lines",
+            "8",
+            "--top",
+            "3",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert!(args.diff.diff_only);
+        assert!(args.common.path_filter.exclude_tests);
+        assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
+        assert!((args.threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(args.min_lines, Some(8));
+        assert_eq!(args.ranking.top, Some(3));
+        // `--method` is omitted above, so it defaults to TSED.
+        assert_eq!(args.method, SimilarityMethod::Tsed);
+        // `--doc-overlap` is omitted above; the markdown rollup is opt-in.
+        assert!(!args.doc_overlap);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_doc_overlap() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--doc-overlap",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert!(args.doc_overlap);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_method() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--method",
+            "token",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.method, SimilarityMethod::Token);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_sweep_ladder() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--sweep",
+            "0.6,0.75,0.85",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.sweep, vec![0.6, 0.75, 0.85]);
+    }
+
+    #[test]
+    fn analyze_similarity_rejects_sweep_with_threshold() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--sweep",
+            "0.6,0.85",
+            "--threshold",
+            "0.7",
+        ])
+        .expect_err("--sweep and --threshold are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// `--paired-by` takes either spelling of the tight key — the issue
+    /// that asked for the mode named it `name`, the value enum calls it
+    /// `qualified` — plus the loose `method` key.
+    #[rstest]
+    #[case::qualified("qualified", PairKey::Qualified)]
+    #[case::name_alias("name", PairKey::Qualified)]
+    #[case::method("method", PairKey::Method)]
+    fn parses_analyze_similarity_paired_by(#[case] value: &str, #[case] expected: PairKey) {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--paired-by",
+            value,
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.paired_by, Some(expected));
+        assert!((args.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_drift_floor() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--paired-by",
+            "method",
+            "--drift-floor",
+            "0",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(args.drift_floor, 0.0);
+    }
+
+    /// Without `--paired-by` there is nothing for a floor to filter, so
+    /// a lone `--drift-floor` is a mistake worth reporting rather than
+    /// silently ignoring.
+    #[test]
+    fn analyze_similarity_rejects_drift_floor_without_paired_by() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--drift-floor",
+            "0.5",
+        ])
+        .expect_err("--drift-floor requires --paired-by");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// Sweeping annotates clusters; pairing does not cluster at all.
+    #[test]
+    fn analyze_similarity_rejects_paired_by_with_sweep() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--sweep",
+            "0.6,0.85",
+            "--paired-by",
+            "name",
+        ])
+        .expect_err("--sweep and --paired-by are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parses_analyze_similarity_min_score_alias() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "src/lib.rs",
+            "--min-score",
+            "0.91",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert!((args.threshold - 0.91).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_analyze_complexity_with_top_and_min_score() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "complexity",
+            "src/lib.rs",
+            "--top",
+            "12",
+            "--min-score",
+            "8",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Complexity(args)) = cli.command else {
+            panic!("expected analyze complexity");
+        };
+        assert_eq!(args.ranking.top, Some(12));
+        assert_eq!(args.min_score, Some(8));
+    }
+
+    #[test]
+    fn parses_analyze_cohesion_with_top_and_min_score() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "cohesion",
+            "src/lib.rs",
+            "--top",
+            "7",
+            "--min-score",
+            "2",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Cohesion(args)) = cli.command else {
+            panic!("expected analyze cohesion");
+        };
+        assert_eq!(args.ranking.top, Some(7));
+        assert_eq!(args.min_score, Some(2));
+    }
+
+    #[test]
+    fn parses_analyze_hotspot_with_since_and_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "hotspot",
+            ".",
+            "--since",
+            "90.days.ago",
+            "--top",
+            "5",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Hotspot(args)) = cli.command else {
+            panic!("expected analyze hotspot");
+        };
+        assert_eq!(args.since.as_deref(), Some("90.days.ago"));
+        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.common.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_risk_with_since_and_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "risk",
+            ".",
+            "--since",
+            "90.days.ago",
+            "--top",
+            "5",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Risk(args)) = cli.command else {
+            panic!("expected analyze risk");
+        };
+        assert_eq!(args.since.as_deref(), Some("90.days.ago"));
+        assert_eq!(args.ranking.top, Some(5));
+        assert!(args.common.path_filter.exclude_tests);
+        assert_eq!(args.common.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_graph_query_with_flags() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "graph-query",
+            ".",
+            "--query",
+            "path",
+            "--symbol",
+            "handler",
+            "--to",
+            "db_write",
+            "--depth",
+            "4",
+            "--limit",
+            "10",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
+            panic!("expected analyze graph-query");
+        };
+        assert_eq!(args.query, GraphQueryKind::Path);
+        assert_eq!(args.symbol, "handler");
+        assert_eq!(args.to.as_deref(), Some("db_write"));
+        assert_eq!(args.depth, Some(4));
+        assert_eq!(args.direction, None);
+        assert_eq!(args.limit, Some(10));
+        assert_eq!(args.common.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_graph_query_direction() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "graph-query",
+            ".",
+            "--query",
+            "neighborhood",
+            "--symbol",
+            "resolve",
+            "--direction",
+            "in",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
+            panic!("expected analyze graph-query");
+        };
+        assert_eq!(args.query, GraphQueryKind::Neighborhood);
+        assert_eq!(args.direction, Some(GraphDirection::In));
+    }
+
+    #[test]
+    fn analyze_graph_query_requires_query_and_symbol() {
+        let err = Cli::try_parse_from(["agent-lens", "analyze", "graph-query", "."])
+            .expect_err("missing required flags");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_analyze_impact_with_flags() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "impact",
+            ".",
+            "--function",
+            "Resolver::resolve",
+            "--function",
+            "helper",
+            "--depth",
+            "3",
+            "--top",
+            "5",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Impact(args)) = cli.command else {
+            panic!("expected analyze impact");
+        };
+        assert_eq!(args.function, ["Resolver::resolve", "helper"]);
+        assert_eq!(args.depth, Some(3));
+        assert_eq!(args.ranking.top, Some(5));
+        assert_eq!(args.common.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_impact_without_flags_as_diff_mode() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "impact", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Impact(args)) = cli.command else {
+            panic!("expected analyze impact");
+        };
+        assert!(args.function.is_empty());
+        assert_eq!(args.depth, None);
+    }
+
+    #[test]
+    fn parses_analyze_hubs_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "hubs",
+            "crates",
+            "--top",
+            "10",
+            "--format",
+            "md",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Hubs(args)) = cli.command else {
+            panic!("expected analyze hubs");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(10));
+        assert!(args.common.path_filter.exclude_tests);
+    }
+
+    #[test]
+    fn parses_analyze_layers_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "layers",
+            "crates",
+            "--top",
+            "8",
+            "--format",
+            "md",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Layers(args)) = cli.command else {
+            panic!("expected analyze layers");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(8));
+        assert!(args.common.path_filter.exclude_tests);
+    }
+
+    #[test]
+    fn parses_analyze_layers_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "layers", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Layers(args)) = cli.command else {
+            panic!("expected analyze layers");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+    }
+
+    #[test]
+    fn parses_analyze_untested_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "untested",
+            "crates",
+            "--top",
+            "30",
+            "--format",
+            "md",
+            "--exclude",
+            "benches/**",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
+            panic!("expected analyze untested");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(30));
+        assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
+    }
+
+    #[test]
+    fn parses_analyze_untested_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "untested", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
+            panic!("expected analyze untested");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+    }
+
+    #[test]
+    fn parses_analyze_visibility_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "visibility",
+            "crates",
+            "--top",
+            "30",
+            "--format",
+            "md",
+            "--exclude",
+            "benches/**",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
+            panic!("expected analyze visibility");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(30));
+        assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
+    }
+
+    #[test]
+    fn parses_analyze_visibility_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "visibility", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
+            panic!("expected analyze visibility");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+    }
+
+    #[test]
+    fn parses_analyze_delegation_with_top_and_diff_only() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "delegation",
+            "crates",
+            "--format",
+            "md",
+            "--top",
+            "30",
+            "--diff-only",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
+            panic!("expected analyze delegation");
+        };
+        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.ranking.top, Some(30));
+        assert!(args.diff.diff_only);
+    }
+
+    #[test]
+    fn parses_analyze_delegation_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "delegation", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
+            panic!("expected analyze delegation");
+        };
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.ranking.top, None);
+        assert!(!args.diff.diff_only);
+    }
+
+    #[test]
+    fn parses_analyze_coupling_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "coupling", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Coupling(args)) = cli.command else {
+            panic!("expected analyze coupling");
+        };
+        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_cycles_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "cycles", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Cycles(args)) = cli.command else {
+            panic!("expected analyze cycles");
+        };
+        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_cycles_with_md_format_and_exclude_tests() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "cycles",
+            "src",
+            "--format",
+            "md",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Cycles(args)) = cli.command else {
+            panic!("expected analyze cycles");
+        };
+        assert_eq!(args.path, PathBuf::from("src"));
+        assert_eq!(args.format, OutputFormat::Md);
+        assert!(args.path_filter.exclude_tests);
+    }
+
+    #[test]
+    fn parses_analyze_function_graph_default_format_is_json() {
+        let cli = Cli::try_parse_from(["agent-lens", "analyze", "function-graph", "."])
+            .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
+            panic!("expected analyze function-graph");
+        };
+        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_analyze_function_graph_with_md_format() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "function-graph",
+            "src/lib.rs",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
+            panic!("expected analyze function-graph");
+        };
+        assert_eq!(args.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.format, OutputFormat::Md);
+    }
+
+    #[test]
+    fn parses_analyze_context_span_with_md_format() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "context-span",
+            "src/lib.rs",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::ContextSpan(args)) = cli.command else {
+            panic!("expected analyze context-span");
+        };
+        assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert!(args.entry_glob.is_empty());
+    }
+
+    #[test]
+    fn parses_analyze_context_span_with_entry_globs() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "context-span",
+            "web",
+            "--entry-glob",
+            "app/**/page.tsx",
+            "--entry-glob",
+            "app/**/route.ts",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::ContextSpan(args)) = cli.command else {
+            panic!("expected analyze context-span");
+        };
+        assert_eq!(args.common.path, PathBuf::from("web"));
+        assert_eq!(
+            args.entry_glob,
+            vec!["app/**/page.tsx".to_owned(), "app/**/route.ts".to_owned()]
+        );
+    }
+
+    #[test]
+    fn analyze_command_requires_a_subcommand() {
+        let err = Cli::try_parse_from(["agent-lens", "analyze"]).expect_err("missing subcommand");
+        // clap reports this as DisplayHelpOnMissingArgumentOrSubcommand
+        // because the parent command has no default behaviour without a
+        // subcommand.
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+        );
+    }
+
+    #[test]
+    fn analyze_cohesion_requires_path() {
+        let err =
+            Cli::try_parse_from(["agent-lens", "analyze", "cohesion"]).expect_err("missing path");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument,);
+    }
+
+    #[test]
+    fn invalid_format_value_is_rejected() {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "cohesion",
+            "src/lib.rs",
+            "--format",
+            "yaml",
+        ])
+        .expect_err("yaml is not a known format");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn invalid_setup_scope_is_rejected() {
+        let err = Cli::try_parse_from(["agent-lens", "hook", "setup", "--scope", "global"])
+            .expect_err("global is not a known scope");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn unknown_subcommand_is_rejected() {
+        let err = Cli::try_parse_from(["agent-lens", "lint"]).expect_err("no lint subcommand");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn unknown_post_tool_use_handler_is_rejected() {
+        let err = Cli::try_parse_from(["agent-lens", "hook", "post-tool-use", "complexity"])
+            .expect_err("complexity is not a hook handler");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn version_flag_short_circuits_parsing() {
+        let err = Cli::try_parse_from(["agent-lens", "--version"]).expect_err("version exits");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn setup_scope_into_settings_scope_round_trip() {
+        let project: SettingsScope = SetupScope::Project.into();
+        let user: SettingsScope = SetupScope::User.into();
+        assert!(matches!(project, SettingsScope::Project));
+        assert!(matches!(user, SettingsScope::User));
+    }
+
+    #[test]
+    fn codex_setup_scope_into_config_scope_round_trip() {
+        let project: codex_setup::ConfigScope = CodexSetupScope::Project.into();
+        let user: codex_setup::ConfigScope = CodexSetupScope::User.into();
+        assert!(matches!(project, codex_setup::ConfigScope::Project));
+        assert!(matches!(user, codex_setup::ConfigScope::User));
+    }
+
+    #[test]
+    fn parses_run_with_profile_and_config() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "run",
+            "web",
+            "--config",
+            "cfg/agent-lens.toml",
+        ])
+        .expect("clean parse");
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.profile, "web");
+        assert_eq!(args.config, Some(PathBuf::from("cfg/agent-lens.toml")));
+    }
+
+    #[test]
+    fn parses_run_without_config_flag() {
+        let cli = Cli::try_parse_from(["agent-lens", "run", "backend"]).expect("clean parse");
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.profile, "backend");
+        assert_eq!(args.config, None);
+    }
+
+    #[test]
+    fn run_requires_a_profile_name() {
+        let err = Cli::try_parse_from(["agent-lens", "run"]).expect_err("missing profile");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_help_with_and_without_md() {
+        let cli = Cli::try_parse_from(["agent-lens", "help", "--md"]).expect("clean parse");
+        let Command::Help(args) = cli.command else {
+            panic!("expected help");
+        };
+        assert!(args.md);
+
+        let cli = Cli::try_parse_from(["agent-lens", "help"]).expect("clean parse");
+        let Command::Help(args) = cli.command else {
+            panic!("expected help");
+        };
+        assert!(!args.md);
+    }
+
+    #[test]
+    fn parses_skills_list() {
+        let cli = Cli::try_parse_from(["agent-lens", "skills", "list"]).expect("clean parse");
+        assert!(matches!(cli.command, Command::Skills(SkillsCommand::List)));
+    }
+
+    #[test]
+    fn parses_skills_install_with_default_scope() {
+        let cli = Cli::try_parse_from(["agent-lens", "skills", "install"]).expect("clean parse");
+        let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
+            panic!("expected skills install");
+        };
+        assert!(matches!(args.scope, SkillsScopeArg::Project));
+        assert!(!args.dry_run);
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn parses_skills_install_user_scope_with_flags() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "skills",
+            "install",
+            "--scope",
+            "user",
+            "--dry-run",
+            "--force",
+        ])
+        .expect("clean parse");
+        let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
+            panic!("expected skills install");
+        };
+        assert!(matches!(args.scope, SkillsScopeArg::User));
+        assert!(args.dry_run);
+        assert!(args.force);
+    }
+
+    #[test]
+    fn skills_scope_arg_into_scope_round_trip() {
+        let project: skills::SkillsScope = SkillsScopeArg::Project.into();
+        let user: skills::SkillsScope = SkillsScopeArg::User.into();
+        assert!(matches!(project, skills::SkillsScope::Project));
+        assert!(matches!(user, skills::SkillsScope::User));
+    }
+
+    /// The routing table is hand-written, so it can drift the moment a new
+    /// analyzer lands. Pin it to the actual subcommand list in both
+    /// directions: every analyzer is routable, and the table never names
+    /// one that no longer exists.
+    #[test]
+    fn routing_table_names_exactly_the_analyze_subcommands() {
+        let command = Cli::command();
+        let analyze = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "analyze")
+            .expect("analyze subcommand");
+
+        // Routing rows are `<question>  analyze <name>`, indented to read
+        // as a code block; the surrounding prose has no such row.
+        let mut routed: Vec<&str> = examples::ANALYZE
+            .lines()
+            .filter(|line| line.starts_with("    "))
+            .filter_map(|line| line.rsplit_once(" analyze "))
+            .map(|(_, name)| name.trim())
+            .collect();
+        routed.sort_unstable();
+
+        let mut declared: Vec<&str> = analyze
+            .get_subcommands()
+            .map(|sub| sub.get_name())
+            .collect();
+        declared.sort_unstable();
+
+        assert_eq!(routed, declared);
+    }
+
+    /// Each analyzer's help ends with a worked invocation of *that*
+    /// analyzer — a copy-pasted example block would otherwise go unnoticed.
+    #[test]
+    fn every_analyze_subcommand_has_its_own_example_block() {
+        let command = Cli::command();
+        let analyze = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "analyze")
+            .expect("analyze subcommand");
+
+        for sub in analyze.get_subcommands() {
+            let epilogue = sub
+                .get_after_long_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let invocation = format!("    agent-lens analyze {} ", sub.get_name());
+            assert!(
+                epilogue.contains(&invocation),
+                "`analyze {}` help is missing an example of itself: {epilogue}",
+                sub.get_name(),
+            );
+        }
+    }
+
+    #[test]
+    fn parses_config_schema_subcommand() {
+        let cli = Cli::try_parse_from(["agent-lens", "config", "schema"]).expect("clean parse");
+        assert!(
+            matches!(cli.command, Command::Config(ConfigCommand::Schema)),
+            "unexpected command: {:?}",
+            cli.command,
+        );
+    }
+}
