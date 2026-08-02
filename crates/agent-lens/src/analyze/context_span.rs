@@ -46,6 +46,7 @@ use tracing::warn;
 use super::error_from::impl_from_coupling_error;
 use super::module_graph::{GraphPolicy, ModuleFile, ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
+use super::options::analyzer_options;
 use super::{AnalyzePathFilter, OutputFormat, SourceLang, module_graph, relative_display_path};
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +114,20 @@ impl From<super::CrateAnalyzerError> for ContextSpanAnalyzerError {
     }
 }
 
+analyzer_options! {
+    /// `analyze context-span` flags, and the
+    /// `[profile.<name>.context-span]` table.
+    pub struct ContextSpanOptions {
+        /// Treat `path` as a project root and merge the TS/JS module trees
+        /// rooted at every file matching this gitignore-aware glob.
+        /// Repeatable: pass `--entry-glob 'app/**/page.tsx' --entry-glob
+        /// 'app/**/route.ts'` to cover Next.js App Router entries in one
+        /// invocation. Patterns are evaluated relative to `path`.
+        #[arg(long = "entry-glob", value_name = "GLOB")]
+        pub entry_glob: Vec<String>,
+    }
+}
+
 /// Stateless analyzer entry point. Kept as a struct so per-run
 /// configuration (e.g. a `--top` cap) can be added later without
 /// changing the call site.
@@ -123,6 +138,13 @@ pub struct ContextSpanAnalyzer {
 }
 
 impl ContextSpanAnalyzer {
+    /// Apply a whole [`ContextSpanOptions`] group. The CLI flags and the
+    /// `[profile.<name>.context-span]` table are the same type, so this is
+    /// the only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: ContextSpanOptions) -> Self {
+        self.with_entry_globs(opts.entry_glob)
+    }
+
     pub fn new() -> Self {
         Self {
             path_filter: AnalyzePathFilter::new(),

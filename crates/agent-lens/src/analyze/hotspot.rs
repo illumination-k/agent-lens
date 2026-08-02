@@ -27,6 +27,7 @@ use serde::Serialize;
 use tracing::warn;
 
 use super::churn::{ChurnError, ChurnScope};
+use super::options::analyzer_options;
 use super::{
     AnalyzePathFilter, AnalyzerError, CompiledPathFilter, OutputFormat, PathFilterError,
     SourceLang, collect_source_files,
@@ -67,6 +68,18 @@ impl From<ChurnError> for HotspotError {
     }
 }
 
+analyzer_options! {
+    /// `analyze hotspot` flags, and the `[profile.<name>.hotspot]` table.
+    pub struct HotspotOptions {
+        @shared(ranking);
+        /// Restrict churn to commits in this `--since=` window. Accepts
+        /// anything git's approxidate parser does (e.g. `90.days.ago`,
+        /// `2024-01-01`).
+        #[arg(long)]
+        pub since: Option<String>,
+    }
+}
+
 /// Stateful hotspot runner. `since` is plumbed through to git's
 /// `--since=` flag so callers can scope churn to a recent window
 /// (e.g. `"90.days.ago"` or `"2024-01-01"`).
@@ -78,6 +91,13 @@ pub struct HotspotAnalyzer {
 }
 
 impl HotspotAnalyzer {
+    /// Apply a whole [`HotspotOptions`] group. The CLI flags and the
+    /// `[profile.<name>.hotspot]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: HotspotOptions) -> Self {
+        self.with_top(opts.top).with_since_opt(opts.since)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

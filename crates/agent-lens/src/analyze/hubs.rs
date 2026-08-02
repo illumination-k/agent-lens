@@ -41,6 +41,7 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
+use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
 
@@ -65,6 +66,13 @@ const MISPLACED_MIN_CALL_SITES: usize = 3;
 /// has a high pull but no module B to move to.
 const MISPLACED_MIN_DOMINANT_SHARE: f64 = 0.5;
 
+analyzer_options! {
+    /// `analyze hubs` flags, and the `[profile.<name>.hubs]` table.
+    pub struct HubsOptions {
+        @shared(ranking);
+    }
+}
+
 /// Analyzer entry point for `analyze hubs`.
 #[derive(Debug, Default, Clone)]
 pub struct HubsAnalyzer {
@@ -74,6 +82,13 @@ pub struct HubsAnalyzer {
 }
 
 impl HubsAnalyzer {
+    /// Apply a whole [`HubsOptions`] group. The CLI flags and the
+    /// `[profile.<name>.hubs]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: HubsOptions) -> Self {
+        self.with_top(opts.top)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

@@ -16,12 +16,24 @@ use std::path::Path;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
+use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
 use super::{
     AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64, read_source,
 };
+
+analyzer_options! {
+    /// `analyze complexity` flags, and the `[profile.<name>.complexity]` table.
+    pub struct ComplexityOptions {
+        @shared(ranking, diff);
+        /// Minimum cognitive complexity score included in the markdown
+        /// ranking. JSON output always carries the full list.
+        #[arg(long)]
+        pub min_score: Option<u32>,
+    }
+}
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -54,6 +66,15 @@ impl ComplexityAnalyzer {
     }
 
     delegate_filter_builders!(filter);
+
+    /// Apply a whole [`ComplexityOptions`] group. The CLI flags and the
+    /// `[profile.<name>.complexity]` table are the same type, so this is
+    /// the only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: ComplexityOptions) -> Self {
+        self.with_top(opts.top)
+            .with_min_score(opts.min_score)
+            .with_diff_only(opts.diff_only)
+    }
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {

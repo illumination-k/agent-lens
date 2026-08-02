@@ -52,7 +52,8 @@ struct Field {
     ty: &'static str,
     /// `required`, `optional`, or a `default: …` note.
     presence: &'static str,
-    /// What the key controls. Mirrors the doc comment in `config.rs`.
+    /// What the key controls. Mirrors the doc comment on the analyzer's
+    /// options struct, which is also that flag's `--help` text.
     desc: &'static str,
 }
 
