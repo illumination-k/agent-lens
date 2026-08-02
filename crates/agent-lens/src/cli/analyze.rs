@@ -5,9 +5,10 @@ use std::path::Path;
 
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
-    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
-    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
-    SimilarityAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, DelegationAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer,
+    ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer, SimilarityAnalyzer,
+    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
