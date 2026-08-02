@@ -173,12 +173,6 @@ pub(crate) fn write_with_parents<E>(
     std::fs::write(path, text).map_err(|source| io_error(path.to_path_buf(), source))
 }
 
-/// Resolve `$HOME/<relative>` as a [`PathBuf`], or `None` if `$HOME` is
-/// unset. Each caller maps `None` to its own scope-specific error.
-pub(crate) fn home_scoped_path(relative: &str) -> Option<PathBuf> {
-    crate::paths::home_scoped_path(relative)
-}
-
 /// Outcome of computing a setup plan against an existing settings/config
 /// file. `T` is the file's payload representation — parsed JSON for the
 /// Claude Code settings file, raw TOML text for the Codex config — and

@@ -121,7 +121,7 @@ pub fn resolve_path(scope: ConfigScope, project_root: &Path) -> Result<PathBuf, 
     match scope {
         ConfigScope::Project => Ok(project_root.join(CONFIG_RELATIVE)),
         ConfigScope::User => {
-            setup_common::home_scoped_path(CONFIG_RELATIVE).ok_or(SetupError::HomeNotFound)
+            crate::paths::home_scoped_path(CONFIG_RELATIVE).ok_or(SetupError::HomeNotFound)
         }
     }
 }

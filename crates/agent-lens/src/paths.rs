@@ -94,14 +94,18 @@ mod tests {
         assert_eq!(git_repo_root(&file).as_deref(), Some(dir.path()));
     }
 
+    /// Both expectations read `$HOME` directly rather than going back
+    /// through [`home_dir`] — deriving them from the function under test
+    /// would make either assertion hold no matter what it returned.
+    #[test]
+    fn home_dir_reads_the_home_variable() {
+        assert_eq!(home_dir(), std::env::var_os("HOME").map(PathBuf::from));
+    }
+
     #[test]
     fn home_scoped_path_joins_onto_home() {
-        let Some(home) = home_dir() else {
-            return;
-        };
-        assert_eq!(
-            home_scoped_path(".claude/settings.json"),
-            Some(home.join(".claude/settings.json")),
-        );
+        let expected =
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude/settings.json"));
+        assert_eq!(home_scoped_path(".claude/settings.json"), expected);
     }
 }
