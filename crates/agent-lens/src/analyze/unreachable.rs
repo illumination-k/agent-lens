@@ -1648,6 +1648,16 @@ mod tests {
         })
     }
 
+    /// The one markdown bullet that renders `suffix`. Assertions go
+    /// through this rather than through the whole document: the summary
+    /// lines repeat several of the same phrases, and a row is what an
+    /// agent acts on.
+    fn row_line<'a>(md: &'a str, suffix: &str) -> &'a str {
+        md.lines()
+            .find(|line| line.starts_with("- `") && line.contains(suffix))
+            .unwrap_or_else(|| panic!("no row for {suffix} in:\n{md}"))
+    }
+
     fn tier_of(report: &Value, suffix: &str) -> Option<String> {
         row_for(report, suffix)
             .and_then(|row| row["tier"].as_str())
@@ -1692,10 +1702,17 @@ mod tests {
         assert_eq!(report["summary"]["reached_function_count"], 2);
         assert_eq!(report["audit"]["reference_scan_file_count"], 1);
 
+        assert_eq!(report["modules"][0]["confirmed_count"], 1);
+        assert_eq!(report["modules"][0]["confirmed_loc"], 1);
+
         let md = analyze_md(dir.path());
         assert!(
             md.contains("1 confirmed function(s) hold 1 LOC"),
             "got {md}",
+        );
+        assert!(
+            md.contains("### `crate` — 1 function(s), 1 LOC"),
+            "the section says which module and how much is in it: {md}",
         );
         assert!(
             md.contains("- `crate::orphan` (src/main.rs:3, 1 LOC, no entry path)"),
@@ -1726,6 +1743,17 @@ mod tests {
             Some(Value::from(1)),
             "the sibling file's mention is the evidence: {report}",
         );
+
+        // How many mentions there are is the difference between one
+        // stale doc comment and a name the codebase leans on.
+        let md = UnreachableAnalyzer::new()
+            .with_tier(Some(Tier::Unknown))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            row_line(&md, "crate::orphan").contains("(1 occurrence(s))"),
+            "got {md}",
+        );
     }
 
     /// The load-bearing pass: the graph resolves nothing here, and the
@@ -1751,12 +1779,16 @@ mod tests {
             demotions(&report, "::orphan"),
         );
 
-        // A row an agent is told to check has to say what to check.
+        // A row an agent is told to check has to say what to check, and
+        // how much of it there is.
         let md = UnreachableAnalyzer::new()
             .with_tier(Some(Tier::Unknown))
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
-        assert!(md.contains("its name is written elsewhere"), "got {md}");
+        assert!(
+            row_line(&md, "crate::orphan").contains("its name is written elsewhere"),
+            "got {md}",
+        );
     }
 
     /// A mention that only dead code makes is no evidence: the whole
@@ -2118,6 +2150,73 @@ mod tests {
         assert!(
             md.contains("delete in order: `src/lib.rs:head:2`"),
             "the order is the edit list, so it is rendered, not just stored: {md}",
+        );
+        assert!(
+            row_line(&md, "crate::waist").contains(", 1 unreachable caller(s)"),
+            "a row says how much of the cluster hangs off it: {md}",
+        );
+    }
+
+    /// Two functions are the smallest cluster there is: one calls the
+    /// other, nothing calls either, and both come out in one edit.
+    #[test]
+    fn a_two_function_cluster_is_still_an_island() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {}\n\
+             fn pair_head() -> usize { pair_tail() }\n\
+             fn pair_tail() -> usize { 1 }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let islands = report["islands"].as_array().expect("islands array");
+        assert_eq!(islands.len(), 1, "got {report}");
+        assert_eq!(islands[0]["function_count"], 2);
+    }
+
+    /// The per-module cap truncates the listing and says what it hid —
+    /// the count it reports against is the module's whole finding list,
+    /// not the rows it chose to render.
+    #[test]
+    fn the_per_module_cap_says_how_many_rows_it_hid() {
+        let mut source = String::from("fn main() {}\n");
+        for i in 0..(FUNCTIONS_PER_MODULE + 1) {
+            source.push_str(&format!("fn dead_{i}() -> usize {{ {i} }}\n"));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main.rs", &source);
+
+        let md = analyze_md(dir.path());
+        assert_eq!(
+            md.matches("- `crate::dead_").count(),
+            FUNCTIONS_PER_MODULE,
+            "got {md}",
+        );
+        assert!(
+            md.contains("- +1 more (JSON output carries every row)"),
+            "got {md}",
+        );
+    }
+
+    /// A call site the graph could not attribute to an enclosing
+    /// function is invisible to the traversal from either end, so it is
+    /// reported as its own bound rather than folded into the others.
+    #[test]
+    fn call_sites_with_no_enclosing_function_are_counted_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn seed() -> usize { 1 }\n\
+             pub static N: usize = seed();\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            report["bounds"]["caller_unattributed_call_count"], 1,
+            "got {report}",
         );
     }
 
