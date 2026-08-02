@@ -192,7 +192,10 @@ mod tests {
     /// needs both halves: a test-shaped name and no receiver. A method
     /// called `TestThing` is production code with an unlucky name.
     #[rstest]
-    #[case::free_test_function("package p\n\nfunc TestThing(t *testing.T) {\n\ta := 1\n\tuse(a)\n}\n", true)]
+    #[case::free_test_function(
+        "package p\n\nfunc TestThing(t *testing.T) {\n\ta := 1\n\tuse(a)\n}\n",
+        true
+    )]
     #[case::method_with_test_name(
         "package p\n\ntype C struct{}\n\nfunc (c *C) TestThing() {\n\ta := 1\n\tuse(a)\n}\n",
         false
