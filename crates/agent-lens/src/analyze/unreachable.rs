@@ -694,11 +694,7 @@ fn line_owners(spans: Option<&[(usize, usize, usize)]>) -> Vec<Option<usize>> {
     let last_line = spans.iter().map(|&(_, end, _)| end).max().unwrap_or(0);
     let mut owners = vec![None; last_line + 1];
     for &(start, end, slot) in spans {
-        for owner in owners
-            .iter_mut()
-            .take(end.min(last_line) + 1)
-            .skip(start)
-        {
+        for owner in owners.iter_mut().take(end.min(last_line) + 1).skip(start) {
             *owner = Some(slot);
         }
     }
@@ -1694,6 +1690,32 @@ mod tests {
         );
         assert_eq!(report["summary"]["confirmed_count"], 1);
         assert_eq!(report["summary"]["reached_function_count"], 2);
+        assert_eq!(report["audit"]["reference_scan_file_count"], 1);
+    }
+
+    /// The reference scan covers the whole corpus, not the defining
+    /// file, and reaches code no function encloses — a name-keyed
+    /// registry in a sibling file is exactly the call a syntax-only
+    /// resolver misses. The scanned-file count is what says how much
+    /// ground the search actually covered.
+    #[test]
+    fn a_reference_from_another_file_demotes_and_is_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main.rs", RUST_ORPHAN);
+        write_file(
+            dir.path(),
+            "src/other.rs",
+            "pub const HANDLERS: [&str; 1] = [\"orphan\"];\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["audit"]["reference_scan_file_count"], 2);
+        assert_eq!(tier_of(&report, "::orphan").as_deref(), Some("unknown"));
+        assert_eq!(
+            row_for(&report, "::orphan").map(|row| row["raw_reference_count"].clone()),
+            Some(Value::from(1)),
+            "the sibling file's mention is the evidence: {report}",
+        );
     }
 
     /// The load-bearing pass: the graph resolves nothing here, and the

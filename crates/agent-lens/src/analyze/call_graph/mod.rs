@@ -1157,6 +1157,28 @@ mod tests {
         assert_eq!(callers_of_c, vec![c, b, a]);
     }
 
+    /// Pointed at a file no graph language claims, the builder scans
+    /// nothing rather than failing: the path filter admits a named file
+    /// whatever its extension, so the language gate is what keeps a
+    /// README out of the parser.
+    #[test]
+    fn a_file_outside_the_graph_languages_contributes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let readme = write_file(dir.path(), "README.md", "# not source\n");
+        write_file(dir.path(), "src/lib.rs", "fn a() {}\n");
+
+        let graph = CallGraphBuilder::new().build(&readme).unwrap();
+        assert!(graph.nodes.is_empty(), "got {:?}", graph.nodes);
+        assert_eq!(graph.language, "unknown");
+
+        let mut visited = Vec::new();
+        let count = CallGraphBuilder::new()
+            .visit_source_texts(dir.path(), |file, _| visited.push(file.to_owned()))
+            .unwrap();
+        assert_eq!(visited, ["src/lib.rs"], "the markdown file is not source");
+        assert_eq!(count, 1);
+    }
+
     /// The three properties the caller sets carry beyond being the
     /// reverse of the adjacency: self-recursion is not a caller,
     /// duplicate call sites collapse to one caller, and a callee with no
