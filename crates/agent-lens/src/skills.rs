@@ -84,7 +84,7 @@ fn frontmatter_field<'a>(content: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// Where to install the bundled skills.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum SkillsScope {
     /// `<project_root>/.claude/skills` (created if missing).
     Project,
@@ -189,9 +189,7 @@ pub enum SkillsError {
 pub fn resolve_root(scope: SkillsScope, project_root: &Path) -> Result<PathBuf, SkillsError> {
     match scope {
         SkillsScope::Project => Ok(project_root.to_path_buf()),
-        SkillsScope::User => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or(SkillsError::HomeNotFound),
+        SkillsScope::User => crate::paths::home_dir().ok_or(SkillsError::HomeNotFound),
     }
 }
 

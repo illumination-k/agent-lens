@@ -45,7 +45,7 @@ pub const SESSION_START_MATCHER: &str = setup_common::CLAUDE_SESSION_START_MATCH
 pub const SESSION_START_COMMANDS: &[&str] = setup_common::CLAUDE_SESSION_START_COMMANDS;
 
 /// Where to install the hook entries.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum SettingsScope {
     /// `<project_root>/.claude/settings.json` (created if missing).
     Project,

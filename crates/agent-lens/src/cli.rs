@@ -107,7 +107,7 @@ fn run_skills(cmd: SkillsCommand) -> Result<(), Box<dyn std::error::Error>> {
 /// re-run with `--force`.
 fn run_skills_install(args: SkillsInstallArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    let root = skills::resolve_root(args.scope.into(), &cwd)?;
+    let root = skills::resolve_root(args.scope, &cwd)?;
     let plan = skills::plan(root, args.force)?;
 
     for conflict in plan.conflicts() {

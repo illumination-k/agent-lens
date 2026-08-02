@@ -21,7 +21,7 @@ use agent_lens::analyze::wrapper::WrapperOptions;
 use agent_lens::hooks::codex::setup as codex_setup;
 use agent_lens::hooks::setup::SettingsScope;
 use agent_lens::skills;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
 use super::examples;
 
@@ -118,31 +118,16 @@ pub(super) enum SkillsCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct SkillsInstallArgs {
-    /// Where to install the skills. `project` writes to
-    /// `<cwd>/.claude/skills`; `user` writes to `$HOME/.claude/skills`.
-    #[arg(long, value_enum, default_value_t = SkillsScopeArg::Project)]
-    pub(super) scope: SkillsScopeArg,
+    /// Where to install the bundled skills. `project` is the current
+    /// directory.
+    #[arg(long, value_enum, default_value_t = skills::SkillsScope::Project)]
+    pub(super) scope: skills::SkillsScope,
     /// Show what would be written without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
     /// Overwrite skills that already exist on disk with different content.
     #[arg(long)]
     pub(super) force: bool,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(super) enum SkillsScopeArg {
-    Project,
-    User,
-}
-
-impl From<SkillsScopeArg> for skills::SkillsScope {
-    fn from(value: SkillsScopeArg) -> Self {
-        match value {
-            SkillsScopeArg::Project => Self::Project,
-            SkillsScopeArg::User => Self::User,
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -179,29 +164,12 @@ pub(super) enum HookCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct SetupArgs {
-    /// Where to install the hooks. `project` writes to
-    /// `<cwd>/.claude/settings.json`; `user` writes to
-    /// `$HOME/.claude/settings.json`.
-    #[arg(long, value_enum, default_value_t = SetupScope::Project)]
-    pub(super) scope: SetupScope,
+    /// Where to install the hooks. `project` is the current directory.
+    #[arg(long, value_enum, default_value_t = SettingsScope::Project)]
+    pub(super) scope: SettingsScope,
     /// Show the resulting JSON without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(super) enum SetupScope {
-    Project,
-    User,
-}
-
-impl From<SetupScope> for SettingsScope {
-    fn from(value: SetupScope) -> Self {
-        match value {
-            SetupScope::Project => Self::Project,
-            SetupScope::User => Self::User,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -279,31 +247,14 @@ pub(super) enum CodexHookCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct CodexSetupArgs {
-    /// Where to install the hooks. `user` writes to
-    /// `$HOME/.codex/config.toml` (Codex's canonical location);
-    /// `project` writes to `<repo-root>/.codex/config.toml`, where
-    /// `repo-root` comes from `git rev-parse --show-toplevel` and
-    /// falls back to the current directory outside a git tree.
-    #[arg(long, value_enum, default_value_t = CodexSetupScope::User)]
-    pub(super) scope: CodexSetupScope,
+    /// Where to install the hooks. `project` is the nearest ancestor
+    /// holding a `.git` entry, falling back to the current directory
+    /// outside a git tree.
+    #[arg(long, value_enum, default_value_t = codex_setup::ConfigScope::User)]
+    pub(super) scope: codex_setup::ConfigScope,
     /// Show the resulting TOML without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(super) enum CodexSetupScope {
-    Project,
-    User,
-}
-
-impl From<CodexSetupScope> for codex_setup::ConfigScope {
-    fn from(value: CodexSetupScope) -> Self {
-        match value {
-            CodexSetupScope::Project => Self::Project,
-            CodexSetupScope::User => Self::User,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -974,7 +925,7 @@ mod tests {
         let Command::Hook(HookCommand::Setup(args)) = cli.command else {
             panic!("expected hook setup");
         };
-        assert!(matches!(args.scope, SetupScope::Project));
+        assert!(matches!(args.scope, SettingsScope::Project));
         assert!(!args.dry_run);
     }
 
@@ -992,7 +943,7 @@ mod tests {
         let Command::Hook(HookCommand::Setup(args)) = cli.command else {
             panic!("expected hook setup");
         };
-        assert!(matches!(args.scope, SetupScope::User));
+        assert!(matches!(args.scope, SettingsScope::User));
         assert!(args.dry_run);
     }
 
@@ -1002,7 +953,7 @@ mod tests {
         let Command::CodexHook(CodexHookCommand::Setup(args)) = cli.command else {
             panic!("expected codex-hook setup");
         };
-        assert!(matches!(args.scope, CodexSetupScope::User));
+        assert!(matches!(args.scope, codex_setup::ConfigScope::User));
         assert!(!args.dry_run);
     }
 
@@ -1723,20 +1674,28 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 
-    #[test]
-    fn setup_scope_into_settings_scope_round_trip() {
-        let project: SettingsScope = SetupScope::Project.into();
-        let user: SettingsScope = SetupScope::User.into();
-        assert!(matches!(project, SettingsScope::Project));
-        assert!(matches!(user, SettingsScope::User));
+    /// The three `--scope` flags used to parse into CLI-local enums that
+    /// were converted to the domain ones; clap now parses the domain
+    /// enums directly, so the accepted spellings come from their variant
+    /// names. Pin both spellings on all three commands: renaming a
+    /// variant is now a CLI-visible change.
+    #[rstest]
+    #[case::hook_project(&["agent-lens", "hook", "setup", "--scope", "project"])]
+    #[case::hook_user(&["agent-lens", "hook", "setup", "--scope", "user"])]
+    #[case::codex_project(&["agent-lens", "codex-hook", "setup", "--scope", "project"])]
+    #[case::codex_user(&["agent-lens", "codex-hook", "setup", "--scope", "user"])]
+    #[case::skills_project(&["agent-lens", "skills", "install", "--scope", "project"])]
+    #[case::skills_user(&["agent-lens", "skills", "install", "--scope", "user"])]
+    fn scope_flags_accept_project_and_user(#[case] argv: &[&str]) {
+        Cli::try_parse_from(argv).expect("clean parse");
     }
 
     #[test]
-    fn codex_setup_scope_into_config_scope_round_trip() {
-        let project: codex_setup::ConfigScope = CodexSetupScope::Project.into();
-        let user: codex_setup::ConfigScope = CodexSetupScope::User.into();
-        assert!(matches!(project, codex_setup::ConfigScope::Project));
-        assert!(matches!(user, codex_setup::ConfigScope::User));
+    fn scope_flags_reject_an_unknown_value() {
+        assert!(
+            Cli::try_parse_from(["agent-lens", "hook", "setup", "--scope", "global"]).is_err(),
+            "an unknown --scope value must not parse",
+        );
     }
 
     #[test]
@@ -1799,7 +1758,7 @@ mod tests {
         let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
             panic!("expected skills install");
         };
-        assert!(matches!(args.scope, SkillsScopeArg::Project));
+        assert!(matches!(args.scope, skills::SkillsScope::Project));
         assert!(!args.dry_run);
         assert!(!args.force);
     }
@@ -1819,17 +1778,9 @@ mod tests {
         let Command::Skills(SkillsCommand::Install(args)) = cli.command else {
             panic!("expected skills install");
         };
-        assert!(matches!(args.scope, SkillsScopeArg::User));
+        assert!(matches!(args.scope, skills::SkillsScope::User));
         assert!(args.dry_run);
         assert!(args.force);
-    }
-
-    #[test]
-    fn skills_scope_arg_into_scope_round_trip() {
-        let project: skills::SkillsScope = SkillsScopeArg::Project.into();
-        let user: skills::SkillsScope = SkillsScopeArg::User.into();
-        assert!(matches!(project, skills::SkillsScope::Project));
-        assert!(matches!(user, skills::SkillsScope::User));
     }
 
     /// The routing table is hand-written, so it can drift the moment a new

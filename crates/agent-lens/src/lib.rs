@@ -26,6 +26,7 @@ pub mod config;
 pub mod config_schema;
 pub mod help_md;
 pub mod hooks;
+pub mod paths;
 pub mod skills;
 
 #[doc(hidden)]

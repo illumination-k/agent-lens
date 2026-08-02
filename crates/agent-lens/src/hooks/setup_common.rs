@@ -176,7 +176,7 @@ pub(crate) fn write_with_parents<E>(
 /// Resolve `$HOME/<relative>` as a [`PathBuf`], or `None` if `$HOME` is
 /// unset. Each caller maps `None` to its own scope-specific error.
 pub(crate) fn home_scoped_path(relative: &str) -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(relative))
+    crate::paths::home_scoped_path(relative)
 }
 
 /// Outcome of computing a setup plan against an existing settings/config
