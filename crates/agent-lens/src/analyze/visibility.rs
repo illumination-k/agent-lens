@@ -1972,6 +1972,11 @@ mod tests {
             annotated,
             "spec {spec}: {finding}",
         );
+        assert_eq!(
+            analyze_md(dir.path()).contains("match a method of an interface"),
+            annotated,
+            "the summary sentence renders exactly when a row is annotated",
+        );
     }
 
     /// Annotation is orthogonal to the caller-scope bucket: a method
