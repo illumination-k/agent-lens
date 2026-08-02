@@ -242,8 +242,66 @@ fn format_cycle(cycle: &DependencyCycle, labeler: &ModuleLabeler) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{run_git, write_file};
+    use crate::test_support::{
+        init_repo_with_crate_for_session_summary, init_repo_with_loose_rust_file, run_git,
+        write_file,
+    };
     use lens_domain::ModulePath;
+
+    #[test]
+    fn render_summary_none_when_cwd_has_neither_repo_nor_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = render_summary(dir.path()).unwrap();
+        assert!(body.is_none(), "got {body:?}");
+    }
+
+    #[test]
+    fn render_summary_includes_both_sections_for_repo_with_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_crate_for_session_summary(dir.path());
+
+        let body = render_summary(dir.path())
+            .unwrap()
+            .expect("expected a summary");
+        assert!(body.starts_with("# agent-lens session-start"), "got {body}");
+        assert!(body.contains("## Hotspots"), "want hotspot: {body}");
+        assert!(body.contains("src/b.rs"), "want churn target: {body}");
+        assert!(body.contains("## Coupling"), "want coupling: {body}");
+        assert!(body.contains("crate::a"), "want modules: {body}");
+        assert!(body.contains("crate::b"), "want modules: {body}");
+    }
+
+    #[test]
+    fn render_summary_coupling_only_when_no_git_repo() {
+        // A bare crate that isn't checked into git: hotspot section is
+        // skipped, coupling stays.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", "pub mod a;\n");
+        write_file(dir.path(), "src/a.rs", "pub fn solo() {}\n");
+
+        let body = render_summary(dir.path())
+            .unwrap()
+            .expect("expected a summary");
+        assert!(body.contains("## Coupling"));
+        assert!(!body.contains("## Hotspots"), "should skip hotspot: {body}");
+    }
+
+    #[test]
+    fn render_summary_hotspot_only_when_no_crate_root() {
+        // A git repo with .rs files but no recognisable crate root
+        // (no src/lib.rs or src/main.rs at the top level).
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_loose_rust_file(dir.path());
+
+        let body = render_summary(dir.path())
+            .unwrap()
+            .expect("expected a summary");
+        assert!(body.contains("## Hotspots"));
+        assert!(
+            !body.contains("## Coupling"),
+            "should skip coupling: {body}"
+        );
+    }
 
     /// A test file out-scoring the production file it exercises is the
     /// normal case, not a corner one: tests change with every feature

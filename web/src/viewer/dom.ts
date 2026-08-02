@@ -14,6 +14,13 @@ export function getCanvasContext(element: HTMLCanvasElement): CanvasRenderingCon
   return canvasContext;
 }
 
+/** Match the canvas backing store to its CSS size at the given pixel ratio. */
+export function resizeCanvasToDisplaySize(canvas: HTMLCanvasElement, pixelRatio: number): void {
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(rect.width * pixelRatio));
+  canvas.height = Math.max(1, Math.floor(rect.height * pixelRatio));
+}
+
 export function formatNumber(value: number | null): string {
   return value === null ? "n/a" : value.toFixed(1);
 }

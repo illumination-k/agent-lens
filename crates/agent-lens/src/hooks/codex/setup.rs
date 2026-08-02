@@ -16,13 +16,12 @@
 //! `[[hooks.PostToolUse.hooks]]` entry already starts with the same
 //! command. Re-running is a no-op once every handler is wired up.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
-use crate::hooks::setup_common;
+use crate::hooks::setup_common::{self, EventBlock, HooksDocument};
 
 const CONFIG_RELATIVE: &str = ".codex/config.toml";
 
@@ -54,52 +53,6 @@ pub const SESSION_START_MATCHER: &str = setup_common::CODEX_SESSION_START_MATCHE
 
 /// Commands the setup writes into `[[hooks.SessionStart.hooks]]`.
 pub const SESSION_START_COMMANDS: &[&str] = setup_common::CODEX_SESSION_START_COMMANDS;
-
-/// Per-event metadata for the merge loop. The shape mirrors the Claude
-/// Code setup's [`crate::hooks::setup`] so the two stay in sync as new
-/// handlers land.
-struct EventBlock {
-    /// Key under `hooks.` in `config.toml` (e.g. `"PostToolUse"`).
-    event: &'static str,
-    /// Field path used in error messages for the outer array-of-tables.
-    array_field: &'static str,
-    /// Field path used in error messages for an entry's `hooks` array.
-    inner_array_field: &'static str,
-    /// Field path used in error messages for a handler's `command`
-    /// field.
-    command_field: &'static str,
-    /// Matcher string written for this event's block.
-    matcher: &'static str,
-    /// Commands the setup may install under this event.
-    commands: &'static [&'static str],
-}
-
-const EVENTS: &[EventBlock] = &[
-    EventBlock {
-        event: setup_common::SESSION_START_EVENT,
-        array_field: "hooks.SessionStart",
-        inner_array_field: "hooks.SessionStart[].hooks",
-        command_field: "hooks.SessionStart[].hooks[].command",
-        matcher: SESSION_START_MATCHER,
-        commands: SESSION_START_COMMANDS,
-    },
-    EventBlock {
-        event: setup_common::PRE_TOOL_USE_EVENT,
-        array_field: "hooks.PreToolUse",
-        inner_array_field: "hooks.PreToolUse[].hooks",
-        command_field: "hooks.PreToolUse[].hooks[].command",
-        matcher: PRE_TOOL_USE_MATCHER,
-        commands: PRE_TOOL_USE_COMMANDS,
-    },
-    EventBlock {
-        event: setup_common::POST_TOOL_USE_EVENT,
-        array_field: "hooks.PostToolUse",
-        inner_array_field: "hooks.PostToolUse[].hooks",
-        command_field: "hooks.PostToolUse[].hooks[].command",
-        matcher: POST_TOOL_USE_MATCHER,
-        commands: POST_TOOL_USE_COMMANDS,
-    },
-];
 
 /// Where to install the hook entries.
 #[derive(Debug, Clone, Copy)]
@@ -144,7 +97,18 @@ pub enum SetupError {
     /// A field along the `hooks.PostToolUse[].hooks[].command` path has
     /// the wrong TOML type for us to merge into safely.
     #[error("{path:?} has an unexpected shape at .{field}")]
-    UnexpectedShape { path: PathBuf, field: &'static str },
+    UnexpectedShape { path: PathBuf, field: String },
+}
+
+fn io_error(path: PathBuf, source: std::io::Error) -> SetupError {
+    SetupError::Io { path, source }
+}
+
+fn shape_error(path: &Path, field: impl Into<String>) -> SetupError {
+    SetupError::UnexpectedShape {
+        path: path.to_path_buf(),
+        field: field.into(),
+    }
 }
 
 /// Resolve the on-disk Codex `config.toml` path for the requested scope.
@@ -170,7 +134,7 @@ pub fn resolve_path(scope: ConfigScope, project_root: &Path) -> Result<PathBuf, 
 /// incompatible, is reported as an error so the user can inspect it
 /// before we clobber anything.
 pub fn plan(path: PathBuf) -> Result<SetupPlan, SetupError> {
-    let before = read_existing(&path)?;
+    let before = setup_common::read_existing_text(&path, io_error)?;
     let mut doc = match before.as_deref() {
         Some(s) => s
             .parse::<DocumentMut>()
@@ -180,7 +144,8 @@ pub fn plan(path: PathBuf) -> Result<SetupPlan, SetupError> {
             })?,
         None => DocumentMut::new(),
     };
-    let added_commands = merge(&path, &mut doc)?;
+    let added_commands =
+        setup_common::merge_hook_commands(&path, &mut doc, setup_common::CODEX_EVENTS)?;
     Ok(SetupPlan {
         path,
         before,
@@ -192,31 +157,72 @@ pub fn plan(path: PathBuf) -> Result<SetupPlan, SetupError> {
 /// Write the planned TOML to disk, creating parent directories if
 /// needed.
 pub fn apply(plan: &SetupPlan) -> Result<(), SetupError> {
-    if let Some(parent) = plan.path.parent() {
-        fs::create_dir_all(parent).map_err(|source| SetupError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(&plan.path, &plan.after).map_err(|source| SetupError::Io {
-        path: plan.path.clone(),
-        source,
-    })
+    setup_common::write_with_parents(&plan.path, &plan.after, io_error)
 }
 
-fn read_existing(path: &Path) -> Result<Option<String>, SetupError> {
-    match fs::read_to_string(path) {
-        Ok(s) if s.trim().is_empty() => Ok(None),
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(SetupError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
+impl HooksDocument for DocumentMut {
+    type Error = SetupError;
+
+    fn installed_commands(
+        &mut self,
+        path: &Path,
+        block: &EventBlock,
+    ) -> Result<Vec<String>, SetupError> {
+        let entries = event_entries(self, path, block)?;
+        let mut out = Vec::new();
+        for group in entries.iter() {
+            let Some(handlers_item) = group.get("hooks") else {
+                continue;
+            };
+            let Some(handlers) = handlers_item.as_array_of_tables() else {
+                return Err(shape_error(path, format!("hooks.{}[].hooks", block.event)));
+            };
+            for handler in handlers.iter() {
+                let Some(cmd_item) = handler.get("command") else {
+                    continue;
+                };
+                let Some(cmd) = cmd_item.as_str() else {
+                    return Err(shape_error(
+                        path,
+                        format!("hooks.{}[].hooks[].command", block.event),
+                    ));
+                };
+                out.push(cmd.to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    fn append_matcher_group(
+        &mut self,
+        path: &Path,
+        block: &EventBlock,
+        commands: &[String],
+    ) -> Result<(), SetupError> {
+        let entries = event_entries(self, path, block)?;
+        let mut group = Table::new();
+        group.insert("matcher", value(block.matcher));
+        let mut handlers = ArrayOfTables::new();
+        for cmd in commands {
+            let mut handler = Table::new();
+            handler.insert("type", value("command"));
+            handler.insert("command", value(cmd));
+            handlers.push(handler);
+        }
+        group.insert("hooks", Item::ArrayOfTables(handlers));
+        entries.push(group);
+        Ok(())
     }
 }
 
-fn merge(path: &Path, doc: &mut DocumentMut) -> Result<Vec<String>, SetupError> {
+/// Navigate to the `hooks.<event>` array-of-tables, creating the
+/// intermediate table/array when absent, and erroring when an existing
+/// field along the path has an incompatible TOML type.
+fn event_entries<'a>(
+    doc: &'a mut DocumentMut,
+    path: &Path,
+    block: &EventBlock,
+) -> Result<&'a mut ArrayOfTables, SetupError> {
     let hooks_item = doc.as_table_mut().entry("hooks").or_insert_with(|| {
         let mut t = Table::new();
         t.set_implicit(true);
@@ -224,90 +230,18 @@ fn merge(path: &Path, doc: &mut DocumentMut) -> Result<Vec<String>, SetupError> 
     });
     let hooks = hooks_item
         .as_table_mut()
-        .ok_or_else(|| SetupError::UnexpectedShape {
-            path: path.to_path_buf(),
-            field: "hooks",
-        })?;
-
-    let mut added: Vec<String> = Vec::new();
-    for block in EVENTS {
-        let entries_item = hooks
-            .entry(block.event)
-            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
-        let entries =
-            entries_item
-                .as_array_of_tables_mut()
-                .ok_or_else(|| SetupError::UnexpectedShape {
-                    path: path.to_path_buf(),
-                    field: block.array_field,
-                })?;
-
-        let installed = collect_installed_commands(entries, path, block)?;
-        let missing: Vec<&str> = block
-            .commands
-            .iter()
-            .copied()
-            .filter(|cmd| {
-                !installed
-                    .iter()
-                    .any(|seen| setup_common::has_command_prefix(seen, cmd))
-            })
-            .collect();
-
-        if !missing.is_empty() {
-            let mut group = Table::new();
-            group.insert("matcher", value(block.matcher));
-            let mut handlers = ArrayOfTables::new();
-            for cmd in &missing {
-                let mut handler = Table::new();
-                handler.insert("type", value("command"));
-                handler.insert("command", value(*cmd));
-                handlers.push(handler);
-            }
-            group.insert("hooks", Item::ArrayOfTables(handlers));
-            entries.push(group);
-            added.extend(missing.iter().map(|s| (*s).to_string()));
-        }
-    }
-
-    Ok(added)
-}
-
-fn collect_installed_commands(
-    entries: &ArrayOfTables,
-    path: &Path,
-    block: &EventBlock,
-) -> Result<Vec<String>, SetupError> {
-    let mut out = Vec::new();
-    for group in entries.iter() {
-        let Some(handlers_item) = group.get("hooks") else {
-            continue;
-        };
-        let Some(handlers) = handlers_item.as_array_of_tables() else {
-            return Err(SetupError::UnexpectedShape {
-                path: path.to_path_buf(),
-                field: block.inner_array_field,
-            });
-        };
-        for handler in handlers.iter() {
-            let Some(cmd_item) = handler.get("command") else {
-                continue;
-            };
-            let Some(cmd) = cmd_item.as_str() else {
-                return Err(SetupError::UnexpectedShape {
-                    path: path.to_path_buf(),
-                    field: block.command_field,
-                });
-            };
-            out.push(cmd.to_string());
-        }
-    }
-    Ok(out)
+        .ok_or_else(|| shape_error(path, "hooks"))?;
+    hooks
+        .entry(block.event)
+        .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .ok_or_else(|| shape_error(path, format!("hooks.{}", block.event)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     fn parse(text: &str) -> DocumentMut {
@@ -575,7 +509,7 @@ type = \"prompt\"
 
         let err = plan(path).unwrap_err();
         assert!(
-            matches!(err, SetupError::UnexpectedShape { field: "hooks", .. }),
+            matches!(err, SetupError::UnexpectedShape { ref field, .. } if field == "hooks"),
             "expected UnexpectedShape at hooks, got {err:?}",
         );
     }
@@ -587,13 +521,13 @@ type = \"prompt\"
         fs::write(&path, "[hooks]\nPostToolUse = \"oops\"\n").unwrap();
 
         let err = plan(path).unwrap_err();
-        assert!(matches!(
-            err,
-            SetupError::UnexpectedShape {
-                field: "hooks.PostToolUse",
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                err,
+                SetupError::UnexpectedShape { ref field, .. } if field == "hooks.PostToolUse"
+            ),
+            "expected UnexpectedShape at hooks.PostToolUse, got {err:?}",
+        );
     }
 
     #[test]
