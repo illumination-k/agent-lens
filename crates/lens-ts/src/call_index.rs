@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, LineIndex,
-    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module,
-    starts_uppercase,
+    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, callee_names_local_binding,
+    qualify_module, starts_uppercase,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -146,11 +146,92 @@ impl FunctionVisitor for CallShapeCollector<'_> {
             line_index: self.line_index,
             imports: &self.imports,
             namespace_aliases: &self.namespace_aliases,
+            locally_bound: local_callable_bindings(&item),
             out: Vec::new(),
         };
         visitor.visit_function_body(item.body);
         self.out.extend(visitor.out);
     }
+}
+
+/// Names bound to a callable inside `item`'s own scope: arrow functions,
+/// function expressions and nested `function` declarations held in a
+/// local, plus parameters whose type annotation or default value is a
+/// function.
+///
+/// The walker gives a nested function the synthetic name
+/// `<parent>::closure#N`, never the local it is assigned to, so a call to
+/// that local has no workspace target. Left to the resolver's name
+/// fallback, it would instead land on whichever unrelated module happens
+/// to export the same name.
+///
+/// Bindings are collected body-wide rather than from the point of
+/// declaration: a call that precedes its binding and means an outer name
+/// is rare, and losing an edge beats fabricating one.
+fn local_callable_bindings(item: &FunctionItem<'_>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for param in &item.params.items {
+        if !binds_a_callable(param) {
+            continue;
+        }
+        if let Some(id) = param.pattern.get_binding_identifier() {
+            out.insert(id.name.to_string());
+        }
+    }
+    let mut collector = LocalBindingCollector { out };
+    collector.visit_function_body(item.body);
+    collector.out
+}
+
+/// A parameter is callable when its annotation is a function type
+/// (`emit: (e: Event) => void`) or its default value is a function
+/// (`emit = () => {}`) — the two shapes JS/TS syntax can decide alone.
+fn binds_a_callable(param: &FormalParameter) -> bool {
+    let annotated = param
+        .type_annotation
+        .as_ref()
+        .is_some_and(|annotation| matches!(annotation.type_annotation, TSType::TSFunctionType(_)));
+    let defaulted = param
+        .initializer
+        .as_deref()
+        .is_some_and(is_function_expression);
+    annotated || defaulted
+}
+
+fn is_function_expression(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    )
+}
+
+struct LocalBindingCollector {
+    out: HashSet<String>,
+}
+
+impl<'a> Visit<'a> for LocalBindingCollector {
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if it.init.as_ref().is_some_and(is_function_expression)
+            && let Some(id) = it.id.get_binding_identifier()
+        {
+            self.out.insert(id.name.to_string());
+        }
+        // The initialiser's body is a scope of its own — nothing it
+        // declares binds here.
+    }
+
+    fn visit_function(&mut self, it: &Function<'a>, _flags: ScopeFlags) {
+        // A `function inner() {}` statement binds `inner` in this scope;
+        // a named function *expression* binds its name only inside
+        // itself, so the declaration check is not just an id check.
+        if it.r#type == FunctionType::FunctionDeclaration
+            && let Some(id) = &it.id
+        {
+            self.out.insert(id.name.to_string());
+        }
+    }
+
+    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
 }
 
 struct FunctionBodyCallVisitor<'a> {
@@ -160,20 +241,16 @@ struct FunctionBodyCallVisitor<'a> {
     line_index: &'a LineIndex,
     imports: &'a [ImportShape],
     namespace_aliases: &'a HashSet<String>,
+    /// Callable names bound in this function's own scope — see
+    /// [`local_callable_bindings`].
+    locally_bound: HashSet<String>,
     out: Vec<CallShape>,
 }
 
 impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_> {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        self.out.push(call_shape(
-            &it.callee,
-            self.line_index.line(it.span.start),
-            self.module,
-            &self.caller_qualified_name,
-            self.caller_owner.clone(),
-            self.imports,
-            self.namespace_aliases,
-        ));
+        let shape = self.call_shape(&it.callee, self.line_index.line(it.span.start));
+        self.out.push(shape);
         walk::walk_call_expression(self, it);
     }
 
@@ -188,28 +265,31 @@ impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_> {
     fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
 }
 
-fn call_shape(
-    callee: &Expression,
-    line: usize,
-    module: &str,
-    caller_qualified_name: &str,
-    caller_owner: Option<String>,
-    imports: &[ImportShape],
-    namespace_aliases: &HashSet<String>,
-) -> CallShape {
-    let callee = callee_facts(callee, namespace_aliases);
-    CallShape {
-        caller_qualified_name: SyntaxFact::Known(Some(caller_qualified_name.to_owned())),
-        caller_module: SyntaxFact::Known(module.to_owned()),
-        caller_owner: SyntaxFact::Known(caller_owner),
-        callee_display_name: SyntaxFact::Known(callee.name),
-        callee_path_segments: callee
-            .path_segments
-            .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
-        receiver_expr_kind: SyntaxFact::Known(callee.receiver),
-        lexical_resolution: LexicalResolutionStatus::NotAttempted,
-        visible_imports: imports.to_vec(),
-        line,
+impl FunctionBodyCallVisitor<'_> {
+    /// The visitor already owns every caller-side fact a call shape
+    /// needs, so this reads them off `self` instead of taking them as a
+    /// parameter list.
+    fn call_shape(&self, callee: &Expression, line: usize) -> CallShape {
+        let callee = callee_facts(callee, self.namespace_aliases);
+        let callee_is_locally_bound = callee_names_local_binding(
+            callee.receiver,
+            callee.path_segments.as_deref(),
+            &self.locally_bound,
+        );
+        CallShape {
+            caller_qualified_name: SyntaxFact::Known(Some(self.caller_qualified_name.clone())),
+            caller_module: SyntaxFact::Known(self.module.to_owned()),
+            caller_owner: SyntaxFact::Known(self.caller_owner.clone()),
+            callee_display_name: SyntaxFact::Known(callee.name),
+            callee_path_segments: callee
+                .path_segments
+                .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
+            receiver_expr_kind: SyntaxFact::Known(callee.receiver),
+            callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
+            lexical_resolution: LexicalResolutionStatus::NotAttempted,
+            visible_imports: self.imports.to_vec(),
+            line,
+        }
     }
 }
 
@@ -378,6 +458,87 @@ fn split_owner(name: &str) -> (Option<String>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    /// A callee bound to a closure, a nested `function`, or a
+    /// function-shaped parameter in the caller's own scope is shadowed:
+    /// the resolver must be told so it does not fall back to a same-named
+    /// function exported elsewhere. The walker names such a closure
+    /// `pump::closure#N`, never `emit`, so nothing legitimate resolves.
+    #[rstest]
+    #[case::arrow_local("function pump() { const emit = (e: number) => {}; emit(1); }", true)]
+    #[case::function_expression_local(
+        "function pump() { const emit = function () {}; emit(1); }",
+        true
+    )]
+    #[case::let_arrow_local("function pump() { let emit = () => {}; emit(1); }", true)]
+    #[case::nested_declaration("function pump() { function emit() {} emit(1); }", true)]
+    #[case::function_typed_param("function pump(emit: (e: number) => void) { emit(1); }", true)]
+    #[case::defaulted_param("function pump(emit = () => {}) { emit(1); }", true)]
+    #[case::binding_in_nested_block(
+        "function pump(flag: boolean) { if (flag) { const emit = () => {}; emit(1); } }",
+        true
+    )]
+    #[case::plain_local("function pump() { const emit = compute(); emit(1); }", false)]
+    #[case::value_param("function pump(emit: number) { emit(1); }", false)]
+    #[case::unbound_name("function pump() { emit(1); }", false)]
+    fn local_callable_bindings_shadow_bare_calls(#[case] source: &str, #[case] expected: bool) {
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::m")
+            .unwrap()
+            .into_iter()
+            .find(|call| {
+                call.callee_name() == Some("emit")
+                    && call.caller_qualified_name() == Some("src::m::pump")
+            })
+            .expect("emit call site in pump");
+        assert_eq!(call.callee_is_locally_bound(), expected);
+    }
+
+    /// A binding in one function does not shadow the same name in
+    /// another, and a top-level `const emit = () => {}` is a real module
+    /// node that must keep resolving.
+    #[test]
+    fn bindings_do_not_leak_across_functions() {
+        let source = concat!(
+            "const emit = (e: number) => {};\n",
+            "function pump() { const emit = () => {}; emit(1); }\n",
+            "function drain() { emit(2); }\n",
+        );
+        let flags: Vec<_> = extract_call_shapes_with_module(source, Dialect::Ts, "src::m")
+            .unwrap()
+            .into_iter()
+            .filter(|call| call.callee_name() == Some("emit"))
+            .map(|call| {
+                (
+                    call.caller_qualified_name().map(ToOwned::to_owned),
+                    call.callee_is_locally_bound(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                (Some("src::m::pump".to_owned()), true),
+                (Some("src::m::drain".to_owned()), false),
+            ]
+        );
+    }
+
+    /// A closure's own parameters bind in the closure, which the walker
+    /// emits as its own unit — they must not shadow the parent's calls.
+    #[test]
+    fn closure_parameters_do_not_shadow_the_enclosing_scope() {
+        let source = "function pump() { run((emit: () => void) => emit()); emit(); }";
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::m")
+            .unwrap()
+            .into_iter()
+            .find(|call| {
+                call.callee_name() == Some("emit")
+                    && call.caller_qualified_name() == Some("src::m::pump")
+            })
+            .expect("emit call site in pump");
+        assert!(!call.callee_is_locally_bound());
+    }
 
     #[test]
     fn extracts_functions_with_module_qualified_names() {

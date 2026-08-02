@@ -88,6 +88,7 @@ adapter does not inspect that part of the syntax.
 - caller qualified name and caller module;
 - callee display name and path segments;
 - receiver expression kind;
+- whether the callee name is bound in the caller's local scope;
 - lexical resolution status;
 - imports visible at the call site;
 - source line.
@@ -95,6 +96,34 @@ adapter does not inspect that part of the syntax.
 Default extraction should set resolution to `NotAttempted`. Graph analyzers can
 then fold language-specific lexical rules into `Resolved`, `Unresolved`, or
 `Ambiguous` without requiring type inference.
+
+## Locally bound callees
+
+A bare call whose callee is bound in the caller's own scope — a closure or
+nested function held in a local, a function-typed parameter — targets that
+binding, which shadows every definition outside the function. Adapters that can
+read local scopes set `callee_is_locally_bound` to `Known(true)` for such call
+sites, and the call-graph resolver leaves them unresolved rather than matching
+the name against the workspace.
+
+Without it, `emit := func(...) {...}; emit(ev)` resolves through the
+last-segment fallback to whichever module happens to define an `emit`,
+fabricating a cross-module edge — enough to turn cleanly layered modules into a
+reported cycle in `layers` and to inflate fan-in in `hubs`. Unlike the
+ubiquitous-name and builtin tables below, this needs no name list: scope is
+decidable from the AST the adapter already walks.
+
+Adapters recognise, per language: Go `:=` / `var` / `=` bindings to a
+`func_literal`, `func`-typed `var`s and parameters; Rust `let` bindings to a
+closure, nested `fn` items, `fn`-typed locals, and parameters of
+`Fn`/`FnMut`/`FnOnce`/`fn` type (directly, via a generic bound, or behind a
+reference or wrapper); TypeScript arrow/function-expression locals, nested
+`function` declarations, and parameters with a function-type annotation or a
+function default; Python nested `def`s, `lambda` locals, and `Callable`
+annotations. Bindings are collected body-wide rather than from the point of
+declaration — a call that precedes its binding and means an outer name is rare,
+and losing an edge beats fabricating one. An adapter that does not track scopes
+leaves the fact `Unknown`, which reads as "not locally bound".
 
 ## ImportShape
 

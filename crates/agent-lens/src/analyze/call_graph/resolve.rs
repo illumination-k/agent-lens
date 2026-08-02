@@ -20,6 +20,14 @@
 //!   [`GraphLanguage::builtin_function_names`][super::model::GraphLanguage::builtin_function_names].
 //!
 //! Both leave the site [`Resolution::Unresolved`].
+//!
+//! A third case needs no name table at all: a callee bound in the
+//! caller's own local scope (a closure or nested function held in a
+//! local, a function-typed parameter). The adapter reports that as
+//! [`CallShape::callee_is_locally_bound`], and the binding shadows every
+//! definition outside the function, so the whole resolution ladder —
+//! lexical candidates included — is skipped and the site stays
+//! [`Resolution::Unresolved`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -159,6 +167,18 @@ impl Resolver {
         }
         if site.has_receiver_expression() {
             return self.resolve_receiver_method(site, callee_name, language);
+        }
+        // `emit := func(...) {...}; emit(x)` — the callee is a local
+        // binding, so the program never reaches a workspace definition of
+        // that name. Skipping the ladder here rather than only the name
+        // fallback is what the language itself does: the binding shadows
+        // the enclosing module's own `emit` just as it shadows another
+        // module's. Short idiomatic local names (`emit`, `send`, `next`,
+        // `done`) collide with methods somewhere in any medium-sized
+        // corpus, and the fabricated edge shows up as a module cycle in
+        // `layers` and as inflated fan-in in `hubs`.
+        if site.callee_is_locally_bound() {
+            return ResolvedCall::unresolved();
         }
         for candidate in lexical_candidates(site) {
             if let Some(ids) = self.qualified.get(&candidate) {
@@ -452,6 +472,7 @@ mod tests {
             caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),
             caller_owner: SyntaxFact::Known(Some("S".to_owned())),
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            callee_is_locally_bound: SyntaxFact::Known(false),
             lexical_resolution: lens_domain::LexicalResolutionStatus::NotAttempted,
             visible_imports: vec![
                 ImportShape {
@@ -642,6 +663,80 @@ mod tests {
         assert_eq!(call.resolution, Resolution::Unresolved);
         assert!(call.candidates.is_empty());
         assert_eq!(call.method, None);
+    }
+
+    fn locally_bound_site(path: &str) -> CallShape {
+        CallShape {
+            callee_is_locally_bound: SyntaxFact::Known(true),
+            ..site(path)
+        }
+    }
+
+    /// A closure or function-typed parameter shadows every workspace
+    /// definition of its name, so the whole ladder is skipped — including
+    /// the last-segment fallback that would otherwise mint an edge to an
+    /// unrelated module's `emit`.
+    #[rstest]
+    #[case::name_fallback_to_another_module("other::W::emit")]
+    #[case::name_fallback_to_a_free_function("other::emit")]
+    #[case::lexical_match_in_the_callers_own_module("crate::m::emit")]
+    fn locally_bound_callees_never_resolve(#[case] defined_at: &str) {
+        let nodes = vec![node(defined_at)];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&locally_bound_site("emit"), GraphLanguage::Go);
+
+        assert_eq!(call.resolution, Resolution::Unresolved, "{defined_at}");
+        assert_eq!(call.to, None);
+        assert!(call.candidates.is_empty());
+        assert_eq!(call.method, None);
+    }
+
+    /// The flag is per call site: the same name resolves normally where
+    /// nothing binds it locally.
+    #[test]
+    fn the_same_name_resolves_where_it_is_not_locally_bound() {
+        let nodes = vec![node("other::W::emit")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&site("emit"), GraphLanguage::Go);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+        assert_eq!(call.method, Some(ResolutionMethod::LastSegment));
+    }
+
+    /// `SyntaxFact::Unknown` means the adapter does not track scopes, not
+    /// that the callee is shadowed — those sites keep resolving.
+    #[test]
+    fn unknown_local_binding_facts_do_not_suppress_resolution() {
+        let nodes = vec![node("other::W::emit")];
+        let resolver = Resolver::new(&nodes);
+        let unknown = CallShape {
+            callee_is_locally_bound: SyntaxFact::Unknown,
+            ..site("emit")
+        };
+
+        let call = resolver.resolve(&unknown, GraphLanguage::Go);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+    }
+
+    /// A receiver call names a method on the receiver's type, which a
+    /// local of the same name does not shadow. Adapters only set the flag
+    /// for bare calls, but pin the ordering so a future move of the check
+    /// above `resolve_receiver_method` is caught.
+    #[test]
+    fn receiver_calls_are_unaffected_by_the_local_binding_flag() {
+        let nodes = vec![node("crate::m::W::emit")];
+        let resolver = Resolver::new(&nodes);
+        let receiver = CallShape {
+            callee_is_locally_bound: SyntaxFact::Known(true),
+            ..receiver_site("emit")
+        };
+
+        let call = resolver.resolve(&receiver, GraphLanguage::Go);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
     }
 
     #[test]
