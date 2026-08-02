@@ -309,7 +309,7 @@ fn collect_binding_names(pat: &BindingPattern, out: &mut Vec<String>) {
 /// Flatten a TS type annotation to the head identifiers it references
 /// (`Map<string, User>` -> `Map`, `string`, `User`). Shapes we don't
 /// model contribute nothing, mirroring the Rust adapter's path flatten.
-fn ts_type_paths(ty: &TSType, out: &mut Vec<String>) {
+pub(crate) fn ts_type_paths(ty: &TSType, out: &mut Vec<String>) {
     match ty {
         TSType::TSTypeReference(r) => {
             type_name_head(&r.type_name, out);

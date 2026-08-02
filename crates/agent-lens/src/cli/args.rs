@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use agent_lens::analyze::{
-    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD,
-    GraphDirection, GraphQueryKind, OutputFormat, PairKey, SimilarityMethod,
+    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphDirection, GraphQueryKind,
+    OutputFormat, PairKey, SimilarityMethod, SimilarityTarget,
 };
 use agent_lens::hooks::codex::setup as codex_setup;
 use agent_lens::hooks::setup::SettingsScope;
@@ -915,12 +915,23 @@ pub(super) struct AnalyzeSimilarityArgs {
     /// without `--paired-by`.
     #[arg(long, default_value_t = DEFAULT_SIMILARITY_DRIFT_FLOOR, requires = "paired_by")]
     pub(super) drift_floor: f64,
-    /// Minimum source line count for a function to be considered.
-    /// Functions shorter than this are dropped before pairwise
-    /// comparison; keeps trivial getters / one-liners out of the
-    /// report.
-    #[arg(long, default_value_t = DEFAULT_SIMILARITY_MIN_LINES)]
-    pub(super) min_lines: usize,
+    /// Minimum source line count for a unit to be considered. Units
+    /// shorter than this are dropped before pairwise comparison; keeps
+    /// trivial getters / one-liners out of the report. Defaults per
+    /// target: 5 for `--target functions`, 3 for `--target types`.
+    #[arg(long)]
+    pub(super) min_lines: Option<usize>,
+    /// Comparison unit. `functions` (default) compares function bodies.
+    /// `types` compares type definitions instead — Rust struct/enum/type
+    /// alias, TS interface/type alias/enum, Python annotated classes /
+    /// dataclasses / Enum subclasses, Go struct/alias — by their member
+    /// shape (field names and types, enum variants, alias targets), so
+    /// duplicated DTOs and drifted mirror structs surface the same way
+    /// duplicated functions do. With `--paired-by`, only the
+    /// `qualified`/`name` key applies; `method` has no meaning for a
+    /// type and is rejected.
+    #[arg(long, value_enum, default_value_t = SimilarityTarget::Functions)]
+    pub(super) target: SimilarityTarget,
     /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
     /// distance over the body AST. `token` compares preorder token
     /// k-gram multisets — faster and more tolerant of reordered code,
@@ -1155,7 +1166,7 @@ mod tests {
         assert!(args.common.path_filter.exclude_tests);
         assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
         assert!((args.threshold - 0.85).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, 8);
+        assert_eq!(args.min_lines, Some(8));
         assert_eq!(args.ranking.top, Some(3));
         // `--method` is omitted above, so it defaults to TSED.
         assert_eq!(args.method, SimilarityMethod::Tsed);

@@ -429,7 +429,7 @@ fn collect_pattern_names(pat: &syn::Pat, out: &mut Vec<String>) {
     }
 }
 
-fn collect_type_paths(ty: &syn::Type, out: &mut Vec<String>) {
+pub(crate) fn collect_type_paths(ty: &syn::Type, out: &mut Vec<String>) {
     match ty {
         syn::Type::Array(array) => collect_type_paths(&array.elem, out),
         syn::Type::BareFn(bare_fn) => {
@@ -508,7 +508,7 @@ fn collect_bound_paths(bound: &syn::TypeParamBound, out: &mut Vec<String>) {
     }
 }
 
-fn generic_summaries(generics: &syn::Generics) -> Vec<String> {
+pub(crate) fn generic_summaries(generics: &syn::Generics) -> Vec<String> {
     let mut out: Vec<String> = generics.params.iter().map(normalized_tokens).collect();
     if let Some(where_clause) = &generics.where_clause {
         out.extend(where_clause.predicates.iter().map(normalized_tokens));

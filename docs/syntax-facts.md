@@ -38,6 +38,35 @@ The body tree remains the existing `TreeNode` currency for structural
 similarity, but it is now nested under a neutral shape so language adapters can
 add comparable signature and ownership facts without CLI-specific structs.
 
+## TypeShape
+
+`TypeShape` (`lens_domain::type_shape`) is the type-definition unit compared
+by `analyze similarity --target types`. Kinds are language-neutral:
+
+- `Record` — named fields or properties: Rust struct, TS interface or
+  object-literal type alias, Python annotated class (dataclass / TypedDict),
+  Go struct;
+- `Enum` — tagged variants: Rust/TS enums, Python `Enum` subclasses;
+- `Alias` — a name for another type: `type X = …` and Go defined types.
+
+The language-facing spelling lives in `kind_label`, a fixed vocabulary
+(`struct`, `enum`, `type_alias`, `interface`, `class`, `dataclass`) surfaced
+in reports. Members carry the declared name, the normalized annotation text,
+and the referenced type paths.
+
+Rendering into the comparison currency lives in the domain, not the
+adapters, so every language emits one label vocabulary: the root label is
+the neutral kind, each member becomes a leaf labelled
+`Field(name: type_text)` with names case-folded (`userId` = `user_id`) and
+type text whitespace-normalized, enum variants become `Variant(name)` nodes
+with payload `Field` children. Member facts go into labels — never
+`TreeNode::value` — because APTED, token profiles, and exact-match hashing
+compare labels only. `member_signature()` synthesizes a `SignatureShape`
+from the member list so the signature component of the similarity blend
+(identifier overlap, type overlap, member count) applies to type pairs
+unchanged, and `into_function_shape()` lowers the whole definition into the
+`FunctionShape` corpus currency the similarity pipeline runs on.
+
 ## SignatureShape
 
 `SignatureShape` records comparable syntax where available:

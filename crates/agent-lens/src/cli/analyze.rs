@@ -5,10 +5,10 @@ use std::path::Path;
 
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
-    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD,
-    DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
-    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
-    SimilarityAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, DelegationAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer,
+    ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer, SimilarityAnalyzer,
+    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -145,8 +145,9 @@ pub(super) fn build_analyze_command(
                 ranking: AnalyzeRankingArgs { top: opts.top },
                 threshold: opts.threshold.unwrap_or(DEFAULT_SIMILARITY_THRESHOLD),
                 sweep: opts.sweep.unwrap_or_default(),
-                min_lines: opts.min_lines.unwrap_or(DEFAULT_SIMILARITY_MIN_LINES),
+                min_lines: opts.min_lines,
                 method: opts.method.unwrap_or_default(),
+                target: opts.target.unwrap_or_default(),
                 doc_overlap: opts.doc_overlap,
                 paired_by: opts.paired_by,
                 drift_floor: opts.drift_floor.unwrap_or(DEFAULT_SIMILARITY_DRIFT_FLOOR),
@@ -345,7 +346,8 @@ impl AnalyzeCommand {
                     .with_threshold(args.threshold)
                     .with_sweep(sweep)
                     .with_diff_only(args.diff.diff_only)
-                    .with_min_lines(args.min_lines)
+                    .with_min_lines_opt(args.min_lines)
+                    .with_target(args.target)
                     .with_method(args.method)
                     .with_doc_overlap(args.doc_overlap)
                     .with_paired_by(args.paired_by)
@@ -391,7 +393,7 @@ impl AnalyzeCommand {
 mod tests {
     use std::path::PathBuf;
 
-    use agent_lens::analyze::{GraphQueryKind, PairKey, SimilarityMethod};
+    use agent_lens::analyze::{GraphQueryKind, PairKey, SimilarityMethod, SimilarityTarget};
     use agent_lens::test_support::write_file;
     use clap::Parser;
 
@@ -440,7 +442,7 @@ mod tests {
                 .analyze(&file, OutputFormat::Json)
                 .unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-            parsed["function_count"].as_u64().unwrap()
+            parsed["unit_count"].as_u64().unwrap()
         };
 
         assert_eq!(run(AnalyzePathArgs::default()), 2, "All keeps both");
@@ -517,7 +519,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.common.path, PathBuf::from("/repo/web"));
         assert_eq!(args.common.format, OutputFormat::Md);
         assert!((args.threshold - 0.7).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, 9);
+        assert_eq!(args.min_lines, Some(9));
         assert_eq!(args.ranking.top, Some(4));
         assert_eq!(args.method, SimilarityMethod::Token);
         assert!(args.doc_overlap);
@@ -541,9 +543,12 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze similarity");
         };
         assert!((args.threshold - DEFAULT_SIMILARITY_THRESHOLD).abs() < f64::EPSILON);
-        assert_eq!(args.min_lines, DEFAULT_SIMILARITY_MIN_LINES);
+        // An absent `min-lines` stays unset so the analyzer can apply the
+        // target-specific default.
+        assert_eq!(args.min_lines, None);
         assert_eq!(args.ranking.top, None);
         assert_eq!(args.method, SimilarityMethod::Tsed);
+        assert_eq!(args.target, SimilarityTarget::Functions);
         assert!(!args.doc_overlap);
         // Absent `paired-by` keeps the clustering report; the floor falls
         // back to its default so it is well-defined if pairing is turned

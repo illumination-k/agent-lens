@@ -6,7 +6,7 @@ use lens_domain::{
     CandidateStrategy, TSEDOptions, collect_subtree_sizes, lsh_candidate_pairs_for_trees,
 };
 
-use super::{OwnedFunction, SimilarityMethod};
+use super::{OwnedUnit, SimilarityMethod};
 
 #[derive(Debug)]
 pub(super) struct TreeProfile {
@@ -60,6 +60,15 @@ impl TreeProfile {
     ) -> &'a lens_domain::SubtreeSizes {
         self.subtree_sizes
             .get_or_init(|| collect_subtree_sizes(tree))
+    }
+
+    /// Whether this profile carries the cheap-filter data (`from_tree`)
+    /// rather than the scoring-only shape (`from_tree_for_scoring`).
+    /// Test-only: lets `build_tree_profiles` callers pin which shape the
+    /// LSH gate selected.
+    #[cfg(test)]
+    pub(super) fn has_filters(&self) -> bool {
+        self.filters.is_some()
     }
 
     pub(super) fn exact_hash(&self, compare_values: bool) -> u64 {
@@ -228,12 +237,13 @@ impl CandidatePairStrategy {
 /// bounded by those quantities, so the token method skips them and scores
 /// every enumerated pair.
 pub(super) fn candidate_pairs(
-    corpus: &[OwnedFunction],
+    corpus: &[OwnedUnit],
     min_lines: usize,
     profiles: &[TreeProfile],
     threshold: f64,
     opts: &TSEDOptions,
     method: SimilarityMethod,
+    allow_lsh: bool,
 ) -> CandidatePairs {
     let eligible_indices: Vec<usize> = corpus
         .iter()
@@ -246,11 +256,11 @@ pub(super) fn candidate_pairs(
     // cover the exact setting here; tighter banding has missed one-label
     // near-clones that still clear the analyzer threshold.
     strategy.lsh.num_bands = 24;
-    let use_lsh = strategy_uses_lsh(&strategy, eligible_indices.len());
+    let use_lsh = allow_lsh && strategy_uses_lsh(&strategy, eligible_indices.len());
     let (pairs, filter_counts) = if use_lsh {
         let trees: Vec<&lens_domain::TreeNode> = eligible_indices
             .iter()
-            .filter_map(|&i| corpus.get(i).map(OwnedFunction::body_tree))
+            .filter_map(|&i| corpus.get(i).map(OwnedUnit::body_tree))
             .collect();
         let lsh_pairs = lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
             .into_iter()
@@ -298,14 +308,14 @@ pub(super) fn candidate_pairs(
     }
 }
 
-fn same_test_class(corpus: &[OwnedFunction], i: usize, j: usize) -> bool {
+fn same_test_class(corpus: &[OwnedUnit], i: usize, j: usize) -> bool {
     match (corpus.get(i), corpus.get(j)) {
         (Some(a), Some(b)) => a.is_test == b.is_test,
         _ => false,
     }
 }
 
-pub(super) fn eligible_function_count(corpus: &[OwnedFunction], min_lines: usize) -> usize {
+pub(super) fn eligible_function_count(corpus: &[OwnedUnit], min_lines: usize) -> usize {
     corpus
         .iter()
         .filter(|function| function.line_count() >= min_lines)
@@ -520,11 +530,12 @@ where
 mod tests {
     use super::*;
 
-    fn owned_function(name: &str, is_test: bool) -> OwnedFunction {
-        OwnedFunction {
+    fn owned_function(name: &str, is_test: bool) -> OwnedUnit {
+        OwnedUnit {
             file: std::path::PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test,
+            kind: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -562,16 +573,18 @@ mod tests {
             0.0,
             &lens_domain::TSEDOptions::default(),
             SimilarityMethod::Tsed,
+            true,
         );
 
         assert_eq!(candidates.pairs, vec![(0, 1), (0, 2), (1, 2)]);
     }
 
-    fn owned_function_with_tree(name: &str, tree: lens_domain::TreeNode) -> OwnedFunction {
-        OwnedFunction {
+    fn owned_function_with_tree(name: &str, tree: lens_domain::TreeNode) -> OwnedUnit {
+        OwnedUnit {
             file: std::path::PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test: false,
+            kind: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -613,12 +626,75 @@ mod tests {
             .collect();
         let opts = lens_domain::TSEDOptions::default();
 
-        let tsed = candidate_pairs(&corpus, 1, &profiles, 0.99, &opts, SimilarityMethod::Tsed);
-        let token = candidate_pairs(&corpus, 1, &profiles, 0.99, &opts, SimilarityMethod::Token);
+        let tsed = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.99,
+            &opts,
+            SimilarityMethod::Tsed,
+            true,
+        );
+        let token = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.99,
+            &opts,
+            SimilarityMethod::Token,
+            true,
+        );
 
         assert!(tsed.pairs.is_empty(), "TSED should prune the disjoint pair");
         assert_eq!(token.pairs, vec![(0, 1)]);
         assert_eq!(token.total_len(), 1);
+    }
+
+    /// The types target passes `allow_lsh = false`; even a corpus past
+    /// the LSH switch-over must stay on the exact cartesian path, since
+    /// MinHash recall collapses on small type trees.
+    #[test]
+    fn allow_lsh_false_forces_cartesian_past_the_lsh_threshold() {
+        let corpus: Vec<OwnedUnit> = (0..200)
+            .map(|i| owned_function(&format!("t{i}"), false))
+            .collect();
+        let profiles: Vec<_> = corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
+            .collect();
+        let opts = lens_domain::TSEDOptions::default();
+
+        let gated = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.0,
+            &opts,
+            SimilarityMethod::Tsed,
+            false,
+        );
+        let open = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.0,
+            &opts,
+            SimilarityMethod::Tsed,
+            true,
+        );
+
+        assert!(
+            matches!(gated.strategy, CandidatePairStrategy::Cartesian),
+            "expected cartesian, got {}",
+            gated.strategy.as_str()
+        );
+        assert!(
+            matches!(open.strategy, CandidatePairStrategy::Lsh),
+            "expected lsh, got {}",
+            open.strategy.as_str()
+        );
+        // All-identical trees: the exact path must enumerate every pair.
+        assert_eq!(gated.pairs.len(), 200 * 199 / 2);
     }
 
     #[test]

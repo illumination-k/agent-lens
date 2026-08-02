@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::analyze::{GraphDirection, GraphQueryKind, OutputFormat, PairKey, SimilarityMethod};
+use crate::analyze::{
+    GraphDirection, GraphQueryKind, OutputFormat, PairKey, SimilarityMethod, SimilarityTarget,
+};
 
 /// File name searched for when discovering a project config.
 pub const CONFIG_FILE_NAME: &str = "agent-lens.toml";
@@ -202,6 +204,9 @@ pub struct SimilarityOptions {
     /// Body-scoring algorithm: `tsed` (default) or `token`. Mirrors the
     /// `--method` CLI flag.
     pub method: Option<SimilarityMethod>,
+    /// Comparison unit: `functions` (default) or `types`. Mirrors the
+    /// `--target` CLI flag.
+    pub target: Option<SimilarityTarget>,
     /// Roll the per-pair doc-comment overlap up into the markdown
     /// report. Mirrors the `--doc-overlap` CLI flag; JSON output carries
     /// the per-pair values either way.

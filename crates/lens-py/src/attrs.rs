@@ -98,7 +98,7 @@ fn is_pytest_decorator(expr: &Expr) -> bool {
 /// (e.g. `pytest.mark.parametrize` → `["pytest", "mark", "parametrize"]`).
 /// `Call` nodes unwrap to their callee so `@pytest.mark.skip("reason")`
 /// matches the same path as the bare attribute form.
-fn dotted_path(expr: &Expr) -> Option<Vec<&str>> {
+pub(crate) fn dotted_path(expr: &Expr) -> Option<Vec<&str>> {
     match expr {
         Expr::Name(name) => Some(vec![name.id.as_str()]),
         Expr::Attribute(attr) => {

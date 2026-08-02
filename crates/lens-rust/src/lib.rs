@@ -19,6 +19,7 @@ mod method_names;
 mod parser;
 #[cfg(test)]
 mod proptests;
+mod type_defs;
 mod wrapper;
 
 pub use call_index::{
@@ -35,4 +36,5 @@ pub use parser::{
     RustFunctionDef, RustParseError, RustParser, extract_function_shapes_with_modules,
     extract_functions_with_modules,
 };
+pub use type_defs::extract_type_defs;
 pub use wrapper::find_wrappers;

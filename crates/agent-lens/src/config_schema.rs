@@ -125,8 +125,8 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             Field {
                 key: "min-lines",
                 ty: "int",
-                presence: "default: 5",
-                desc: "Ignore functions shorter than this many lines. Omitting it applies the default, not \"no floor\".",
+                presence: "default: 5 (functions) / 3 (types)",
+                desc: "Ignore units shorter than this many lines. Omitting it applies the target-specific default, not \"no floor\".",
             },
             Field {
                 key: "top",
@@ -139,6 +139,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "\"tsed\" or \"token\"",
                 presence: "optional",
                 desc: "Body-scoring algorithm: tsed (tree-edit distance, default) or token (k-gram overlap).",
+            },
+            Field {
+                key: "target",
+                ty: "\"functions\" or \"types\"",
+                presence: "optional",
+                desc: "Comparison unit: functions (default) or type definitions (struct/class/interface/enum/alias member shapes). With types, paired-by only accepts the qualified/name key.",
             },
             Field {
                 key: "doc-overlap",

@@ -5,7 +5,7 @@ use std::path::Path;
 use lens_domain::SimilarCluster;
 use serde::Serialize;
 
-use super::{OwnedFunction, SimilarityComponents};
+use super::{OwnedUnit, SimilarityComponents};
 
 #[derive(Debug, Serialize)]
 pub(super) struct Report<'a> {
@@ -14,7 +14,9 @@ pub(super) struct Report<'a> {
     /// Body-scoring algorithm used: `tsed` or `token`. Surfaced because
     /// the two methods are not on the same score scale.
     method: &'static str,
-    function_count: usize,
+    /// Comparison unit: `functions` or `types`.
+    target: &'static str,
+    unit_count: usize,
     /// Clustering cut applied. In sweep mode this is the ladder floor;
     /// otherwise the plain `--threshold`.
     threshold: f64,
@@ -33,16 +35,18 @@ impl<'a> Report<'a> {
     pub(super) fn new(
         path: &Path,
         method: &'static str,
+        target: &'static str,
         threshold: f64,
         min_lines: usize,
-        function_count: usize,
+        unit_count: usize,
         sweep: Option<&[f64]>,
         clusters: &'a [ClusterView<'a>],
     ) -> Self {
         Self {
             root: path.display().to_string(),
             method,
-            function_count,
+            target,
+            unit_count,
             threshold,
             sweep: sweep.map(<[f64]>::to_vec),
             min_lines,
@@ -61,28 +65,28 @@ pub(super) struct ClusterView<'a> {
     /// in `--sweep` mode. `None` (and omitted from JSON) otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     survives_at_threshold: Option<f64>,
-    functions: Vec<FunctionRef<'a>>,
+    units: Vec<UnitRef<'a>>,
     pairs: Vec<PairView<'a>>,
 }
 
 impl<'a> ClusterView<'a> {
     pub(super) fn from_domain(
-        corpus: &'a [OwnedFunction],
+        corpus: &'a [OwnedUnit],
         cluster: SimilarCluster,
         pair_scores: &HashMap<(usize, usize), SimilarityComponents>,
     ) -> Self {
-        let functions: Vec<FunctionRef<'a>> = cluster
+        let units: Vec<UnitRef<'a>> = cluster
             .members
             .iter()
-            .filter_map(|i| corpus.get(*i).map(FunctionRef::from))
+            .filter_map(|i| corpus.get(*i).map(UnitRef::from))
             .collect();
         let pairs = cluster_pair_views(corpus, &cluster.members, pair_scores);
         Self {
-            size: functions.len(),
+            size: units.len(),
             min_similarity: cluster.min_similarity,
             max_similarity: cluster.max_similarity,
             survives_at_threshold: None,
-            functions,
+            units,
             pairs,
         }
     }
@@ -127,7 +131,7 @@ fn highest_surviving_rung(min_similarity: f64, ladder: &[f64]) -> Option<f64> {
 }
 
 fn cluster_pair_views<'a>(
-    corpus: &'a [OwnedFunction],
+    corpus: &'a [OwnedUnit],
     members: &[usize],
     pair_scores: &HashMap<(usize, usize), SimilarityComponents>,
 ) -> Vec<PairView<'a>> {
@@ -137,10 +141,10 @@ fn cluster_pair_views<'a>(
             let Some(components) = pair_scores.get(&sorted_pair_key(i, j)).copied() else {
                 continue;
             };
-            let Some(a) = corpus.get(i).map(FunctionRef::from) else {
+            let Some(a) = corpus.get(i).map(UnitRef::from) else {
                 continue;
             };
-            let Some(b) = corpus.get(j).map(FunctionRef::from) else {
+            let Some(b) = corpus.get(j).map(UnitRef::from) else {
                 continue;
             };
             pairs.push(PairView::new(a, b, components));
@@ -159,19 +163,24 @@ fn sorted_pair_key(i: usize, j: usize) -> (usize, usize) {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-pub(super) struct FunctionRef<'a> {
+pub(super) struct UnitRef<'a> {
     file: &'a str,
     name: &'a str,
+    /// Language-facing kind for a type unit (`struct`, `interface`,
+    /// `dataclass`, …); absent for functions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
     start_line: usize,
     end_line: usize,
     is_test: bool,
 }
 
-impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
-    fn from(f: &'a OwnedFunction) -> Self {
+impl<'a> From<&'a OwnedUnit> for UnitRef<'a> {
+    fn from(f: &'a OwnedUnit) -> Self {
         Self {
             file: f.rel_path.as_str(),
             name: f.name(),
+            kind: f.kind,
             start_line: f.start_line(),
             end_line: f.end_line(),
             is_test: f.is_test,
@@ -181,8 +190,8 @@ impl<'a> From<&'a OwnedFunction> for FunctionRef<'a> {
 
 #[derive(Debug, Serialize)]
 pub(super) struct PairView<'a> {
-    a: FunctionRef<'a>,
-    b: FunctionRef<'a>,
+    a: UnitRef<'a>,
+    b: UnitRef<'a>,
     similarity: f64,
     body_similarity: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,11 +209,7 @@ pub(super) struct PairView<'a> {
 }
 
 impl<'a> PairView<'a> {
-    pub(super) fn new(
-        a: FunctionRef<'a>,
-        b: FunctionRef<'a>,
-        components: SimilarityComponents,
-    ) -> Self {
+    pub(super) fn new(a: UnitRef<'a>, b: UnitRef<'a>, components: SimilarityComponents) -> Self {
         Self {
             a,
             b,
@@ -274,17 +279,18 @@ pub(super) fn format_markdown(
     report: &Report<'_>,
     top: Option<usize>,
     doc_overlap: bool,
+    noun: &str,
 ) -> String {
     let cut = match &report.sweep {
         Some(ladder) => format!("sweep {}", format_ladder(ladder)),
         None => format!("threshold {:.2}", report.threshold),
     };
     let mut out = format!(
-        "# Similarity report: {} ({} method, {} function(s), {}, min lines {})\n",
-        report.root, report.method, report.function_count, cut, report.min_lines,
+        "# Similarity report: {} ({} method, {} {noun}(s), {}, min lines {})\n",
+        report.root, report.method, report.unit_count, cut, report.min_lines,
     );
     if report.clusters.is_empty() {
-        out.push_str("\n_No similar function clusters at or above threshold._\n");
+        let _ = writeln!(out, "\n_No similar {noun} clusters at or above threshold._");
         return out;
     }
     let clusters = top.map_or(report.clusters, |limit| {
@@ -304,8 +310,8 @@ pub(super) fn format_markdown(
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
-        let _ = writeln!(out, "\n- {}", cluster_headline(cluster, doc_overlap));
-        for f in &cluster.functions {
+        let _ = writeln!(out, "\n- {}", cluster_headline(cluster, doc_overlap, noun));
+        for f in &cluster.units {
             let _ = writeln!(
                 out,
                 "  - {}:`{}` (L{}-{})",
@@ -320,7 +326,7 @@ pub(super) fn format_markdown(
 /// similarity band, the identifier-overlap band, then the optional
 /// annotations — doc overlap when asked for, and the sweep survival
 /// rung when sweeping.
-fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool) -> String {
+fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool, noun: &str) -> String {
     let identifier_tag = identifier_overlap_summary(cluster)
         .map(|summary| format!(", {summary}"))
         .unwrap_or_default();
@@ -334,7 +340,7 @@ fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool) -> String {
         .map(|rung| format!(" [survives ≥{rung:.2}]"))
         .unwrap_or_default();
     format!(
-        "{} functions, similarity {:.0}–{:.0}%{identifier_tag}{doc_tag}{survival_tag}",
+        "{} {noun}s, similarity {:.0}–{:.0}%{identifier_tag}{doc_tag}{survival_tag}",
         cluster.size,
         cluster.min_similarity * 100.0,
         cluster.max_similarity * 100.0,
@@ -356,7 +362,9 @@ fn format_ladder(ladder: &[f64]) -> String {
 pub(super) struct PairedReport<'a> {
     root: String,
     method: &'static str,
-    /// Key that decided which functions are siblings: `qualified` or
+    /// Comparison unit: `functions` or `types`.
+    target: &'static str,
+    /// Key that decided which units are siblings: `qualified` or
     /// `method`.
     paired_by: &'static str,
     /// Score below which a matched pair is called drifted. Unlike the
@@ -366,7 +374,7 @@ pub(super) struct PairedReport<'a> {
     /// than reported as drift.
     drift_floor: f64,
     min_lines: usize,
-    function_count: usize,
+    unit_count: usize,
     /// Distinct name keys that produced at least one reported pair.
     key_count: usize,
     pair_count: usize,
@@ -390,11 +398,12 @@ pub(super) struct PairedReport<'a> {
 pub(super) struct PairedReportInputs<'p> {
     pub path: &'p Path,
     pub method: &'static str,
+    pub target: &'static str,
     pub paired_by: &'static str,
     pub threshold: f64,
     pub drift_floor: f64,
     pub min_lines: usize,
-    pub function_count: usize,
+    pub unit_count: usize,
     pub same_file_pair_count: usize,
     pub below_floor_count: usize,
 }
@@ -405,11 +414,12 @@ impl<'a> PairedReport<'a> {
         Self {
             root: inputs.path.display().to_string(),
             method: inputs.method,
+            target: inputs.target,
             paired_by: inputs.paired_by,
             threshold: inputs.threshold,
             drift_floor: inputs.drift_floor,
             min_lines: inputs.min_lines,
-            function_count: inputs.function_count,
+            unit_count: inputs.unit_count,
             key_count: groups.len(),
             pair_count: groups.iter().map(|g| g.pairs.len()).sum(),
             drifted_pair_count: groups.iter().map(|g| g.drifted_pair_count).sum(),
@@ -437,7 +447,7 @@ pub(super) struct DriftGroupView<'a> {
     /// divergence or a missed sync — the report labels rather than
     /// judges, because it cannot tell which.
     drifted_pair_count: usize,
-    functions: Vec<FunctionRef<'a>>,
+    units: Vec<UnitRef<'a>>,
     pairs: Vec<PairView<'a>>,
 }
 
@@ -458,7 +468,7 @@ pub(super) struct ScoredMatch {
 /// endpoints with it unless another pair keeps them, so the member list
 /// always matches the pairs actually shown.
 pub(super) fn build_drift_groups<'a>(
-    corpus: &'a [OwnedFunction],
+    corpus: &'a [OwnedUnit],
     keys: &'a [String],
     matches: &[ScoredMatch],
     threshold: f64,
@@ -474,16 +484,16 @@ pub(super) fn build_drift_groups<'a>(
             let mut members: Vec<usize> = scored.iter().flat_map(|m| [m.i, m.j]).collect();
             members.sort_unstable();
             members.dedup();
-            let functions: Vec<FunctionRef<'a>> = members
+            let units: Vec<UnitRef<'a>> = members
                 .iter()
-                .filter_map(|i| corpus.get(*i).map(FunctionRef::from))
+                .filter_map(|i| corpus.get(*i).map(UnitRef::from))
                 .collect();
             let pairs: Vec<PairView<'a>> = scored
                 .iter()
                 .filter_map(|m| {
                     Some(PairView::new(
-                        corpus.get(m.i).map(FunctionRef::from)?,
-                        corpus.get(m.j).map(FunctionRef::from)?,
+                        corpus.get(m.i).map(UnitRef::from)?,
+                        corpus.get(m.j).map(UnitRef::from)?,
                         m.components,
                     ))
                 })
@@ -492,11 +502,11 @@ pub(super) fn build_drift_groups<'a>(
             let (min_similarity, max_similarity) = min_max(&scores)?;
             Some(DriftGroupView {
                 key: keys.get(key_index)?.as_str(),
-                size: functions.len(),
+                size: units.len(),
                 min_similarity,
                 max_similarity,
                 drifted_pair_count: scores.iter().filter(|s| **s < threshold).count(),
-                functions,
+                units,
                 pairs,
             })
         })
@@ -528,13 +538,17 @@ fn sort_by_drift(groups: &mut [DriftGroupView<'_>]) {
     });
 }
 
-pub(super) fn format_paired_markdown(report: &PairedReport<'_>, top: Option<usize>) -> String {
+pub(super) fn format_paired_markdown(
+    report: &PairedReport<'_>,
+    top: Option<usize>,
+    noun: &str,
+) -> String {
     let mut out = format!(
-        "# Similarity report: {} (paired by {}, {} method, {} function(s), drift threshold {:.2}, floor {:.2}, min lines {})\n",
+        "# Similarity report: {} (paired by {}, {} method, {} {noun}(s), drift threshold {:.2}, floor {:.2}, min lines {})\n",
         report.root,
         report.paired_by,
         report.method,
-        report.function_count,
+        report.unit_count,
         report.threshold,
         report.drift_floor,
         report.min_lines,
@@ -542,7 +556,7 @@ pub(super) fn format_paired_markdown(report: &PairedReport<'_>, top: Option<usiz
     if report.groups.is_empty() {
         let _ = writeln!(
             out,
-            "\n_No name-matched functions above the floor ({} match(es) below floor, {} same-file namesake pair(s) skipped)._",
+            "\n_No name-matched {noun}s above the floor ({} match(es) below floor, {} same-file namesake pair(s) skipped)._",
             report.below_floor_count, report.same_file_pair_count,
         );
         return out;
@@ -575,8 +589,8 @@ pub(super) fn format_paired_markdown(report: &PairedReport<'_>, top: Option<usiz
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
-        let _ = writeln!(out, "\n- {}", drift_headline(group));
-        for f in &group.functions {
+        let _ = writeln!(out, "\n- {}", drift_headline(group, noun));
+        for f in &group.units {
             let _ = writeln!(
                 out,
                 "  - {}:`{}` (L{}-{})",
@@ -588,11 +602,11 @@ pub(super) fn format_paired_markdown(report: &PairedReport<'_>, top: Option<usiz
 }
 
 /// The one-line summary heading a key's member list: the key, how many
-/// functions share it, their similarity band, and how many of the pairs
+/// units share it, their similarity band, and how many of the pairs
 /// between them count as drifted.
-fn drift_headline(group: &DriftGroupView<'_>) -> String {
+fn drift_headline(group: &DriftGroupView<'_>, noun: &str) -> String {
     format!(
-        "`{}` — {} functions, similarity {:.0}–{:.0}%, {}/{} pair(s) drifted",
+        "`{}` — {} {noun}s, similarity {:.0}–{:.0}%, {}/{} pair(s) drifted",
         group.key,
         group.size,
         group.min_similarity * 100.0,
@@ -608,11 +622,12 @@ mod tests {
     use rstest::rstest;
     use std::path::PathBuf;
 
-    fn owned_function(name: &str) -> OwnedFunction {
-        OwnedFunction {
+    fn owned_function(name: &str) -> OwnedUnit {
+        OwnedUnit {
             file: PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test: false,
+            kind: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -637,7 +652,7 @@ mod tests {
     }
 
     /// Bare cluster carrying only the stats the sweep ranking reads. The
-    /// `functions`/`pairs` vectors stay empty so the value is `'static` and
+    /// `units`/`pairs` vectors stay empty so the value is `'static` and
     /// the sort/annotation logic can be exercised in isolation.
     fn cluster(min_similarity: f64, max_similarity: f64, size: usize) -> ClusterView<'static> {
         ClusterView {
@@ -645,7 +660,7 @@ mod tests {
             min_similarity,
             max_similarity,
             survives_at_threshold: None,
-            functions: Vec::new(),
+            units: Vec::new(),
             pairs: Vec::new(),
         }
     }
@@ -746,9 +761,10 @@ mod tests {
     /// Cluster carrying only the per-pair identifier scores the rollup
     /// reads, with a fixed similarity band so the headline is stable.
     fn cluster_with_identifier_scores(scores: &[Option<f64>]) -> ClusterView<'static> {
-        let f = FunctionRef {
+        let f = UnitRef {
             file: "lib.rs",
             name: "alpha",
+            kind: None,
             start_line: 1,
             end_line: 5,
             is_test: false,
@@ -758,7 +774,7 @@ mod tests {
             min_similarity: 0.9,
             max_similarity: 0.9,
             survives_at_threshold: None,
-            functions: Vec::new(),
+            units: Vec::new(),
             pairs: scores
                 .iter()
                 .map(|&identifier_overlap| PairView {
@@ -804,20 +820,21 @@ mod tests {
         let boilerplate = cluster_with_identifier_scores(&[Some(0.2), Some(0.5)]);
 
         assert_eq!(
-            cluster_headline(&clone, false),
+            cluster_headline(&clone, false, "function"),
             "2 functions, similarity 90–90%, identifier overlap 100–100%",
         );
         assert_eq!(
-            cluster_headline(&boilerplate, false),
+            cluster_headline(&boilerplate, false, "function"),
             "2 functions, similarity 90–90%, identifier overlap 20–50%",
         );
     }
 
     /// Cluster carrying only the per-pair doc scores the rollup reads.
     fn cluster_with_doc_scores(docs: &[Option<f64>]) -> ClusterView<'static> {
-        let f = FunctionRef {
+        let f = UnitRef {
             file: "lib.rs",
             name: "alpha",
+            kind: None,
             start_line: 1,
             end_line: 5,
             is_test: false,
@@ -827,7 +844,7 @@ mod tests {
             min_similarity: 0.9,
             max_similarity: 0.9,
             survives_at_threshold: None,
-            functions: Vec::new(),
+            units: Vec::new(),
             pairs: docs
                 .iter()
                 .map(|&doc_overlap| PairView {
@@ -876,8 +893,8 @@ mod tests {
         assert_eq!(min_max(values), expected);
     }
 
-    fn sibling(name: &str, rel_path: &str) -> OwnedFunction {
-        OwnedFunction {
+    fn sibling(name: &str, rel_path: &str) -> OwnedUnit {
+        OwnedUnit {
             rel_path: rel_path.to_owned(),
             file: PathBuf::from(rel_path),
             ..owned_function(name)
@@ -918,7 +935,7 @@ mod tests {
         assert_eq!(group.max_similarity, 0.9);
         assert_eq!(group.drifted_pair_count, 1);
         assert_eq!(
-            group.functions.iter().map(|f| f.file).collect::<Vec<_>>(),
+            group.units.iter().map(|f| f.file).collect::<Vec<_>>(),
             vec!["napi.rs", "wasm.rs", "py.rs"],
         );
         // Pairs ascend so the worst sibling reads first.
@@ -984,7 +1001,7 @@ mod tests {
             min_similarity: min,
             max_similarity: max,
             drifted_pair_count: 1,
-            functions: Vec::new(),
+            units: Vec::new(),
             pairs: Vec::new(),
         }
     }
@@ -1014,16 +1031,18 @@ mod tests {
         wide.size = 4;
         wide.drifted_pair_count = 3;
         wide.pairs = vec![PairView::new(
-            FunctionRef {
+            UnitRef {
                 file: "a.rs",
                 name: "render_modules",
+                kind: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
             },
-            FunctionRef {
+            UnitRef {
                 file: "b.rs",
                 name: "render_modules",
+                kind: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
@@ -1032,7 +1051,7 @@ mod tests {
         )];
 
         assert_eq!(
-            drift_headline(&wide),
+            drift_headline(&wide, "function"),
             "`render_modules` — 4 functions, similarity 34–98%, 3/1 pair(s) drifted",
         );
     }
@@ -1042,11 +1061,12 @@ mod tests {
             PairedReportInputs {
                 path: Path::new("src"),
                 method: "tsed",
+                target: "functions",
                 paired_by: "qualified",
                 threshold: 0.85,
                 drift_floor: 0.3,
                 min_lines: 5,
-                function_count: 40,
+                unit_count: 40,
                 same_file_pair_count: 2,
                 below_floor_count: 7,
             },
@@ -1059,7 +1079,7 @@ mod tests {
     /// call for different next steps.
     #[test]
     fn empty_paired_markdown_reports_what_was_excluded() {
-        let out = format_paired_markdown(&paired_report(Vec::new()), None);
+        let out = format_paired_markdown(&paired_report(Vec::new()), None, "function");
         assert!(out.contains("paired by qualified"));
         assert!(out.contains("7 match(es) below floor"));
         assert!(out.contains("2 same-file namesake pair(s) skipped"));
@@ -1069,12 +1089,12 @@ mod tests {
     fn paired_markdown_caps_at_top_and_says_so() {
         let report = paired_report(vec![group("alpha", 0.35, 0.40), group("beta", 0.80, 0.99)]);
 
-        let capped = format_paired_markdown(&report, Some(1));
+        let capped = format_paired_markdown(&report, Some(1), "function");
         assert!(capped.contains("## Most drifted 1 of 2 name key(s)"));
         assert!(capped.contains("`alpha`"));
         assert!(!capped.contains("`beta`"));
 
-        let full = format_paired_markdown(&report, None);
+        let full = format_paired_markdown(&report, None, "function");
         assert!(full.contains("## 2 name key(s) with cross-file siblings"));
         assert!(full.contains("`beta`"));
     }
@@ -1083,16 +1103,18 @@ mod tests {
     fn paired_report_totals_roll_up_from_the_groups() {
         let mut first = group("alpha", 0.35, 0.40);
         first.pairs = vec![PairView::new(
-            FunctionRef {
+            UnitRef {
                 file: "a.rs",
                 name: "alpha",
+                kind: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
             },
-            FunctionRef {
+            UnitRef {
                 file: "b.rs",
                 name: "alpha",
+                kind: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
