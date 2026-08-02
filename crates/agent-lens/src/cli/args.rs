@@ -668,7 +668,12 @@ pub(super) enum AnalyzeCommand {
     /// than lost code. Only resolved edges carry a caller module:
     /// ambiguous and name-matching unresolved call sites from outside
     /// the proposed scope are counted per row as the reason to check it
-    /// first. Callers outside the analyzed path are invisible, so a
+    /// first. An exported Go method matching a method of an interface
+    /// declared in the analyzed tree (same name and parameter count) is
+    /// annotated `may satisfy interface ...` and ranked after the
+    /// unannotated rows of its bucket: its calls can dispatch through
+    /// the interface, so a missing caller is expected rather than
+    /// evidence. Callers outside the analyzed path are invisible, so a
     /// single library crate's own API surface looks crate-internal —
     /// the report says so when only one crate is in scope. Export status
     /// is extracted for Rust and Go only; TypeScript and Python

@@ -19,7 +19,7 @@ pub(crate) mod resolve;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use lens_domain::{CallShape, FunctionComplexity, FunctionShape, WrapperFinding};
+use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
 use lens_rust::CallIndexOptions;
 
 use super::cargo_meta::CrateNameCache;
@@ -44,6 +44,11 @@ pub(crate) struct CallGraph {
     pub(crate) nodes: Vec<CallGraphNode>,
     pub(crate) edges: Vec<CallGraphEdge>,
     pub(crate) module_summary: Vec<ModuleResolutionSummary>,
+    /// Interface method sets declared in the scanned files. Empty
+    /// unless the graph was built with
+    /// [`CallGraphBuilder::with_interface_facts`]; only the Go adapter
+    /// extracts them today.
+    pub(crate) interfaces: Vec<InterfaceShape>,
 }
 
 impl CallGraph {
@@ -65,6 +70,7 @@ impl CallGraph {
             nodes,
             edges,
             module_summary,
+            interfaces: collect_interfaces(files),
         }
     }
 
@@ -164,6 +170,7 @@ pub(crate) struct CallGraphBuilder {
     only_tests: bool,
     exclude_tests: bool,
     delegation_facts: bool,
+    interface_facts: bool,
     path_filter: AnalyzePathFilter,
 }
 
@@ -173,6 +180,7 @@ impl CallGraphBuilder {
             only_tests: false,
             exclude_tests: false,
             delegation_facts: false,
+            interface_facts: false,
             path_filter: AnalyzePathFilter::new(),
         }
     }
@@ -182,6 +190,15 @@ impl CallGraphBuilder {
     /// which is one more parse per file than the graph itself needs.
     pub(crate) fn with_delegation_facts(mut self, delegation_facts: bool) -> Self {
         self.delegation_facts = delegation_facts;
+        self
+    }
+
+    /// Collect [`CallGraph::interfaces`] from the scanned files. Off by
+    /// default for the same reason as delegation facts: the extraction
+    /// is one more parse per (Go) file, and only the visibility
+    /// analyzer reads the result.
+    pub(crate) fn with_interface_facts(mut self, interface_facts: bool) -> Self {
+        self.interface_facts = interface_facts;
         self
     }
 
@@ -277,6 +294,13 @@ impl CallGraphBuilder {
             .delegation_facts
             .then(|| extract_wrappers(lang, &source))
             .transpose()?;
+        let interfaces = (self.interface_facts && matches!(lang, SourceLang::Go))
+            .then(|| {
+                lens_golang::extract_interface_shapes_with_module(&source, &module)
+                    .map_err(parse_err)
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -287,6 +311,7 @@ impl CallGraphBuilder {
             calls,
             complexity,
             wrappers,
+            interfaces,
         })
     }
 
@@ -438,6 +463,9 @@ pub(crate) struct FileGraphInput {
     /// Thin-wrapper findings for this file, or `None` when delegation
     /// facts were not requested.
     pub(crate) wrappers: Option<Vec<WrapperFinding>>,
+    /// Interface declarations in this file. Empty unless interface
+    /// facts were requested (and the language extracts them).
+    pub(crate) interfaces: Vec<InterfaceShape>,
 }
 
 impl SourceLang {
@@ -449,6 +477,21 @@ impl SourceLang {
             Self::Go => GraphLanguage::Go,
         }
     }
+}
+
+/// Flatten the per-file interface declarations into one deterministic
+/// list, sorted by qualified name (declarations shadowing each other
+/// across files stay distinct entries — a method set is a method set).
+fn collect_interfaces(files: Vec<FileGraphInput>) -> Vec<InterfaceShape> {
+    let mut interfaces: Vec<InterfaceShape> =
+        files.into_iter().flat_map(|file| file.interfaces).collect();
+    interfaces.sort_by(|a, b| {
+        a.qualified_name
+            .known_value()
+            .cmp(&b.qualified_name.known_value())
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    interfaces
 }
 
 fn graph_language_label(files: &[FileGraphInput]) -> &'static str {
@@ -489,6 +532,7 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<CallGraphNode> {
                 end_line: f.span.end_line,
                 is_test: f.is_test || file.path_is_test,
                 visibility: NodeVisibility::from_shape(&f.visibility),
+                param_count: f.signature_shape().map(|s| s.parameter_count()),
                 weights: NodeWeights {
                     loc: f.line_count(),
                     cyclomatic_complexity: metrics.map(|m| m.cyclomatic),
