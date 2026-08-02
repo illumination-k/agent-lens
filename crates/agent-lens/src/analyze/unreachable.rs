@@ -2188,6 +2188,38 @@ mod tests {
         );
     }
 
+    /// The two denominators every share on the report divides by, kept
+    /// apart on a corpus that has one of each: a judged Rust function, a
+    /// test that is neither, and two functions in languages that carry
+    /// no export status.
+    #[test]
+    fn the_judged_and_unjudged_counts_split_the_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.ts",
+            "function orphanTs() { return 1; }\n",
+        );
+        write_file(dir.path(), "src/lib.py", "def orphan_py():\n    return 1\n");
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn judged() -> usize { 1 }\n\
+             #[test]\n\
+             fn covered() { judged(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            report["audit"]["judged_function_count"], 1,
+            "only the non-test Rust function is judged: {report}",
+        );
+        assert_eq!(
+            report["audit"]["unjudged_function_count"], 2,
+            "the test function is not unjudged — it is an entry point: {report}",
+        );
+    }
+
     /// Dropping the test files takes the entry points tests provide with
     /// it, which is the one flag that can turn live code into a
     /// confirmed row. Saying so is the whole mitigation.
