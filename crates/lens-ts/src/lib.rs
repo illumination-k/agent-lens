@@ -12,6 +12,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod attrs;
+mod blocks;
 mod call_index;
 mod cohesion;
 mod complexity;
@@ -26,6 +27,7 @@ mod type_defs;
 mod walk;
 mod wrapper;
 
+pub use blocks::extract_blocks;
 pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};

@@ -5,7 +5,7 @@ use std::path::Path;
 use lens_domain::SimilarCluster;
 use serde::Serialize;
 
-use super::{OwnedUnit, SimilarityComponents};
+use super::{BlockInfo, OwnedUnit, SimilarityComponents};
 
 #[derive(Debug, Serialize)]
 pub(super) struct Report<'a> {
@@ -14,7 +14,7 @@ pub(super) struct Report<'a> {
     /// Body-scoring algorithm used: `tsed` or `token`. Surfaced because
     /// the two methods are not on the same score scale.
     method: &'static str,
-    /// Comparison unit: `functions` or `types`.
+    /// Comparison unit: `functions`, `types`, or `blocks`.
     target: &'static str,
     unit_count: usize,
     /// Clustering cut applied. In sweep mode this is the ladder floor;
@@ -65,6 +65,11 @@ pub(super) struct ClusterView<'a> {
     /// in `--sweep` mode. `None` (and omitted from JSON) otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     survives_at_threshold: Option<f64>,
+    /// One member's source text, for `--target blocks`. A statement run
+    /// has no name, so without this the report says *where* the clones
+    /// are but never *what* they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<&'a str>,
     units: Vec<UnitRef<'a>>,
     pairs: Vec<PairView<'a>>,
 }
@@ -86,10 +91,44 @@ impl<'a> ClusterView<'a> {
             min_similarity: cluster.min_similarity,
             max_similarity: cluster.max_similarity,
             survives_at_threshold: None,
+            snippet: representative_snippet(corpus, &cluster.members),
             units,
             pairs,
         }
     }
+
+    /// Distinct files the cluster's members sit in, each with how many
+    /// members it holds, most occurrences first.
+    fn occurrences_by_file(&self) -> Vec<(&'a str, usize)> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for unit in &self.units {
+            *counts.entry(unit.file).or_insert(0) += 1;
+        }
+        let mut out: Vec<_> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        out
+    }
+
+    /// Distinct enclosing functions the cluster's members sit in.
+    fn distinct_owner_count(&self) -> usize {
+        self.units
+            .iter()
+            .map(|unit| (unit.file, unit.name))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+}
+
+/// The longest member's snippet, so the representative shown is the one
+/// carrying the most context rather than whichever member happened to be
+/// clustered first.
+fn representative_snippet<'a>(corpus: &'a [OwnedUnit], members: &[usize]) -> Option<&'a str> {
+    members
+        .iter()
+        .filter_map(|&i| corpus.get(i))
+        .filter_map(|unit| unit.block().map(|block| (unit.line_count(), block)))
+        .max_by_key(|(lines, _)| *lines)
+        .map(|(_, block): (usize, &BlockInfo)| block.snippet.as_str())
 }
 
 /// Tag each cluster with the highest sweep rung at which its complete-link
@@ -170,6 +209,9 @@ pub(super) struct UnitRef<'a> {
     /// `dataclass`, …); absent for functions.
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<&'static str>,
+    /// Statements in the run, for a block unit; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statement_count: Option<usize>,
     start_line: usize,
     end_line: usize,
     is_test: bool,
@@ -181,6 +223,7 @@ impl<'a> From<&'a OwnedUnit> for UnitRef<'a> {
             file: f.rel_path.as_str(),
             name: f.name(),
             kind: f.kind,
+            statement_count: f.block().map(|block| block.statement_count),
             start_line: f.start_line(),
             end_line: f.end_line(),
             is_test: f.is_test,
@@ -275,6 +318,60 @@ fn min_max(values: &[f64]) -> Option<(f64, f64)> {
     )
 }
 
+/// Collapse block clusters that a broader cluster already covers.
+///
+/// Sliding windows produce nested findings by construction: the 2-, 3-
+/// and 4-statement runs starting at the same statement are three separate
+/// clusters describing one duplicated region. Keeping the widest of them
+/// is what an "extract this helper" reader actually wants, and it is the
+/// difference between a report of 12 findings and a report of 200.
+///
+/// A cluster is dropped when every one of its members sits inside a
+/// member of an already-kept cluster. Clusters are ranked widest-first
+/// (most members, then most lines) so the survivor is the broadest
+/// description of each region.
+pub(super) fn collapse_subsumed_blocks(clusters: &mut Vec<ClusterView<'_>>) {
+    clusters.sort_by(|a, b| {
+        b.size
+            .cmp(&a.size)
+            .then(covered_lines(b).cmp(&covered_lines(a)))
+            .then(
+                b.min_similarity
+                    .partial_cmp(&a.min_similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    let mut kept: Vec<Vec<UnitRef<'_>>> = Vec::new();
+    clusters.retain(|cluster| {
+        if kept.iter().any(|keeper| subsumes(keeper, &cluster.units)) {
+            return false;
+        }
+        kept.push(cluster.units.clone());
+        true
+    });
+}
+
+fn covered_lines(cluster: &ClusterView<'_>) -> usize {
+    cluster
+        .units
+        .iter()
+        .map(|unit| unit.end_line.saturating_sub(unit.start_line) + 1)
+        .sum()
+}
+
+/// True when every unit in `units` is contained in some unit of `keeper`.
+fn subsumes(keeper: &[UnitRef<'_>], units: &[UnitRef<'_>]) -> bool {
+    units
+        .iter()
+        .all(|unit| keeper.iter().any(|outer| contains(*outer, *unit)))
+}
+
+fn contains(outer: UnitRef<'_>, inner: UnitRef<'_>) -> bool {
+    outer.file == inner.file
+        && outer.start_line <= inner.start_line
+        && inner.end_line <= outer.end_line
+}
+
 pub(super) fn format_markdown(
     report: &Report<'_>,
     top: Option<usize>,
@@ -311,15 +408,66 @@ pub(super) fn format_markdown(
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
         let _ = writeln!(out, "\n- {}", cluster_headline(cluster, doc_overlap, noun));
-        for f in &cluster.units {
-            let _ = writeln!(
-                out,
-                "  - {}:`{}` (L{}-{})",
-                f.file, f.name, f.start_line, f.end_line,
-            );
+        match cluster.snippet {
+            Some(snippet) => write_block_cluster(&mut out, cluster, snippet),
+            None => {
+                for f in &cluster.units {
+                    let _ = writeln!(
+                        out,
+                        "  - {}:`{}` (L{}-{})",
+                        f.file, f.name, f.start_line, f.end_line,
+                    );
+                }
+            }
         }
     }
     out
+}
+
+/// A block cluster's body: one representative snippet, then the per-file
+/// occurrence counts. Listing every occurrence in full would blow the
+/// context budget the moment a cluster has fifty members — which is
+/// exactly the case this target exists to surface — so the file rollup
+/// carries the distribution and the first occurrence per file carries a
+/// jump-to line.
+fn write_block_cluster(out: &mut String, cluster: &ClusterView<'_>, snippet: &str) {
+    let fence = snippet_fence(snippet);
+    let _ = writeln!(out, "\n  {fence}\n{}\n  {fence}", indent_snippet(snippet));
+    for (file, count) in cluster.occurrences_by_file() {
+        let first = cluster
+            .units
+            .iter()
+            .filter(|unit| unit.file == file)
+            .min_by_key(|unit| unit.start_line);
+        match first {
+            Some(unit) => {
+                let _ = writeln!(
+                    out,
+                    "  - {file} ×{count} (first: `{}` L{}-{})",
+                    unit.name, unit.start_line, unit.end_line,
+                );
+            }
+            None => {
+                let _ = writeln!(out, "  - {file} ×{count}");
+            }
+        }
+    }
+}
+
+fn indent_snippet(snippet: &str) -> String {
+    snippet
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Fence long enough to survive the snippet's own content. Doc comments
+/// and string literals do contain triple backticks, and a fence the
+/// snippet can close is a fence that swallows the rest of the report.
+fn snippet_fence(snippet: &str) -> String {
+    let longest_run = snippet.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    "`".repeat(longest_run.saturating_add(1).max(3))
 }
 
 /// The one-line summary heading a cluster's member list: size, the
@@ -327,6 +475,9 @@ pub(super) fn format_markdown(
 /// annotations — doc overlap when asked for, and the sweep survival
 /// rung when sweeping.
 fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool, noun: &str) -> String {
+    if cluster.snippet.is_some() {
+        return block_cluster_headline(cluster);
+    }
     let identifier_tag = identifier_overlap_summary(cluster)
         .map(|summary| format!(", {summary}"))
         .unwrap_or_default();
@@ -347,6 +498,31 @@ fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool, noun: &str) ->
     )
 }
 
+/// Block clusters are counted, not named: what a reader needs first is
+/// how widely the run repeats and how far it is spread, since a run
+/// repeated ten times in one file is a loop waiting to happen while the
+/// same run across ten files is a helper waiting to be extracted.
+fn block_cluster_headline(cluster: &ClusterView<'_>) -> String {
+    let file_count = cluster.occurrences_by_file().len();
+    let statements = cluster
+        .units
+        .iter()
+        .filter_map(|unit| unit.statement_count)
+        .max()
+        .unwrap_or(0);
+    let survival_tag = cluster
+        .survives_at_threshold
+        .map(|rung| format!(" [survives ≥{rung:.2}]"))
+        .unwrap_or_default();
+    format!(
+        "{} occurrences across {} function(s) in {file_count} file(s), up to {statements} statement(s), similarity {:.0}–{:.0}%{survival_tag}",
+        cluster.size,
+        cluster.distinct_owner_count(),
+        cluster.min_similarity * 100.0,
+        cluster.max_similarity * 100.0,
+    )
+}
+
 /// Render a sweep ladder as `[0.60, 0.75, 0.85]` for the markdown header.
 fn format_ladder(ladder: &[f64]) -> String {
     let rungs: Vec<String> = ladder.iter().map(|r| format!("{r:.2}")).collect();
@@ -362,7 +538,7 @@ fn format_ladder(ladder: &[f64]) -> String {
 pub(super) struct PairedReport<'a> {
     root: String,
     method: &'static str,
-    /// Comparison unit: `functions` or `types`.
+    /// Comparison unit: `functions`, `types`, or `blocks`.
     target: &'static str,
     /// Key that decided which units are siblings: `qualified` or
     /// `method`.
@@ -628,6 +804,7 @@ mod tests {
             rel_path: "lib.rs".to_owned(),
             is_test: false,
             kind: None,
+            block: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -660,6 +837,7 @@ mod tests {
             min_similarity,
             max_similarity,
             survives_at_threshold: None,
+            snippet: None,
             units: Vec::new(),
             pairs: Vec::new(),
         }
@@ -758,6 +936,113 @@ mod tests {
         assert_eq!(sorted_pair_key(2, 0), (0, 2));
     }
 
+    fn block_unit(file: &'static str, start_line: usize, end_line: usize) -> UnitRef<'static> {
+        UnitRef {
+            file,
+            name: "handler",
+            kind: None,
+            statement_count: Some(end_line - start_line + 1),
+            start_line,
+            end_line,
+            is_test: false,
+        }
+    }
+
+    fn block_cluster(units: Vec<UnitRef<'static>>) -> ClusterView<'static> {
+        ClusterView {
+            size: units.len(),
+            min_similarity: 0.9,
+            max_similarity: 1.0,
+            survives_at_threshold: None,
+            snippet: Some("body"),
+            units,
+            pairs: Vec::new(),
+        }
+    }
+
+    /// The 2- and 3-statement windows over one duplicated region are
+    /// separate clusters describing the same finding. Only the widest
+    /// survives, so the report has one entry per region rather than one
+    /// per window size.
+    #[test]
+    fn collapse_subsumed_blocks_keeps_only_the_widest_cluster_per_region() {
+        let mut clusters = vec![
+            block_cluster(vec![block_unit("a.rs", 11, 14), block_unit("b.rs", 21, 24)]),
+            block_cluster(vec![block_unit("a.rs", 10, 15), block_unit("b.rs", 20, 25)]),
+        ];
+
+        collapse_subsumed_blocks(&mut clusters);
+
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].units[0].start_line, 10);
+        assert_eq!(clusters[0].units[0].end_line, 15);
+    }
+
+    /// A cluster covering a region no kept cluster reaches must survive,
+    /// even when one of its members happens to nest inside a kept one.
+    #[test]
+    fn collapse_subsumed_blocks_keeps_clusters_covering_new_regions() {
+        let mut clusters = vec![
+            block_cluster(vec![block_unit("a.rs", 10, 15), block_unit("b.rs", 20, 25)]),
+            block_cluster(vec![block_unit("a.rs", 11, 14), block_unit("c.rs", 30, 33)]),
+        ];
+
+        collapse_subsumed_blocks(&mut clusters);
+
+        assert_eq!(clusters.len(), 2, "c.rs is covered by nothing else");
+    }
+
+    /// A wider cluster sorts first, so the survivor is the one carrying
+    /// the most context — not whichever cluster the domain happened to
+    /// emit first.
+    #[test]
+    fn collapse_subsumed_blocks_ranks_bigger_clusters_first() {
+        let mut clusters = vec![
+            block_cluster(vec![block_unit("a.rs", 10, 12), block_unit("b.rs", 20, 22)]),
+            block_cluster(vec![
+                block_unit("c.rs", 10, 12),
+                block_unit("d.rs", 20, 22),
+                block_unit("e.rs", 30, 32),
+            ]),
+        ];
+
+        collapse_subsumed_blocks(&mut clusters);
+
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(clusters[0].size, 3);
+    }
+
+    /// The per-file rollup is what keeps a 55-occurrence cluster from
+    /// filling the report; it has to count every member, sorted by how
+    /// concentrated the duplication is.
+    #[test]
+    fn occurrences_by_file_counts_members_most_first() {
+        let cluster = block_cluster(vec![
+            block_unit("b.rs", 1, 4),
+            block_unit("a.rs", 1, 4),
+            block_unit("a.rs", 10, 13),
+        ]);
+
+        assert_eq!(
+            cluster.occurrences_by_file(),
+            vec![("a.rs", 2), ("b.rs", 1)]
+        );
+    }
+
+    /// A snippet that contains its own triple backticks must not be
+    /// able to close the fence and let the rest of the report leak out
+    /// of the code block.
+    #[rstest]
+    #[case::plain("let a = 1;", "```")]
+    #[case::triple("/// ```\nlet a = 1;", "````")]
+    #[case::quad("// ````rust", "`````")]
+    fn snippet_fence_outgrows_the_snippets_own_backticks(
+        #[case] snippet: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(snippet_fence(snippet), expected);
+    }
+
     /// Cluster carrying only the per-pair identifier scores the rollup
     /// reads, with a fixed similarity band so the headline is stable.
     fn cluster_with_identifier_scores(scores: &[Option<f64>]) -> ClusterView<'static> {
@@ -765,6 +1050,7 @@ mod tests {
             file: "lib.rs",
             name: "alpha",
             kind: None,
+            statement_count: None,
             start_line: 1,
             end_line: 5,
             is_test: false,
@@ -774,6 +1060,7 @@ mod tests {
             min_similarity: 0.9,
             max_similarity: 0.9,
             survives_at_threshold: None,
+            snippet: None,
             units: Vec::new(),
             pairs: scores
                 .iter()
@@ -835,6 +1122,7 @@ mod tests {
             file: "lib.rs",
             name: "alpha",
             kind: None,
+            statement_count: None,
             start_line: 1,
             end_line: 5,
             is_test: false,
@@ -844,6 +1132,7 @@ mod tests {
             min_similarity: 0.9,
             max_similarity: 0.9,
             survives_at_threshold: None,
+            snippet: None,
             units: Vec::new(),
             pairs: docs
                 .iter()
@@ -1035,6 +1324,7 @@ mod tests {
                 file: "a.rs",
                 name: "render_modules",
                 kind: None,
+                statement_count: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
@@ -1043,6 +1333,7 @@ mod tests {
                 file: "b.rs",
                 name: "render_modules",
                 kind: None,
+                statement_count: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
@@ -1107,6 +1398,7 @@ mod tests {
                 file: "a.rs",
                 name: "alpha",
                 kind: None,
+                statement_count: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
@@ -1115,6 +1407,7 @@ mod tests {
                 file: "b.rs",
                 name: "alpha",
                 kind: None,
+                statement_count: None,
                 start_line: 1,
                 end_line: 5,
                 is_test: false,

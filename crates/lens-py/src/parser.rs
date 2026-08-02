@@ -224,6 +224,20 @@ pub(crate) fn function_body_tree(func: &StmtFunctionDef) -> TreeNode {
     builder.finish()
 }
 
+/// Lower a single statement into a generic [`TreeNode`], the per-statement
+/// counterpart of [`function_body_tree`]. Sub-function similarity needs
+/// statements individually so they can be recombined into sliding windows.
+pub(crate) fn stmt_tree(stmt: &Stmt) -> TreeNode {
+    let mut builder = TreeBuilder::new("Stmt");
+    builder.visit_stmt(stmt);
+    let mut root = builder.finish();
+    // `visit_stmt` attaches exactly one child to the synthetic root; the
+    // fallback keeps the function total if that ever stops holding.
+    root.children
+        .pop()
+        .unwrap_or_else(|| TreeNode::leaf("Stmt"))
+}
+
 /// Builds a [`TreeNode`] tree by walking the AST with [`Visitor`].
 ///
 /// The stack always holds the open ancestor chain; `enter` pushes a fresh

@@ -10,6 +10,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod attrs;
+mod blocks;
 mod call_index;
 mod cohesion;
 mod common;
@@ -22,6 +23,7 @@ mod proptests;
 mod type_defs;
 mod wrapper;
 
+pub use blocks::extract_blocks;
 pub use call_index::{
     CallIndexOptions, CallKind, CallSite, UseAlias,
     extract_call_shapes_with_options_and_base_module, extract_call_sites,

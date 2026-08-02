@@ -210,6 +210,10 @@ pub enum AnalyzerError {
         "--paired-by method is incompatible with --target types: a type definition has no owner::method split to key on; use --paired-by name"
     )]
     TypeTargetPairedByMethod,
+    #[error(
+        "--paired-by is incompatible with --target blocks: a statement run has no stable name to key siblings on; drop --paired-by and read the clustering report instead"
+    )]
+    BlockTargetPairedBy,
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
     #[error("invalid graph query: {message}")]

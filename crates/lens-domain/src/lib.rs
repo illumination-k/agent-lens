@@ -45,6 +45,10 @@
 //!   call-graph resolver consults them to avoid attributing a call to a
 //!   workspace function that merely shares a standard-library method
 //!   name or a language builtin.
+//! * [`block`] — sub-function comparison units: sliding windows over the
+//!   statement sequences an adapter reports, so duplication that lives
+//!   inside larger functions can be clustered the same way whole
+//!   functions are.
 //! * [`wrapper`] — thin-wrapper finding shape. Adapters decide what
 //!   counts as a trivial adapter in their grammar; the result type is
 //!   shared so `agent-lens` can dispatch on language without per-adapter
@@ -53,6 +57,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod apted;
+pub mod block;
 pub mod cohesion;
 pub mod complexity;
 pub mod context_span;
@@ -74,6 +79,7 @@ pub use apted::{
     APTEDOptions, SubtreeSizes, collect_subtree_sizes, compute_edit_distance,
     compute_edit_distance_with_subtree_sizes,
 };
+pub use block::{BlockShape, BlockSite, BlockWindowOptions, StatementShape, block_windows};
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };

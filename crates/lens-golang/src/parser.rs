@@ -411,7 +411,7 @@ pub(crate) fn unquote_go_string_literal(text: &str) -> String {
 /// bodies would still differ on the root label across languages —
 /// fine for in-language similarity but inconsistent with the rest of
 /// the workspace's tree shape.
-fn build_tree(node: Node<'_>, source: &[u8], is_root: bool) -> TreeNode {
+pub(crate) fn build_tree(node: Node<'_>, source: &[u8], is_root: bool) -> TreeNode {
     let label = if is_root { "Block" } else { node.kind() };
     let value = node_value(node, source);
     let mut children = Vec::new();

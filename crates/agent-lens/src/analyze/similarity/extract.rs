@@ -1,4 +1,4 @@
-use lens_domain::{FunctionDef, TypeShape};
+use lens_domain::{BlockSite, FunctionDef, TypeShape};
 
 use crate::analyze::{AnalyzerError, SourceLang, dispatch_lens};
 
@@ -17,4 +17,13 @@ pub(super) fn extract_types(
     source: &str,
 ) -> Result<Vec<TypeShape>, AnalyzerError> {
     dispatch_lens!(lang, source, extract_type_defs).map_err(AnalyzerError::Parse)
+}
+
+/// Every statement sequence inside every function, ready to be cut into
+/// sliding windows by [`lens_domain::block_windows`].
+pub(super) fn extract_block_sites(
+    lang: SourceLang,
+    source: &str,
+) -> Result<Vec<BlockSite>, AnalyzerError> {
+    dispatch_lens!(lang, source, extract_blocks).map_err(AnalyzerError::Parse)
 }

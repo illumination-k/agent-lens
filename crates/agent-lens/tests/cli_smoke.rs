@@ -267,6 +267,109 @@ fn analyze_similarity_target_types_json_carries_target_and_kind() {
     assert!(units.iter().all(|u| u["kind"] == "struct"), "got {json}");
 }
 
+const BOILERPLATE_A_RS: &str = r#"
+pub fn search(query: &str, limit: usize, offset: usize) -> Result<Vec<Hit>, ErrorData> {
+    let client = build_client();
+    let normalized = normalize_query(query);
+    let page = Page::new(limit, offset);
+    let hits = client.search(&normalized, page).map_err(|e| ErrorData {
+        code: ErrorCode(-32603),
+        message: Cow::from(format!("search failed: {e}")),
+        data: None,
+    })?;
+    record_metric("search", hits.len());
+    Ok(hits)
+}
+"#;
+
+const BOILERPLATE_B_RS: &str = r#"
+pub fn fetch(id: &str) -> Result<Record, ErrorData> {
+    let store = open_store();
+    let record = store.fetch(id).map_err(|e| ErrorData {
+        code: ErrorCode(-32603),
+        message: Cow::from(format!("fetch failed: {e}")),
+        data: None,
+    })?;
+    Ok(record)
+}
+"#;
+
+/// Like the types target, the blocks target has to be reachable both
+/// through `--target` and through the `target` profile key. The fixture
+/// is two handlers whose *functions* score nowhere near the threshold —
+/// only the copied error-mapping statement inside them does — so a
+/// passing assertion proves the run really compared sub-function
+/// windows.
+#[rstest]
+#[case::flag(None)]
+#[case::profile_key(Some(
+    "[profile.snippets]\npath = \".\"\nformat = \"md\"\ntools = [\"similarity\"]\n\n[profile.snippets.similarity]\ntarget = \"blocks\"\nthreshold = 0.8\n"
+))]
+fn analyze_similarity_target_blocks_reports_repeated_statements(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", BOILERPLATE_A_RS);
+    write_file(dir.path(), "b.rs", BOILERPLATE_B_RS);
+
+    let output = match config {
+        None => agent_lens(
+            &[
+                "analyze",
+                "similarity",
+                ".",
+                "--format",
+                "md",
+                "--target",
+                "blocks",
+                "--threshold",
+                "0.8",
+            ],
+            dir.path(),
+            None,
+        ),
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            agent_lens(&["run", "snippets"], dir.path(), None)
+        }
+    };
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("block(s)"), "got: {stdout}");
+    assert!(stdout.contains("2 occurrences across"), "got: {stdout}");
+    assert!(stdout.contains("map_err"), "got: {stdout}");
+    assert!(stdout.contains("a.rs ×1"), "got: {stdout}");
+    assert!(stdout.contains("b.rs ×1"), "got: {stdout}");
+}
+
+/// `--paired-by` keys on names; a statement run has none, so the CLI has
+/// to reject the combination rather than print an empty report.
+#[test]
+fn analyze_similarity_target_blocks_rejects_paired_by() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", BOILERPLATE_A_RS);
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            ".",
+            "--target",
+            "blocks",
+            "--paired-by",
+            "name",
+        ],
+        dir.path(),
+        None,
+    );
+
+    assert!(!output.status.success(), "expected a non-zero exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--target blocks"), "got: {stderr}");
+}
+
 #[test]
 fn analyze_similarity_target_types_rejects_paired_by_method() {
     let dir = tempfile::tempdir().unwrap();

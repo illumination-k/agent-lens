@@ -14,7 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_similar_pairs};
+use lens_domain::{
+    BlockWindowOptions, TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_similar_pairs,
+};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -30,11 +32,12 @@ mod report;
 mod token;
 
 use candidates::{
-    CandidatePairs, TreeProfile, candidate_pairs, eligible_function_count, similarity_uses_lsh,
+    CandidateConfig, CandidatePairs, TreeProfile, candidate_pairs, eligible_function_count,
+    similarity_uses_lsh,
 };
 #[cfg(test)]
 use candidates::{CheapFilter, tsed_upper_bound_filter};
-use corpus::{OwnedUnit, collect_corpus};
+use corpus::{BlockInfo, OwnedUnit, collect_corpus};
 pub use paired::PairKey;
 use paired::{PairedCandidate, name_matched_pairs};
 use report::{
@@ -59,6 +62,23 @@ pub const DEFAULT_MIN_LINES: usize = 5;
 /// is unit structs and one-line aliases whose trees are too small to
 /// score meaningfully.
 pub const DEFAULT_TYPE_MIN_LINES: usize = 3;
+
+/// Default minimum line count for `--target blocks`. Sub-function clones
+/// are short by nature — the boilerplate this target exists to find is
+/// often a single four-line call chain — so the function default would
+/// drop the whole point of the run, while a floor of 2-3 lines turns
+/// every `let x = ...;` pair into a cluster.
+pub const DEFAULT_BLOCK_MIN_LINES: usize = 4;
+
+/// Longest statement run considered by `--target blocks`, in statements.
+///
+/// Windowing is the one place where block granularity can explode: every
+/// start position spawns up to this many windows, so the corpus grows by
+/// roughly this factor over the statement count. Six covers the
+/// extract-a-helper refactors this target is aimed at (a guard, a URL
+/// assembly, an error-mapping chain) without letting a 40-statement
+/// function contribute 800 units.
+const MAX_BLOCK_STATEMENTS: usize = 6;
 
 /// Default floor for `--paired-by`. A name-matched pair scoring below
 /// this shares a name and essentially nothing else, which in practice
@@ -163,6 +183,10 @@ pub enum SimilarityTarget {
     /// alias/enum, Python annotated classes and Enum subclasses, Go
     /// struct/alias.
     Types,
+    /// Contiguous runs of statements inside function bodies. Finds the
+    /// copy-pasted snippet that lives *within* otherwise-different
+    /// functions, which function granularity structurally cannot see.
+    Blocks,
 }
 
 impl SimilarityTarget {
@@ -170,6 +194,7 @@ impl SimilarityTarget {
         match self {
             Self::Functions => "functions",
             Self::Types => "types",
+            Self::Blocks => "blocks",
         }
     }
 
@@ -178,7 +203,16 @@ impl SimilarityTarget {
         match self {
             Self::Functions => "function",
             Self::Types => "type",
+            Self::Blocks => "block",
         }
+    }
+
+    /// Whether a unit of this target carries a signature worth scoring.
+    /// A statement run has none, so the blended
+    /// `0.8 * body + 0.2 * signature` would hand every block pair a free
+    /// 0.2 — the score has to be the body score alone.
+    fn body_only(self) -> bool {
+        self == Self::Blocks
     }
 }
 
@@ -350,7 +384,19 @@ impl SimilarityAnalyzer {
         self.min_lines.unwrap_or(match self.target {
             SimilarityTarget::Functions => DEFAULT_MIN_LINES,
             SimilarityTarget::Types => DEFAULT_TYPE_MIN_LINES,
+            SimilarityTarget::Blocks => DEFAULT_BLOCK_MIN_LINES,
         })
+    }
+
+    /// Windowing policy for `--target blocks`. `--min-lines` doubles as
+    /// the window floor so the corpus never carries windows the candidate
+    /// filter would drop anyway.
+    fn block_window_options(&self) -> BlockWindowOptions {
+        BlockWindowOptions {
+            min_lines: self.resolved_min_lines(),
+            max_statements: MAX_BLOCK_STATEMENTS,
+            ..BlockWindowOptions::default()
+        }
     }
 
     /// LSH candidate generation is a recall trap for type units: their
@@ -358,7 +404,7 @@ impl SimilarityAnalyzer {
     /// preorder shingles, so MinHash misses exactly the near-duplicates
     /// the run is looking for. Types always take the cartesian path.
     fn allow_lsh(&self) -> bool {
-        self.target == SimilarityTarget::Functions
+        self.target != SimilarityTarget::Types
     }
 
     /// Read `path`, analyze it, and produce a report in `format`.
@@ -366,12 +412,16 @@ impl SimilarityAnalyzer {
         if self.target == SimilarityTarget::Types && self.paired_by == Some(PairKey::Method) {
             return Err(AnalyzerError::TypeTargetPairedByMethod);
         }
+        if self.target == SimilarityTarget::Blocks && self.paired_by.is_some() {
+            return Err(AnalyzerError::BlockTargetPairedBy);
+        }
         let started = Instant::now();
         let corpus = collect_corpus(
             path,
             &self.filter.path_filter(),
             self.selection,
             self.target,
+            self.block_window_options(),
         )?;
         let unit_count = corpus.len();
         if let Some(key) = self.paired_by {
@@ -535,15 +585,18 @@ impl SimilarityAnalyzer {
             SimilarityMethod::Token => Vec::new(),
         };
         let candidate_started = Instant::now();
-        let candidate_threshold = body_candidate_threshold(threshold);
+        let candidate_threshold = body_candidate_threshold(threshold, self.target.body_only());
         let candidates = candidate_pairs(
             corpus,
-            min_lines,
             &profiles,
-            candidate_threshold,
-            &self.opts,
-            self.method,
-            self.allow_lsh(),
+            &CandidateConfig {
+                min_lines,
+                threshold: candidate_threshold,
+                opts: &self.opts,
+                method: self.method,
+                allow_lsh: self.allow_lsh(),
+                exclude_overlapping: self.target == SimilarityTarget::Blocks,
+            },
         );
         log_candidate_stats(corpus.len(), min_lines, &candidates, candidate_started);
         let (pairs_to_score, diff_prefiltered_count) =
@@ -577,6 +630,9 @@ impl SimilarityAnalyzer {
             .into_iter()
             .map(|c| ClusterView::from_domain(corpus, c, &pair_scores))
             .collect();
+        if self.target == SimilarityTarget::Blocks {
+            report::collapse_subsumed_blocks(&mut clusters);
+        }
         if let Some(ladder) = self.sweep.as_deref() {
             report::annotate_sweep_survival(&mut clusters, ladder);
         }
@@ -628,13 +684,14 @@ impl SimilarityAnalyzer {
         pairs: &[(usize, usize)],
         threshold: f64,
     ) -> ScoreStats {
+        let body_only = self.target.body_only();
         match self.method {
             SimilarityMethod::Tsed => {
-                score_candidate_pairs(corpus, profiles, pairs, threshold, &self.opts)
+                score_candidate_pairs(corpus, profiles, pairs, threshold, &self.opts, body_only)
             }
             SimilarityMethod::Token => {
                 let token_profiles = build_token_profiles(corpus, self.opts.apted.compare_values);
-                score_token_candidate_pairs(corpus, &token_profiles, pairs, threshold)
+                score_token_candidate_pairs(corpus, &token_profiles, pairs, threshold, body_only)
             }
         }
     }
@@ -667,7 +724,16 @@ fn build_token_profiles(corpus: &[OwnedUnit], compare_values: bool) -> Vec<Token
         .collect()
 }
 
-fn body_candidate_threshold(threshold: f64) -> f64 {
+/// Threshold the cheap body-only candidate filters must clear.
+///
+/// With a signature component in play the body only has to carry
+/// `threshold - 0.2` of the blend, so the filter has to be that much
+/// looser to stay sound. Body-only targets score the body alone, so the
+/// run threshold *is* the body threshold.
+fn body_candidate_threshold(threshold: f64, body_only: bool) -> f64 {
+    if body_only {
+        return threshold.clamp(0.0, 1.0);
+    }
     ((threshold - SIGNATURE_SIMILARITY_WEIGHT) / BODY_SIMILARITY_WEIGHT).clamp(0.0, 1.0)
 }
 
@@ -800,11 +866,12 @@ fn score_candidate_pairs(
     pairs: &[(usize, usize)],
     threshold: f64,
     opts: &TSEDOptions,
+    body_only: bool,
 ) -> ScoreStats {
     pairs
         .par_iter()
         .fold(ScoreStats::default, |mut stats, &(i, j)| {
-            if let Some(score) = score_candidate_pair(corpus, profiles, i, j, opts) {
+            if let Some(score) = score_candidate_pair(corpus, profiles, i, j, opts, body_only) {
                 stats.record(score, threshold);
             }
             stats
@@ -819,6 +886,7 @@ fn score_candidate_pair(
     i: usize,
     j: usize,
     opts: &TSEDOptions,
+    body_only: bool,
 ) -> Option<PairScore> {
     let a = corpus.get(i)?;
     let b = corpus.get(j)?;
@@ -845,22 +913,37 @@ fn score_candidate_pair(
         )
     };
     let signature = signature_components(a.signature(), b.signature());
-    let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
-    let similarity = (BODY_SIMILARITY_WEIGHT * body_similarity)
-        + (SIGNATURE_SIMILARITY_WEIGHT * signature_similarity);
     Some(PairScore {
         i,
         j,
-        components: SimilarityComponents {
-            similarity,
-            body_similarity,
-            signature_similarity: signature.signature_similarity,
-            type_overlap: signature.type_overlap,
-            identifier_overlap: signature.identifier_overlap,
-            doc_overlap: None,
-        },
+        components: blend(body_similarity, signature, body_only),
         exact_match,
     })
+}
+
+/// Fold the body score and the signature components into the reported
+/// [`SimilarityComponents`]. Body-only targets carry no signature at all,
+/// so they skip the blend rather than taking the `unwrap_or(1.0)` path,
+/// which would silently award every pair the full signature weight.
+fn blend(
+    body_similarity: f64,
+    signature: SignatureComponents,
+    body_only: bool,
+) -> SimilarityComponents {
+    let similarity = if body_only {
+        body_similarity
+    } else {
+        (BODY_SIMILARITY_WEIGHT * body_similarity)
+            + (SIGNATURE_SIMILARITY_WEIGHT * signature.signature_similarity.unwrap_or(1.0))
+    };
+    SimilarityComponents {
+        similarity,
+        body_similarity,
+        signature_similarity: signature.signature_similarity,
+        type_overlap: signature.type_overlap,
+        identifier_overlap: signature.identifier_overlap,
+        doc_overlap: None,
+    }
 }
 
 fn score_token_candidate_pairs(
@@ -868,11 +951,13 @@ fn score_token_candidate_pairs(
     token_profiles: &[TokenProfile],
     pairs: &[(usize, usize)],
     threshold: f64,
+    body_only: bool,
 ) -> ScoreStats {
     pairs
         .par_iter()
         .fold(ScoreStats::default, |mut stats, &(i, j)| {
-            if let Some(score) = score_token_candidate_pair(corpus, token_profiles, i, j) {
+            if let Some(score) = score_token_candidate_pair(corpus, token_profiles, i, j, body_only)
+            {
                 stats.record(score, threshold);
             }
             stats
@@ -886,25 +971,16 @@ fn score_token_candidate_pair(
     token_profiles: &[TokenProfile],
     i: usize,
     j: usize,
+    body_only: bool,
 ) -> Option<PairScore> {
     let a = corpus.get(i)?;
     let b = corpus.get(j)?;
     let body_similarity = token::token_similarity(token_profiles.get(i)?, token_profiles.get(j)?);
     let signature = signature_components(a.signature(), b.signature());
-    let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
-    let similarity = (BODY_SIMILARITY_WEIGHT * body_similarity)
-        + (SIGNATURE_SIMILARITY_WEIGHT * signature_similarity);
     Some(PairScore {
         i,
         j,
-        components: SimilarityComponents {
-            similarity,
-            body_similarity,
-            signature_similarity: signature.signature_similarity,
-            type_overlap: signature.type_overlap,
-            identifier_overlap: signature.identifier_overlap,
-            doc_overlap: None,
-        },
+        components: blend(body_similarity, signature, body_only),
         exact_match: body_similarity >= 1.0,
     })
 }
@@ -1341,6 +1417,7 @@ fn delta(xs: &[i32]) -> i32 {
             rel_path: "lib.rs".to_owned(),
             is_test: false,
             kind: None,
+            block: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line,
@@ -1481,9 +1558,9 @@ fn delta(xs: &[i32]) -> i32 {
 
     #[test]
     fn body_candidate_threshold_reverses_combined_score_formula_and_clamps() {
-        assert!((body_candidate_threshold(0.85) - 0.8125).abs() < 1e-9);
-        assert_eq!(body_candidate_threshold(0.10), 0.0);
-        assert_eq!(body_candidate_threshold(1.50), 1.0);
+        assert!((body_candidate_threshold(0.85, false) - 0.8125).abs() < 1e-9);
+        assert_eq!(body_candidate_threshold(0.10, false), 0.0);
+        assert_eq!(body_candidate_threshold(1.50, false), 1.0);
     }
 
     #[test]
@@ -1668,6 +1745,7 @@ fn delta(xs: &[i32]) -> i32 {
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                block: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "left".to_owned(),
                     start_line: 1,
@@ -1691,6 +1769,7 @@ fn delta(xs: &[i32]) -> i32 {
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                block: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "right".to_owned(),
                     start_line: 7,
@@ -1713,7 +1792,7 @@ fn delta(xs: &[i32]) -> i32 {
         let profiles = build_tree_profiles(&corpus, 1, true);
 
         let score =
-            score_candidate_pair(&corpus, &profiles, 0, 1, &TSEDOptions::default()).unwrap();
+            score_candidate_pair(&corpus, &profiles, 0, 1, &TSEDOptions::default(), false).unwrap();
 
         assert!(score.components.body_similarity < 1.0);
         assert!(score.components.signature_similarity.unwrap() < 0.5);
@@ -2772,6 +2851,7 @@ def beta(ys):
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                block: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "left".to_owned(),
                     start_line: 1,
@@ -2803,6 +2883,7 @@ def beta(ys):
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                block: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "right".to_owned(),
                     start_line: 7,
@@ -2832,7 +2913,7 @@ def beta(ys):
         ];
         let token_profiles = build_token_profiles(&corpus, false);
 
-        let score = score_token_candidate_pair(&corpus, &token_profiles, 0, 1).unwrap();
+        let score = score_token_candidate_pair(&corpus, &token_profiles, 0, 1, false).unwrap();
 
         // Identical body token streams, divergent signature types.
         assert_eq!(score.components.body_similarity, 1.0);
@@ -2870,6 +2951,7 @@ def beta(ys):
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                block: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: name.to_owned(),
                     start_line: 1,
@@ -2884,7 +2966,7 @@ def beta(ys):
         let corpus = vec![function("left", "Let"), function("right", "Call")];
         let token_profiles = build_token_profiles(&corpus, false);
 
-        let score = score_token_candidate_pair(&corpus, &token_profiles, 0, 1).unwrap();
+        let score = score_token_candidate_pair(&corpus, &token_profiles, 0, 1, false).unwrap();
 
         let body = score.components.body_similarity;
         assert!(
@@ -3216,6 +3298,7 @@ impl Counter {
     #[rstest]
     #[case::functions(SimilarityTarget::Functions, true)]
     #[case::types(SimilarityTarget::Types, false)]
+    #[case::blocks(SimilarityTarget::Blocks, true)]
     fn allow_lsh_follows_target(#[case] target: SimilarityTarget, #[case] expected: bool) {
         assert_eq!(
             SimilarityAnalyzer::new().with_target(target).allow_lsh(),
@@ -3427,6 +3510,228 @@ impl Counter {
             .unwrap();
         let touched: serde_json::Value = serde_json::from_str(&touched).unwrap();
         assert_eq!(touched["cluster_count"], 1, "got {touched}");
+    }
+
+    /// Two handlers that share nothing but one copy-pasted error-mapping
+    /// statement. Function granularity structurally cannot see it; the
+    /// blocks target must.
+    const MAPPED_ERROR_A: &str = r#"
+pub fn search(query: &str, limit: usize, offset: usize) -> Result<Vec<Hit>, ErrorData> {
+    let client = build_client();
+    let normalized = normalize_query(query);
+    let page = Page::new(limit, offset);
+    let hits = client.search(&normalized, page).map_err(|e| ErrorData {
+        code: ErrorCode(-32603),
+        message: Cow::from(format!("search failed: {e}")),
+        data: None,
+    })?;
+    record_metric("search", hits.len());
+    Ok(hits)
+}
+"#;
+
+    const MAPPED_ERROR_B: &str = r#"
+pub fn fetch(id: &str) -> Result<Record, ErrorData> {
+    let store = open_store();
+    let record = store.fetch(id).map_err(|e| ErrorData {
+        code: ErrorCode(-32603),
+        message: Cow::from(format!("fetch failed: {e}")),
+        data: None,
+    })?;
+    Ok(record)
+}
+"#;
+
+    /// End-to-end guard for the whole point of `--target blocks`: the
+    /// repeated statement is invisible at function granularity and
+    /// reported at block granularity, from the same corpus.
+    #[test]
+    fn blocks_target_finds_duplication_functions_target_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", MAPPED_ERROR_A);
+        write_file(dir.path(), "b.rs", MAPPED_ERROR_B);
+
+        let functions = SimilarityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let functions: serde_json::Value = serde_json::from_str(&functions).unwrap();
+        assert_eq!(functions["cluster_count"], 0, "got {functions}");
+
+        // 0.80 rather than the 0.85 default: block scores are body-only,
+        // so they carry none of the 0.2 signature weight a function pair
+        // gets, and the two copies differ in the receiver they map over.
+        let blocks = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .with_threshold(0.8)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let blocks: serde_json::Value = serde_json::from_str(&blocks).unwrap();
+        assert_eq!(blocks["target"], "blocks", "got {blocks}");
+        assert_eq!(blocks["cluster_count"], 1, "got {blocks}");
+        let units = blocks["clusters"][0]["units"].as_array().unwrap();
+        assert_eq!(units.len(), 2, "got {blocks}");
+        assert!(
+            units.iter().any(|u| u["file"] == "a.rs") && units.iter().any(|u| u["file"] == "b.rs"),
+            "cluster should span both files: {blocks}"
+        );
+        assert!(
+            units.iter().all(|u| u["statement_count"].is_number()),
+            "block units carry a statement count: {blocks}"
+        );
+    }
+
+    /// A cluster's members must be distinct source regions. Sliding
+    /// windows overlap by construction, so without the span-overlap
+    /// filter the top cluster is always a window against the window one
+    /// statement to its left.
+    #[test]
+    fn blocks_target_never_pairs_overlapping_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", MAPPED_ERROR_A);
+        write_file(dir.path(), "b.rs", MAPPED_ERROR_B);
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .with_threshold(0.5)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        for cluster in parsed["clusters"].as_array().unwrap() {
+            let units = cluster["units"].as_array().unwrap();
+            for (pos, a) in units.iter().enumerate() {
+                for b in &units[pos + 1..] {
+                    let overlaps = a["file"] == b["file"]
+                        && a["start_line"].as_u64() <= b["end_line"].as_u64()
+                        && b["start_line"].as_u64() <= a["end_line"].as_u64();
+                    assert!(!overlaps, "overlapping members reported: {cluster}");
+                }
+            }
+        }
+    }
+
+    /// The markdown report is the surface an agent reads. A block
+    /// cluster has no name, so it has to carry the snippet and the
+    /// per-file occurrence counts instead of a bare member list.
+    #[test]
+    fn blocks_markdown_carries_a_snippet_and_per_file_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", MAPPED_ERROR_A);
+        write_file(dir.path(), "b.rs", MAPPED_ERROR_B);
+
+        let md = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .with_threshold(0.8)
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+
+        assert!(md.contains("block(s)"), "got {md}");
+        assert!(md.contains("occurrences across"), "got {md}");
+        assert!(md.contains("map_err"), "snippet should be inline: {md}");
+        assert!(md.contains("a.rs ×1"), "got {md}");
+        assert!(md.contains("b.rs ×1"), "got {md}");
+    }
+
+    /// `--paired-by` keys on names; a statement run has none, so the
+    /// combination is rejected up front rather than reporting nothing.
+    #[rstest]
+    #[case::qualified(PairKey::Qualified)]
+    #[case::method(PairKey::Method)]
+    fn blocks_target_rejects_paired_by(#[case] key: PairKey) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", MAPPED_ERROR_A);
+
+        let err = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .with_paired_by(Some(key))
+            .analyze(dir.path(), OutputFormat::Json)
+            .expect_err("paired-by should be rejected for blocks");
+
+        assert!(matches!(err, AnalyzerError::BlockTargetPairedBy), "{err}");
+    }
+
+    /// Blocks have no signature, so the blended score would hand every
+    /// pair the full 0.2 signature weight for free. Body-only scoring is
+    /// what keeps `--threshold 0.85` meaning "the bodies are 85% alike".
+    #[test]
+    fn blocks_similarity_is_the_body_score_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", MAPPED_ERROR_A);
+        write_file(dir.path(), "b.rs", MAPPED_ERROR_B);
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .with_threshold(0.5)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pairs: Vec<_> = parsed["clusters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["pairs"].as_array().unwrap().clone())
+            .collect();
+
+        assert!(!pairs.is_empty(), "expected scored pairs: {parsed}");
+        for pair in pairs {
+            assert_eq!(
+                pair["similarity"], pair["body_similarity"],
+                "block score must be body-only: {pair}"
+            );
+            assert!(
+                pair["signature_similarity"].is_null(),
+                "blocks carry no signature: {pair}"
+            );
+        }
+    }
+
+    /// Every supported language must reach the blocks target, not just
+    /// the one whose adapter was written first.
+    #[rstest]
+    #[case::rust(
+        "a.rs",
+        "fn alpha(items: &[u32]) -> u32 {\n    let mut total = 0;\n    for item in items {\n        total += item * 2;\n        total = total.saturating_sub(1);\n        total = total.min(9_999);\n    }\n    total\n}\n",
+        "b.rs",
+        "fn beta(values: &[u32]) -> u32 {\n    let mut total = 0;\n    let scale = 3;\n    let _ = scale;\n    for value in values {\n        total += value * 2;\n        total = total.saturating_sub(1);\n        total = total.min(9_999);\n    }\n    total\n}\n"
+    )]
+    #[case::typescript(
+        "a.ts",
+        "export function alpha(items: number[]): number {\n  let total = 0;\n  for (const item of items) {\n    total += item * 2;\n    total = Math.max(total - 1, 0);\n    total = Math.min(total, 9999);\n  }\n  return total;\n}\n",
+        "b.ts",
+        "export function beta(values: number[]): number {\n  let total = 0;\n  const scale = 3;\n  void scale;\n  for (const value of values) {\n    total += value * 2;\n    total = Math.max(total - 1, 0);\n    total = Math.min(total, 9999);\n  }\n  return total;\n}\n"
+    )]
+    #[case::python(
+        "a.py",
+        "def alpha(items):\n    total = 0\n    for item in items:\n        total += item * 2\n        total = max(total - 1, 0)\n        total = min(total, 9999)\n    return total\n",
+        "b.py",
+        "def beta(values):\n    total = 0\n    scale = 3\n    del scale\n    for value in values:\n        total += value * 2\n        total = max(total - 1, 0)\n        total = min(total, 9999)\n    return total\n"
+    )]
+    #[case::golang(
+        "a.go",
+        "package p\n\nfunc Alpha(items []int) int {\n\ttotal := 0\n\tfor _, item := range items {\n\t\ttotal += item * 2\n\t\ttotal = max(total-1, 0)\n\t\ttotal = min(total, 9999)\n\t}\n\treturn total\n}\n",
+        "b.go",
+        "package p\n\nfunc Beta(values []int) int {\n\ttotal := 0\n\tscale := 3\n\t_ = scale\n\tfor _, value := range values {\n\t\ttotal += value * 2\n\t\ttotal = max(total-1, 0)\n\t\ttotal = min(total, 9999)\n\t}\n\treturn total\n}\n"
+    )]
+    fn blocks_target_clusters_repeated_loop_bodies_per_language(
+        #[case] file_a: &str,
+        #[case] source_a: &str,
+        #[case] file_b: &str,
+        #[case] source_b: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), file_a, source_a);
+        write_file(dir.path(), file_b, source_b);
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(
+            parsed["cluster_count"].as_u64().unwrap_or(0) >= 1,
+            "expected a cross-file block cluster: {parsed}"
+        );
     }
 
     #[test]

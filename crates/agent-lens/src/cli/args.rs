@@ -918,7 +918,8 @@ pub(super) struct AnalyzeSimilarityArgs {
     /// Minimum source line count for a unit to be considered. Units
     /// shorter than this are dropped before pairwise comparison; keeps
     /// trivial getters / one-liners out of the report. Defaults per
-    /// target: 5 for `--target functions`, 3 for `--target types`.
+    /// target: 5 for `--target functions`, 3 for `--target types`, 4 for
+    /// `--target blocks` (where it also bounds the sliding window).
     #[arg(long)]
     pub(super) min_lines: Option<usize>,
     /// Comparison unit. `functions` (default) compares function bodies.
@@ -929,7 +930,18 @@ pub(super) struct AnalyzeSimilarityArgs {
     /// duplicated DTOs and drifted mirror structs surface the same way
     /// duplicated functions do. With `--paired-by`, only the
     /// `qualified`/`name` key applies; `method` has no meaning for a
-    /// type and is rejected.
+    /// type and is rejected. `blocks` drops below function granularity
+    /// and compares contiguous runs of statements *inside* function
+    /// bodies, so copy-pasted boilerplate that lives in otherwise
+    /// different functions — a repeated error-mapping chain, a repeated
+    /// URL assembly — surfaces as a cluster of N occurrences with one
+    /// representative snippet. Windows slide over each statement list,
+    /// so `--min-lines` doubles as the window floor. A statement run has
+    /// no signature, so its score is the body score alone rather than the
+    /// `0.8 body + 0.2 signature` blend the other targets use — a
+    /// slightly lower `--threshold` than the function default is usually
+    /// the right cut. `--paired-by` has no meaning for a statement run
+    /// and is rejected.
     #[arg(long, value_enum, default_value_t = SimilarityTarget::Functions)]
     pub(super) target: SimilarityTarget,
     /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit

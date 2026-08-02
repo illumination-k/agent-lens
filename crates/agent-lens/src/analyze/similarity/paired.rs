@@ -202,6 +202,7 @@ mod tests {
             rel_path: rel_path.to_owned(),
             is_test: false,
             kind: None,
+            block: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,

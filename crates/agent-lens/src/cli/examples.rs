@@ -217,6 +217,7 @@ Examples:
     agent-lens analyze similarity . --paired-by name --format md
     agent-lens analyze similarity src/ --target types --format md
     agent-lens analyze similarity . --target types --paired-by name --format md
+    agent-lens analyze similarity src/ --target blocks --format md --exclude-tests
 ";
 
 pub const WRAPPER: &str = "\

@@ -200,6 +200,13 @@ agent-lens analyze similarity crates/lens-rust/src --format md --doc-overlap
 # ones a threshold report structurally cannot reach — surface worst-first
 agent-lens analyze similarity . --format md --paired-by name
 
+# Drop below function granularity: compare contiguous runs of statements
+# *inside* function bodies, so copy-pasted boilerplate that lives in
+# otherwise-different functions surfaces as "N occurrences" with one
+# representative snippet. Block scores are body-only (a statement run has no
+# signature to blend in), so a slightly lower threshold is usually right
+agent-lens analyze similarity crates/ --target blocks --threshold 0.8 --format md
+
 # All analyzers accept path filters: focus tests, drop tests, or exclude globs
 agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
@@ -352,25 +359,25 @@ recursively with `.gitignore` semantics.
 
 Analyzer-specific options today:
 
-| Analyzer         | Extra options                                                                                                                                                                            |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--diff-only`, `--top N` |
-| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
-| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
-| `wrapper`        | `--diff-only`                                                                                                                                                                            |
-| `delegation`     | `--diff-only`, `--top N`                                                                                                                                                                 |
-| `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                               |
-| `risk`           | `--since VALUE`, `--top N`                                                                                                                                                               |
-| `hubs`           | `--top N`                                                                                                                                                                                |
-| `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                                                 |
-| `layers`         | `--top N`                                                                                                                                                                                |
-| `untested`       | `--top N`                                                                                                                                                                                |
-| `visibility`     | `--top N`                                                                                                                                                                                |
-| `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                                                  |
-| `coupling`       | shared analyzer options only                                                                                                                                                             |
-| `cycles`         | shared analyzer options only                                                                                                                                                             |
-| `function-graph` | shared analyzer options only                                                                                                                                                             |
-| `context-span`   | shared analyzer options only                                                                                                                                                             |
+| Analyzer         | Extra options                                                                                                                                                                                                                 |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--target functions\|types\|blocks`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--diff-only`, `--top N` |
+| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                                                     |
+| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                                                     |
+| `wrapper`        | `--diff-only`                                                                                                                                                                                                                 |
+| `delegation`     | `--diff-only`, `--top N`                                                                                                                                                                                                      |
+| `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                                                                    |
+| `risk`           | `--since VALUE`, `--top N`                                                                                                                                                                                                    |
+| `hubs`           | `--top N`                                                                                                                                                                                                                     |
+| `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                                                                                      |
+| `layers`         | `--top N`                                                                                                                                                                                                                     |
+| `untested`       | `--top N`                                                                                                                                                                                                                     |
+| `visibility`     | `--top N`                                                                                                                                                                                                                     |
+| `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                                                                                       |
+| `coupling`       | shared analyzer options only                                                                                                                                                                                                  |
+| `cycles`         | shared analyzer options only                                                                                                                                                                                                  |
+| `function-graph` | shared analyzer options only                                                                                                                                                                                                  |
+| `context-span`   | shared analyzer options only                                                                                                                                                                                                  |
 
 `--sweep` conflicts with `--threshold`, `--paired-by` conflicts with `--sweep`,
 and `--drift-floor` requires `--paired-by`.

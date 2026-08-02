@@ -125,7 +125,7 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             Field {
                 key: "min-lines",
                 ty: "int",
-                presence: "default: 5 (functions) / 3 (types)",
+                presence: "default: 5 (functions) / 3 (types) / 4 (blocks)",
                 desc: "Ignore units shorter than this many lines. Omitting it applies the target-specific default, not \"no floor\".",
             },
             Field {
@@ -142,9 +142,9 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             },
             Field {
                 key: "target",
-                ty: "\"functions\" or \"types\"",
+                ty: "\"functions\", \"types\", or \"blocks\"",
                 presence: "optional",
-                desc: "Comparison unit: functions (default) or type definitions (struct/class/interface/enum/alias member shapes). With types, paired-by only accepts the qualified/name key.",
+                desc: "Comparison unit: functions (default), type definitions (struct/class/interface/enum/alias member shapes), or blocks (contiguous statement runs inside function bodies). With types, paired-by only accepts the qualified/name key; with blocks, paired-by is rejected and scores are body-only.",
             },
             Field {
                 key: "doc-overlap",
