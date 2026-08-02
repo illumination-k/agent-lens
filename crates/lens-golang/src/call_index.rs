@@ -18,8 +18,8 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, VisibilityShape,
-    callee_names_local_binding, qualify_module, starts_uppercase,
+    OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
+    VisibilityShape, callee_names_local_binding, qualify_module, starts_uppercase,
 };
 use tree_sitter::Node;
 
@@ -99,13 +99,42 @@ fn function_shape(site: &FnSite<'_, '_>, source: &[u8], module: &str) -> Functio
         module_path: SyntaxFact::Known(module.to_owned()),
         owner: SyntaxFact::Known(owner_shape),
         visibility: SyntaxFact::Known(visibility),
-        signature: SyntaxFact::Unknown,
+        signature: SyntaxFact::Known(parameter_signature(node, source)),
         doc: crate::parser::doc_comment_text(node, source),
         body: BodyShape {
             tree: crate::parser::function_body_tree(body, source),
         },
         span,
         is_test,
+    }
+}
+
+/// Project a declaration's parameter list into a [`SignatureShape`]
+/// that carries only the parameter slots (with their names, where
+/// declared — the receiver is not a slot). The call graph reads the
+/// slot count to match methods against interface method sets by arity;
+/// every other signature fact stays [`SyntaxFact::Unknown`] rather than
+/// being half-extracted here.
+fn parameter_signature(node: Node<'_>, source: &[u8]) -> SignatureShape {
+    let params = node
+        .child_by_field_name("parameters")
+        .map(|params| crate::parser::parameter_slot_names(params, source))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| ParameterShape {
+            name: SyntaxFact::Known(name),
+            type_annotation: SyntaxFact::Unknown,
+            type_paths: Vec::new(),
+        })
+        .collect();
+    SignatureShape {
+        name_tokens: SyntaxFact::Unknown,
+        params,
+        return_type: SyntaxFact::Unknown,
+        return_type_paths: Vec::new(),
+        receiver: SyntaxFact::Unknown,
+        generics: SyntaxFact::Unknown,
+        bounds: SyntaxFact::Unknown,
     }
 }
 
@@ -721,6 +750,26 @@ func caller() { (func() {})() }
                 Some(VisibilityShape::Exported),
                 Some(VisibilityShape::Unexported),
             ]
+        );
+    }
+
+    /// The graph matches methods against interface method sets by
+    /// arity, so the call-index shapes carry parameter slots: grouped
+    /// names expand, unnamed types count one each, a variadic slot is
+    /// one, and the receiver is not a slot.
+    #[rstest]
+    #[case::grouped("func f(a, b int) {}", 2)]
+    #[case::unnamed("func f(int, string) {}", 2)]
+    #[case::variadic("func f(xs ...int) {}", 1)]
+    #[case::receiver_not_counted("func (s *S) f(x int) {}", 1)]
+    #[case::niladic("func f() {}", 0)]
+    fn shapes_carry_parameter_slot_counts(#[case] decl: &str, #[case] expected: usize) {
+        let funcs = shapes(&format!("package p\n{decl}\n"), "m");
+        assert_eq!(
+            funcs[0]
+                .signature_shape()
+                .map(SignatureShape::parameter_count),
+            Some(expected),
         );
     }
 

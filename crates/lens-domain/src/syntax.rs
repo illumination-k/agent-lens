@@ -103,6 +103,30 @@ impl From<FunctionDef> for FunctionShape {
     }
 }
 
+/// Neutral representation of an interface-like declaration: the named
+/// method set a concrete type satisfies structurally (Go `interface`;
+/// a Rust `trait` would project the same way).
+///
+/// Only directly declared methods are carried. Embedded interfaces are
+/// not expanded — an embedded interface's methods are collected from
+/// its own declaration when that declaration is in scope, and an
+/// out-of-scope embed has no method set to expand anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceShape {
+    pub display_name: String,
+    pub qualified_name: SyntaxFact<String>,
+    pub methods: Vec<InterfaceMethodShape>,
+}
+
+/// One method an interface declares directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceMethodShape {
+    pub name: String,
+    /// Parameter slots, with grouped names expanded: `Do(a, b int)`
+    /// declares 2, `Do(int)` declares 1, a variadic slot counts as 1.
+    pub param_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerShape {
     pub display_name: String,
