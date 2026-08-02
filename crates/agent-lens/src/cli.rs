@@ -19,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 
 mod analyze;
 mod args;
+mod baseline;
 mod examples;
 mod hooks;
 mod profile;
@@ -28,6 +29,7 @@ use args::{
     Cli, CodexHookCommand, Command, ConfigCommand, HelpArgs, HookCommand, SkillsCommand,
     SkillsInstallArgs,
 };
+use baseline::run_baseline;
 use hooks::{
     run_codex_hook_setup, run_codex_post_tool_use, run_codex_pre_tool_use, run_codex_session_start,
     run_hook_setup, run_post_tool_use, run_pre_tool_use, run_session_start,
@@ -68,6 +70,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
         Command::Analyze(sub) => run_analyze(sub),
         Command::Run(args) => run_profile(args),
+        Command::Baseline(sub) => run_baseline(sub),
         Command::Skills(sub) => run_skills(sub),
         Command::Config(sub) => run_config(sub),
         Command::Help(args) => run_help(args),
