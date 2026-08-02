@@ -28,6 +28,7 @@ mod node_text;
 mod parser;
 #[cfg(test)]
 mod proptests;
+mod statements;
 #[cfg(test)]
 mod test_support;
 mod type_defs;
@@ -42,5 +43,6 @@ pub use coupling::{CouplingError, GoPackage, build_module_tree, extract_edges, m
 pub use interfaces::extract_interface_shapes_with_module;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use parser::{GoParseError, GoParser};
+pub use statements::extract_statement_seqs;
 pub use type_defs::extract_type_defs;
 pub use wrapper::find_wrappers;

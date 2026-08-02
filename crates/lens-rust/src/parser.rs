@@ -548,7 +548,7 @@ fn block_tree(block: &syn::Block) -> TreeNode {
     TreeNode::with_children("Block", "", block.stmts.iter().map(stmt_tree).collect())
 }
 
-fn stmt_tree(stmt: &syn::Stmt) -> TreeNode {
+pub(crate) fn stmt_tree(stmt: &syn::Stmt) -> TreeNode {
     match stmt {
         syn::Stmt::Local(local) => {
             let mut children = vec![pat_tree(&local.pat)];

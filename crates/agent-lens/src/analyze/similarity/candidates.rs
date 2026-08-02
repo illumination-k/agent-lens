@@ -190,6 +190,10 @@ pub(super) struct CandidatePairs {
     pub label_filtered_count: usize,
     pub arity_filtered_count: usize,
     pub shingle_filtered_count: usize,
+    /// Pairs dropped because the two units cover overlapping source
+    /// lines. Only ever non-zero for `--target blocks`; see
+    /// [`CandidatePairs::drop_overlapping`].
+    pub overlap_filtered_count: usize,
     pub strategy: CandidatePairStrategy,
 }
 
@@ -200,7 +204,35 @@ impl CandidatePairs {
             + self.label_filtered_count
             + self.arity_filtered_count
             + self.shingle_filtered_count
+            + self.overlap_filtered_count
     }
+
+    /// Drop pairs whose two units cover overlapping lines of the same
+    /// file.
+    ///
+    /// Essential for `--target blocks` and meaningless for the others.
+    /// Sliding windows mint one unit per statement run, so the window
+    /// starting at statement 3 and the window starting at statement 3
+    /// that is one statement longer are near-identical by construction —
+    /// and so are all their neighbours. Left in, every function with a
+    /// few statements reports itself as a cluster of "duplicates" and
+    /// real cross-function repetition is buried. Overlapping windows are
+    /// one piece of code compared against itself, never duplication.
+    pub(super) fn drop_overlapping(&mut self, corpus: &[OwnedUnit]) {
+        let before = self.pairs.len();
+        self.pairs.retain(|&(i, j)| {
+            corpus
+                .get(i)
+                .zip(corpus.get(j))
+                .is_none_or(|(a, b)| !units_overlap(a, b))
+        });
+        self.overlap_filtered_count += before - self.pairs.len();
+    }
+}
+
+/// True when two units cover overlapping lines of the same file.
+fn units_overlap(a: &OwnedUnit, b: &OwnedUnit) -> bool {
+    a.file == b.file && a.start_line() <= b.end_line() && b.start_line() <= a.end_line()
 }
 
 #[derive(Debug, Default)]
@@ -297,6 +329,7 @@ pub(super) fn candidate_pairs(
         pairs,
         eligible_function_count: eligible_indices.len(),
         size_filtered_count: filter_counts.size,
+        overlap_filtered_count: 0,
         label_filtered_count: filter_counts.label,
         arity_filtered_count: filter_counts.arity,
         shingle_filtered_count: filter_counts.shingle,
@@ -553,6 +586,56 @@ mod tests {
                 ),
             }),
         }
+    }
+
+    fn window(file: &str, start_line: usize, end_line: usize) -> OwnedUnit {
+        OwnedUnit {
+            file: std::path::PathBuf::from(file),
+            rel_path: file.to_owned(),
+            is_test: false,
+            kind: None,
+            shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
+                name: "f".to_owned(),
+                start_line,
+                end_line,
+                is_test: false,
+                signature: None,
+                doc: None,
+                tree: lens_domain::TreeNode::leaf("Block"),
+            }),
+        }
+    }
+
+    /// Windows sharing so much as one line are the same code seen
+    /// twice. Only pairs in different files, or disjoint in the same
+    /// file, survive.
+    #[test]
+    fn drop_overlapping_keeps_only_disjoint_or_cross_file_pairs() {
+        let corpus = vec![
+            window("a.rs", 10, 14), // 0
+            window("a.rs", 11, 13), // 1: nested inside 0
+            window("a.rs", 14, 18), // 2: shares line 14 with 0
+            window("a.rs", 20, 24), // 3: disjoint from 0
+            window("b.rs", 11, 13), // 4: same lines, different file
+        ];
+        let mut candidates = CandidatePairs {
+            pairs: vec![(0, 1), (0, 2), (0, 3), (0, 4), (1, 4)],
+            eligible_function_count: corpus.len(),
+            size_filtered_count: 0,
+            label_filtered_count: 0,
+            arity_filtered_count: 0,
+            shingle_filtered_count: 0,
+            overlap_filtered_count: 0,
+            strategy: CandidatePairStrategy::Cartesian,
+        };
+
+        candidates.drop_overlapping(&corpus);
+
+        assert_eq!(candidates.pairs, vec![(0, 3), (0, 4), (1, 4)]);
+        assert_eq!(candidates.overlap_filtered_count, 2);
+        // Dropped pairs stay in the enumerated total so the profiling
+        // counters still add up.
+        assert_eq!(candidates.total_len(), 5);
     }
 
     #[test]

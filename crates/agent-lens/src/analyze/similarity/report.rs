@@ -5,7 +5,16 @@ use std::path::Path;
 use lens_domain::SimilarCluster;
 use serde::Serialize;
 
-use super::{OwnedUnit, SimilarityComponents};
+use super::{OwnedUnit, SimilarityComponents, SimilarityTarget};
+
+/// Longest representative snippet rendered for a block cluster. Long
+/// enough to show the repeated shape, short enough that a 40-cluster
+/// report still fits an agent's context window.
+const MAX_SNIPPET_LINES: usize = 12;
+
+/// How many files a block cluster's occurrence breakdown names before it
+/// collapses the tail into a count.
+const MAX_BREAKDOWN_FILES: usize = 6;
 
 #[derive(Debug, Serialize)]
 pub(super) struct Report<'a> {
@@ -14,7 +23,7 @@ pub(super) struct Report<'a> {
     /// Body-scoring algorithm used: `tsed` or `token`. Surfaced because
     /// the two methods are not on the same score scale.
     method: &'static str,
-    /// Comparison unit: `functions` or `types`.
+    /// Comparison unit: `functions`, `types`, or `blocks`.
     target: &'static str,
     unit_count: usize,
     /// Clustering cut applied. In sweep mode this is the ladder floor;
@@ -67,6 +76,16 @@ pub(super) struct ClusterView<'a> {
     survives_at_threshold: Option<f64>,
     units: Vec<UnitRef<'a>>,
     pairs: Vec<PairView<'a>>,
+    /// Source lines of the cluster's representative occurrence, for
+    /// `--target blocks`. A block has no name to look up, so without the
+    /// text a reader has to open every file to see what repeated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<Vec<String>>,
+    /// Corpus indices of the members, kept for snippet resolution.
+    /// Not serialized: the `units` list is the public shape, and raw
+    /// indices into a corpus the consumer never sees mean nothing.
+    #[serde(skip)]
+    members: Vec<usize>,
 }
 
 impl<'a> ClusterView<'a> {
@@ -74,22 +93,108 @@ impl<'a> ClusterView<'a> {
         corpus: &'a [OwnedUnit],
         cluster: SimilarCluster,
         pair_scores: &HashMap<(usize, usize), SimilarityComponents>,
+        target: SimilarityTarget,
     ) -> Self {
-        let units: Vec<UnitRef<'a>> = cluster
+        // Members and units are built in one pass so they stay index
+        // aligned: `representative` reads the corpus index that goes
+        // with a chosen unit, and a `filter_map` that dropped one side
+        // only would silently quote the wrong occurrence.
+        let (members, units): (Vec<usize>, Vec<UnitRef<'a>>) = cluster
             .members
             .iter()
-            .filter_map(|i| corpus.get(*i).map(UnitRef::from))
-            .collect();
-        let pairs = cluster_pair_views(corpus, &cluster.members, pair_scores);
+            .filter_map(|i| corpus.get(*i).map(|unit| (*i, UnitRef::from(unit))))
+            .unzip();
+        // Block clusters routinely run to dozens of members, and a
+        // pairwise view list is quadratic in that: 55 occurrences would
+        // emit 1,485 pair objects carrying nothing the min/max band does
+        // not already say — blocks have no signature, so every optional
+        // component on them is null. The band plus the unit list is the
+        // whole of the information.
+        let pairs = match target {
+            SimilarityTarget::Blocks => Vec::new(),
+            _ => cluster_pair_views(corpus, &cluster.members, pair_scores),
+        };
+        let size = units.len();
         Self {
-            size: units.len(),
+            size,
             min_similarity: cluster.min_similarity,
             max_similarity: cluster.max_similarity,
             survives_at_threshold: None,
             units,
             pairs,
+            snippet: None,
+            members,
         }
     }
+
+    /// Corpus index of the occurrence the report quotes. Must agree
+    /// with [`Self::quoted_unit`] — the markdown prints that unit's
+    /// location above the snippet, so reading the text from a different
+    /// member would caption the wrong file and line.
+    pub(super) fn representative(&self) -> Option<usize> {
+        let quoted = self.quoted_unit()?;
+        self.members
+            .iter()
+            .zip(&self.units)
+            .find(|(_, unit)| *unit == quoted)
+            .map(|(index, _)| *index)
+    }
+
+    pub(super) fn set_snippet(&mut self, snippet: Vec<String>) {
+        self.snippet = Some(snippet);
+    }
+
+    /// Longest span any member covers, used to rank a cluster against
+    /// one whose windows are shorter.
+    fn max_line_count(&self) -> usize {
+        self.units
+            .iter()
+            .map(UnitRef::line_count)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The occurrence the markdown report quotes: earliest by file then
+    /// line, so the snippet and the location line always agree and stay
+    /// stable across runs.
+    fn quoted_unit(&self) -> Option<&UnitRef<'_>> {
+        self.units.iter().min_by_key(|u| (u.file, u.start_line))
+    }
+}
+
+/// Rank block clusters by how much duplication they represent, then drop
+/// the ones that are only a sub-window of a cluster already reported.
+///
+/// Sliding windows mint a unit per statement run, so one repeated
+/// five-statement fragment surfaces as up to five overlapping clusters —
+/// the whole run, plus every shorter run inside it. Reporting all of
+/// them would bury the finding in its own echoes. Ordering by occurrence
+/// count first and span second means the most-repeated, longest form is
+/// kept, and a shorter window is dropped only when *every* one of its
+/// occurrences already sits inside a kept one: a fragment that also
+/// repeats somewhere the longer run does not still earns its own entry.
+pub(super) fn prune_block_clusters(clusters: &mut Vec<ClusterView<'_>>) {
+    clusters.sort_by(|a, b| {
+        b.size
+            .cmp(&a.size)
+            .then(b.max_line_count().cmp(&a.max_line_count()))
+            .then(
+                b.min_similarity
+                    .partial_cmp(&a.min_similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    let mut kept: Vec<Vec<UnitRef<'_>>> = Vec::new();
+    clusters.retain(|cluster| {
+        let covered = cluster
+            .units
+            .iter()
+            .all(|unit| kept.iter().flatten().any(|k| k.contains(unit)));
+        if !covered {
+            kept.push(cluster.units.clone());
+        }
+        !covered
+    });
 }
 
 /// Tag each cluster with the highest sweep rung at which its complete-link
@@ -162,7 +267,7 @@ fn sorted_pair_key(i: usize, j: usize) -> (usize, usize) {
     if i <= j { (i, j) } else { (j, i) }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(super) struct UnitRef<'a> {
     file: &'a str,
     name: &'a str,
@@ -173,6 +278,20 @@ pub(super) struct UnitRef<'a> {
     start_line: usize,
     end_line: usize,
     is_test: bool,
+}
+
+impl UnitRef<'_> {
+    fn line_count(&self) -> usize {
+        self.end_line.saturating_sub(self.start_line) + 1
+    }
+
+    /// True when `other` occupies the same file and its line span sits
+    /// inside this one's.
+    fn contains(&self, other: &UnitRef<'_>) -> bool {
+        self.file == other.file
+            && self.start_line <= other.start_line
+            && other.end_line <= self.end_line
+    }
 }
 
 impl<'a> From<&'a OwnedUnit> for UnitRef<'a> {
@@ -279,8 +398,9 @@ pub(super) fn format_markdown(
     report: &Report<'_>,
     top: Option<usize>,
     doc_overlap: bool,
-    noun: &str,
+    target: SimilarityTarget,
 ) -> String {
+    let noun = target.noun();
     let cut = match &report.sweep {
         Some(ladder) => format!("sweep {}", format_ladder(ladder)),
         None => format!("threshold {:.2}", report.threshold),
@@ -311,6 +431,10 @@ pub(super) fn format_markdown(
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
         let _ = writeln!(out, "\n- {}", cluster_headline(cluster, doc_overlap, noun));
+        if target == SimilarityTarget::Blocks {
+            write_block_body(&mut out, cluster);
+            continue;
+        }
         for f in &cluster.units {
             let _ = writeln!(
                 out,
@@ -320,6 +444,84 @@ pub(super) fn format_markdown(
         }
     }
     out
+}
+
+/// Body of a block cluster: where it lives, one quoted occurrence, and
+/// the per-file occurrence counts.
+///
+/// Deliberately *not* the flat member list the other targets print. A
+/// block cluster's whole point is that it has many occurrences — the
+/// 55-site case from the issue would otherwise emit 55 near-identical
+/// lines and swamp the rest of the report — and a window has no name to
+/// look up, so the quoted text is what makes the finding actionable.
+fn write_block_body(out: &mut String, cluster: &ClusterView<'_>) {
+    if let Some(rep) = cluster.quoted_unit() {
+        let _ = writeln!(
+            out,
+            "  - at {}:`{}` (L{}-{})",
+            rep.file, rep.name, rep.start_line, rep.end_line,
+        );
+    }
+    if let Some(snippet) = &cluster.snippet {
+        let _ = writeln!(out, "    ```");
+        for line in snippet.iter().take(MAX_SNIPPET_LINES) {
+            let _ = writeln!(out, "    {line}");
+        }
+        if snippet.len() > MAX_SNIPPET_LINES {
+            let _ = writeln!(
+                out,
+                "    … ({} more lines)",
+                snippet.len() - MAX_SNIPPET_LINES
+            );
+        }
+        let _ = writeln!(out, "    ```");
+    }
+    let _ = writeln!(out, "  - occurrences: {}", file_breakdown(cluster));
+}
+
+/// `path ×6, other ×5 (+3 more files)` — where the occurrences actually
+/// concentrate, which is what decides whether the fix is one helper or a
+/// dozen local edits.
+fn file_breakdown(cluster: &ClusterView<'_>) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for unit in &cluster.units {
+        match counts.iter_mut().find(|(file, _)| *file == unit.file) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((unit.file, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let shown: Vec<String> = counts
+        .iter()
+        .take(MAX_BREAKDOWN_FILES)
+        .map(|(file, count)| format!("{file} ×{count}"))
+        .collect();
+    let mut line = shown.join(", ");
+    if counts.len() > MAX_BREAKDOWN_FILES {
+        let _ = write!(
+            line,
+            " (+{} more file(s))",
+            counts.len() - MAX_BREAKDOWN_FILES
+        );
+    }
+    line
+}
+
+/// Distinct enclosing functions and files a block cluster spans, for the
+/// headline. "40 occurrences in 40 functions" and "40 occurrences in 2
+/// functions" call for completely different fixes.
+fn block_spread(cluster: &ClusterView<'_>) -> (usize, usize) {
+    let mut functions: Vec<(&str, &str)> = cluster
+        .units
+        .iter()
+        .map(|unit| (unit.file, unit.name))
+        .collect();
+    functions.sort_unstable();
+    functions.dedup();
+    let mut files: Vec<&str> = cluster.units.iter().map(|unit| unit.file).collect();
+    files.sort_unstable();
+    files.dedup();
+    (functions.len(), files.len())
 }
 
 /// The one-line summary heading a cluster's member list: size, the
@@ -339,8 +541,15 @@ fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool, noun: &str) ->
         .survives_at_threshold
         .map(|rung| format!(" [survives ≥{rung:.2}]"))
         .unwrap_or_default();
+    let spread_tag = if noun == "block" {
+        let (function_count, file_count) = block_spread(cluster);
+        let lines = cluster.quoted_unit().map_or(0, UnitRef::line_count);
+        format!(", {lines} line(s), in {function_count} function(s) across {file_count} file(s)")
+    } else {
+        String::new()
+    };
     format!(
-        "{} {noun}s, similarity {:.0}–{:.0}%{identifier_tag}{doc_tag}{survival_tag}",
+        "{} {noun}s, similarity {:.0}–{:.0}%{spread_tag}{identifier_tag}{doc_tag}{survival_tag}",
         cluster.size,
         cluster.min_similarity * 100.0,
         cluster.max_similarity * 100.0,
@@ -662,6 +871,8 @@ mod tests {
             survives_at_threshold: None,
             units: Vec::new(),
             pairs: Vec::new(),
+            snippet: None,
+            members: Vec::new(),
         }
     }
 
@@ -722,6 +933,205 @@ mod tests {
             .map(|c| (c.max_similarity, c.size))
             .collect();
         assert_eq!(order, vec![(0.90, 2), (0.86, 3), (0.86, 2)]);
+    }
+
+    /// Cluster of block windows at fixed spans, for the pruning and
+    /// block-markdown checks.
+    fn block_cluster(units: &[(&'static str, &'static str, usize, usize)]) -> ClusterView<'static> {
+        ClusterView {
+            size: units.len(),
+            min_similarity: 0.9,
+            max_similarity: 1.0,
+            survives_at_threshold: None,
+            units: units
+                .iter()
+                .map(|&(file, name, start_line, end_line)| UnitRef {
+                    file,
+                    name,
+                    kind: None,
+                    start_line,
+                    end_line,
+                    is_test: false,
+                })
+                .collect(),
+            pairs: Vec::new(),
+            snippet: None,
+            members: (0..units.len()).collect(),
+        }
+    }
+
+    /// The snippet is read from the member `representative` names while
+    /// the caption comes from `quoted_unit`; if they can disagree, the
+    /// report quotes one occurrence under another's file and line. The
+    /// corpus index deliberately does not follow source order here.
+    #[test]
+    fn representative_is_the_corpus_index_of_the_quoted_unit() {
+        let mut cluster = block_cluster(&[
+            ("b.rs", "second", 30, 32),
+            ("a.rs", "first", 20, 22),
+            ("a.rs", "first", 10, 12),
+        ]);
+        cluster.members = vec![7, 4, 9];
+
+        assert_eq!(
+            cluster.quoted_unit().map(|u| (u.file, u.start_line)),
+            Some(("a.rs", 10)),
+        );
+        assert_eq!(cluster.representative(), Some(9));
+    }
+
+    fn cluster_spans(clusters: &[ClusterView<'_>]) -> Vec<Vec<(usize, usize)>> {
+        clusters
+            .iter()
+            .map(|c| c.units.iter().map(|u| (u.start_line, u.end_line)).collect())
+            .collect()
+    }
+
+    #[test]
+    fn prune_block_clusters_drops_sub_windows_of_a_kept_cluster() {
+        // The 5-line cluster and the 3-line one inside it describe the
+        // same duplication; only the longer form should survive.
+        let mut clusters = vec![
+            block_cluster(&[("a.rs", "f", 11, 13), ("b.rs", "g", 31, 33)]),
+            block_cluster(&[("a.rs", "f", 10, 14), ("b.rs", "g", 30, 34)]),
+        ];
+
+        prune_block_clusters(&mut clusters);
+
+        assert_eq!(cluster_spans(&clusters), vec![vec![(10, 14), (30, 34)]]);
+    }
+
+    /// A shorter fragment that also repeats where the longer run does
+    /// not is a finding of its own, not an echo of the longer one.
+    #[test]
+    fn prune_block_clusters_keeps_a_sub_window_with_an_uncovered_occurrence() {
+        let mut clusters = vec![
+            block_cluster(&[("a.rs", "f", 10, 14), ("b.rs", "g", 30, 34)]),
+            block_cluster(&[
+                ("a.rs", "f", 11, 13),
+                ("b.rs", "g", 31, 33),
+                ("c.rs", "h", 50, 52),
+            ]),
+        ];
+
+        prune_block_clusters(&mut clusters);
+
+        // Ranked by occurrence count first, so the 3-member cluster
+        // leads and nothing it covers is dropped.
+        assert_eq!(
+            cluster_spans(&clusters),
+            vec![vec![(11, 13), (31, 33), (50, 52)], vec![(10, 14), (30, 34)],],
+        );
+    }
+
+    /// Containment is per-file: the same line range in a different file
+    /// is a different piece of code.
+    #[test]
+    fn prune_block_clusters_does_not_cover_across_files() {
+        let mut clusters = vec![
+            block_cluster(&[("a.rs", "f", 10, 14), ("b.rs", "g", 30, 34)]),
+            block_cluster(&[("c.rs", "h", 11, 13), ("d.rs", "i", 31, 33)]),
+        ];
+
+        prune_block_clusters(&mut clusters);
+
+        assert_eq!(clusters.len(), 2);
+    }
+
+    #[test]
+    fn block_markdown_quotes_one_occurrence_and_rolls_the_rest_up_by_file() {
+        let mut cluster = block_cluster(&[
+            ("b.rs", "second", 30, 32),
+            ("a.rs", "first", 10, 12),
+            ("a.rs", "first", 20, 22),
+        ]);
+        cluster.set_snippet(vec!["let a = 1;".to_owned(), "let b = 2;".to_owned()]);
+        let clusters = [cluster];
+        let report = Report::new(
+            Path::new("src"),
+            "tsed",
+            "blocks",
+            0.85,
+            3,
+            9,
+            None,
+            &clusters,
+        );
+
+        let md = format_markdown(&report, None, false, SimilarityTarget::Blocks);
+
+        assert!(md.contains("3 blocks, similarity 90–100%"), "got: {md}");
+        assert!(
+            md.contains("3 line(s), in 2 function(s) across 2 file(s)"),
+            "got: {md}",
+        );
+        // Earliest by file then line is the quoted occurrence.
+        assert!(md.contains("at a.rs:`first` (L10-12)"), "got: {md}");
+        assert!(md.contains("    let a = 1;"), "got: {md}");
+        assert!(md.contains("occurrences: a.rs ×2, b.rs ×1"), "got: {md}",);
+        // The flat member list of the other targets must not appear.
+        assert!(!md.contains("  - b.rs:`second`"), "got: {md}");
+    }
+
+    /// A quoted occurrence is capped so one long window cannot swallow
+    /// the report, and the cut has to be announced — a silently
+    /// truncated snippet reads as the whole fragment.
+    #[rstest]
+    #[case::under_cap(MAX_SNIPPET_LINES - 1, MAX_SNIPPET_LINES - 1, None)]
+    #[case::exactly_at_cap(MAX_SNIPPET_LINES, MAX_SNIPPET_LINES, None)]
+    #[case::over_cap(MAX_SNIPPET_LINES + 3, MAX_SNIPPET_LINES, Some("… (3 more lines)"))]
+    fn block_snippet_is_capped_and_says_when_it_truncated(
+        #[case] snippet_len: usize,
+        #[case] expected_shown: usize,
+        #[case] expected_marker: Option<&str>,
+    ) {
+        let mut cluster = block_cluster(&[("a.rs", "f", 1, 3), ("b.rs", "g", 1, 3)]);
+        cluster.set_snippet((0..snippet_len).map(|i| format!("line{i};")).collect());
+        let mut out = String::new();
+
+        write_block_body(&mut out, &cluster);
+
+        let shown = (0..snippet_len)
+            .filter(|i| out.contains(&format!("    line{i};\n")))
+            .count();
+        assert_eq!(shown, expected_shown, "got: {out}");
+        match expected_marker {
+            Some(marker) => assert!(out.contains(marker), "got: {out}"),
+            None => assert!(!out.contains("more lines)"), "got: {out}"),
+        }
+    }
+
+    /// The occurrence breakdown names files up to a cap and then says
+    /// how many it left out. A cap that fires one file early would
+    /// report "+0 more file(s)" on a cluster that fits exactly.
+    #[rstest]
+    #[case::under_cap(MAX_BREAKDOWN_FILES - 1, None)]
+    #[case::exactly_at_cap(MAX_BREAKDOWN_FILES, None)]
+    #[case::over_cap(MAX_BREAKDOWN_FILES + 2, Some("(+2 more file(s))"))]
+    fn block_file_breakdown_collapses_the_tail_past_the_display_cap(
+        #[case] file_count: usize,
+        #[case] expected_marker: Option<&str>,
+    ) {
+        const FILES: [&str; 9] = [
+            "a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs", "h.rs", "i.rs",
+        ];
+        let units: Vec<(&'static str, &'static str, usize, usize)> = FILES[..file_count]
+            .iter()
+            .map(|file| (*file, "fn", 1usize, 3usize))
+            .collect();
+
+        let line = file_breakdown(&block_cluster(&units));
+
+        assert!(line.starts_with("a.rs ×1, b.rs ×1"), "got: {line}");
+        assert_eq!(
+            line.split(", ").count(),
+            file_count.min(MAX_BREAKDOWN_FILES),
+            "got: {line}",
+        );
+        match expected_marker {
+            Some(marker) => assert!(line.ends_with(marker), "got: {line}"),
+            None => assert!(!line.contains("more file(s)"), "got: {line}"),
+        }
     }
 
     #[test]
@@ -788,6 +1198,8 @@ mod tests {
                     doc_overlap: None,
                 })
                 .collect(),
+            snippet: None,
+            members: Vec::new(),
         }
     }
 
@@ -858,6 +1270,8 @@ mod tests {
                     doc_overlap,
                 })
                 .collect(),
+            snippet: None,
+            members: Vec::new(),
         }
     }
 

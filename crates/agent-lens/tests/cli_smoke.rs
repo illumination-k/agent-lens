@@ -293,6 +293,138 @@ fn analyze_similarity_target_types_rejects_paired_by_method() {
     );
 }
 
+/// Two functions with different names, different signatures, and
+/// different surrounding work, sharing one repeated four-statement
+/// fragment. Function-granularity comparison cannot see it — the bodies
+/// as wholes are not similar — which is the whole reason `--target
+/// blocks` exists.
+const SHARED_BLOCK_A_RS: &str = r#"
+fn fetch_article(id: u64) -> String {
+    let client = build_client();
+    let url = format!("{}/article/{}", base_url(), id);
+    let request = client.get(&url);
+    let response = request.send();
+    let body = response.text();
+    body
+}
+"#;
+
+const SHARED_BLOCK_B_RS: &str = r#"
+fn fetch_author(name: &str, retries: u32) -> Vec<String> {
+    let mut collected = Vec::new();
+    for _ in 0..retries {
+        collected.push(name.to_owned());
+    }
+    let client = build_client();
+    let url = format!("{}/author/{}", base_url(), name);
+    let request = client.get(&url);
+    let response = request.send();
+    let body = response.text();
+    collected.push(body);
+    collected
+}
+"#;
+
+/// The blocks target has to be reachable both ways an analyzer is
+/// driven: the `--target` flag and the `target` profile key.
+#[rstest]
+#[case::flag(None)]
+#[case::profile_key(Some(
+    "[profile.fragments]\npath = \".\"\nformat = \"md\"\ntools = [\"similarity\"]\n\n[profile.fragments.similarity]\ntarget = \"blocks\"\n"
+))]
+fn analyze_similarity_target_blocks_reports_repeated_fragments(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", SHARED_BLOCK_A_RS);
+    write_file(dir.path(), "b.rs", SHARED_BLOCK_B_RS);
+
+    let output = match config {
+        None => agent_lens(
+            &[
+                "analyze",
+                "similarity",
+                ".",
+                "--format",
+                "md",
+                "--target",
+                "blocks",
+            ],
+            dir.path(),
+            None,
+        ),
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            agent_lens(&["run", "fragments"], dir.path(), None)
+        }
+    };
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("block(s)"), "got: {stdout}");
+    assert!(stdout.contains("2 blocks, similarity"), "got: {stdout}");
+    assert!(
+        stdout.contains("in 2 function(s) across 2 file(s)"),
+        "got: {stdout}",
+    );
+    // The report quotes the repeated source and breaks occurrences down
+    // by file rather than listing every member.
+    assert!(
+        stdout.contains("let request = client.get(&url);"),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains("occurrences: a.rs ×1, b.rs ×1"),
+        "got: {stdout}",
+    );
+}
+
+/// A function whose only duplication is with itself must report
+/// nothing: sliding windows overlap by construction, and without the
+/// overlap filter every multi-statement function would report as a
+/// cluster of its own sub-windows.
+#[test]
+fn analyze_similarity_target_blocks_ignores_overlapping_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", SHARED_BLOCK_A_RS);
+
+    let output = agent_lens(
+        &["analyze", "similarity", ".", "--target", "blocks"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["target"], "blocks", "got {json}");
+    assert_eq!(json["cluster_count"], 0, "got {json}");
+}
+
+#[test]
+fn analyze_similarity_target_blocks_rejects_paired_by() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", SHARED_BLOCK_A_RS);
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            ".",
+            "--target",
+            "blocks",
+            "--paired-by",
+            "name",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--paired-by is incompatible with --target blocks"),
+        "got: {stderr}"
+    );
+}
+
 const DOCUMENTED_PAIR_RS: &str = r#"
 /// Validate the user id before persisting.
 fn validate_user(id: u64) -> bool {
