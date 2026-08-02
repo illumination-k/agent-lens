@@ -1832,6 +1832,33 @@ mod tests {
         );
     }
 
+    /// The v1 scope boundary, and the one place visibility decides a
+    /// tier on its own: only a declaration that cannot be named from
+    /// outside the analyzed path is confirmed. `pub(crate)` is narrower
+    /// than `pub` and still wider than that — the analyzed path is not
+    /// always the whole crate — so it stays a `likely` row with no
+    /// caveat attached, because the visibility *is* the reason.
+    #[test]
+    fn an_unreachable_declaration_wider_than_private_stays_likely() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {}\n\
+             pub(crate) fn wider() -> usize { 1 }\n\
+             fn narrow() -> usize { 2 }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(tier_of(&report, "::wider").as_deref(), Some("likely"));
+        assert_eq!(tier_of(&report, "::narrow").as_deref(), Some("confirmed"));
+        assert!(
+            demotions(&report, "::wider").is_empty(),
+            "no caveat fired — the declaration's reach is the whole reason: {:?}",
+            demotions(&report, "::wider"),
+        );
+    }
+
     /// An inherent method of the same shape is judged normally — the
     /// exemption above is about trait dispatch, not about methods.
     #[test]
