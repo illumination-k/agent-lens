@@ -2177,15 +2177,55 @@ mod tests {
         let default = analyze_md(dir.path());
         assert!(default.contains("`crate::orphan`"), "got {default}");
         assert!(!default.contains("`crate::demoted`"), "got {default}");
+        // Which tier is being shown is half the meaning of the listing,
+        // so the cut is named in the heading rather than implied by
+        // which rows are present.
+        assert!(default.contains("(`confirmed` and above"), "got {default}",);
 
         let widened = UnreachableAnalyzer::new()
             .with_tier(Some(Tier::Unknown))
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert!(widened.contains("`crate::demoted`"), "got {widened}");
+        assert!(widened.contains("(`unknown` and above"), "got {widened}");
 
         let report = analyze_json(dir.path());
         assert_eq!(tiers(&report).len(), 2, "JSON carries every tier: {report}");
+    }
+
+    /// `--top` caps how many module sections markdown renders, and says
+    /// what it hid rather than dropping it silently. JSON is unaffected.
+    #[test]
+    fn top_caps_the_markdown_module_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {}\nfn orphan_here() -> usize { 1 }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/other.rs",
+            "fn orphan_there() -> usize { 2 }\n",
+        );
+
+        let full = analyze_md(dir.path());
+        assert!(full.contains("; 2 of 2 module(s))"), "got {full}");
+
+        let capped = UnreachableAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(capped.contains("; 1 of 2 module(s))"), "got {capped}");
+        assert!(
+            capped.contains("+1 more module(s) not shown"),
+            "got {capped}",
+        );
+        assert_eq!(
+            tiers(&analyze_json(dir.path())).len(),
+            2,
+            "JSON carries every module",
+        );
     }
 
     /// With nothing to report the markdown says which of the two empty
