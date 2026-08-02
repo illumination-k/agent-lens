@@ -987,7 +987,7 @@ mod tests {
         assert!(args.common.path_filter.exclude_tests);
         assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
         assert!((args.opts.threshold - 0.85).abs() < f64::EPSILON);
-        assert_eq!(args.opts.min_lines, 8);
+        assert_eq!(args.opts.min_lines, Some(8));
         assert_eq!(args.opts.top, Some(3));
         // `--method` is omitted above, so it defaults to TSED.
         assert_eq!(args.opts.method, SimilarityMethod::Tsed);

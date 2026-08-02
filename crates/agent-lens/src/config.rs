@@ -339,7 +339,7 @@ since = "90.days.ago"
 
         let similarity = web.similarity.as_ref().unwrap();
         assert!(close(similarity.threshold, 0.9));
-        assert_eq!(similarity.min_lines, 8);
+        assert_eq!(similarity.min_lines, Some(8));
         assert_eq!(similarity.top, Some(20));
         assert!(similarity.doc_overlap);
         assert!(!similarity.diff_only);

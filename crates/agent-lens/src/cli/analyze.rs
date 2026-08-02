@@ -300,8 +300,8 @@ mod tests {
     use std::path::PathBuf;
 
     use agent_lens::analyze::{
-        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD,
-        GraphQueryKind, PairKey, SimilarityMethod,
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphQueryKind, PairKey,
+        SimilarityMethod,
     };
     use agent_lens::test_support::write_file;
     use clap::Parser;
@@ -351,7 +351,7 @@ mod tests {
                 .analyze(&file, OutputFormat::Json)
                 .unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-            parsed["function_count"].as_u64().unwrap()
+            parsed["unit_count"].as_u64().unwrap()
         };
 
         assert_eq!(run(AnalyzePathArgs::default()), 2, "All keeps both");
@@ -428,7 +428,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.common.path, PathBuf::from("/repo/web"));
         assert_eq!(args.common.format, OutputFormat::Md);
         assert!((args.opts.threshold - 0.7).abs() < f64::EPSILON);
-        assert_eq!(args.opts.min_lines, 9);
+        assert_eq!(args.opts.min_lines, Some(9));
         assert_eq!(args.opts.top, Some(4));
         assert_eq!(args.opts.method, SimilarityMethod::Token);
         assert!(args.opts.doc_overlap);
@@ -452,7 +452,9 @@ fn dispatch(n: i32) -> i32 {
             panic!("expected analyze similarity");
         };
         assert!((args.opts.threshold - DEFAULT_SIMILARITY_THRESHOLD).abs() < f64::EPSILON);
-        assert_eq!(args.opts.min_lines, DEFAULT_SIMILARITY_MIN_LINES);
+        // Absent `min-lines` stays `None`: the effective floor depends on
+        // `--target`, so the analyzer resolves it rather than the seam.
+        assert_eq!(args.opts.min_lines, None);
         assert_eq!(args.opts.top, None);
         assert_eq!(args.opts.method, SimilarityMethod::Tsed);
         assert!(!args.opts.doc_overlap);

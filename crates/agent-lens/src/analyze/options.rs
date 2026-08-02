@@ -257,7 +257,8 @@ mod tests {
             sweep: vec![0.6, 0.8],
             paired_by: None,
             drift_floor: 0.4,
-            min_lines: 9,
+            min_lines: Some(9),
+            target: crate::analyze::SimilarityTarget::Types,
             method: crate::analyze::SimilarityMethod::Token,
             doc_overlap: true,
         };
@@ -266,7 +267,8 @@ mod tests {
             .with_threshold(0.6)
             .with_sweep(Some(vec![0.6, 0.8]))
             .with_diff_only(true)
-            .with_min_lines(9)
+            .with_min_lines_opt(Some(9))
+            .with_target(crate::analyze::SimilarityTarget::Types)
             .with_method(crate::analyze::SimilarityMethod::Token)
             .with_doc_overlap(true)
             .with_paired_by(None)

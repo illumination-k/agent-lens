@@ -63,8 +63,9 @@ pub type CouplingAnalyzerError = CrateAnalyzerError;
 pub use similarity::{
     DEFAULT_DRIFT_FLOOR as DEFAULT_SIMILARITY_DRIFT_FLOOR,
     DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
-    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD, FunctionSelection, PairKey,
-    SimilarityAnalyzer, SimilarityMethod,
+    DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD,
+    DEFAULT_TYPE_MIN_LINES as DEFAULT_SIMILARITY_TYPE_MIN_LINES, FunctionSelection, PairKey,
+    SimilarityAnalyzer, SimilarityMethod, SimilarityTarget,
 };
 pub use untested::UntestedAnalyzer;
 pub use visibility::VisibilityAnalyzer;
@@ -206,6 +207,10 @@ pub enum AnalyzerError {
         min_lines: usize,
         strategy: &'static str,
     },
+    #[error(
+        "--paired-by method is incompatible with --target types: a type definition has no owner::method split to key on; use --paired-by name"
+    )]
+    TypeTargetPairedByMethod,
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
     #[error("invalid graph query: {message}")]

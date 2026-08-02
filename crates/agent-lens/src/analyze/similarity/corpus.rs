@@ -7,25 +7,34 @@ use tracing::debug;
 
 use super::FunctionSelection;
 use super::PROFILE_TARGET;
-use super::extract::extract_functions;
+use super::SimilarityTarget;
+use super::extract::{extract_functions, extract_types};
 use crate::analyze::{
     AnalyzePathFilter, AnalyzerError, SourceFile, collect_source_files, read_source,
 };
 
-/// A single function plus the file it originated from. The corpus that
-/// drives pairwise similarity is a flat `Vec<OwnedFunction>` so cross-file
-/// pairs are just regular pairs with different `file`s.
+/// A single comparison unit plus the file it originated from. The corpus
+/// that drives pairwise similarity is a flat `Vec<OwnedUnit>` so
+/// cross-file pairs are just regular pairs with different `file`s.
+///
+/// Both targets share this one type: a type definition is lowered to a
+/// [`FunctionShape`] at collection (its member tree as the body, its
+/// synthesized member signature as the signature), so pairing, scoring,
+/// diff filtering, and clustering never branch on the unit kind.
 #[derive(Debug)]
-pub(super) struct OwnedFunction {
+pub(super) struct OwnedUnit {
     /// Filesystem path used for `git diff` lookups.
     pub(super) file: PathBuf,
     /// Display path (relative to the walk root for directory mode).
     pub(super) rel_path: String,
     pub(super) is_test: bool,
+    /// Language-facing kind label (`"struct"`, `"interface"`, …) for a
+    /// type unit; `None` for a function.
+    pub(super) kind: Option<&'static str>,
     pub(super) shape: FunctionShape,
 }
 
-impl OwnedFunction {
+impl OwnedUnit {
     pub(super) fn name(&self) -> &str {
         &self.shape.display_name
     }
@@ -53,16 +62,22 @@ impl OwnedFunction {
     pub(super) fn doc(&self) -> Option<&str> {
         self.shape.doc.as_deref()
     }
+
+    pub(super) fn is_type(&self) -> bool {
+        self.kind.is_some()
+    }
 }
 
-/// Collect every function under `path` into a flat corpus, tagging each
-/// with the file it came from. Single-file inputs return a 1-element
-/// per-file slice; directory inputs walk recursively, honouring `.gitignore`.
+/// Collect every unit of `target`'s kind under `path` into a flat
+/// corpus, tagging each with the file it came from. Single-file inputs
+/// return a 1-element per-file slice; directory inputs walk recursively,
+/// honouring `.gitignore`.
 pub(super) fn collect_corpus(
     path: &Path,
     path_filter: &AnalyzePathFilter,
     selection: FunctionSelection,
-) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+    target: SimilarityTarget,
+) -> Result<Vec<OwnedUnit>, AnalyzerError> {
     let collection_filter = if selection == FunctionSelection::OnlyTests {
         path_filter.clone().with_only_tests(false)
     } else {
@@ -72,11 +87,11 @@ pub(super) fn collect_corpus(
     let started = Instant::now();
     let files = collect_source_files(path, &filter)?;
 
-    let parsed: Vec<Vec<OwnedFunction>> = files
+    let parsed: Vec<Vec<OwnedUnit>> = files
         .par_iter()
         .map(|source_file| {
             let path_is_test = filter.is_test_path(&source_file.path);
-            collect_file(source_file, selection, path_is_test)
+            collect_file(source_file, selection, path_is_test, target)
         })
         .collect::<Result<_, _>>()?;
 
@@ -86,7 +101,7 @@ pub(super) fn collect_corpus(
         target: PROFILE_TARGET,
         root = %path.display(),
         file_count,
-        function_count = out.len(),
+        unit_count = out.len(),
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         "similarity corpus directory collected"
     );
@@ -97,28 +112,44 @@ fn collect_file(
     file: &SourceFile,
     selection: FunctionSelection,
     path_is_test: bool,
-) -> Result<Vec<OwnedFunction>, AnalyzerError> {
+    target: SimilarityTarget,
+) -> Result<Vec<OwnedUnit>, AnalyzerError> {
     let started = Instant::now();
     let (lang, source) = read_source(&file.path)?;
-    let funcs = extract_functions(lang, &source)?;
-    let out: Vec<_> = funcs
-        .into_iter()
-        .filter_map(|def| {
-            let is_test = def.is_test || path_is_test;
-            selection.includes(is_test).then(|| OwnedFunction {
-                file: file.path.clone(),
-                rel_path: file.display_path.clone(),
-                is_test,
-                shape: FunctionShape::from(def),
+    let out: Vec<_> = match target {
+        SimilarityTarget::Functions => extract_functions(lang, &source)?
+            .into_iter()
+            .filter_map(|def| {
+                let is_test = def.is_test || path_is_test;
+                selection.includes(is_test).then(|| OwnedUnit {
+                    file: file.path.clone(),
+                    rel_path: file.display_path.clone(),
+                    is_test,
+                    kind: None,
+                    shape: FunctionShape::from(def),
+                })
             })
-        })
-        .collect();
+            .collect(),
+        SimilarityTarget::Types => extract_types(lang, &source)?
+            .into_iter()
+            .filter_map(|type_shape| {
+                let is_test = type_shape.is_test || path_is_test;
+                selection.includes(is_test).then(|| OwnedUnit {
+                    file: file.path.clone(),
+                    rel_path: file.display_path.clone(),
+                    is_test,
+                    kind: Some(type_shape.kind_label),
+                    shape: type_shape.into_function_shape(),
+                })
+            })
+            .collect(),
+    };
     debug!(
         target: PROFILE_TARGET,
         path = %file.path.display(),
         language = ?lang,
         bytes = source.len(),
-        function_count = out.len(),
+        unit_count = out.len(),
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         "similarity source parsed"
     );

@@ -186,6 +186,113 @@ fn analyze_similarity_paired_by_reports_drifted_siblings(#[case] config: Option<
     );
 }
 
+const MIRROR_STRUCT_A_RS: &str = r#"
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub retries: u32,
+}
+"#;
+
+const MIRROR_STRUCT_B_RS: &str = r#"
+pub struct JsConfig {
+    pub host: String,
+    pub port: u16,
+    pub retries: u32,
+}
+"#;
+
+/// The types target has to be reachable both ways an analyzer is
+/// driven: the `--target` flag and the `target` profile key. The fixture
+/// is two mirror structs with no function bodies at all, so a passing
+/// assertion also proves the run compared type definitions rather than
+/// silently falling back to the (empty) function corpus.
+#[rstest]
+#[case::flag(None)]
+#[case::profile_key(Some(
+    "[profile.shapes]\npath = \".\"\nformat = \"md\"\ntools = [\"similarity\"]\n\n[profile.shapes.similarity]\ntarget = \"types\"\n"
+))]
+fn analyze_similarity_target_types_reports_mirror_structs(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", MIRROR_STRUCT_A_RS);
+    write_file(dir.path(), "b.rs", MIRROR_STRUCT_B_RS);
+
+    let output = match config {
+        None => agent_lens(
+            &[
+                "analyze",
+                "similarity",
+                ".",
+                "--format",
+                "md",
+                "--target",
+                "types",
+            ],
+            dir.path(),
+            None,
+        ),
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            agent_lens(&["run", "shapes"], dir.path(), None)
+        }
+    };
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("2 type(s)"), "got: {stdout}");
+    assert!(stdout.contains("2 types, similarity"), "got: {stdout}");
+    assert!(stdout.contains("a.rs:`Config`"), "got: {stdout}");
+    assert!(stdout.contains("b.rs:`JsConfig`"), "got: {stdout}");
+}
+
+/// JSON is the machine-facing contract: the types target must carry the
+/// `target` discriminator and per-unit `kind` labels.
+#[test]
+fn analyze_similarity_target_types_json_carries_target_and_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", MIRROR_STRUCT_A_RS);
+    write_file(dir.path(), "b.rs", MIRROR_STRUCT_B_RS);
+
+    let output = agent_lens(
+        &["analyze", "similarity", ".", "--target", "types"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["target"], "types", "got {json}");
+    let units = json["clusters"][0]["units"].as_array().unwrap();
+    assert!(units.iter().all(|u| u["kind"] == "struct"), "got {json}");
+}
+
+#[test]
+fn analyze_similarity_target_types_rejects_paired_by_method() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", MIRROR_STRUCT_A_RS);
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            ".",
+            "--target",
+            "types",
+            "--paired-by",
+            "method",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--paired-by method is incompatible with --target types"),
+        "got: {stderr}"
+    );
+}
+
 const DOCUMENTED_PAIR_RS: &str = r#"
 /// Validate the user id before persisting.
 fn validate_user(id: u64) -> bool {

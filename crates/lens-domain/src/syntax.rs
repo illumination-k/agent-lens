@@ -159,7 +159,7 @@ pub struct SignatureShape {
     pub params: Vec<ParameterShape>,
     pub return_type: SyntaxFact<Option<String>>,
     pub return_type_paths: Vec<String>,
-    pub receiver: SyntaxFact<ReceiverKind>,
+    pub receiver: SyntaxFact<ReceiverShape>,
     pub generics: SyntaxFact<Vec<String>>,
     pub bounds: SyntaxFact<Vec<String>>,
 }
@@ -196,7 +196,7 @@ impl SignatureShape {
             .flat_map(|items| items.iter().map(String::as_str))
     }
 
-    pub fn receiver_kind(&self) -> Option<ReceiverKind> {
+    pub fn receiver_shape(&self) -> Option<ReceiverShape> {
         self.receiver.known_value().copied()
     }
 }
@@ -220,7 +220,7 @@ impl From<FunctionSignature> for SignatureShape {
             params,
             return_type: SyntaxFact::Unknown,
             return_type_paths: signature.return_type_paths,
-            receiver: SyntaxFact::Known(signature.receiver.into()),
+            receiver: SyntaxFact::Known(signature.receiver),
             generics: SyntaxFact::Known(signature.generics),
             bounds: SyntaxFact::Unknown,
         }
@@ -232,25 +232,6 @@ pub struct ParameterShape {
     pub name: SyntaxFact<Option<String>>,
     pub type_annotation: SyntaxFact<Option<String>>,
     pub type_paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReceiverKind {
-    None,
-    Value,
-    Ref,
-    RefMut,
-}
-
-impl From<ReceiverShape> for ReceiverKind {
-    fn from(receiver: ReceiverShape) -> Self {
-        match receiver {
-            ReceiverShape::None => Self::None,
-            ReceiverShape::Value => Self::Value,
-            ReceiverShape::Ref => Self::Ref,
-            ReceiverShape::RefMut => Self::RefMut,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,7 +438,7 @@ mod tests {
         );
         assert_eq!(sig.return_type_paths, ["Result<User>"]);
         assert_eq!(sig.generics().collect::<Vec<_>>(), ["T: Clone"]);
-        assert_eq!(sig.receiver_kind(), Some(ReceiverKind::Ref));
+        assert_eq!(sig.receiver_shape(), Some(ReceiverShape::Ref));
     }
 
     #[test]

@@ -1,13 +1,13 @@
 ---
 name: find-duplicates
-description: Use when the user asks to find duplicated, near-duplicate, copy-pasted, or forwarding-only functions in this codebase, or how many forwarding hops sit between an entry point and the real work — or before adding a new function, to check whether something similar already exists. Wraps `agent-lens analyze similarity`, `agent-lens analyze wrapper`, and `agent-lens analyze delegation`.
+description: Use when the user asks to find duplicated, near-duplicate, copy-pasted, or forwarding-only functions in this codebase, duplicated or drifted struct/class/interface/type definitions (`--target types`), or how many forwarding hops sit between an entry point and the real work — or before adding a new function or type, to check whether something similar already exists. Wraps `agent-lens analyze similarity`, `agent-lens analyze wrapper`, and `agent-lens analyze delegation`.
 ---
 
 # Find duplicate and forwarding functions
 
 Three analyzers cover the "is this already written?" and "why does this take four files?" questions:
 
-- `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ). Functions shorter than `--min-lines` (default `5`) are skipped to keep getters and one-liners out of the report.
+- `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ). Functions shorter than `--min-lines` (default `5`) are skipped to keep getters and one-liners out of the report. With `--target types` it compares type definitions instead — see below.
 - `wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
 - `delegation` — what `wrapper` becomes when it stacks: chains where every hop only forwards, reported with the terminus (the function doing the work) as the headline, plus a per-module roll-up that flags modules built almost entirely out of forwarders.
 
@@ -110,6 +110,43 @@ count is reported too, so an empty report tells you which kind of empty it is.
 
 `--paired-by` conflicts with `--sweep` (which annotates clusters; this mode
 doesn't cluster).
+
+## Comparing type definitions (`--target types`)
+
+`--target types` switches the comparison unit from function bodies to type
+definitions: Rust `struct` / `enum` / `type` alias, TS `interface` / `type`
+alias / `enum`, Python annotated classes (dataclass / TypedDict / pydantic)
+and `Enum` subclasses, Go `struct` / defined types. Each definition is
+compared by its member shape — field names and types (naming conventions
+folded, so `userId` matches `user_id`), enum variants, alias targets — so
+duplicated DTOs, copy-pasted config structs, and drifted mirror types
+surface the same way duplicated functions do:
+
+```bash
+agent-lens analyze similarity <dir> --target types --format md
+agent-lens analyze similarity <dir> --target types --paired-by name --format md
+```
+
+The second form is the drift detector for parallel type hierarchies:
+`Summary` / `JsSummary` / `PySummary` share a key (binding affixes are
+stripped), and every cross-file pair is reported worst-first regardless of
+threshold. `--paired-by method` is rejected for types — a type has no
+method segment to key on.
+
+Everything composes as with functions: `--diff-only`, `--sweep`, `--top`,
+`--threshold`, `--exclude-tests`. Two defaults differ: `--min-lines`
+defaults to `3` (types run shorter than function bodies; one-line aliases
+and unit structs are dropped), and candidate generation is always exact
+(no LSH), so very large corpora (`>~5k` eligible types) hit the scope
+guardrail — narrow the path or raise `--min-lines`.
+
+Reading type output: small structs clear `0.85` more easily than function
+bodies, so on a noisy report raise `--threshold 0.9`–`0.95` or lean on
+`identifier overlap` in the headline — a high body score with high
+identifier overlap is a copy-pasted type; with low overlap it is two
+different entities that happen to have the same shape (often fine). In
+JSON, each unit carries a `kind` (`struct`, `interface`, `enum`,
+`type_alias`, `class`, `dataclass`) so cross-language pairs are explicit.
 
 ## Excluding tests
 
