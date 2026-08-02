@@ -57,10 +57,10 @@ impl ComplexityAnalyzer {
 
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let files = self
+        let scan = self
             .filter
             .collect_per_file(path, |sf| self.analyze_file(sf))?;
-        let report = build_report(path, &files);
+        let report = build_report(path, scan.scanned_file_count, &scan.reports);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.min_score)
         })
@@ -111,7 +111,7 @@ impl PerFileShape for ComplexityShape {
 type Report<'a> = PerFileReport<'a, ComplexityShape, FunctionView<'a>, Summary>;
 type FileView<'a> = super::runner::FileView<'a, ComplexityShape, FunctionView<'a>>;
 
-fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
+fn build_report<'a>(path: &Path, scanned_file_count: usize, files: &'a [FileReport]) -> Report<'a> {
     let views = files
         .iter()
         .map(|f| {
@@ -121,7 +121,7 @@ fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
             )
         })
         .collect();
-    PerFileReport::new(path, views).with_summary(Summary::from_files(files))
+    PerFileReport::new(path, scanned_file_count, views).with_summary(Summary::from_files(files))
 }
 
 #[derive(Debug, Serialize)]
@@ -227,10 +227,12 @@ impl<'a> From<&'a FunctionComplexity> for FunctionView<'a> {
 const DEFAULT_TOP: usize = 5;
 
 fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<u32>) -> String {
+    // Scanned-file count, not with-findings count: a clean run must
+    // read as "files were analyzed, nothing found", not "0 file(s)".
     let mut out = format!(
-        "# Complexity report: {} ({} file(s), {} function(s))\n",
+        "# Complexity report: {} ({} file(s) scanned, {} function(s))\n",
         report.root(),
-        report.file_count(),
+        report.scanned_file_count(),
         report.item_count(),
     );
     if report.item_count() == 0 {
@@ -459,6 +461,7 @@ fn dispatch(n: i32) -> i32 {
             .analyze(&file, OutputFormat::Md)
             .unwrap();
         assert!(md.contains("No functions found"));
+        assert!(md.contains("1 file(s) scanned"), "got: {md}");
     }
 
     #[test]
@@ -644,6 +647,9 @@ fn b(n: i32) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["file_count"], 1);
+        // Dropped from `files`, but still counted as scanned so an
+        // empty report can't be mistaken for "no files considered".
+        assert_eq!(parsed["scanned_file_count"], 2);
         assert_eq!(parsed["files"][0]["file"], "with_fn.rs");
     }
 
