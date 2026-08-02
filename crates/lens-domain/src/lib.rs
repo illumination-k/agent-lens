@@ -19,6 +19,10 @@
 //! * [`lsh`] — MinHash + banded LSH used to pre-filter candidate pairs once
 //!   the corpus grows past a couple hundred functions, replacing the
 //!   quadratic cartesian product with a near-linear pass.
+//! * [`block_shape`] — statement-sequence windows inside function
+//!   bodies, the unit compared by `similarity --target blocks`. Adapters
+//!   supply positioned statements; the windowing that turns them into
+//!   comparison units lives here so every language sees the same rule.
 //! * [`cohesion`] — LCOM4-style cohesion metric over method graphs that the
 //!   language adapters (e.g. `lens-rust`) populate.
 //! * [`complexity`] — per-function Cyclomatic / Cognitive / Nesting / Halstead
@@ -53,6 +57,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod apted;
+pub mod block_shape;
 pub mod cohesion;
 pub mod complexity;
 pub mod context_span;
@@ -73,6 +78,10 @@ pub mod wrapper;
 pub use apted::{
     APTEDOptions, SubtreeSizes, collect_subtree_sizes, compute_edit_distance,
     compute_edit_distance_with_subtree_sizes,
+};
+pub use block_shape::{
+    BlockShape, BlockWindowOptions, DEFAULT_MAX_WINDOW_STATEMENTS, StatementSeq, StatementUnit,
+    block_windows,
 };
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,

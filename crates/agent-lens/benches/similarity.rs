@@ -14,6 +14,7 @@ fn bench_similarity(c: &mut Criterion) {
     let analyzer = SimilarityAnalyzer::new();
     let token_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Token);
     let types_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Types);
+    let blocks_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Blocks);
 
     c.bench_function("similarity_directory_cartesian_32_functions", |b| {
         b.iter(|| {
@@ -60,6 +61,19 @@ fn bench_similarity(c: &mut Criterion) {
     c.bench_function("similarity_directory_types_512", |b| {
         b.iter(|| {
             let report = match types_analyzer.analyze(types.path(), OutputFormat::Json) {
+                Ok(report) => report,
+                Err(err) => panic!("similarity benchmark failed: {err}"),
+            };
+            std::hint::black_box(report.len());
+        });
+    });
+
+    // Blocks multiply the unit count: the dense corpus's 256 functions
+    // mint several thousand statement windows, which is the shape that
+    // decides whether the target is usable on a real repo at all.
+    c.bench_function("similarity_directory_blocks_256_functions", |b| {
+        b.iter(|| {
+            let report = match blocks_analyzer.analyze(medium.path(), OutputFormat::Json) {
                 Ok(report) => report,
                 Err(err) => panic!("similarity benchmark failed: {err}"),
             };

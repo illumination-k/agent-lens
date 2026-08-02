@@ -377,6 +377,15 @@ pub(crate) fn function_body_tree(body: Node<'_>, source: &[u8]) -> TreeNode {
     build_tree(body, source, /* is_root = */ true)
 }
 
+/// Lower a single statement node into the subtree
+/// [`function_body_tree`] nests under `Block`. Used by
+/// `similarity --target blocks`, which compares runs of statements
+/// rather than whole bodies; routing both through [`build_tree`] is what
+/// keeps a window covering a whole body identical to that body's tree.
+pub(crate) fn statement_tree(node: Node<'_>, source: &[u8]) -> TreeNode {
+    build_tree(node, source, /* is_root = */ false)
+}
+
 /// Strip the surrounding quotes from a Go string literal.
 ///
 /// Go has two string literal forms — interpreted strings (`"..."`) and

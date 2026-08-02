@@ -398,7 +398,7 @@ fn jsdoc_text(raw: &str) -> Option<String> {
 /// A nested function (`<parent>::closure#N`) carries no test marker of
 /// its own — it inherits the classification of the enclosing named
 /// function or method, so the `::closure#N` chain is peeled off first.
-fn is_test_item(qualified: &str) -> bool {
+pub(crate) fn is_test_item(qualified: &str) -> bool {
     let base = strip_nested_segments(qualified);
     match base.rsplit_once("::") {
         Some((owner, method)) => {

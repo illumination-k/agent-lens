@@ -67,6 +67,39 @@ from the member list so the signature component of the similarity blend
 unchanged, and `into_function_shape()` lowers the whole definition into the
 `FunctionShape` corpus currency the similarity pipeline runs on.
 
+## BlockShape
+
+`BlockShape` (`lens_domain::block_shape`) is the sub-function unit compared by
+`analyze similarity --target blocks`: a contiguous run of statements inside a
+function body.
+
+Adapters supply `StatementSeq`s — one per statement list in the file, at every
+nesting depth (function body, `if` arm, loop body, `switch` case, `match` arm),
+each `StatementUnit` carrying its 1-based inclusive line span and the same
+subtree the adapter would nest under a function body's `Block`. Reusing the
+body lowering is what makes a window covering a whole body identical to that
+body's own tree.
+
+Windowing lives in the domain, not the adapters, so every language produces
+the same unit population for the same shape of code. `block_windows` slides
+over each list, minting one window per contiguous run of up to
+`DEFAULT_MAX_WINDOW_STATEMENTS` (8) statements, and drops a window that
+
+- spans fewer than `min_lines` source lines (the `--min-lines` cut), or
+- lowers to fewer than `MIN_WINDOW_TREE_NODES` (8) tree nodes, or
+- repeats a source span already emitted for that file.
+
+The node floor matters because line count is a poor size proxy here: a Rust
+`matches!` body lowers to one `MacroStmt` leaf however many lines it spans, and
+two such windows would score a perfect 1.0 against each other. Capping the run
+length keeps the unit count linear in the statement count
+(`statements × max_statements`) rather than quadratic.
+
+`into_function_shape()` lowers a window into the `FunctionShape` corpus
+currency, with the window tree as the body and no signature — blocks have
+nothing to compare there, so the analyzer scores them on the body alone
+instead of treating a missing signature as a perfect match.
+
 ## SignatureShape
 
 `SignatureShape` records comparable syntax where available:

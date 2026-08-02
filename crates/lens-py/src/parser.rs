@@ -217,11 +217,24 @@ pub(crate) fn docstring_text(func: &StmtFunctionDef) -> Option<String> {
 /// Lower a function body into a generic [`TreeNode`] rooted at `Block`,
 /// matching the shape similarity / wrapper analyzers expect.
 pub(crate) fn function_body_tree(func: &StmtFunctionDef) -> TreeNode {
+    TreeNode::with_children("Block", "", func.body.iter().map(stmt_tree).collect())
+}
+
+/// Lower a single statement into the subtree [`function_body_tree`]
+/// would nest under `Block`. `similarity --target blocks` compares runs
+/// of statements, so it needs the per-statement subtree; routing both
+/// through one lowering is what keeps a window covering a whole body
+/// identical to that body's own tree.
+pub(crate) fn stmt_tree(stmt: &Stmt) -> TreeNode {
     let mut builder = TreeBuilder::new("Block");
-    for stmt in &func.body {
-        builder.visit_stmt(stmt);
-    }
-    builder.finish()
+    builder.visit_stmt(stmt);
+    let mut root = builder.finish();
+    // `visit_stmt` enters exactly once and leaves exactly once, so the
+    // root has exactly one child. The fallback keeps the label rather
+    // than panicking if that ever stops holding.
+    root.children
+        .pop()
+        .unwrap_or_else(|| TreeNode::new(stmt_label(stmt), stmt_value(stmt)))
 }
 
 /// Builds a [`TreeNode`] tree by walking the AST with [`Visitor`].

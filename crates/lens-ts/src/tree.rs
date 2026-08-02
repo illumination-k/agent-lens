@@ -35,7 +35,7 @@ fn node_with(label: &str, children: impl IntoIterator<Item = TreeNode>) -> TreeN
     n
 }
 
-fn stmt_tree(stmt: &Statement) -> TreeNode {
+pub(crate) fn stmt_tree(stmt: &Statement) -> TreeNode {
     match stmt {
         Statement::BlockStatement(b) => node_with("Block", b.body.iter().map(stmt_tree)),
         Statement::IfStatement(it) => if_stmt(it),

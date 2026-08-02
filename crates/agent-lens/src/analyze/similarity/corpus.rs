@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{FunctionShape, SignatureShape, TreeNode};
+use lens_domain::{BlockWindowOptions, FunctionShape, SignatureShape, TreeNode, block_windows};
 use rayon::prelude::*;
 use tracing::debug;
 
 use super::FunctionSelection;
 use super::PROFILE_TARGET;
 use super::SimilarityTarget;
-use super::extract::{extract_functions, extract_types};
+use super::extract::{extract_functions, extract_statement_seqs, extract_types};
 use crate::analyze::{
     AnalyzePathFilter, AnalyzerError, SourceFile, collect_source_files, read_source,
 };
@@ -72,11 +72,18 @@ impl OwnedUnit {
 /// corpus, tagging each with the file it came from. Single-file inputs
 /// return a 1-element per-file slice; directory inputs walk recursively,
 /// honouring `.gitignore`.
+///
+/// `min_lines` is only consulted for [`SimilarityTarget::Blocks`], where
+/// it bounds the window population at collection time rather than
+/// filtering afterwards: a corpus of every statement run regardless of
+/// length would be an order of magnitude larger than the one anybody
+/// asked for.
 pub(super) fn collect_corpus(
     path: &Path,
     path_filter: &AnalyzePathFilter,
     selection: FunctionSelection,
     target: SimilarityTarget,
+    min_lines: usize,
 ) -> Result<Vec<OwnedUnit>, AnalyzerError> {
     let collection_filter = if selection == FunctionSelection::OnlyTests {
         path_filter.clone().with_only_tests(false)
@@ -91,7 +98,7 @@ pub(super) fn collect_corpus(
         .par_iter()
         .map(|source_file| {
             let path_is_test = filter.is_test_path(&source_file.path);
-            collect_file(source_file, selection, path_is_test, target)
+            collect_file(source_file, selection, path_is_test, target, min_lines)
         })
         .collect::<Result<_, _>>()?;
 
@@ -113,6 +120,7 @@ fn collect_file(
     selection: FunctionSelection,
     path_is_test: bool,
     target: SimilarityTarget,
+    min_lines: usize,
 ) -> Result<Vec<OwnedUnit>, AnalyzerError> {
     let started = Instant::now();
     let (lang, source) = read_source(&file.path)?;
@@ -143,6 +151,32 @@ fn collect_file(
                 })
             })
             .collect(),
+        SimilarityTarget::Blocks => {
+            let seqs: Vec<_> = extract_statement_seqs(lang, &source)?
+                .into_iter()
+                .filter(|seq| selection.includes(seq.is_test || path_is_test))
+                .map(|mut seq| {
+                    seq.is_test = seq.is_test || path_is_test;
+                    seq
+                })
+                .collect();
+            block_windows(
+                &seqs,
+                BlockWindowOptions {
+                    min_lines,
+                    ..BlockWindowOptions::default()
+                },
+            )
+            .into_iter()
+            .map(|window| OwnedUnit {
+                file: file.path.clone(),
+                rel_path: file.display_path.clone(),
+                is_test: window.is_test,
+                kind: None,
+                shape: window.into_function_shape(),
+            })
+            .collect()
+        }
     };
     debug!(
         target: PROFILE_TARGET,
