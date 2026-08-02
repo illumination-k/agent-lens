@@ -1691,6 +1691,16 @@ mod tests {
         assert_eq!(report["summary"]["confirmed_count"], 1);
         assert_eq!(report["summary"]["reached_function_count"], 2);
         assert_eq!(report["audit"]["reference_scan_file_count"], 1);
+
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains("1 confirmed function(s) hold 1 LOC"),
+            "got {md}",
+        );
+        assert!(
+            md.contains("- `crate::orphan` (src/main.rs:3, 1 LOC, no entry path)"),
+            "the row carries where it is, how big it is, and why it is here: {md}",
+        );
     }
 
     /// The reference scan covers the whole corpus, not the defining
@@ -1740,6 +1750,13 @@ mod tests {
             "got {:?}",
             demotions(&report, "::orphan"),
         );
+
+        // A row an agent is told to check has to say what to check.
+        let md = UnreachableAnalyzer::new()
+            .with_tier(Some(Tier::Unknown))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("its name is written elsewhere"), "got {md}");
     }
 
     /// A mention that only dead code makes is no evidence: the whole
@@ -1884,6 +1901,17 @@ mod tests {
             tier_of(&report, "::used"),
             None,
             "a public function with a caller is not a finding: {report}",
+        );
+
+        let md = UnreachableAnalyzer::new()
+            .with_tier(Some(Tier::Likely))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains(
+                "`crate::unused` (src/lib.rs:2, 1 LOC, entry point, no caller in the tree)"
+            ),
+            "an uncalled entry reads differently from an unreachable function: {md}",
         );
     }
 
@@ -2054,6 +2082,16 @@ mod tests {
                 == 3,
             "each member cross-references its island: {report}",
         );
+
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains("island 0: 3 function(s), 3 LOC, 3 private, in `crate`"),
+            "got {md}",
+        );
+        assert!(
+            md.contains("delete in order: `src/lib.rs:head:2`"),
+            "the order is the edit list, so it is rendered, not just stored: {md}",
+        );
     }
 
     /// A cluster whose members the analyzer could not confirm dead is
@@ -2117,6 +2155,13 @@ mod tests {
         );
         assert_eq!(report["entries"]["function_count"], 3);
         assert_eq!(report["entries"]["absent"], false);
+        // The markdown carries the same set: a reader who only sees the
+        // rendered report still knows what the verdicts are relative to.
+        assert!(
+            analyze_md(dir.path()).contains("Entry set: 3 function(s) (1 main, 1 test, 1 public)"),
+            "got {}",
+            analyze_md(dir.path()),
+        );
     }
 
     /// Languages with no extracted export status are treated as live so
