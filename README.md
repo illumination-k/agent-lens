@@ -766,6 +766,7 @@ and drives every one of them:
 | profile      | what it looks at                                                          |
 | ------------ | ------------------------------------------------------------------------- |
 | `self`       | the `agent-lens` crate, tests excluded — the product-side refactor audit  |
+| `self-reach` | the workspace with tests kept — untested, unreachable, over-exposed code  |
 | `self-tests` | the same crate, tests only — copy-pasted fixtures, dead helpers           |
 | `lenses`     | the four language front-ends, where a fix applied to one can miss three   |
 | `web`        | the TypeScript viewer, the only end-to-end run of the TS front-end        |
@@ -789,6 +790,12 @@ profile is caught outright.
 Before a commit, `mise run selftest changes` is the fast one to reach for: every
 tool runs `--diff-only`, so an empty report means the pending edit introduced no
 duplicate, no forwarding-only wrapper, and no complexity spike.
+
+The split between `self` and `self-reach` is not cosmetic. `exclude-tests` is
+what makes the refactor rankings readable, and it is also what removes the
+starting points `untested` and `unreachable` traverse from; a single crate has
+no cross-crate caller for `visibility` to find. Each analyzer says so in its own
+report — the profiles just take it at its word.
 
 Benchmarks use Criterion's baseline mechanism:
 

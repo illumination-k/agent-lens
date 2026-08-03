@@ -35,7 +35,7 @@ mise run selftest # Run agent-lens over its own sources; not part of ci
 ## Dogfooding
 
 `agent-lens.toml` declares one profile per view of this repository (`self`,
-`self-tests`, `lenses`, `web`, `changes`, `baseline`), and `mise run selftest`
+`self-reach`, `self-tests`, `lenses`, `web`, `changes`, `baseline`), and `mise run selftest`
 builds the binary and drives every one of them. Run a single profile with
 `mise run selftest <profile>`.
 

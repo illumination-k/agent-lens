@@ -41,9 +41,6 @@ tools = [
   "hubs",
   "hotspot",
   "risk",
-  "untested",
-  "unreachable",
-  "visibility",
 ]
 
 # Every ranking below is capped and floored. This profile's output is
@@ -85,14 +82,35 @@ top = 15
 [profile.self.layers]
 top = 15
 
-[profile.self.untested]
-top = 15
+# Reachability: what no test path guards, what nothing can reach any
+# more, and what is `pub` wider than its callers need.
+#
+# These three are separated from `self` because both of its filters
+# break them, which the reports say outright:
+#
+#   * `exclude-tests` removes the traversal's own starting points, so
+#     `untested` called all 827 functions untested and `unreachable`
+#     warned that code used only by tests looks dead.
+#   * a single crate has no cross-crate caller, so `visibility` cannot
+#     tell a library's intended API from over-exposure — at the
+#     workspace root it recognises 142 `pub use` re-exports it could not
+#     see from inside one crate.
+#
+# So this profile keeps the tests and widens to the workspace.
+[profile.self-reach]
+path = "crates"
+format = "md"
+exclude = ["agent-lens/benches/**"]
+tools = ["untested", "unreachable", "visibility"]
 
-[profile.self.unreachable]
-top = 15
+[profile.self-reach.untested]
+top = 10
 
-[profile.self.visibility]
-top = 15
+[profile.self-reach.unreachable]
+top = 10
+
+[profile.self-reach.visibility]
+top = 10
 
 # The same lens turned on the test corpus. Test code has its own failure
 # modes — a copy-pasted fixture that wants to be one `#[rstest]` case, a
