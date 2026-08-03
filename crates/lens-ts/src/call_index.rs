@@ -400,16 +400,14 @@ fn collect_imports(program: &Program, module: &str) -> Vec<ImportShape> {
     out
 }
 
+/// Every import in this language names its module, alias, and symbol
+/// outright, so the three facts are always known.
 fn import_shape(
     local_alias: Option<String>,
     imported_module: String,
     exported_symbol: Option<String>,
 ) -> ImportShape {
-    ImportShape {
-        imported_module: SyntaxFact::Known(imported_module),
-        local_alias: SyntaxFact::Known(local_alias),
-        exported_symbol: SyntaxFact::Known(exported_symbol),
-    }
+    ImportShape::known(imported_module, local_alias, exported_symbol)
 }
 
 fn module_export_name(name: &ModuleExportName) -> Option<String> {

@@ -367,6 +367,28 @@ pub struct ImportShape {
     pub exported_symbol: SyntaxFact<Option<String>>,
 }
 
+impl ImportShape {
+    /// An import whose three parts the adapter read straight off the
+    /// syntax tree, so every field is [`SyntaxFact::Known`].
+    ///
+    /// This is the shape a language with explicit import statements
+    /// produces — TypeScript and Python both build every import this
+    /// way. It lives here rather than in each adapter because "all three
+    /// facts are known" is a statement about [`ImportShape`], not about
+    /// any one language.
+    pub fn known(
+        imported_module: String,
+        local_alias: Option<String>,
+        exported_symbol: Option<String>,
+    ) -> Self {
+        Self {
+            imported_module: SyntaxFact::Known(imported_module),
+            local_alias: SyntaxFact::Known(local_alias),
+            exported_symbol: SyntaxFact::Known(exported_symbol),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +401,32 @@ mod tests {
 
         assert_eq!(known.known_value().map(String::as_str), Some("value"));
         assert_eq!(unknown.known_value(), None);
+    }
+
+    #[test]
+    fn import_shape_known_marks_every_field_as_known() {
+        let shape = ImportShape::known(
+            "./mod".to_owned(),
+            Some("alias".to_owned()),
+            Some("symbol".to_owned()),
+        );
+        assert_eq!(
+            shape,
+            ImportShape {
+                imported_module: SyntaxFact::Known("./mod".to_owned()),
+                local_alias: SyntaxFact::Known(Some("alias".to_owned())),
+                exported_symbol: SyntaxFact::Known(Some("symbol".to_owned())),
+            }
+        );
+    }
+
+    /// An absent alias or symbol is a *known* absence — a default import
+    /// really has no named symbol — not an unread fact.
+    #[test]
+    fn import_shape_known_treats_none_as_a_known_absence() {
+        let shape = ImportShape::known("./mod".to_owned(), None, None);
+        assert_eq!(shape.local_alias, SyntaxFact::Known(None));
+        assert_eq!(shape.exported_symbol, SyntaxFact::Known(None));
     }
 
     #[test]
