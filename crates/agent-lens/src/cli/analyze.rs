@@ -175,134 +175,85 @@ impl WithAnalyzePathArgs for SimilarityAnalyzer {
     }
 }
 
+/// Dispatch an [`AnalyzeCommand`] variant onto its analyzer.
+///
+/// Every arm has the same shape — take the options group, take the
+/// shared path filter, run — and differs only in which analyzer and
+/// which constructor. Spelling that out eighteen times made the one
+/// interesting line per analyzer (`with_options` vs `from_options` vs
+/// no options at all) invisible; here the three groups *are* the
+/// structure, and adding an analyzer is a single line in one of them.
+macro_rules! dispatch_analyze {
+    (
+        $cmd:expr;
+        // Analyzers built from a `Default` and handed their options group.
+        with_options { $($wo_variant:ident => $wo_analyzer:ty),* $(,)? }
+        // Analyzers whose options carry required fields, so the options
+        // group *is* the constructor.
+        from_options { $($fo_variant:ident => $fo_analyzer:ty),* $(,)? }
+        // Analyzers with no flags beyond the shared path/format args.
+        no_options { $($no_variant:ident => $no_analyzer:ty),* $(,)? }
+    ) => {
+        match $cmd {
+            $(
+                AnalyzeCommand::$wo_variant(args) => {
+                    let (path, format, path_filter) = args.common.into_parts();
+                    <$wo_analyzer>::new()
+                        .with_options(args.opts)
+                        .with_analyze_path_args(path_filter)
+                        .analyze(&path, format)?
+                }
+            )*
+            $(
+                AnalyzeCommand::$fo_variant(args) => {
+                    let (path, format, path_filter) = args.common.into_parts();
+                    <$fo_analyzer>::from_options(args.opts)
+                        .with_analyze_path_args(path_filter)
+                        .analyze(&path, format)?
+                }
+            )*
+            $(
+                AnalyzeCommand::$no_variant(args) => {
+                    let (path, format, path_filter) = args.into_parts();
+                    <$no_analyzer>::new()
+                        .with_analyze_path_args(path_filter)
+                        .analyze(&path, format)?
+                }
+            )*
+        }
+    };
+}
+
 impl AnalyzeCommand {
     /// Pick the right analyzer for this CLI variant and produce its
-    /// report. Every arm has the same shape: hand the analyzer its whole
-    /// options group, then the shared path filter. Which flags exist and
-    /// what they mean lives with the analyzer, not here.
+    /// report. Which flags exist and what they mean lives with the
+    /// analyzer, not here.
     pub(super) fn run(self) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(match self {
-            Self::Cohesion(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                CohesionAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
+        Ok(dispatch_analyze! {
+            self;
+            with_options {
+                Cohesion => CohesionAnalyzer,
+                Complexity => ComplexityAnalyzer,
+                ContextSpan => ContextSpanAnalyzer,
+                Delegation => DelegationAnalyzer,
+                Hotspot => HotspotAnalyzer,
+                Hubs => HubsAnalyzer,
+                Impact => ImpactAnalyzer,
+                Layers => LayersAnalyzer,
+                Risk => RiskAnalyzer,
+                Similarity => SimilarityAnalyzer,
+                Unreachable => UnreachableAnalyzer,
+                Untested => UntestedAnalyzer,
+                Visibility => VisibilityAnalyzer,
+                Wrapper => WrapperAnalyzer,
             }
-            Self::Complexity(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                ComplexityAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
+            from_options {
+                GraphQuery => GraphQueryAnalyzer,
             }
-            Self::ContextSpan(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                ContextSpanAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Delegation(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                DelegationAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Hotspot(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                HotspotAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Hubs(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                HubsAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Impact(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                ImpactAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Layers(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                LayersAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Risk(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                RiskAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Similarity(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                SimilarityAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Unreachable(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                UnreachableAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Untested(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                UntestedAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Visibility(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                VisibilityAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Wrapper(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                WrapperAnalyzer::new()
-                    .with_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::GraphQuery(args) => {
-                let (path, format, path_filter) = args.common.into_parts();
-                GraphQueryAnalyzer::from_options(args.opts)
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Coupling(args) => {
-                let (path, format, path_filter) = args.into_parts();
-                CouplingAnalyzer::new()
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::Cycles(args) => {
-                let (path, format, path_filter) = args.into_parts();
-                CyclesAnalyzer::new()
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
-            }
-            Self::FunctionGraph(args) => {
-                let (path, format, path_filter) = args.into_parts();
-                FunctionGraphAnalyzer::new()
-                    .with_analyze_path_args(path_filter)
-                    .analyze(&path, format)?
+            no_options {
+                Coupling => CouplingAnalyzer,
+                Cycles => CyclesAnalyzer,
+                FunctionGraph => FunctionGraphAnalyzer,
             }
         })
     }

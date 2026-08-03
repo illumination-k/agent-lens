@@ -53,7 +53,8 @@ use super::call_graph::algo::{
 };
 use super::call_graph::model::{CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::churn::{ChurnError, ChurnScope};
+use super::churn::ChurnScope;
+use super::error_from::impl_from_churn_error;
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
@@ -92,15 +93,7 @@ pub enum RiskError {
     NotInGitRepo { path: PathBuf },
 }
 
-impl From<ChurnError> for RiskError {
-    fn from(error: ChurnError) -> Self {
-        match error {
-            ChurnError::Io { path, source } => Self::Io { path, source },
-            ChurnError::Git { stderr } => Self::Git { stderr },
-            ChurnError::NotInGitRepo { path } => Self::NotInGitRepo { path },
-        }
-    }
-}
+impl_from_churn_error!(RiskError);
 
 analyzer_options! {
     /// `analyze risk` flags, and the `[profile.<name>.risk]` table.

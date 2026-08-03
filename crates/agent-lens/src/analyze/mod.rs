@@ -210,6 +210,13 @@ pub enum AnalyzerError {
         min_lines: usize,
         strategy: &'static str,
     },
+    /// A similarity score lives in `[0.0, 1.0]`, so a cut outside that
+    /// range can never be crossed. Left unchecked it produces an empty
+    /// report, which reads as "nothing similar here" — the opposite of
+    /// what happened. Fail instead of answering a question that was not
+    /// asked.
+    #[error("{flag} must be within [0.0, 1.0]; got {value} — no similarity score can reach it")]
+    SimilarityScoreOutOfRange { flag: &'static str, value: f64 },
     #[error(
         "--paired-by method is incompatible with --target types: a type definition has no owner::method split to key on; use --paired-by name"
     )]

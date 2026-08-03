@@ -74,7 +74,9 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::{ModuleSection, render_module_confidence, render_module_sections};
+use super::format::{
+    ModuleSection, render_backticked_list, render_module_confidence, render_module_sections,
+};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
@@ -1569,22 +1571,6 @@ fn render_islands(out: &mut String, islands: &[Island]) {
     let overflow = islands.len().saturating_sub(ISLANDS_SHOWN);
     if overflow > 0 {
         let _ = writeln!(out, "- +{overflow} more (JSON output carries every island)");
-    }
-}
-
-/// Backticked items up to `cap`, the remainder rolled into a count.
-fn render_backticked_list(items: &[String], cap: usize) -> String {
-    let listed = items
-        .iter()
-        .take(cap)
-        .map(|item| format!("`{item}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let overflow = items.len().saturating_sub(cap);
-    if overflow > 0 {
-        format!("{listed} +{overflow} more")
-    } else {
-        listed
     }
 }
 

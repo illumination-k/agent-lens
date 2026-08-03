@@ -353,12 +353,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap the result set by node count.",
             },
         ],
-        ToolName::ContextSpan => &[Field {
-            key: "entry-glob",
-            ty: "array<string> (globs)",
-            presence: "default: []",
-            desc: "Entry-point globs used to seed the span walk.",
-        }],
+        ToolName::ContextSpan => &[
+            Field {
+                key: "entry-glob",
+                ty: "array<string> (globs)",
+                presence: "default: []",
+                desc: "Entry-point globs used to seed the span walk.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown module table to the top N spans.",
+            },
+        ],
         ToolName::Wrapper => &[Field {
             key: "diff-only",
             ty: "bool",

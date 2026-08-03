@@ -113,7 +113,12 @@ impl ResolvedProfile {
 /// hand-typed commands produce identical per-tool output.
 pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = ResolvedProfile::resolve(args.selector)?;
-    let format = resolved.profile.format.unwrap_or(OutputFormat::Json);
+    // `--format` beats the profile's `format`, which in turn beats the
+    // JSON default: the flag is the caller speaking about this one run.
+    let format = args
+        .format
+        .or(resolved.profile.format)
+        .unwrap_or(OutputFormat::Json);
 
     let mut sections: Vec<(config::ToolName, String)> = Vec::new();
     for tool in resolved.tools() {
