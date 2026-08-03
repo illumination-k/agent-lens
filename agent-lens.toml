@@ -23,6 +23,11 @@
 path = "crates/agent-lens"
 format = "md"
 exclude-tests = true
+# `benches/` is not test-like by path, so `exclude-tests` keeps it. The
+# Criterion corpus writers there are deliberately near-identical — that
+# is what they are measuring — and without this they are the largest
+# similarity cluster in the crate, every run, forever.
+exclude = ["benches/**"]
 tools = [
   "complexity",
   "cohesion",
