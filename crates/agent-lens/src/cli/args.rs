@@ -64,6 +64,15 @@ pub(super) enum Command {
     /// combined document.
     #[command(after_long_help = examples::RUN)]
     Run(RunArgs),
+    /// Snapshot a profile's analyzers as a compact set of metrics.
+    ///
+    /// A baseline is what turns an analyzer into a check: comparing a
+    /// later run against a stored snapshot separates "this change made
+    /// things worse" from "this file was already like that", so a
+    /// repository can adopt a threshold without first paying off its
+    /// existing debt.
+    #[command(subcommand, after_long_help = examples::BASELINE)]
+    Baseline(BaselineCommand),
     /// List or install the Claude Code skills bundled with this binary.
     ///
     /// The skills teach a coding agent which analyzer fits a given
@@ -131,14 +140,50 @@ pub(super) struct SkillsInstallArgs {
     pub(super) force: bool,
 }
 
+/// How a command names the profile it works on. Shared by every
+/// profile-driven command so `run` and `baseline create` cannot drift on
+/// what "which profile, from which config" means.
 #[derive(Debug, Args)]
-pub(super) struct RunArgs {
+pub(super) struct ProfileSelectorArgs {
     /// Name of the `[profile.<name>]` table to run.
     pub(super) profile: String,
     /// Path to an explicit `agent-lens.toml`. Defaults to the nearest
     /// one found by walking up from the current directory.
     #[arg(long, value_name = "PATH")]
     pub(super) config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct RunArgs {
+    #[command(flatten)]
+    pub(super) selector: ProfileSelectorArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum BaselineCommand {
+    /// Snapshot a profile's metrics as a JSON document.
+    ///
+    /// Every analyzer in the profile runs as JSON — whatever the
+    /// profile's `format` says, since that key shapes the report a
+    /// human or agent reads while a snapshot is built from structured
+    /// fields — and each report is reduced to a handful of named
+    /// numbers. Analyzers with no baseline summary yet are listed under
+    /// `skipped` instead of being silently dropped.
+    ///
+    /// The document is deterministic: the same tree at the same commit
+    /// snapshots byte-identically, with no wall-clock timestamp to make
+    /// a regeneration look like a change.
+    Create(BaselineCreateArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct BaselineCreateArgs {
+    #[command(flatten)]
+    pub(super) selector: ProfileSelectorArgs,
+    /// Write the snapshot here instead of stdout, creating the
+    /// directory if needed.
+    #[arg(long, value_name = "PATH")]
+    pub(super) out: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1787,8 +1832,11 @@ mod tests {
         let Command::Run(args) = cli.command else {
             panic!("expected run command");
         };
-        assert_eq!(args.profile, "web");
-        assert_eq!(args.config, Some(PathBuf::from("cfg/agent-lens.toml")));
+        assert_eq!(args.selector.profile, "web");
+        assert_eq!(
+            args.selector.config,
+            Some(PathBuf::from("cfg/agent-lens.toml")),
+        );
     }
 
     #[test]
@@ -1797,13 +1845,55 @@ mod tests {
         let Command::Run(args) = cli.command else {
             panic!("expected run command");
         };
-        assert_eq!(args.profile, "backend");
-        assert_eq!(args.config, None);
+        assert_eq!(args.selector.profile, "backend");
+        assert_eq!(args.selector.config, None);
     }
 
     #[test]
     fn run_requires_a_profile_name() {
         let err = Cli::try_parse_from(["agent-lens", "run"]).expect_err("missing profile");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_baseline_create_with_profile_config_and_out() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "baseline",
+            "create",
+            "web",
+            "--config",
+            "cfg/agent-lens.toml",
+            "--out",
+            "target/baseline.json",
+        ])
+        .expect("clean parse");
+        let Command::Baseline(BaselineCommand::Create(args)) = cli.command else {
+            panic!("expected baseline create command");
+        };
+        assert_eq!(args.selector.profile, "web");
+        assert_eq!(
+            args.selector.config,
+            Some(PathBuf::from("cfg/agent-lens.toml")),
+        );
+        assert_eq!(args.out, Some(PathBuf::from("target/baseline.json")));
+    }
+
+    #[test]
+    fn baseline_create_defaults_to_stdout_and_a_discovered_config() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "baseline", "create", "web"]).expect("clean parse");
+        let Command::Baseline(BaselineCommand::Create(args)) = cli.command else {
+            panic!("expected baseline create command");
+        };
+        assert_eq!(args.selector.config, None);
+        assert_eq!(args.out, None);
+    }
+
+    #[test]
+    fn baseline_create_requires_a_profile_name() {
+        let err =
+            Cli::try_parse_from(["agent-lens", "baseline", "create"]).expect_err("missing profile");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 

@@ -913,6 +913,142 @@ fn run_without_a_config_file_exits_nonzero() {
 }
 
 #[test]
+fn baseline_create_snapshots_profile_metrics() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\", \"cohesion\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["profile"], "audit");
+    assert_eq!(json["target"], "src");
+    assert_eq!(json["tools"][0]["tool"], "complexity");
+    assert_eq!(json["tools"][0]["metrics"]["file_count"], 1);
+    assert_eq!(json["tools"][0]["metrics"]["cyclomatic_max"], 2);
+    assert_eq!(json["tools"][1]["tool"], "cohesion");
+    // Outside a git tree the snapshot still stands; it just cannot say
+    // which commit it describes.
+    assert!(json.get("commit").is_none(), "got: {json}");
+    assert!(json.get("skipped").is_none(), "got: {json}");
+}
+
+/// A profile's `format` shapes the report a reader gets from `run`; a
+/// snapshot is built from structured fields either way.
+#[test]
+fn baseline_create_ignores_the_profiles_markdown_format() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["tools"][0]["metrics"]["function_count"], 1);
+}
+
+#[test]
+fn baseline_create_records_the_commit_and_repeats_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+
+    let first = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let second = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&first);
+    assert_eq!(
+        json["commit"].as_str().map(str::len),
+        Some(40),
+        "got: {json}"
+    );
+    // Nothing in a snapshot reads the clock, so re-running it against an
+    // unchanged tree must not produce a diff.
+    assert_eq!(first.stdout, second.stdout);
+}
+
+#[test]
+fn baseline_create_lists_analyzers_it_cannot_summarize() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"wrapper\", \"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["skipped"][0]["tool"], "wrapper");
+    assert!(json["skipped"][0]["reason"].is_string(), "got: {json}");
+    // The covered tools still make it into the snapshot.
+    assert_eq!(json["tools"][0]["tool"], "complexity");
+}
+
+#[test]
+fn baseline_create_writes_the_snapshot_to_out_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(
+        &[
+            "baseline",
+            "create",
+            "audit",
+            "--out",
+            "target/lens/baseline.json",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.stdout.is_empty(), "stdout: {:?}", output.stdout);
+    // The directory did not exist beforehand: a snapshot's natural home
+    // is a build path nothing has created yet.
+    let written = std::fs::read_to_string(dir.path().join("target/lens/baseline.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+    assert_eq!(json["tools"][0]["tool"], "complexity");
+    assert!(written.ends_with("}\n"), "got: {written}");
+}
+
+#[test]
+fn baseline_create_with_unknown_profile_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "missing"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("agent-lens failed"), "got: {stderr}");
+}
+
+#[test]
 fn help_md_emits_markdown_reference() {
     let dir = tempfile::tempdir().unwrap();
     let output = agent_lens(&["help", "--md"], dir.path(), None);

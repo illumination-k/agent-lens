@@ -1,0 +1,22 @@
+# Analysis profiles for this repository.
+#
+# `baseline` is the metric snapshot the roadmap's Phase 0 asks for:
+#
+#     agent-lens baseline create baseline --out target/agent-lens/baseline.json
+#
+# It targets the `agent-lens` crate because coupling and context-span
+# work from a single crate root, and that crate is where the analyzers,
+# hooks, and CLI all live. Tests are excluded: their complexity and
+# cohesion are real but they are not the surface this baseline is meant
+# to hold steady.
+[profile.baseline]
+path = "crates/agent-lens"
+exclude-tests = true
+tools = [
+  "complexity",
+  "cohesion",
+  "coupling",
+  "context-span",
+  "hotspot",
+  "similarity",
+]

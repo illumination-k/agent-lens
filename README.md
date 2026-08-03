@@ -300,10 +300,83 @@ Markdown — every `[profile.<name>]` key and per-tool override table, with type
 defaults, and a worked example — so an agent can author or audit a config
 without reading the source.
 
+### As a baseline
+
+An analyzer report says what is wrong now. A **baseline** says whether it got
+worse: `agent-lens baseline create <profile>` runs the profile's analyzers and
+reduces each report to a handful of named numbers, so a later run can be
+compared against the stored snapshot. That is what lets a repository adopt a
+threshold without first paying off the debt it already has — only regressions
+have to be new.
+
+```bash
+# Snapshot the profile's metrics on stdout
+agent-lens baseline create baseline
+
+# …or straight to a file (parent directories are created)
+agent-lens baseline create baseline --out target/agent-lens/baseline.json
+```
+
+```json
+{
+  "schema_version": 1,
+  "tool_version": "0.2.0",
+  "profile": "baseline",
+  "target": "crates/agent-lens",
+  "commit": "85488bfd5bd99874e4652ba62741346164c8055c",
+  "tools": [
+    {
+      "tool": "complexity",
+      "metrics": {
+        "cognitive_max": 24,
+        "file_count": 75,
+        "function_count": 1848
+      }
+    }
+  ]
+}
+```
+
+The analyzers always run as JSON here, whatever the profile's `format` says:
+that key shapes the report a reader gets from `run`, while a snapshot is built
+from structured fields. One profile therefore serves both.
+
+Metrics per analyzer:
+
+| Analyzer       | Metrics                                                                                                                                         |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `complexity`   | `file_count`, `function_count`, `cyclomatic_max`, `cognitive_max`, `cognitive_p95`, `max_nesting_max`, `loc_total`, `maintainability_index_min` |
+| `cohesion`     | `file_count`, `unit_count`, `lcom4_max`, `split_unit_count` (units with LCOM4 ≥ 2)                                                              |
+| `coupling`     | `module_count`, `edge_count`, `cycle_count`, `fan_in_max`, `fan_out_max`, `ifc_max`                                                             |
+| `context-span` | `module_count`, `transitive_max`, `transitive_sum`                                                                                              |
+| `hotspot`      | `file_count`, `score_max`, `commits_max`, `cognitive_max`                                                                                       |
+| `similarity`   | `unit_count`, `cluster_count`, `clustered_unit_count`, `cluster_max_size`                                                                       |
+
+The `*_count` metrics that size the measured surface (`file_count`,
+`function_count`, `unit_count`, `module_count`) are context, not quality — a
+growing codebase moves them without anything getting worse. Of the rest,
+`maintainability_index_min` is the only one that is worse when it _falls_.
+Any analyzer in the profile that is not in the table above is listed under
+`skipped` with a reason rather than silently dropped — the graph analyzers rank
+individual symbols, and what a snapshot of one should be is not settled yet.
+
+Two properties make the file safe to store and diff:
+
+- **Deterministic.** Nothing reads the clock. The same tree at the same commit
+  snapshots byte-identically, so regenerating never looks like a change; the
+  recorded `commit` is what anchors the snapshot in time.
+- **Honest about gaps.** A metric that was never measured is omitted rather
+  than written as `0` — "no functions were measured" and "the worst function
+  scored 0" are different facts. An empty-but-present population still gets its
+  totals (`clustered_unit_count: 0` on a clean run), but never a maximum.
+
+Comparison and ratcheting — failing on a regression against a stored snapshot —
+are the next step; today the command produces the artifact.
+
 ### Current command surface
 
 The current binary exposes three top-level command trees plus `run`,
-`skills`, `config`, and `help`:
+`baseline`, `skills`, `config`, and `help`:
 
 | Command tree | Commands                                                                                                                                                                                                                       |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -311,6 +384,7 @@ The current binary exposes three top-level command trees plus `run`,
 | `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                      |
 | `analyze`    | `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk` |
 | `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                  |
+| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document                                                                                                                               |
 | `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                                            |
 | `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                                       |
 | `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                                             |
@@ -747,6 +821,10 @@ untested, visibility).
 
 New metrics are prioritised by _does this change how an agent decides what to
 do?_ rather than _does it look nice in a dashboard?_
+
+Turning those analyzers into checks is the other half. `baseline create` is the
+first step — a stored metric snapshot — and comparing a run against one, so a
+build fails on a regression rather than on pre-existing debt, is what follows.
 
 An MCP server front-end is a likely next surface, but the CLI is the source
 of truth.
