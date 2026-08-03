@@ -157,10 +157,12 @@ if [ -n "${usage_profile:-}" ]; then
 else
   # The profile list comes from the config itself, so a profile added to
   # agent-lens.toml is covered without touching this task.
-  profiles="$(sed -n 's/^\[profile\.\([a-z0-9-]*\)\]$/\1/p' agent-lens.toml)"
+  profiles="$(sed -n 's/^\[profile\.\([A-Za-z0-9_-]*\)\]$/\1/p' agent-lens.toml)"
 fi
 
-[ -n "$out" ] && mkdir -p "$out"
+if [ -n "$out" ]; then
+  mkdir -p "$out"
+fi
 for profile in $profiles; do
   echo "==> agent-lens run $profile --format $format" >&2
   if [ -n "$out" ]; then
