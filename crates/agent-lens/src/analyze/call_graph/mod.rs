@@ -256,21 +256,40 @@ impl CallGraphBuilder {
         let mut files = Vec::new();
         let mut crate_cache = CrateNameCache::new();
         for source_file in collect_source_files(path, &filter)? {
-            if !matches!(
-                SourceLang::from_path(&source_file.path),
-                Some(
-                    SourceLang::Rust
-                        | SourceLang::TypeScript(_)
-                        | SourceLang::Python
-                        | SourceLang::Go
-                )
-            ) {
+            if !graphed_language(&source_file.path) {
                 continue;
             }
             let path_is_test = filter.is_test_path(&source_file.path);
             files.push(self.scan_file(path, &source_file, path_is_test, &mut crate_cache)?);
         }
         Ok(CallGraph::build(files))
+    }
+
+    /// Hand every source file the graph would scan to `visit`, as its
+    /// display path (the spelling [`CallGraphNode::file`] uses) and its
+    /// text.
+    ///
+    /// The text is read a second time rather than kept from
+    /// [`Self::build`]: only the reachability analyzer wants it, and
+    /// holding every file of a workspace in memory to spare it one
+    /// re-read would be paid for by every other analyzer. Returns the
+    /// number of files visited.
+    pub(crate) fn visit_source_texts(
+        &self,
+        path: &Path,
+        mut visit: impl FnMut(&str, &str),
+    ) -> Result<usize, AnalyzerError> {
+        let filter = self.collection_filter().compile(path)?;
+        let mut visited = 0;
+        for source_file in collect_source_files(path, &filter)? {
+            if !graphed_language(&source_file.path) {
+                continue;
+            }
+            let (_, source) = read_source(&source_file.path)?;
+            visit(&source_file.display_path, &source);
+            visited += 1;
+        }
+        Ok(visited)
     }
 
     fn scan_file(
@@ -342,14 +361,14 @@ impl CallGraphBuilder {
 /// }
 /// ```
 ///
-/// Analyzers that also need the flag's value at report time (to phrase
+/// Analyzers that also need a flag's value at report time (to phrase
 /// the output differently, say) name the field to mirror it into:
 /// `only_tests => only_tests`.
 macro_rules! delegate_call_graph_builders {
     (
         $field:ident,
         $(#[$only_tests_doc:meta])* only_tests $(=> $only_tests_mirror:ident)?,
-        $(#[$exclude_tests_doc:meta])* exclude_tests,
+        $(#[$exclude_tests_doc:meta])* exclude_tests $(=> $exclude_tests_mirror:ident)?,
     ) => {
         $(#[$only_tests_doc])*
         pub fn with_only_tests(mut self, only_tests: bool) -> Self {
@@ -360,6 +379,7 @@ macro_rules! delegate_call_graph_builders {
 
         $(#[$exclude_tests_doc])*
         pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+            $(self.$exclude_tests_mirror = exclude_tests;)?
             self.$field = self.$field.with_exclude_tests(exclude_tests);
             self
         }
@@ -372,6 +392,16 @@ macro_rules! delegate_call_graph_builders {
 }
 
 pub(crate) use delegate_call_graph_builders;
+
+/// Whether the file's extension maps to a language the graph is built
+/// from. Other supported extensions exist (the per-file analyzers read
+/// them), so this is the graph's own narrower gate.
+fn graphed_language(path: &Path) -> bool {
+    matches!(
+        SourceLang::from_path(path),
+        Some(SourceLang::Rust | SourceLang::TypeScript(_) | SourceLang::Python | SourceLang::Go)
+    )
+}
 
 fn parse_err<E>(e: E) -> AnalyzerError
 where
@@ -528,11 +558,17 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<CallGraphNode> {
                     .known_value()
                     .and_then(|owner| owner.as_ref())
                     .map(|owner| owner.display_name.clone()),
+                owner_kind: f
+                    .owner
+                    .known_value()
+                    .and_then(|owner| owner.as_ref())
+                    .map(|owner| owner.kind),
                 start_line: f.span.start_line,
                 end_line: f.span.end_line,
                 is_test: f.is_test || file.path_is_test,
                 visibility: NodeVisibility::from_shape(&f.visibility),
                 param_count: f.signature_shape().map(|s| s.parameter_count()),
+                attributes: f.attributes.known_value().cloned(),
                 weights: NodeWeights {
                     loc: f.line_count(),
                     cyclomatic_complexity: metrics.map(|m| m.cyclomatic),
@@ -1119,6 +1155,28 @@ mod tests {
             .map(|v| v.node)
             .collect();
         assert_eq!(callers_of_c, vec![c, b, a]);
+    }
+
+    /// Pointed at a file no graph language claims, the builder scans
+    /// nothing rather than failing: the path filter admits a named file
+    /// whatever its extension, so the language gate is what keeps a
+    /// README out of the parser.
+    #[test]
+    fn a_file_outside_the_graph_languages_contributes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let readme = write_file(dir.path(), "README.md", "# not source\n");
+        write_file(dir.path(), "src/lib.rs", "fn a() {}\n");
+
+        let graph = CallGraphBuilder::new().build(&readme).unwrap();
+        assert!(graph.nodes.is_empty(), "got {:?}", graph.nodes);
+        assert_eq!(graph.language, "unknown");
+
+        let mut visited = Vec::new();
+        let count = CallGraphBuilder::new()
+            .visit_source_texts(dir.path(), |file, _| visited.push(file.to_owned()))
+            .unwrap();
+        assert_eq!(visited, ["src/lib.rs"], "the markdown file is not source");
+        assert_eq!(count, 1);
     }
 
     /// The three properties the caller sets carry beyond being the

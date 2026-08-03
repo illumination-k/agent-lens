@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 17] = [
+const TOOL_ORDER: [ToolName; 18] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
@@ -33,6 +33,7 @@ const TOOL_ORDER: [ToolName; 17] = [
     ToolName::Impact,
     ToolName::Layers,
     ToolName::Untested,
+    ToolName::Unreachable,
     ToolName::Visibility,
     ToolName::Delegation,
     ToolName::GraphQuery,
@@ -75,7 +76,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, similarity, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, similarity, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -278,6 +279,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             presence: "optional",
             desc: "Cap the markdown module listing to the top N modules.",
         }],
+        ToolName::Unreachable => &[
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown module listing to the top N modules.",
+            },
+            Field {
+                key: "tier",
+                ty: "\"confirmed\", \"likely\", or \"unknown\"",
+                presence: "default: confirmed",
+                desc: "Lowest confidence tier rendered in markdown. JSON always carries every tier.",
+            },
+        ],
         ToolName::Visibility => &[Field {
             key: "top",
             ty: "int",
@@ -518,7 +533,8 @@ mod tests {
     use crate::config::{
         CohesionOptions, ComplexityOptions, ContextSpanOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        RiskOptions, SimilarityOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
+        RiskOptions, SimilarityOptions, UnreachableOptions, UntestedOptions, VisibilityOptions,
+        WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -546,6 +562,7 @@ mod tests {
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
         assert_tool_parity::<ImpactOptions>(ToolName::Impact);
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
+        assert_tool_parity::<UnreachableOptions>(ToolName::Unreachable);
         assert_tool_parity::<UntestedOptions>(ToolName::Untested);
         assert_tool_parity::<VisibilityOptions>(ToolName::Visibility);
         assert_tool_parity::<DelegationOptions>(ToolName::Delegation);

@@ -132,6 +132,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Impact
         | ToolName::Layers
         | ToolName::Risk
+        | ToolName::Unreachable
         | ToolName::Untested
         | ToolName::Visibility
         | ToolName::Wrapper => None,
@@ -577,6 +578,7 @@ mod tests {
     #[case(ToolName::Impact)]
     #[case(ToolName::Layers)]
     #[case(ToolName::Risk)]
+    #[case(ToolName::Unreachable)]
     #[case(ToolName::Untested)]
     #[case(ToolName::Visibility)]
     #[case(ToolName::Wrapper)]

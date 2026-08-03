@@ -47,6 +47,30 @@ fn is_test_attribute(attr: &Attribute) -> bool {
     matches!(last.as_deref(), Some("test" | "rstest"))
 }
 
+/// The attribute paths carried by `attrs`, as written and without their
+/// arguments: `#[inline]` yields `inline`, `#[cfg(test)]` yields `cfg`,
+/// `#[tokio::main]` yields `tokio::main`.
+///
+/// Doc comments reach syn as `#[doc = "…"]`, so they are dropped here —
+/// they are already carried as [`doc_from_attrs`] and every documented
+/// function would otherwise look annotated. Arguments are dropped
+/// because the consumers ask what kind of annotation this is, not what
+/// it was configured with.
+pub(crate) fn attribute_paths(attrs: &[Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter(|attr| !attr.path().is_ident("doc"))
+        .map(|attr| {
+            attr.path()
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::")
+        })
+        .collect()
+}
+
 /// Collect the doc text carried by `attrs`. `///` and `/** */` comments
 /// both reach syn as `#[doc = "..."]` name-value attributes, one per
 /// line, so joining the trimmed values with `\n` reconstructs the
@@ -104,5 +128,31 @@ mod tests {
     #[case::cfg_unrelated(parse_quote! { #[cfg(unix)] fn x() {} })]
     fn is_test_function_rejects_non_test_shapes(#[case] item_fn: syn::ItemFn) {
         assert!(!is_test_function(&item_fn.attrs));
+    }
+
+    #[rstest]
+    #[case::none(parse_quote! { fn x() {} }, Vec::<&str>::new())]
+    #[case::bare(parse_quote! { #[inline] fn x() {} }, vec!["inline"])]
+    #[case::arguments_dropped(parse_quote! { #[cfg(test)] fn x() {} }, vec!["cfg"])]
+    #[case::qualified(parse_quote! { #[tokio::main] fn x() {} }, vec!["tokio::main"])]
+    #[case::several(
+        parse_quote! { #[allow(dead_code)] #[no_mangle] fn x() {} },
+        vec!["allow", "no_mangle"],
+    )]
+    // A doc comment is a `#[doc = "…"]` attribute, and reporting it
+    // would make every documented function look annotated.
+    #[case::doc_comment_is_not_an_attribute(
+        parse_quote! {
+            /// Doc.
+            #[inline]
+            fn x() {}
+        },
+        vec!["inline"],
+    )]
+    fn attribute_paths_lists_paths_without_arguments(
+        #[case] item_fn: syn::ItemFn,
+        #[case] expected: Vec<&str>,
+    ) {
+        assert_eq!(attribute_paths(&item_fn.attrs), expected);
     }
 }

@@ -13,7 +13,7 @@
 //! Names a project invented stay out: matching those by name is the
 //! resolver's main source of true positives.
 
-use lens_domain::{BuiltinFunctionNames, UbiquitousMethodNames};
+use lens_domain::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
 
 /// TypeScript / JavaScript's ubiquitous method names, sorted for binary
 /// search.
@@ -141,6 +141,15 @@ pub const BUILTIN_FUNCTION_NAMES: BuiltinFunctionNames = BuiltinFunctionNames::n
     "structuredClone",
 ]);
 
+/// Decorator names that cannot make a function reachable.
+///
+/// Empty because the adapter does not extract decorators yet: it reports
+/// [`lens_domain::SyntaxFact::Unknown`] for a function's annotations, so
+/// nothing ever reaches this table. It exists so the per-language lookup
+/// is total, and an empty table is the safe reading — every decorator
+/// would count as "something may call this".
+pub const INERT_ATTRIBUTE_NAMES: InertAttributeNames = InertAttributeNames::new(&[]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +159,7 @@ mod tests {
     fn table_is_sorted_and_deduped() {
         assert!(UBIQUITOUS_METHOD_NAMES.is_sorted_and_deduped());
         assert!(BUILTIN_FUNCTION_NAMES.is_sorted_and_deduped());
+        assert!(INERT_ATTRIBUTE_NAMES.is_sorted_and_deduped());
     }
 
     #[rstest]

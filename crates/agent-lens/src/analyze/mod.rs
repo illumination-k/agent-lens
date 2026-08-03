@@ -18,6 +18,7 @@ pub mod cycles;
 pub mod delegation;
 mod diff;
 mod error_from;
+mod export_lang;
 mod format;
 pub mod function_graph;
 pub mod graph_query;
@@ -33,6 +34,7 @@ pub mod risk;
 mod runner;
 pub mod similarity;
 mod source_files;
+pub mod unreachable;
 pub mod untested;
 pub mod visibility;
 pub mod wrapper;
@@ -67,6 +69,7 @@ pub use similarity::{
     DEFAULT_TYPE_MIN_LINES as DEFAULT_SIMILARITY_TYPE_MIN_LINES, FunctionSelection, PairKey,
     SimilarityAnalyzer, SimilarityMethod, SimilarityTarget,
 };
+pub use unreachable::{Tier as UnreachableTier, UnreachableAnalyzer};
 pub use untested::UntestedAnalyzer;
 pub use visibility::VisibilityAnalyzer;
 pub use wrapper::WrapperAnalyzer;

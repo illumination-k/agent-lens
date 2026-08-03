@@ -275,7 +275,23 @@ fn receiver_shape(node: Node<'_>) -> ReceiverShape {
 /// markers (`//`, `/* */`) are stripped per line. Returns `None` when
 /// there is no adjacent comment or it is blank.
 pub(crate) fn doc_comment_text(node: Node<'_>, source: &[u8]) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
+    let doc = adjacent_comments(node, source)
+        .into_iter()
+        .map(strip_comment_markers)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    (!doc.is_empty()).then_some(doc)
+}
+
+/// The raw text of the `comment` siblings forming the declaration's doc
+/// block, in source order. Shared by [`doc_comment_text`], which reads
+/// them as prose, and [`directive_names`], which reads them as compiler
+/// directives — the two disagree about markers and whitespace, so the
+/// split happens after the walk rather than inside it.
+fn adjacent_comments<'a>(node: Node<'_>, source: &'a [u8]) -> Vec<&'a str> {
+    let mut comments: Vec<&'a str> = Vec::new();
     let mut expected_row = node.start_position().row;
     let mut prev = node.prev_sibling();
     while let Some(sibling) = prev {
@@ -285,13 +301,38 @@ pub(crate) fn doc_comment_text(node: Node<'_>, source: &[u8]) -> Option<String> 
         let Some(text) = node_str(sibling, source) else {
             break;
         };
-        lines.push(strip_comment_markers(text));
+        comments.push(text);
         expected_row = sibling.start_position().row;
         prev = sibling.prev_sibling();
     }
-    lines.reverse();
-    let doc = lines.join("\n").trim().to_owned();
-    (!doc.is_empty()).then_some(doc)
+    comments.reverse();
+    comments
+}
+
+/// Compiler directives written above the declaration, named without
+/// their arguments: `//go:linkname local remote` yields `go:linkname`,
+/// the cgo `//export Name` yields `export`.
+///
+/// Go has no attribute syntax, so a directive is a comment the toolchain
+/// happens to read — and the spelling is exact: no space after `//`, the
+/// directive name runs to the first space. Prose that merely starts with
+/// the word "export" is not one, hence the `//export ` prefix rather
+/// than a search.
+pub(crate) fn directive_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    adjacent_comments(node, source)
+        .into_iter()
+        .flat_map(str::lines)
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if let Some(rest) = line.strip_prefix("//go:") {
+                let name = rest.split_whitespace().next().unwrap_or_default();
+                return (!name.is_empty()).then(|| format!("go:{name}"));
+            }
+            line.strip_prefix("//export ")
+                .is_some_and(|name| !name.trim().is_empty())
+                .then(|| "export".to_owned())
+        })
+        .collect()
 }
 
 /// Strip `//` / `/* */` markers from one comment node's text, trimming
@@ -972,5 +1013,33 @@ func (s *Service) Compute(x int) int {
             .extract_functions("package p\nfunc !!! {")
             .unwrap_err();
         assert!(format!("{err}").contains("parse"));
+    }
+
+    /// Go has no attribute syntax: a directive is a comment the
+    /// toolchain reads, and the spelling is exact. The ones that
+    /// publish a symbol to a caller no Go call site names — cgo's
+    /// `//export`, `//go:linkname` — have to be told apart from prose
+    /// that merely starts with the same word.
+    #[rstest]
+    #[case::codegen_directive("//go:noinline\nfunc f() {}\n", vec!["go:noinline"])]
+    #[case::directive_with_arguments(
+        "//go:linkname f runtime.f\nfunc f() {}\n",
+        vec!["go:linkname"],
+    )]
+    #[case::cgo_export("//export F\nfunc f() {}\n", vec!["export"])]
+    #[case::several("//go:generate stringer\n//go:noinline\nfunc f() {}\n", vec!["go:generate", "go:noinline"])]
+    #[case::prose_is_not_a_directive("// export the widget\nfunc f() {}\n", Vec::new())]
+    #[case::spaced_is_not_a_directive("// go:noinline\nfunc f() {}\n", Vec::new())]
+    #[case::export_needs_a_name("//export\nfunc f() {}\n", Vec::new())]
+    #[case::no_comment("func f() {}\n", Vec::new())]
+    fn directive_names_reads_only_real_directives(#[case] body: &str, #[case] expected: Vec<&str>) {
+        let source = format!("package app\n\n{body}");
+        let bytes = source.as_bytes();
+        let tree = super::parse_tree(&source).unwrap();
+        let mut found = None;
+        walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+            found = Some(directive_names(site.node, bytes));
+        });
+        assert_eq!(found.unwrap_or_default(), expected);
     }
 }

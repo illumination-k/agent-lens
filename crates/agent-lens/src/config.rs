@@ -53,6 +53,7 @@ pub use crate::analyze::impact::ImpactOptions;
 pub use crate::analyze::layers::LayersOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
+pub use crate::analyze::unreachable::UnreachableOptions;
 pub use crate::analyze::untested::UntestedOptions;
 pub use crate::analyze::visibility::VisibilityOptions;
 pub use crate::analyze::wrapper::WrapperOptions;
@@ -148,6 +149,8 @@ pub struct Profile {
     #[serde(default)]
     pub delegation: Option<DelegationOptions>,
     #[serde(default)]
+    pub unreachable: Option<UnreachableOptions>,
+    #[serde(default)]
     pub untested: Option<UntestedOptions>,
     #[serde(default)]
     pub visibility: Option<VisibilityOptions>,
@@ -185,6 +188,7 @@ pub enum ToolName {
     Layers,
     Risk,
     Similarity,
+    Unreachable,
     Untested,
     Visibility,
     Wrapper,
@@ -208,6 +212,7 @@ impl ToolName {
             Self::Layers => "layers",
             Self::Risk => "risk",
             Self::Similarity => "similarity",
+            Self::Unreachable => "unreachable",
             Self::Untested => "untested",
             Self::Visibility => "visibility",
             Self::Wrapper => "wrapper",

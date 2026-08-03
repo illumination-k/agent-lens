@@ -132,6 +132,7 @@ impl BlockShape {
             visibility: SyntaxFact::Unknown,
             signature: SyntaxFact::Unknown,
             doc: None,
+            attributes: SyntaxFact::Unknown,
             body: BodyShape { tree: self.tree },
             span: self.span,
             is_test: self.is_test,

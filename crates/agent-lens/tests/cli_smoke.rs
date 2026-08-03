@@ -681,6 +681,35 @@ fn run_profile_drives_impact_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_unreachable_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/main.rs",
+        "fn main() { covered(); }\n\
+         fn covered() -> usize { 1 }\n\
+         fn never_reached() -> usize { 2 }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.dead]\npath = \"src\"\ntools = [\"unreachable\"]\n\n\
+         [profile.dead.unreachable]\ntop = 5\ntier = \"unknown\"\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "dead"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "unreachable");
+    let report = &json["results"][0]["report"];
+    assert_eq!(report["summary"]["confirmed_count"], 1);
+    assert_eq!(
+        report["modules"][0]["findings"][0]["qualified_name"],
+        "crate::never_reached",
+    );
+    assert_eq!(report["modules"][0]["findings"][0]["tier"], "confirmed");
+}
+
+#[test]
 fn run_profile_drives_untested_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(

@@ -33,6 +33,7 @@ Pick an analyzer by question:
     what breaks if I change this?         analyze impact
     which level does this code sit on?    analyze layers
     what has no test path guarding it?    analyze untested
+    can anything still reach this code?   analyze unreachable
     is this `pub` wider than it needs?    analyze visibility
     who calls this / how do I get there?  analyze graph-query
     give me the raw call graph            analyze function-graph
@@ -173,6 +174,14 @@ Examples:
 
     agent-lens analyze untested src/ --format md
     agent-lens analyze untested . --exclude 'benches/**' --top 30 --format md
+";
+
+pub const UNREACHABLE: &str = "\
+Examples:
+
+    agent-lens analyze unreachable . --format md
+    agent-lens analyze unreachable crates/ --tier unknown --format md
+    agent-lens analyze unreachable . --exclude 'benches/**' --top 30 --format md
 ";
 
 pub const DELEGATION: &str = "\
