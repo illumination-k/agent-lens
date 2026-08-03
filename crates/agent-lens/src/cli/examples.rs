@@ -67,6 +67,7 @@ Examples:
     agent-lens analyze similarity src/ --format md
     agent-lens hook setup --dry-run     # wire hooks into settings.json
     agent-lens run audit                # a profile from agent-lens.toml
+    agent-lens baseline create audit    # that profile's metrics, snapshotted
     agent-lens help --md                # whole CLI as one Markdown doc
 "
 );
@@ -233,6 +234,21 @@ Examples:
 
     agent-lens run audit
     agent-lens run audit --config ./agent-lens.toml
+";
+
+pub const BASELINE: &str = "\
+A baseline snapshots the profile's analyzers as named numbers, so a later
+run can tell a regression from debt that was already there. Covered
+analyzers: complexity, cohesion, coupling, context-span, hotspot, and
+similarity; anything else in the profile is listed under `skipped`.
+
+The document is deterministic — same tree, same commit, same bytes — so it
+is safe to store as a CI artifact and diff.
+
+Examples:
+
+    agent-lens baseline create audit
+    agent-lens baseline create audit --out target/agent-lens/baseline.json
 ";
 
 pub const HOOK_SETUP: &str = "\
