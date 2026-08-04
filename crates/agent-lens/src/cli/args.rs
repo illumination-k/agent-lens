@@ -157,6 +157,13 @@ pub(super) struct ProfileSelectorArgs {
 pub(super) struct RunArgs {
     #[command(flatten)]
     pub(super) selector: ProfileSelectorArgs,
+    /// Override the profile's `format` for this run. The profile picks
+    /// the format its readers usually want; this is for the run that
+    /// wants the other one — piping a normally-markdown profile into
+    /// `jq`, or reading a JSON profile by eye — without editing the
+    /// config.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub(super) format: Option<OutputFormat>,
 }
 
 #[derive(Debug, Subcommand)]

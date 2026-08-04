@@ -29,7 +29,26 @@ mise run test     # Tests (nextest, doctests, vitest)
 mise run ci       # Full required verification; covers everything CI gates on
 mise run bench    # Criterion benchmarks; not part of ci
 mise run mutants  # Mutation tests; slow and not part of normal ci
+mise run selftest # Run agent-lens over its own sources; not part of ci
 ```
+
+## Dogfooding
+
+`agent-lens.toml` declares one profile per view of this repository (`self`,
+`self-reach`, `self-tests`, `lenses`, `web`, `changes`, `baseline`), and `mise run selftest`
+builds the binary and drives every one of them. Run a single profile with
+`mise run selftest <profile>`.
+
+After changing an analyzer, run the profiles it appears in and read the diff
+against the previous run — not the report in isolation. Unit tests cover
+analyzer output on fixtures; this is what catches an analyzer that still returns
+`Ok` while saying something absurd about code the maintainers know by heart.
+Findings the tool reports about its own sources are real findings: fix them or
+say why they are acceptable.
+
+Before committing, `mise run selftest changes` runs every diff-only tool over
+the working tree. An empty report means the pending edit introduced no
+duplicate, no forwarding-only wrapper, and no complexity spike.
 
 Also run mutation testing against the current diff whenever practical. `mise run
 mutants:rust:diff [base]` (base defaults to `main`) is the diff-scoped form and is

@@ -1,5 +1,241 @@
 # Analysis profiles for this repository.
 #
+# `agent-lens` is its own first user. Every profile below points the tool
+# at its own sources, so an analyzer that regresses produces a nonsense
+# report about code the maintainers already know well — which is the
+# cheapest test this project has for output nobody can unit-test.
+#
+# Run them all against a freshly built binary with `mise run selftest`,
+# or one at a time with `agent-lens run <profile>`.
+#
+# `graph-query` and `impact` appear in no profile on purpose: both need a
+# symbol to start from, which is a per-question argument rather than a
+# project setting.
+
+# The self-audit: every analyzer that works from a single crate root,
+# pointed at the crate where the analyzers, hooks, and CLI all live.
+#
+# Tests are excluded because this profile answers "what should I
+# refactor in the product?" — a table-driven test module is duplicated on
+# purpose and would dominate every ranking. `self-tests` is the other
+# half of that view.
+[profile.self]
+path = "crates/agent-lens"
+format = "md"
+exclude-tests = true
+# `benches/` is not test-like by path, so `exclude-tests` keeps it. The
+# Criterion corpus writers there are deliberately near-identical — that
+# is what they are measuring — and without this they are the largest
+# similarity cluster in the crate, every run, forever.
+exclude = ["benches/**"]
+tools = [
+  "complexity",
+  "cohesion",
+  "similarity",
+  "wrapper",
+  "delegation",
+  "coupling",
+  "context-span",
+  "cycles",
+  "layers",
+  "hubs",
+  "hotspot",
+  "risk",
+]
+
+# Every ranking below is capped and floored. This profile's output is
+# read in an agent's context window, and an uncapped `visibility` or
+# `untested` listing over a crate this size runs to thousands of lines
+# that push out the findings worth acting on. JSON still carries every
+# row, so the caps cost nothing a `--format json` run cannot recover.
+[profile.self.complexity]
+top = 15
+min-score = 10
+
+[profile.self.cohesion]
+top = 15
+min-score = 3
+
+[profile.self.similarity]
+top = 20
+# Above the 0.85 default: at 0.85 the builder methods every analyzer
+# repeats (`with_top`, `with_exclude_tests`, …) fill the report with
+# three-line pairs that are correct as they are.
+threshold = 0.9
+min-lines = 8
+
+[profile.self.context-span]
+top = 15
+
+[profile.self.delegation]
+top = 15
+
+[profile.self.hotspot]
+top = 15
+
+[profile.self.risk]
+top = 15
+
+[profile.self.hubs]
+top = 15
+
+[profile.self.layers]
+top = 15
+
+# Reachability: what no test path guards, what nothing can reach any
+# more, and what is `pub` wider than its callers need.
+#
+# These three are separated from `self` because both of its filters
+# break them, which the reports say outright:
+#
+#   * `exclude-tests` removes the traversal's own starting points, so
+#     `untested` called all 827 functions untested and `unreachable`
+#     warned that code used only by tests looks dead.
+#   * a single crate has no cross-crate caller, so `visibility` cannot
+#     tell a library's intended API from over-exposure — at the
+#     workspace root it recognises 142 `pub use` re-exports it could not
+#     see from inside one crate.
+#
+# So this profile keeps the tests and widens to the workspace.
+[profile.self-reach]
+path = "crates"
+format = "md"
+exclude = ["agent-lens/benches/**"]
+tools = ["untested", "unreachable", "visibility"]
+
+[profile.self-reach.untested]
+top = 10
+
+[profile.self-reach.unreachable]
+top = 10
+
+[profile.self-reach.visibility]
+top = 10
+
+# The same lens turned on the test corpus. Test code has its own failure
+# modes — a copy-pasted fixture that wants to be one `#[rstest]` case, a
+# helper nothing calls any more — and a profile that excludes tests is
+# blind to all of them.
+[profile.self-tests]
+path = "crates/agent-lens"
+format = "md"
+only-tests = true
+tools = ["similarity", "complexity", "cohesion"]
+
+[profile.self-tests.similarity]
+top = 20
+# Lower than `self`: near-identical test bodies are the finding here, not
+# the noise. Each cluster is a candidate `#[rstest]` parameterisation,
+# which is what CLAUDE.md asks new tests to be written as.
+threshold = 0.85
+min-lines = 6
+
+[profile.self-tests.complexity]
+top = 10
+min-score = 8
+
+[profile.self-tests.cohesion]
+top = 10
+min-score = 3
+
+# The language front-ends: four parallel implementations of one
+# interface. Cross-crate similarity is expected in shape and a real
+# finding in body, so this is the profile that catches a fix applied to
+# `lens-rust` and forgotten in `lens-py`.
+#
+# `coupling` and `context-span` are absent because both resolve from a
+# single crate root, and this path holds several.
+[profile.lenses]
+path = "crates"
+format = "md"
+exclude-tests = true
+exclude = ["agent-lens/**", "agent-hooks/**"]
+tools = ["similarity", "complexity", "wrapper", "cohesion"]
+
+[profile.lenses.similarity]
+top = 25
+threshold = 0.85
+min-lines = 8
+
+[profile.lenses.complexity]
+top = 15
+min-score = 10
+
+[profile.lenses.cohesion]
+top = 10
+min-score = 3
+
+# The web viewer: the TypeScript half of the repo, and the only profile
+# that drives the TS front-end end to end.
+#
+# `unreachable` and `visibility` are omitted deliberately — neither
+# extracts export status for TypeScript, so both would spend a walk to
+# report on an empty audit set.
+[profile.web]
+path = "web/src"
+format = "md"
+exclude-tests = true
+tools = [
+  "complexity",
+  "cohesion",
+  "similarity",
+  "wrapper",
+  "cycles",
+  "layers",
+  "hubs",
+]
+
+[profile.web.complexity]
+top = 10
+min-score = 8
+
+[profile.web.cohesion]
+top = 10
+min-score = 3
+
+[profile.web.similarity]
+top = 15
+min-lines = 6
+
+[profile.web.layers]
+top = 10
+
+[profile.web.hubs]
+top = 10
+
+# Pre-commit review of the working tree: every tool runs `--diff-only`,
+# so the report is about what changed rather than what the repo already
+# looks like. An empty report means the pending edit introduced no
+# duplicate, no forwarding-only wrapper, and no complexity spike — which
+# is the question worth asking before a commit, and the one the whole-repo
+# profiles above cannot answer.
+[profile.changes]
+path = "crates"
+format = "md"
+exclude-tests = true
+tools = ["similarity", "wrapper", "complexity", "cohesion", "delegation"]
+
+[profile.changes.similarity]
+diff-only = true
+threshold = 0.85
+min-lines = 6
+top = 15
+
+[profile.changes.wrapper]
+diff-only = true
+
+[profile.changes.complexity]
+diff-only = true
+top = 15
+
+[profile.changes.cohesion]
+diff-only = true
+top = 10
+
+[profile.changes.delegation]
+diff-only = true
+top = 10
+
 # `baseline` is the metric snapshot the roadmap's Phase 0 asks for:
 #
 #     agent-lens baseline create baseline --out target/agent-lens/baseline.json
@@ -9,6 +245,10 @@
 # hooks, and CLI all live. Tests are excluded: their complexity and
 # cohesion are real but they are not the surface this baseline is meant
 # to hold steady.
+#
+# Kept separate from `self` on purpose. A baseline is only useful while
+# it stays comparable across commits, so its tool list and filters must
+# not move when the self-audit profile is retuned.
 [profile.baseline]
 path = "crates/agent-lens"
 exclude-tests = true

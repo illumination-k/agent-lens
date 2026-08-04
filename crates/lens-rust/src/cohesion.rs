@@ -56,7 +56,9 @@ const MODULE_UNIT_NAME: &str = "<module>";
 ///
 /// Empty `impl` blocks (no instance methods) are skipped; they have no
 /// cohesion to measure and would only add noise to a report. Likewise
-/// empty modules and `#[cfg(test)]` modules are skipped.
+/// empty modules, and every form of test scaffolding: `#[cfg(test)]`
+/// modules and `impl` blocks, plus `#[cfg(test)]` / `#[test]` functions
+/// and methods declared inside production ones.
 pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, CohesionError> {
     let file = syn::parse_file(source)?;
     let mut out = Vec::new();
@@ -80,6 +82,11 @@ fn collect_scope(items: &[Item], scope_name: &str, out: &mut Vec<CohesionUnit>) 
 fn collect_item(item: &Item, out: &mut Vec<CohesionUnit>) {
     match item {
         Item::Impl(item_impl) => {
+            // A `#[cfg(test)]`-gated `impl` is test scaffolding for the
+            // same reason a gated `mod` is.
+            if has_cfg_test(&item_impl.attrs) {
+                return;
+            }
             if let Some(unit) = unit_from_impl(item_impl) {
                 out.push(unit);
             }
@@ -112,11 +119,15 @@ fn unit_from_impl(item_impl: &ItemImpl) -> Option<CohesionUnit> {
         None => CohesionUnitKind::Inherent,
     };
 
+    // `#[cfg(test)]` / `#[test]` methods are test scaffolding, the same
+    // as the free functions [`build_module_unit`] already drops: their
+    // field access follows what a fixture needs, so counting them splits
+    // production responsibilities that are not actually split.
     let instance_methods: Vec<&ImplItemFn> = item_impl
         .items
         .iter()
         .filter_map(|i| match i {
-            ImplItem::Fn(f) if has_self_receiver(f) => Some(f),
+            ImplItem::Fn(f) if has_self_receiver(f) && !is_test_function(&f.attrs) => Some(f),
             _ => None,
         })
         .collect();
@@ -922,6 +933,40 @@ mod tests {
             .collect();
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "<module>");
+    }
+
+    #[test]
+    fn impl_cfg_test_methods_are_skipped() {
+        // A `#[cfg(test)]` probe touches whatever field the assertion
+        // needs, which would split the impl into a component that does
+        // not exist in production.
+        let src = r#"
+struct Counter { n: i32, log: Vec<String> }
+impl Counter {
+    fn inc(&mut self) { self.n += 1; }
+    fn get(&self) -> i32 { self.n }
+
+    #[cfg(test)]
+    fn logged(&self) -> usize { self.log.len() }
+}
+"#;
+        let u = unit(src);
+        let names: Vec<&str> = u.methods.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["inc", "get"]);
+        assert_eq!(u.components.len(), 1);
+    }
+
+    #[test]
+    fn cfg_test_impl_block_is_skipped() {
+        let src = r#"
+struct Fixture { n: i32 }
+
+#[cfg(test)]
+impl Fixture {
+    fn probe(&self) -> i32 { self.n }
+}
+"#;
+        assert!(extract_cohesion_units(src).unwrap().is_empty());
     }
 
     #[test]

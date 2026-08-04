@@ -118,6 +118,7 @@ analyzer_options! {
     /// `analyze context-span` flags, and the
     /// `[profile.<name>.context-span]` table.
     pub struct ContextSpanOptions {
+        @shared(ranking);
         /// Treat `path` as a project root and merge the TS/JS module trees
         /// rooted at every file matching this gitignore-aware glob.
         /// Repeatable: pass `--entry-glob 'app/**/page.tsx' --entry-glob
@@ -128,13 +129,12 @@ analyzer_options! {
     }
 }
 
-/// Stateless analyzer entry point. Kept as a struct so per-run
-/// configuration (e.g. a `--top` cap) can be added later without
-/// changing the call site.
+/// Analyzer entry point, holding the per-run configuration.
 #[derive(Debug, Default, Clone)]
 pub struct ContextSpanAnalyzer {
     path_filter: AnalyzePathFilter,
     entry_globs: Vec<String>,
+    top: Option<usize>,
 }
 
 impl ContextSpanAnalyzer {
@@ -142,14 +142,26 @@ impl ContextSpanAnalyzer {
     /// `[profile.<name>.context-span]` table are the same type, so this is
     /// the only seam between parsed options and the analyzer.
     pub fn with_options(self, opts: ContextSpanOptions) -> Self {
-        self.with_entry_globs(opts.entry_glob)
+        self.with_entry_globs(opts.entry_glob).with_top(opts.top)
     }
 
     pub fn new() -> Self {
         Self {
             path_filter: AnalyzePathFilter::new(),
             entry_globs: Vec::new(),
+            top: None,
         }
+    }
+
+    /// Cap the markdown module table to the top-N spans. JSON output
+    /// always carries every module. `None` keeps every row.
+    ///
+    /// One row per module with its reachable-module preview makes this
+    /// the widest table any analyzer emits, so on a crate of any size
+    /// the uncapped table is most of the report's context cost.
+    pub fn with_top(mut self, top: Option<usize>) -> Self {
+        self.top = top;
+        self
     }
 
     pub fn with_only_tests(mut self, only_tests: bool) -> Self {
@@ -201,7 +213,7 @@ impl ContextSpanAnalyzer {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(ContextSpanAnalyzerError::Serialize)
             }
-            OutputFormat::Md => Ok(format_markdown(&view)),
+            OutputFormat::Md => Ok(format_markdown(&view, self.top)),
         }
     }
 }
@@ -393,7 +405,7 @@ fn transitive_file_count(
 
 const TOP_REACHABLE_LIMIT: usize = 5;
 
-fn format_markdown(view: &ReportView) -> String {
+fn format_markdown(view: &ReportView, top: Option<usize>) -> String {
     let mut out = format!(
         "# Context span report: {} ({} module(s))\n",
         view.crate_root, view.module_count,
@@ -402,11 +414,11 @@ fn format_markdown(view: &ReportView) -> String {
         out.push_str("\n_No modules discovered._\n");
         return out;
     }
-    render_modules_table(&mut out, &view.modules);
+    render_modules_table(&mut out, &view.modules, top);
     out
 }
 
-fn render_modules_table(out: &mut String, modules: &[ModuleSpanView]) {
+fn render_modules_table(out: &mut String, modules: &[ModuleSpanView], top: Option<usize>) {
     // writeln! into a String cannot fail; the result is swallowed
     // deliberately to satisfy the workspace's `unwrap_used` lint.
     let _ = writeln!(out, "\n## Modules (by transitive desc)\n");
@@ -420,12 +432,20 @@ fn render_modules_table(out: &mut String, modules: &[ModuleSpanView]) {
             .then_with(|| b.direct.cmp(&a.direct))
             .then_with(|| a.path.cmp(&b.path))
     });
-    for m in sorted {
+    let limit = top.unwrap_or(sorted.len());
+    for m in sorted.iter().take(limit) {
         let preview = reachable_preview(&m.reachable);
         let _ = writeln!(
             out,
             "| {} | {} | {} | {} | {} |",
             m.path, m.direct, m.transitive, m.files, preview,
+        );
+    }
+    let overflow = sorted.len().saturating_sub(limit);
+    if overflow > 0 {
+        let _ = writeln!(
+            out,
+            "\n+{overflow} more module(s) not shown (raise `--top`; JSON carries every row).",
         );
     }
 }
@@ -628,6 +648,44 @@ mod tests {
         assert!(md.contains("crate::a"));
         assert!(md.contains("crate::b"));
         assert!(md.contains("crate::c"));
+    }
+
+    #[test]
+    fn top_caps_the_markdown_table_and_counts_the_remainder() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = chain_crate(dir.path());
+        let md = ContextSpanAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        // `crate::a` spans the whole chain, so it is the row that
+        // survives the cap; the rest are counted, not dropped silently.
+        assert!(md.contains("crate::a"), "got: {md}");
+        assert!(md.contains("+3 more module(s) not shown"), "got: {md}");
+    }
+
+    #[test]
+    fn top_above_the_module_count_adds_no_overflow_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = chain_crate(dir.path());
+        let md = ContextSpanAnalyzer::new()
+            .with_top(Some(99))
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("crate::c"), "got: {md}");
+        assert!(!md.contains("not shown"), "got: {md}");
+    }
+
+    #[test]
+    fn top_never_truncates_the_json_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = chain_crate(dir.path());
+        let json = ContextSpanAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["module_count"], 4);
     }
 
     #[test]

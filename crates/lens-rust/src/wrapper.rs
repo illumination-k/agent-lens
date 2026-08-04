@@ -51,9 +51,11 @@ const TRIVIAL_CLOSURE_ADAPTERS: &[&str] = &["map_err"];
 /// opportunity. Trait default methods remain eligible because they are
 /// authored at the trait definition site.
 ///
-/// `#[cfg(test)]`-gated `mod`/`impl`/`trait` blocks are skipped: their
-/// methods are forwarding by design (test helpers shorten `assert_eq!`
-/// call sites, they don't reflect a wrapper a refactor should remove).
+/// Test scaffolding is skipped: `#[cfg(test)]`-gated `mod`/`impl`/`trait`
+/// blocks, and individual `#[cfg(test)]` / `#[test]` functions inside
+/// production ones. Their methods are forwarding by design (test helpers
+/// shorten `assert_eq!` call sites, they don't reflect a wrapper a
+/// refactor should remove).
 pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError> {
     let file = syn::parse_file(source)?;
     let opts = WalkOptions {
@@ -61,7 +63,10 @@ pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, RustParseError
     };
     let mut out = Vec::new();
     walk_fn_items(&file.items, opts, &mut |site| {
-        if site.is_trait_impl {
+        // `skip_cfg_test_blocks` stops the walk at a gated block; a fn
+        // gated on its own still reaches here, and is test scaffolding
+        // for the same reason.
+        if site.is_trait_impl || site.is_test {
             return;
         }
         if let Some(finding) = analyze_fn(site.owner, site.sig, site.block) {
@@ -584,6 +589,44 @@ mod tests {
         // Only the production-side `shim` survives; `run` and `extract`
         // are dropped because they live inside `#[cfg(test)]`.
         assert_eq!(names(&findings), ["shim"]);
+    }
+
+    /// A fn gated on its own is test scaffolding just as much as one
+    /// inside a gated `mod`, but the block-level skip never sees it —
+    /// the walk reaches the fn through a production `impl`/module.
+    #[rstest]
+    #[case::cfg_test_method(
+        r#"
+struct Profile;
+impl Profile {
+    fn real(&self) -> usize { self.inner.len() }
+
+    #[cfg(test)]
+    fn probe(&self) -> bool { self.inner.is_empty() }
+}
+"#,
+        ["Profile::real"]
+    )]
+    #[case::cfg_test_free_fn(
+        r#"
+fn shim(x: i32) -> i32 { core(x) }
+
+#[cfg(test)]
+fn probe(x: i32) -> i32 { core(x) }
+"#,
+        ["shim"]
+    )]
+    #[case::test_attribute_fn(
+        r#"
+fn shim(x: i32) -> i32 { core(x) }
+
+#[test]
+fn probe() { assert_eq!(shim(1), 1) }
+"#,
+        ["shim"]
+    )]
+    fn skips_individually_gated_test_functions(#[case] src: &str, #[case] expected: [&str; 1]) {
+        assert_eq!(names(&run(src)), expected);
     }
 
     /// `impl <Trait> for T` methods are protocol glue: the signature is

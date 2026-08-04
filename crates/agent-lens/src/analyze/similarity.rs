@@ -550,8 +550,32 @@ impl SimilarityAnalyzer {
         self.target != SimilarityTarget::Types
     }
 
+    /// Reject score cuts no score can reach, before any file is read.
+    ///
+    /// Every cut here is compared against a similarity in `[0.0, 1.0]`,
+    /// so `--threshold 1.5` silently reports "no similar functions" — a
+    /// clean bill of health for a run that never had a chance to find
+    /// anything. Checked in one place so the CLI flag and the
+    /// `[profile.<name>.similarity]` table are held to the same range;
+    /// clap's own range parsing would only cover the former.
+    fn validate_score_cuts(&self) -> Result<(), AnalyzerError> {
+        let out_of_range = |value: f64| !(0.0..=1.0).contains(&value);
+        let mut cuts: Vec<(&'static str, f64)> = vec![("--threshold", self.threshold)];
+        if let Some(ladder) = self.sweep.as_deref() {
+            cuts.extend(ladder.iter().map(|&rung| ("--sweep", rung)));
+        }
+        if self.paired_by.is_some() {
+            cuts.push(("--drift-floor", self.drift_floor));
+        }
+        match cuts.into_iter().find(|&(_, value)| out_of_range(value)) {
+            Some((flag, value)) => Err(AnalyzerError::SimilarityScoreOutOfRange { flag, value }),
+            None => Ok(()),
+        }
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+        self.validate_score_cuts()?;
         if self.target == SimilarityTarget::Types && self.paired_by == Some(PairKey::Method) {
             return Err(AnalyzerError::TypeTargetPairedByMethod);
         }
@@ -2290,12 +2314,15 @@ fn beta(xs: &[i32]) -> i32 {
         assert!(md.contains("No similar function clusters"));
     }
 
+    /// The tightest legal cut — exact structural identity — leaves the
+    /// merely-similar pair unreported. (A cut *above* 1.0 is rejected
+    /// outright; see `rejects_score_cuts_outside_the_unit_interval`.)
     #[test]
     fn threshold_override_suppresses_all_pairs() {
         let dir = tempfile::tempdir().unwrap();
         let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
         let json = SimilarityAnalyzer::new()
-            .with_threshold(1.5)
+            .with_threshold(1.0)
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -3832,6 +3859,59 @@ impl Counter {
         assert_eq!(parsed["key_count"], 1, "got {parsed}");
         assert_eq!(parsed["groups"][0]["key"], "summary", "got {parsed}");
         assert_eq!(parsed["groups"][0]["size"], 2, "got {parsed}");
+    }
+
+    /// A cut outside `[0.0, 1.0]` can never be crossed, so the run would
+    /// otherwise report "no similar functions" for a question it never
+    /// asked. Every cut is checked, and the check runs before any file
+    /// is read.
+    #[rstest]
+    #[case::threshold_above_one(SimilarityAnalyzer::new().with_threshold(1.5), "--threshold", 1.5)]
+    #[case::threshold_below_zero(
+        SimilarityAnalyzer::new().with_threshold(-0.5),
+        "--threshold",
+        -0.5
+    )]
+    #[case::sweep_rung_above_one(
+        SimilarityAnalyzer::new().with_sweep(Some(vec![0.6, 2.0])),
+        "--sweep",
+        2.0
+    )]
+    #[case::drift_floor_above_one(
+        SimilarityAnalyzer::new()
+            .with_paired_by(Some(PairKey::Qualified))
+            .with_drift_floor(1.2),
+        "--drift-floor",
+        1.2
+    )]
+    fn rejects_score_cuts_outside_the_unit_interval(
+        #[case] analyzer: SimilarityAnalyzer,
+        #[case] expected_flag: &str,
+        #[case] expected_value: f64,
+    ) {
+        let missing = std::path::Path::new("/definitely/not/a/real/path");
+        let err = analyzer
+            .analyze(missing, OutputFormat::Json)
+            .expect_err("a cut no score can reach is an error, not an empty report");
+        let AnalyzerError::SimilarityScoreOutOfRange { flag, value } = err else {
+            panic!("unexpected error: {err}");
+        };
+        assert_eq!(flag, expected_flag);
+        assert!((value - expected_value).abs() < f64::EPSILON, "got {value}");
+    }
+
+    /// The bounds themselves are legal cuts: 1.0 asks for exact matches,
+    /// 0.0 asks for everything.
+    #[rstest]
+    #[case::exact_only(1.0)]
+    #[case::everything(0.0)]
+    fn accepts_score_cuts_on_the_boundary(#[case] threshold: f64) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", "fn a() -> u8 {\n    1\n}\n");
+        SimilarityAnalyzer::new()
+            .with_threshold(threshold)
+            .analyze(dir.path(), OutputFormat::Json)
+            .expect("a cut at the edge of the range is valid");
     }
 
     #[test]

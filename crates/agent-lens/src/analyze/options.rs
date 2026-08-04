@@ -194,8 +194,10 @@ mod tests {
     );
     assert_options_reach_the_analyzer!(
         context_span_options_reach_the_analyzer: ContextSpanAnalyzer,
-        ContextSpanOptions { entry_glob: vec!["app/**/page.tsx".to_owned()] },
-        |a| a.with_entry_globs(vec!["app/**/page.tsx".to_owned()])
+        ContextSpanOptions { top: Some(3), entry_glob: vec!["app/**/page.tsx".to_owned()] },
+        |a| a
+            .with_entry_globs(vec!["app/**/page.tsx".to_owned()])
+            .with_top(Some(3))
     );
     assert_options_reach_the_analyzer!(
         delegation_options_reach_the_analyzer: DelegationAnalyzer,

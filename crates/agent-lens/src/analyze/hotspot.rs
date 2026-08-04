@@ -26,7 +26,8 @@ use lens_domain::{FileComplexity, FunctionComplexity, HotspotEntry, compute_hots
 use serde::Serialize;
 use tracing::warn;
 
-use super::churn::{ChurnError, ChurnScope};
+use super::churn::ChurnScope;
+use super::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
 use super::{
     AnalyzePathFilter, AnalyzerError, CompiledPathFilter, OutputFormat, PathFilterError,
@@ -55,18 +56,7 @@ pub enum HotspotError {
     PathFilter(#[from] PathFilterError),
 }
 
-/// Churn extraction lives in [`super::churn`] so `analyze risk` shares
-/// it verbatim; its failures map one-for-one onto the variants this
-/// analyzer has always exposed.
-impl From<ChurnError> for HotspotError {
-    fn from(error: ChurnError) -> Self {
-        match error {
-            ChurnError::Io { path, source } => Self::Io { path, source },
-            ChurnError::Git { stderr } => Self::Git { stderr },
-            ChurnError::NotInGitRepo { path } => Self::NotInGitRepo { path },
-        }
-    }
-}
+impl_from_churn_error!(HotspotError);
 
 analyzer_options! {
     /// `analyze hotspot` flags, and the `[profile.<name>.hotspot]` table.

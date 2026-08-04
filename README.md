@@ -288,6 +288,10 @@ agent-lens run web
 
 # Point at an explicit config file
 agent-lens run web --config path/to/agent-lens.toml
+
+# Override the profile's `format` for one run — the profile picks what its
+# usual readers want, this is for piping a markdown profile into `jq`
+agent-lens run web --format json
 ```
 
 Keys are kebab-case and match the CLI flags. A relative `path` resolves against
@@ -744,6 +748,7 @@ mise run ci       # the full lint + test pipeline CI runs
 mise run bench    # Criterion benchmarks (not in CI)
 mise run mutants  # full-workspace cargo-mutants (slow; not in CI by default)
 mise run mutants:rust:diff [base]  # mutation-test Rust changes vs base
+mise run selftest # run agent-lens over its own sources (dogfooding)
 ```
 
 `mise run ci` fans out to `ci:base` (prek, dprint/shfmt/shellcheck,
@@ -751,6 +756,46 @@ actionlint/zizmor/ghalint/pinact), `ci:rust`, and `ci:ts`, which together cover
 every required GitHub check — so a green local run means a green PR. The web
 tasks install `web/node_modules` themselves, so `mise run ci` works on a fresh
 checkout.
+
+### Dogfooding
+
+`agent-lens` is its own first user. The repository's `agent-lens.toml` declares
+one profile per view of this codebase, and `mise run selftest` builds the binary
+and drives every one of them:
+
+| profile      | what it looks at                                                          |
+| ------------ | ------------------------------------------------------------------------- |
+| `self`       | the `agent-lens` crate, tests excluded — the product-side refactor audit  |
+| `self-reach` | the workspace with tests kept — untested, unreachable, over-exposed code  |
+| `self-tests` | the same crate, tests only — copy-pasted fixtures, dead helpers           |
+| `lenses`     | the four language front-ends, where a fix applied to one can miss three   |
+| `web`        | the TypeScript viewer, the only end-to-end run of the TS front-end        |
+| `changes`    | every tool in `--diff-only` mode: a pre-commit review of the working tree |
+| `baseline`   | the metric snapshot `baseline create` reduces to numbers                  |
+
+```bash
+mise run selftest                       # every profile, markdown, to stdout
+mise run selftest self                  # one profile
+mise run selftest --format json --out target/agent-lens/self
+```
+
+This is not a test — there is nothing to assert on a report a human or an agent
+reads. It is the cheapest check the project has for the failure mode unit tests
+cannot see: an analyzer that still returns `Ok` while saying something absurd
+about code the maintainers know by heart. Run it after touching an analyzer, and
+read the diff against the previous run rather than the report in isolation. The
+task also fails if any profile exits non-zero, so a panic or a rejected-but-valid
+profile is caught outright.
+
+Before a commit, `mise run selftest changes` is the fast one to reach for: every
+tool runs `--diff-only`, so an empty report means the pending edit introduced no
+duplicate, no forwarding-only wrapper, and no complexity spike.
+
+The split between `self` and `self-reach` is not cosmetic. `exclude-tests` is
+what makes the refactor rankings readable, and it is also what removes the
+starting points `untested` and `unreachable` traverse from; a single crate has
+no cross-crate caller for `visibility` to find. Each analyzer says so in its own
+report — the profiles just take it at its word.
 
 Benchmarks use Criterion's baseline mechanism:
 
