@@ -481,7 +481,7 @@ impl<'ast> Visit<'ast> for EdgeVisitor<'_> {
         if let syn::Type::Path(tp) = &*i.self_ty {
             self.try_record(&path_to_segments(&tp.path), EdgeKind::ImplFor);
         }
-        if let Some((_, trait_path, _)) = &i.trait_ {
+        if let Some((trait_path, _)) = &i.trait_ {
             self.try_record(&path_to_segments(trait_path), EdgeKind::ImplFor);
         }
         // Recurse into the body but skip the self_ty / trait_ to avoid

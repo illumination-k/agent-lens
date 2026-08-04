@@ -35,7 +35,7 @@ use syn::{
 };
 
 use crate::attrs::{has_cfg_test, is_test_function};
-use crate::common::type_path_last_ident;
+use crate::common::{split_guard, type_path_last_ident};
 
 /// Failures produced while extracting cohesion units.
 #[derive(Debug, thiserror::Error)]
@@ -109,7 +109,7 @@ fn collect_item(item: &Item, out: &mut Vec<CohesionUnit>) {
 fn unit_from_impl(item_impl: &ItemImpl) -> Option<CohesionUnit> {
     let type_name = type_path_last_ident(&item_impl.self_ty)?;
     let kind = match &item_impl.trait_ {
-        Some((_, path, _)) => CohesionUnitKind::Trait {
+        Some((path, _)) => CohesionUnitKind::Trait {
             trait_name: path
                 .segments
                 .last()
@@ -417,8 +417,9 @@ impl<'ast> Visit<'ast> for LocalWalker<'_> {
     }
 
     fn visit_arm(&mut self, arm: &'ast Arm) {
-        collect_pat_names(&arm.pat, self.locals);
-        if let Some((_, guard)) = &arm.guard {
+        let (pat, guard) = split_guard(&arm.pat);
+        collect_pat_names(pat, self.locals);
+        if let Some(guard) = guard {
             self.visit_expr(guard);
         }
         self.visit_expr(&arm.body);
@@ -841,6 +842,22 @@ const TAG: i32 = 0;
 
 fn reader() -> i32 { TAG }
 fn shadowed(TAG: i32) -> i32 { TAG }
+"#,
+        2
+    )]
+    // A binding introduced by a *guarded* arm shadows the module field
+    // the same way a plain arm's binding does. syn 3 wraps the arm's
+    // pattern in `Pat::Guard`, so the binding is only seen if the walk
+    // unwraps that layer; if it does not, `MARK` reads as a module-level
+    // reference shared with `reader` and the two collapse to 1.
+    #[case::module_guarded_arm_binding_shadows_module_field(
+        r#"
+const MARK: i32 = 0;
+
+fn reader() -> i32 { MARK }
+fn shadowed(n: i32) -> i32 {
+    match n { MARK if MARK > 0 => MARK, _ => 0 }
+}
 "#,
         2
     )]

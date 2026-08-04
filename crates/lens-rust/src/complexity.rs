@@ -24,7 +24,7 @@
 
 use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, HalsteadCounts, qualify};
 
-use crate::common::{WalkOptions, walk_fn_items};
+use crate::common::{WalkOptions, split_guard, walk_fn_items};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -141,7 +141,7 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
         self.visit_expr(&e.expr);
         self.counters.enter_nest();
         for arm in &e.arms {
-            if let Some((_, guard)) = &arm.guard {
+            if let (_, Some(guard)) = split_guard(&arm.pat) {
                 self.visit_expr(guard);
             }
             self.visit_expr(&arm.body);
@@ -285,6 +285,19 @@ fn f(n: i32) -> i32 {
     #[case::logical_operators(
         r#"
 fn f(a: bool, b: bool, c: bool) -> bool { a && b || c }
+"#,
+        Some(3),
+        Some(2),
+        None
+    )]
+    // syn 3 moved match guards into the pattern as `Pat::Guard`, so the
+    // guard expression is only reached if the arm walk unwraps it. Without
+    // that, the `&&` below goes uncounted and cognitive drops to 1.
+    #[case::match_guard_expression_is_walked(
+        r#"
+fn f(n: i32, flag: bool) -> i32 {
+    match n { x if x > 0 && flag => x, _ => 0 }
+}
 "#,
         Some(3),
         Some(2),
