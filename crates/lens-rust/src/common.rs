@@ -8,11 +8,28 @@
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::{
-    Attribute, Block, ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemTrait, Signature, TraitItem,
-    Type,
+    Attribute, Block, Expr, ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemTrait, Pat, Signature,
+    TraitItem, Type,
 };
 
 use crate::attrs::{has_cfg_test, is_test_function};
+
+/// Split a pattern into the pattern proper and its guard expression.
+///
+/// syn 3 moved match guards out of [`syn::Arm`] and into the pattern
+/// itself as [`syn::Pat::Guard`], so that `if` conditions can nest
+/// anywhere a pattern can. Every caller here still wants the two apart —
+/// bindings come from the pattern, control flow from the guard — so
+/// unwrap one layer and hand back both.
+///
+/// Only the outermost guard is peeled. A guard nested deeper inside the
+/// pattern stays where it is and is reached by the normal pattern walk.
+pub(crate) fn split_guard(pat: &Pat) -> (&Pat, Option<&Expr>) {
+    match pat {
+        Pat::Guard(guard) => (&guard.pat, Some(&guard.guard)),
+        other => (other, None),
+    }
+}
 
 /// Render `node` back to source-like text.
 ///

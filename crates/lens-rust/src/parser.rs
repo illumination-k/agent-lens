@@ -8,7 +8,7 @@ use lens_domain::{
 use quote::ToTokens;
 use syn::spanned::Spanned;
 
-use crate::common::{WalkOptions, walk_fn_items};
+use crate::common::{WalkOptions, split_guard, walk_fn_items};
 
 /// A Rust-language parser backed by [`syn`].
 ///
@@ -425,10 +425,13 @@ fn signature_info(sig: &syn::Signature) -> FunctionSignature {
 }
 
 fn receiver_shape(receiver: &syn::Receiver) -> ReceiverShape {
-    match (&receiver.reference, &receiver.mutability) {
-        (Some(_), Some(_)) => ReceiverShape::RefMut,
-        (Some(_), None) => ReceiverShape::Ref,
-        (None, _) => ReceiverShape::Value,
+    // syn 3 folds the `&` and its `mut` into `ReceiverKind::Reference`;
+    // the sibling `mutability` field now only carries the `mut` of a
+    // by-value `mut self`, which is a binding mode rather than a shape.
+    match &receiver.kind {
+        syn::ReceiverKind::Reference(_, _, Some(_)) => ReceiverShape::RefMut,
+        syn::ReceiverKind::Reference(_, _, None) => ReceiverShape::Ref,
+        _ => ReceiverShape::Value,
     }
 }
 
@@ -464,11 +467,11 @@ fn collect_pattern_names(pat: &syn::Pat, out: &mut Vec<String>) {
 pub(crate) fn collect_type_paths(ty: &syn::Type, out: &mut Vec<String>) {
     match ty {
         syn::Type::Array(array) => collect_type_paths(&array.elem, out),
-        syn::Type::BareFn(bare_fn) => {
-            for input in &bare_fn.inputs {
+        syn::Type::FnPtr(fn_ptr) => {
+            for input in &fn_ptr.inputs {
                 collect_type_paths(&input.ty, out);
             }
-            if let syn::ReturnType::Type(_, ty) = &bare_fn.output {
+            if let syn::ReturnType::Type(_, ty) = &fn_ptr.output {
                 collect_type_paths(ty, out);
             }
         }
@@ -522,7 +525,7 @@ fn collect_path_argument_type_paths(args: &syn::PathArguments, out: &mut Vec<Str
         }
         syn::PathArguments::Parenthesized(args) => {
             for input in &args.inputs {
-                collect_type_paths(input, out);
+                collect_type_paths(&input.ty, out);
             }
             if let syn::ReturnType::Type(_, ty) = &args.output {
                 collect_type_paths(ty, out);
@@ -552,7 +555,7 @@ pub(crate) fn generic_summaries(generics: &syn::Generics) -> Vec<String> {
 fn param_tree(arg: &syn::FnArg) -> TreeNode {
     match arg {
         syn::FnArg::Receiver(receiver) => {
-            let label = if receiver.reference.is_some() {
+            let label = if matches!(receiver.kind, syn::ReceiverKind::Reference(..)) {
                 "ReceiverRef"
             } else {
                 "Receiver"
@@ -774,8 +777,12 @@ fn closure_tree(closure: &syn::ExprClosure) -> TreeNode {
 }
 
 fn arm_tree(arm: &syn::Arm) -> TreeNode {
-    let mut children = vec![pat_tree(&arm.pat)];
-    if let Some((_, guard)) = &arm.guard {
+    // syn 3 represents a match guard as a `Pat::Guard` wrapping the arm's
+    // pattern. Peel it back apart so the emitted tree keeps the shape the
+    // TSED comparison has always seen: pattern, optional `Guard`, body.
+    let (pat, guard) = split_guard(&arm.pat);
+    let mut children = vec![pat_tree(pat)];
+    if let Some(guard) = guard {
         children.push(TreeNode::with_children("Guard", "", vec![expr_tree(guard)]));
     }
     children.push(expr_tree(&arm.body));
@@ -815,14 +822,10 @@ fn type_tree(ty: &syn::Type) -> TreeNode {
             "",
             vec![type_tree(&array.elem), expr_tree(&array.len)],
         ),
-        syn::Type::BareFn(bare_fn) => TreeNode::with_children(
+        syn::Type::FnPtr(fn_ptr) => TreeNode::with_children(
             "TypeBareFn",
             "",
-            bare_fn
-                .inputs
-                .iter()
-                .map(|arg| type_tree(&arg.ty))
-                .collect(),
+            fn_ptr.inputs.iter().map(|arg| type_tree(&arg.ty)).collect(),
         ),
         syn::Type::Group(group) => type_tree(&group.elem),
         syn::Type::ImplTrait(impl_trait) => TreeNode::with_children(
@@ -905,7 +908,7 @@ fn segment_generic_trees(segment: &syn::PathSegment) -> Vec<TreeNode> {
         syn::PathArguments::Parenthesized(args) => args
             .inputs
             .iter()
-            .map(type_tree)
+            .map(|arg| type_tree(&arg.ty))
             .chain(match &args.output {
                 syn::ReturnType::Default => None,
                 syn::ReturnType::Type(_, _) => Some(return_type_tree(&args.output)),
@@ -1012,7 +1015,7 @@ fn type_label(prefix: &str, ty: &syn::Type) -> String {
 fn type_summary(ty: &syn::Type) -> String {
     match ty {
         syn::Type::Array(array) => format!("[{}]", type_summary(&array.elem)),
-        syn::Type::BareFn(_) => "fn".to_owned(),
+        syn::Type::FnPtr(_) => "fn".to_owned(),
         syn::Type::Group(group) => type_summary(&group.elem),
         syn::Type::ImplTrait(_) => "impl Trait".to_owned(),
         syn::Type::Infer(_) => "_".to_owned(),
@@ -1656,6 +1659,7 @@ extern crate alloc;
         }
 
         let grouped = syn::Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
             group_token: Default::default(),
             elem: Box::new(syn::parse_str("u8").unwrap()),
         });
@@ -1732,6 +1736,7 @@ extern crate alloc;
         assert_eq!(out, vec!["Wrapper", "Into", "User"]);
 
         let grouped = syn::Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
             group_token: Default::default(),
             elem: Box::new(syn::parse_str("GroupedUser").unwrap()),
         });

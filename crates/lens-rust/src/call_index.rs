@@ -524,7 +524,7 @@ fn is_fn_trait_name(name: &str) -> bool {
 /// or any of those behind a reference or a wrapper like `Box<dyn Fn()>`.
 fn type_is_callable(ty: &Type, callable_generics: &HashSet<String>) -> bool {
     match ty {
-        Type::BareFn(_) => true,
+        Type::FnPtr(_) => true,
         Type::ImplTrait(imp) => imp.bounds.iter().any(bound_is_fn_trait),
         Type::TraitObject(obj) => obj.bounds.iter().any(bound_is_fn_trait),
         Type::Reference(reference) => type_is_callable(&reference.elem, callable_generics),
@@ -830,10 +830,12 @@ mod tests {
     #[test]
     fn grouped_types_are_peeled_when_deciding_callability() {
         let grouped = Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
             group_token: Default::default(),
             elem: Box::new(syn::parse_str("fn(u8)").unwrap()),
         });
         let grouped_value = Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
             group_token: Default::default(),
             elem: Box::new(syn::parse_str("u8").unwrap()),
         });
