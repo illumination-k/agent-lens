@@ -375,9 +375,6 @@ fn collect_pat_names(pat: &Pat, out: &mut HashSet<String>) {
         Pat::Reference(r) => collect_pat_names(&r.pat, out),
         Pat::Paren(p) => collect_pat_names(&p.pat, out),
         Pat::Type(t) => collect_pat_names(&t.pat, out),
-        // A guard nested inside a pattern still binds through its inner
-        // pattern; the guard expression itself binds nothing.
-        Pat::Guard(g) => collect_pat_names(&g.pat, out),
         _ => {}
     }
 }
