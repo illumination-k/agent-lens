@@ -309,7 +309,7 @@ fn collect_binding_names(pat: &BindingPattern, out: &mut Vec<String>) {
 /// Flatten a TS type annotation to the head identifiers it references
 /// (`Map<string, User>` -> `Map`, `string`, `User`). Shapes we don't
 /// model contribute nothing, mirroring the Rust adapter's path flatten.
-fn ts_type_paths(ty: &TSType, out: &mut Vec<String>) {
+pub(crate) fn ts_type_paths(ty: &TSType, out: &mut Vec<String>) {
     match ty {
         TSType::TSTypeReference(r) => {
             type_name_head(&r.type_name, out);
@@ -398,7 +398,7 @@ fn jsdoc_text(raw: &str) -> Option<String> {
 /// A nested function (`<parent>::closure#N`) carries no test marker of
 /// its own — it inherits the classification of the enclosing named
 /// function or method, so the `::closure#N` chain is peeled off first.
-fn is_test_item(qualified: &str) -> bool {
+pub(crate) fn is_test_item(qualified: &str) -> bool {
     let base = strip_nested_segments(qualified);
     match base.rsplit_once("::") {
         Some((owner, method)) => {

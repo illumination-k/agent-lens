@@ -15,10 +15,18 @@ use std::path::Path;
 use lens_domain::{ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
+use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
 use super::{AnalyzerError, OutputFormat, SourceFile, SourceLang, read_source};
+
+analyzer_options! {
+    /// `analyze wrapper` flags, and the `[profile.<name>.wrapper]` table.
+    pub struct WrapperOptions {
+        @shared(diff);
+    }
+}
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -35,25 +43,34 @@ impl WrapperAnalyzer {
 
     delegate_filter_builders!(filter);
 
+    /// Apply a whole [`WrapperOptions`] group. The CLI flags and the
+    /// `[profile.<name>.wrapper]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: WrapperOptions) -> Self {
+        self.with_diff_only(opts.diff_only)
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let files = self.collect_file_reports(path)?;
-        let report = build_report(path, &files);
+        let (files, scanned_file_count) = self.collect_file_reports(path)?;
+        let report = build_report(path, scanned_file_count, &files);
         render_report(&report, format, || format_markdown(&report))
     }
 
-    /// Resolve `path` to a list of per-file reports. Single-file inputs
-    /// produce a one-element vec; directory inputs walk recursively,
-    /// honouring `.gitignore`. Files with no findings are dropped so the
-    /// output stays signal-dense.
-    fn collect_file_reports(&self, path: &Path) -> Result<Vec<FileReport>, AnalyzerError> {
+    /// Resolve `path` to a list of per-file reports plus the number of
+    /// source files scanned to produce them. Single-file inputs produce
+    /// a one-element vec; directory inputs walk recursively, honouring
+    /// `.gitignore`. Files with no findings are dropped so the output
+    /// stays signal-dense, but they still count as scanned.
+    fn collect_file_reports(&self, path: &Path) -> Result<(Vec<FileReport>, usize), AnalyzerError> {
         // Pass 1: produce wrapper findings AND a call-site index for
         // every supported source file. Splitting it from the metric
         // rollup lets reuse metrics see calls in files that themselves
         // contain no wrappers.
-        let mut per_files = self
+        let scan = self
             .filter
             .collect_per_file(path, |sf| self.scan_file(sf))?;
+        let mut per_files = scan.reports;
         // Reuse metrics are workspace-wide by construction. A
         // single-file input only sees calls inside that one file, so
         // every cross-file rollup would trivially be 0. To avoid
@@ -63,10 +80,11 @@ impl WrapperAnalyzer {
         if path.is_dir() {
             annotate_reuse(&mut per_files);
         }
-        Ok(per_files
+        let files = per_files
             .into_iter()
             .filter_map(PerFile::into_report)
-            .collect())
+            .collect();
+        Ok((files, scan.scanned_file_count))
     }
 
     /// Walk a single file, returning the per-file slice (wrappers +
@@ -270,7 +288,7 @@ impl PerFileShape for WrapperShape {
 
 type Report<'a> = PerFileReport<'a, WrapperShape, WrapperView<'a>>;
 
-fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
+fn build_report<'a>(path: &Path, scanned_file_count: usize, files: &'a [FileReport]) -> Report<'a> {
     let views = files
         .iter()
         .map(|f| {
@@ -280,7 +298,7 @@ fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
             )
         })
         .collect();
-    PerFileReport::new(path, views)
+    PerFileReport::new(path, scanned_file_count, views)
 }
 
 #[derive(Debug, Serialize)]
@@ -326,10 +344,13 @@ impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
 }
 
 fn format_markdown(report: &Report<'_>) -> String {
+    // The header counts *scanned* files, not files with findings, so a
+    // clean run reads "8 file(s) scanned, 0 wrapper(s)" instead of the
+    // misleading "0 file(s)" that looks like nothing was analyzed.
     let mut out = format!(
-        "# Wrapper report: {} ({} file(s), {} wrapper(s))\n",
+        "# Wrapper report: {} ({} file(s) scanned, {} wrapper(s))\n",
         report.root(),
-        report.file_count(),
+        report.scanned_file_count(),
         report.item_count(),
     );
     if report.item_count() == 0 {
@@ -457,6 +478,48 @@ fn alpha(xs: &[i32]) -> i32 {
             .analyze(&file, OutputFormat::Md)
             .unwrap();
         assert!(md.contains("No thin forwarding wrappers"));
+        // Even with nothing found, the header must say the file was
+        // scanned rather than the misleading "0 file(s)".
+        assert!(md.contains("1 file(s) scanned"), "got: {md}");
+    }
+
+    #[test]
+    fn directory_with_no_wrappers_still_reports_scanned_files() {
+        // Regression test for issue #140: a directory whose files parse
+        // fine but contain no wrappers used to report "0 file(s)",
+        // indistinguishable from an extension/path-filter problem. The
+        // report must count scanned files independently of findings.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "app.ts",
+            "export function meaningful(x: number): number { const y = x + 1; return y * 2; }\n",
+        );
+        write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+fn alpha(xs: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in xs { total += *x; }
+    total
+}
+"#,
+        );
+
+        let md = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("2 file(s) scanned, 0 wrapper(s)"), "got: {md}");
+        assert!(md.contains("No thin forwarding wrappers"), "got: {md}");
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["scanned_file_count"], 2, "got {parsed}");
+        assert_eq!(parsed["file_count"], 0, "got {parsed}");
+        assert_eq!(parsed["wrapper_count"], 0, "got {parsed}");
     }
 
     #[test]
@@ -581,6 +644,9 @@ fn meaningful(xs: &[i32]) -> i32 {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["wrapper_count"], 2);
         assert_eq!(parsed["file_count"], 2);
+        // The wrapper-less noop.rs is excluded from `files` but still
+        // counted as scanned.
+        assert_eq!(parsed["scanned_file_count"], 3);
         let files = parsed["files"].as_array().unwrap();
         let paths: Vec<&str> = files.iter().map(|f| f["file"].as_str().unwrap()).collect();
         assert!(paths.contains(&"a.rs"), "got {paths:?}");

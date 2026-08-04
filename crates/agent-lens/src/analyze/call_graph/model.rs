@@ -8,7 +8,8 @@
 //! part of the JSON schema.
 
 use lens_domain::{
-    BuiltinFunctionNames, FunctionShape, SyntaxFact, UbiquitousMethodNames, VisibilityShape,
+    BuiltinFunctionNames, FunctionShape, InertAttributeNames, OwnerKind, SyntaxFact,
+    UbiquitousMethodNames, VisibilityShape,
 };
 use serde::Serialize;
 
@@ -21,6 +22,13 @@ pub(crate) struct CallGraphNode {
     pub(crate) file: String,
     pub(crate) module: String,
     pub(crate) impl_owner: Option<String>,
+    /// What kind of owner `impl_owner` names, where the adapter says.
+    /// The distinction reachability analysis needs is trait dispatch: a
+    /// method of a trait `impl` (or a trait's own default body) can be
+    /// called through the trait without any call site naming it. Kept
+    /// out of the serialized graph until an analyzer reports it.
+    #[serde(skip)]
+    pub(crate) owner_kind: Option<OwnerKind>,
     pub(crate) start_line: usize,
     pub(crate) end_line: usize,
     pub(crate) is_test: bool,
@@ -28,6 +36,19 @@ pub(crate) struct CallGraphNode {
     /// TypeScript and Python until their adapters extract export
     /// status.
     pub(crate) visibility: NodeVisibility,
+    /// Declared parameter slots, when the adapter extracted a
+    /// signature (currently Go). Read by the visibility analyzer to
+    /// match methods against interface method sets by arity; kept out
+    /// of the serialized graph until an analyzer reports it.
+    #[serde(skip)]
+    pub(crate) param_count: Option<usize>,
+    /// Non-doc annotations on the declaration (`no_mangle`,
+    /// `tokio::main`, `go:linkname`), or `None` where the adapter does
+    /// not extract them — which reachability analysis must read as "an
+    /// entry marker may be hiding here". Kept out of the serialized
+    /// graph until an analyzer reports it.
+    #[serde(skip)]
+    pub(crate) attributes: Option<Vec<String>>,
     pub(crate) weights: NodeWeights,
     /// Per-node counts of outgoing call sites by resolution outcome.
     /// Non-resolved edges carry no target endpoint to tag, so this is
@@ -276,6 +297,19 @@ impl GraphLanguage {
             Self::TypeScript => lens_ts::BUILTIN_FUNCTION_NAMES,
             Self::Python => lens_py::BUILTIN_FUNCTION_NAMES,
             Self::Go => lens_golang::BUILTIN_FUNCTION_NAMES,
+        }
+    }
+
+    /// Annotations that cannot make a definition reachable, owned by
+    /// each adapter for the same reason as the two name tables above.
+    /// Consulted by reachability analysis, which treats every other
+    /// annotation as a caller it cannot see.
+    pub(crate) fn inert_attribute_names(self) -> InertAttributeNames {
+        match self {
+            Self::Rust => lens_rust::INERT_ATTRIBUTE_NAMES,
+            Self::TypeScript => lens_ts::INERT_ATTRIBUTE_NAMES,
+            Self::Python => lens_py::INERT_ATTRIBUTE_NAMES,
+            Self::Go => lens_golang::INERT_ATTRIBUTE_NAMES,
         }
     }
 }

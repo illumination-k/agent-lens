@@ -26,7 +26,9 @@ use lens_domain::{FileComplexity, FunctionComplexity, HotspotEntry, compute_hots
 use serde::Serialize;
 use tracing::warn;
 
-use super::churn::{ChurnError, ChurnScope};
+use super::churn::ChurnScope;
+use super::error_from::impl_from_churn_error;
+use super::options::analyzer_options;
 use super::{
     AnalyzePathFilter, AnalyzerError, CompiledPathFilter, OutputFormat, PathFilterError,
     SourceLang, collect_source_files,
@@ -54,16 +56,17 @@ pub enum HotspotError {
     PathFilter(#[from] PathFilterError),
 }
 
-/// Churn extraction lives in [`super::churn`] so `analyze risk` shares
-/// it verbatim; its failures map one-for-one onto the variants this
-/// analyzer has always exposed.
-impl From<ChurnError> for HotspotError {
-    fn from(error: ChurnError) -> Self {
-        match error {
-            ChurnError::Io { path, source } => Self::Io { path, source },
-            ChurnError::Git { stderr } => Self::Git { stderr },
-            ChurnError::NotInGitRepo { path } => Self::NotInGitRepo { path },
-        }
+impl_from_churn_error!(HotspotError);
+
+analyzer_options! {
+    /// `analyze hotspot` flags, and the `[profile.<name>.hotspot]` table.
+    pub struct HotspotOptions {
+        @shared(ranking);
+        /// Restrict churn to commits in this `--since=` window. Accepts
+        /// anything git's approxidate parser does (e.g. `90.days.ago`,
+        /// `2024-01-01`).
+        #[arg(long)]
+        pub since: Option<String>,
     }
 }
 
@@ -78,6 +81,13 @@ pub struct HotspotAnalyzer {
 }
 
 impl HotspotAnalyzer {
+    /// Apply a whole [`HotspotOptions`] group. The CLI flags and the
+    /// `[profile.<name>.hotspot]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: HotspotOptions) -> Self {
+        self.with_top(opts.top).with_since_opt(opts.since)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

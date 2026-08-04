@@ -64,6 +64,7 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
+use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
 
@@ -92,6 +93,13 @@ const EVIDENCE_PER_PAIR: usize = 3;
 /// Module names listed per level in markdown. JSON carries all of them.
 const MODULES_PER_LEVEL: usize = 6;
 
+analyzer_options! {
+    /// `analyze layers` flags, and the `[profile.<name>.layers]` table.
+    pub struct LayersOptions {
+        @shared(ranking);
+    }
+}
+
 /// Analyzer entry point for `analyze layers`.
 #[derive(Debug, Default, Clone)]
 pub struct LayersAnalyzer {
@@ -101,6 +109,13 @@ pub struct LayersAnalyzer {
 }
 
 impl LayersAnalyzer {
+    /// Apply a whole [`LayersOptions`] group. The CLI flags and the
+    /// `[profile.<name>.layers]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: LayersOptions) -> Self {
+        self.with_top(opts.top)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

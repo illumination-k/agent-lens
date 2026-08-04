@@ -9,6 +9,8 @@
 //!   (e.g. cohesion reports).
 //! * [`config`] — `agent-lens.toml` parsing: named analysis profiles that
 //!   the `run` subcommand fans out across several analyzers.
+//! * [`baseline`] — compact metric snapshots of a profile, the artifact a
+//!   later run compares against to tell a regression from existing debt.
 //! * [`config_schema`] — renders the `agent-lens.toml` schema as
 //!   agent-friendly Markdown for `config schema`.
 //! * [`skills`] — the Claude Code skills bundled into the binary plus the
@@ -22,10 +24,12 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod analyze;
+pub mod baseline;
 pub mod config;
 pub mod config_schema;
 pub mod help_md;
 pub mod hooks;
+pub mod paths;
 pub mod skills;
 
 #[doc(hidden)]

@@ -1,4 +1,4 @@
-//! Name tables that switch the resolver's name matching off.
+//! Name tables that switch name-only reasoning off.
 //!
 //! A syntax-only pipeline resolves a callee by name, which is sound for
 //! names a workspace invented and worthless for two families of name it
@@ -14,6 +14,15 @@
 //!
 //! Either way a single workspace symbol sharing the name absorbs every
 //! call site in the corpus and becomes a phantom hub.
+//!
+//! A third table serves reachability rather than resolution:
+//!
+//! * **Inert attribute names.** An annotation on a definition
+//!   (`#[no_mangle]`, `#[tokio::main]`, `//go:linkname`) can register it
+//!   with machinery no call site names, so a reachability verdict must
+//!   not be trusted there. The listed names are the ones that provably
+//!   do no such thing — lints, layout hints, documentation — and are
+//!   therefore safe to ignore.
 //!
 //! The tables themselves are language conventions, so they live next to
 //! the adapters ([`lens_rust`], [`lens_ts`], [`lens_py`],
@@ -95,6 +104,19 @@ name_table!(
     /// might plausibly own belongs in neither table, since name matching
     /// is the resolver's main source of true positives.
     BuiltinFunctionNames
+);
+
+name_table!(
+    /// Annotation names that cannot make a definition reachable: lint
+    /// controls, layout and codegen hints, documentation.
+    ///
+    /// Entries are written the way the adapter emits them — a Rust
+    /// attribute path (`must_use`, `rustfmt::skip`), a Go directive
+    /// (`go:noinline`). The bar for adding one is that the compiler or a
+    /// tool consumes it and nothing else can call the definition because
+    /// of it; an annotation whose expansion is not obvious belongs
+    /// outside the table, where it is read as "something may call this".
+    InertAttributeNames
 );
 
 #[cfg(test)]

@@ -167,7 +167,7 @@ fn signature_info(node: Node<'_>, source: &[u8], raw_name: &str) -> FunctionSign
 /// The `name:` identifiers of a parameter / spec declaration, in order.
 /// `func f(a, b int)` yields `["a", "b"]`; an unnamed parameter yields
 /// an empty list.
-fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
+pub(crate) fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {
@@ -185,6 +185,31 @@ fn declaration_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     names
+}
+
+/// Per-slot parameter names of a `parameter_list`, with grouped
+/// declarations expanded — `(a, b int)` yields two slots — and unnamed
+/// parameters holding `None`. A variadic declaration is one slot. This
+/// slot expansion is what makes two Go signatures comparable by arity:
+/// `Do(a, b int)` and `Do(int, int)` both declare two parameters.
+pub(crate) fn parameter_slot_names(params: Node<'_>, source: &[u8]) -> Vec<Option<String>> {
+    let mut slots = Vec::new();
+    let mut cursor = params.walk();
+    for decl in params.named_children(&mut cursor) {
+        if !matches!(
+            decl.kind(),
+            "parameter_declaration" | "variadic_parameter_declaration"
+        ) {
+            continue;
+        }
+        let names = declaration_names(decl, source);
+        if names.is_empty() {
+            slots.push(None);
+        } else {
+            slots.extend(names.into_iter().map(Some));
+        }
+    }
+    slots
 }
 
 /// Collect return type texts from a `result:` node, which is either a
@@ -206,7 +231,7 @@ fn collect_result_types(result: Node<'_>, source: &[u8], out: &mut Vec<String>) 
 
 /// Collect generic type-parameter declarations (`[T any]`), if any, as
 /// their raw text.
-fn collect_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
+pub(crate) fn collect_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let Some(params) = node.child_by_field_name("type_parameters") else {
         return Vec::new();
     };
@@ -250,7 +275,23 @@ fn receiver_shape(node: Node<'_>) -> ReceiverShape {
 /// markers (`//`, `/* */`) are stripped per line. Returns `None` when
 /// there is no adjacent comment or it is blank.
 pub(crate) fn doc_comment_text(node: Node<'_>, source: &[u8]) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
+    let doc = adjacent_comments(node, source)
+        .into_iter()
+        .map(strip_comment_markers)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    (!doc.is_empty()).then_some(doc)
+}
+
+/// The raw text of the `comment` siblings forming the declaration's doc
+/// block, in source order. Shared by [`doc_comment_text`], which reads
+/// them as prose, and [`directive_names`], which reads them as compiler
+/// directives — the two disagree about markers and whitespace, so the
+/// split happens after the walk rather than inside it.
+fn adjacent_comments<'a>(node: Node<'_>, source: &'a [u8]) -> Vec<&'a str> {
+    let mut comments: Vec<&'a str> = Vec::new();
     let mut expected_row = node.start_position().row;
     let mut prev = node.prev_sibling();
     while let Some(sibling) = prev {
@@ -260,13 +301,38 @@ pub(crate) fn doc_comment_text(node: Node<'_>, source: &[u8]) -> Option<String> 
         let Some(text) = node_str(sibling, source) else {
             break;
         };
-        lines.push(strip_comment_markers(text));
+        comments.push(text);
         expected_row = sibling.start_position().row;
         prev = sibling.prev_sibling();
     }
-    lines.reverse();
-    let doc = lines.join("\n").trim().to_owned();
-    (!doc.is_empty()).then_some(doc)
+    comments.reverse();
+    comments
+}
+
+/// Compiler directives written above the declaration, named without
+/// their arguments: `//go:linkname local remote` yields `go:linkname`,
+/// the cgo `//export Name` yields `export`.
+///
+/// Go has no attribute syntax, so a directive is a comment the toolchain
+/// happens to read — and the spelling is exact: no space after `//`, the
+/// directive name runs to the first space. Prose that merely starts with
+/// the word "export" is not one, hence the `//export ` prefix rather
+/// than a search.
+pub(crate) fn directive_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    adjacent_comments(node, source)
+        .into_iter()
+        .flat_map(str::lines)
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if let Some(rest) = line.strip_prefix("//go:") {
+                let name = rest.split_whitespace().next().unwrap_or_default();
+                return (!name.is_empty()).then(|| format!("go:{name}"));
+            }
+            line.strip_prefix("//export ")
+                .is_some_and(|name| !name.trim().is_empty())
+                .then(|| "export".to_owned())
+        })
+        .collect()
 }
 
 /// Strip `//` / `/* */` markers from one comment node's text, trimming
@@ -350,6 +416,15 @@ fn receiver_type_text(node: Node<'_>, source: &[u8]) -> Option<String> {
 /// `"Block"` label.
 pub(crate) fn function_body_tree(body: Node<'_>, source: &[u8]) -> TreeNode {
     build_tree(body, source, /* is_root = */ true)
+}
+
+/// Lower a single statement node into the subtree
+/// [`function_body_tree`] nests under `Block`. Used by
+/// `similarity --target blocks`, which compares runs of statements
+/// rather than whole bodies; routing both through [`build_tree`] is what
+/// keeps a window covering a whole body identical to that body's tree.
+pub(crate) fn statement_tree(node: Node<'_>, source: &[u8]) -> TreeNode {
+    build_tree(node, source, /* is_root = */ false)
 }
 
 /// Strip the surrounding quotes from a Go string literal.
@@ -938,5 +1013,33 @@ func (s *Service) Compute(x int) int {
             .extract_functions("package p\nfunc !!! {")
             .unwrap_err();
         assert!(format!("{err}").contains("parse"));
+    }
+
+    /// Go has no attribute syntax: a directive is a comment the
+    /// toolchain reads, and the spelling is exact. The ones that
+    /// publish a symbol to a caller no Go call site names — cgo's
+    /// `//export`, `//go:linkname` — have to be told apart from prose
+    /// that merely starts with the same word.
+    #[rstest]
+    #[case::codegen_directive("//go:noinline\nfunc f() {}\n", vec!["go:noinline"])]
+    #[case::directive_with_arguments(
+        "//go:linkname f runtime.f\nfunc f() {}\n",
+        vec!["go:linkname"],
+    )]
+    #[case::cgo_export("//export F\nfunc f() {}\n", vec!["export"])]
+    #[case::several("//go:generate stringer\n//go:noinline\nfunc f() {}\n", vec!["go:generate", "go:noinline"])]
+    #[case::prose_is_not_a_directive("// export the widget\nfunc f() {}\n", Vec::new())]
+    #[case::spaced_is_not_a_directive("// go:noinline\nfunc f() {}\n", Vec::new())]
+    #[case::export_needs_a_name("//export\nfunc f() {}\n", Vec::new())]
+    #[case::no_comment("func f() {}\n", Vec::new())]
+    fn directive_names_reads_only_real_directives(#[case] body: &str, #[case] expected: Vec<&str>) {
+        let source = format!("package app\n\n{body}");
+        let bytes = source.as_bytes();
+        let tree = super::parse_tree(&source).unwrap();
+        let mut found = None;
+        walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+            found = Some(directive_names(site.node, bytes));
+        });
+        assert_eq!(found.unwrap_or_default(), expected);
     }
 }

@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use agent_lens::analyze::{OutputFormat, SimilarityAnalyzer, SimilarityMethod};
+use agent_lens::analyze::{OutputFormat, SimilarityAnalyzer, SimilarityMethod, SimilarityTarget};
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 
@@ -10,8 +10,11 @@ fn bench_similarity(c: &mut Criterion) {
     let medium = dense_bench_corpus(16, 16);
     let large_dense = dense_bench_corpus(32, 32);
     let large_sparse = sparse_bench_corpus(32, 32);
+    let types = types_bench_corpus(32, 16);
     let analyzer = SimilarityAnalyzer::new();
     let token_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Token);
+    let types_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Types);
+    let blocks_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Blocks);
 
     c.bench_function("similarity_directory_cartesian_32_functions", |b| {
         b.iter(|| {
@@ -53,6 +56,31 @@ fn bench_similarity(c: &mut Criterion) {
         });
     });
 
+    // Types always take the cartesian path (LSH is gated off for small
+    // trees), so 512 units ≈ 130k pairs is the shape a real repo hits.
+    c.bench_function("similarity_directory_types_512", |b| {
+        b.iter(|| {
+            let report = match types_analyzer.analyze(types.path(), OutputFormat::Json) {
+                Ok(report) => report,
+                Err(err) => panic!("similarity benchmark failed: {err}"),
+            };
+            std::hint::black_box(report.len());
+        });
+    });
+
+    // Blocks multiply the unit count: the dense corpus's 256 functions
+    // mint several thousand statement windows, which is the shape that
+    // decides whether the target is usable on a real repo at all.
+    c.bench_function("similarity_directory_blocks_256_functions", |b| {
+        b.iter(|| {
+            let report = match blocks_analyzer.analyze(medium.path(), OutputFormat::Json) {
+                Ok(report) => report,
+                Err(err) => panic!("similarity benchmark failed: {err}"),
+            };
+            std::hint::black_box(report.len());
+        });
+    });
+
     c.bench_function("similarity_token_directory_lsh_dense_1024_functions", |b| {
         b.iter(|| {
             let report = match token_analyzer.analyze(large_dense.path(), OutputFormat::Json) {
@@ -82,6 +110,40 @@ fn sparse_bench_corpus(file_count: usize, functions_per_file: usize) -> TempDir 
         panic!("failed to write benchmark corpus: {err}");
     });
     dir
+}
+
+fn types_bench_corpus(file_count: usize, types_per_file: usize) -> TempDir {
+    let dir = tempfile::tempdir().unwrap_or_else(|err| {
+        panic!("failed to create benchmark tempdir: {err}");
+    });
+    write_types_corpus(dir.path(), file_count, types_per_file).unwrap_or_else(|err| {
+        panic!("failed to write benchmark corpus: {err}");
+    });
+    dir
+}
+
+fn write_types_corpus(
+    root: &Path,
+    file_count: usize,
+    types_per_file: usize,
+) -> std::io::Result<()> {
+    const FIELD_TYPES: [&str; 6] = ["u64", "String", "Vec<String>", "bool", "Option<i64>", "f64"];
+    for file_idx in 0..file_count {
+        let path: PathBuf = root.join(format!("types_{file_idx:02}.rs"));
+        let mut src = String::new();
+        for type_idx in 0..types_per_file {
+            let global = file_idx * types_per_file + type_idx;
+            let field_count = 3 + global % 5;
+            let _ = writeln!(src, "pub struct Generated{global:03} {{");
+            for field_idx in 0..field_count {
+                let ty = FIELD_TYPES[(global + field_idx) % FIELD_TYPES.len()];
+                let _ = writeln!(src, "    pub field_{field_idx}: {ty},");
+            }
+            let _ = writeln!(src, "}}\n");
+        }
+        std::fs::write(path, src)?;
+    }
+    Ok(())
 }
 
 fn write_dense_corpus(

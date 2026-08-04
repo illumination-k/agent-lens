@@ -57,6 +57,7 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
+use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, overlaps_any};
 
@@ -100,6 +101,13 @@ const NOTE: &str = "Candidates, not verdicts: a row says every hop between the h
      on Rust; TypeScript and Python carry no extracted export status (no facade exemption) and \
      their idioms are not modelled.";
 
+analyzer_options! {
+    /// `analyze delegation` flags, and the `[profile.<name>.delegation]` table.
+    pub struct DelegationOptions {
+        @shared(ranking, diff);
+    }
+}
+
 /// Analyzer entry point for `analyze delegation`.
 #[derive(Debug, Clone)]
 pub struct DelegationAnalyzer {
@@ -121,6 +129,13 @@ impl Default for DelegationAnalyzer {
 }
 
 impl DelegationAnalyzer {
+    /// Apply a whole [`DelegationOptions`] group. The CLI flags and the
+    /// `[profile.<name>.delegation]` table are the same type, so this is
+    /// the only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: DelegationOptions) -> Self {
+        self.with_top(opts.top).with_diff_only(opts.diff_only)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

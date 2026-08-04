@@ -57,7 +57,10 @@ impl ChurnScope {
             path: path.to_path_buf(),
             source,
         })?;
-        let repo_root = git_repo_root(&target)?;
+        let repo_root =
+            crate::paths::git_repo_root(&target).ok_or_else(|| ChurnError::NotInGitRepo {
+                path: path.to_path_buf(),
+            })?;
         let scope_rel = relative_to(&target, &repo_root);
         Ok(Self {
             target,
@@ -146,25 +149,6 @@ impl ChurnScope {
             None => display_path,
         }
     }
-}
-
-/// Walk parents of `path` looking for a `.git` entry. Returns the
-/// directory containing it, which is what git would call the working
-/// tree root.
-fn git_repo_root(path: &Path) -> Result<PathBuf, ChurnError> {
-    let start = if path.is_file() {
-        path.parent().unwrap_or(path)
-    } else {
-        path
-    };
-    for ancestor in start.ancestors() {
-        if ancestor.join(".git").exists() {
-            return Ok(ancestor.to_path_buf());
-        }
-    }
-    Err(ChurnError::NotInGitRepo {
-        path: path.to_path_buf(),
-    })
 }
 
 /// Express `target` as a `/`-separated path relative to `base`,

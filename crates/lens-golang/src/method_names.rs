@@ -19,7 +19,7 @@
 //! absent — they are ubiquitous only in reflection-heavy code and are
 //! far more often a project's own accessor.
 
-use lens_domain::{BuiltinFunctionNames, UbiquitousMethodNames};
+use lens_domain::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
 
 /// Go's ubiquitous method names, sorted for binary search.
 pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames::new(&[
@@ -84,6 +84,26 @@ pub const BUILTIN_FUNCTION_NAMES: BuiltinFunctionNames = BuiltinFunctionNames::n
     "min", "new", "panic", "print", "println", "real", "recover",
 ]);
 
+/// Go compiler directives that cannot make a function reachable, sorted
+/// for binary search.
+///
+/// Go has no attribute syntax; the adapter reads directives off the
+/// comment immediately above a declaration, so the entries here are
+/// spelled as they are written there minus the `//`. Listed are the ones
+/// that only steer compilation. Left out — and therefore read as "a
+/// caller may exist outside the call graph" — are the directives that
+/// publish a symbol to something the graph cannot see: `//export` (cgo),
+/// `//go:linkname`, `//go:wasmexport`, `//go:cgo_export_static`.
+pub const INERT_ATTRIBUTE_NAMES: InertAttributeNames = InertAttributeNames::new(&[
+    "go:build",
+    "go:generate",
+    "go:noinline",
+    "go:norace",
+    "go:nosplit",
+    "go:notinheap",
+    "go:yeswritebarrierrec",
+]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +113,7 @@ mod tests {
     fn table_is_sorted_and_deduped() {
         assert!(UBIQUITOUS_METHOD_NAMES.is_sorted_and_deduped());
         assert!(BUILTIN_FUNCTION_NAMES.is_sorted_and_deduped());
+        assert!(INERT_ATTRIBUTE_NAMES.is_sorted_and_deduped());
     }
 
     #[rstest]

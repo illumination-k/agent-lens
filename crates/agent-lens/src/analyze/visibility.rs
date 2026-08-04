@@ -24,6 +24,16 @@
 //!   resolver refuses to attribute (`.clone()`, `.get()`) — are counted
 //!   per row when they sit outside the proposed scope. A flagged row is
 //!   the one to check by hand first.
+//! - Interface dispatch hides callers wholesale: in a Go codebase built
+//!   around interfaces, a concrete method's callers name the interface,
+//!   never the method, so every exported implementation looks uncalled.
+//!   Exported Go methods matching a method of an interface declared in
+//!   the analyzed tree — same name, same parameter count — are therefore
+//!   annotated (`may satisfy interface …`) and ranked after unannotated
+//!   rows in their bucket. The match is structural, so a coincidental
+//!   name+arity match annotates too; that over-approximation is the
+//!   right direction here, since a false annotation hides one row while
+//!   the unannotated report drowned in false "no resolved caller" rows.
 //! - Callers outside the analyzed path do not exist for this analyzer.
 //!   Pointed at a single library crate, its whole intended API surface
 //!   looks crate-internal, which is why the crate count is reported and
@@ -43,24 +53,28 @@
 //!
 //! # Schema history
 //!
-//! * `schema_version: 1` — initial shape.
+//! * `schema_version: 1` — initial shape; later additive fields:
+//!   `may_satisfy_interfaces` per finding (omitted when empty) and
+//!   `interface_satisfying_count` in the summary.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::UbiquitousMethodNames;
 use serde::Serialize;
 
 use super::call_graph::model::{
-    CallGraphNode, GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
-    name_last_segment,
+    CallGraphNode, ModuleResolutionSummary, NodeVisibility, Resolution, name_last_segment,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::{ModuleSection, render_module_confidence, render_module_sections};
+use super::export_lang::{ExportLang, InterfaceIndex};
+use super::format::{
+    ModuleSection, render_backticked_list, render_module_confidence, render_module_sections,
+};
+use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat, SourceLang};
+use super::{AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -76,6 +90,10 @@ const FINDINGS_PER_MODULE: usize = 10;
 /// rolled into a count.
 const CALLER_MODULES_PER_ROW: usize = 3;
 
+/// Interfaces named inline on an annotated markdown row before the
+/// rest are rolled into a count.
+const INTERFACES_PER_ROW: usize = 2;
+
 /// What the verdict means, stated in the output itself: every row is a
 /// candidate whose worst case is a failed build, and the evidence is
 /// bounded by what the resolver could see.
@@ -85,7 +103,17 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
      receiver calls on a name the resolver refuses to attribute, are invisible — sites of either \
      kind that name the function from outside the proposed scope are counted per row. Callers \
      outside the analyzed path do not exist here, and only `pub use` re-exports written in a crate \
-     root are recognised as intended API, so a surface published another way can still appear.";
+     root are recognised as intended API, so a surface published another way can still appear. \
+     Exported Go methods matching a method of an interface declared in the analyzed tree (same \
+     name and parameter count) are annotated rather than trusted: their callers can dispatch \
+     through the interface, which no static edge records, so a missing caller is expected there.";
+
+analyzer_options! {
+    /// `analyze visibility` flags, and the `[profile.<name>.visibility]` table.
+    pub struct VisibilityOptions {
+        @shared(ranking);
+    }
+}
 
 /// Analyzer entry point for `analyze visibility`.
 #[derive(Debug, Default, Clone)]
@@ -95,6 +123,13 @@ pub struct VisibilityAnalyzer {
 }
 
 impl VisibilityAnalyzer {
+    /// Apply a whole [`VisibilityOptions`] group. The CLI flags and the
+    /// `[profile.<name>.visibility]` table are the same type, so this is
+    /// the only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: VisibilityOptions) -> Self {
+        self.with_top(opts.top)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -120,7 +155,14 @@ impl VisibilityAnalyzer {
     }
 
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let graph = self.builder.build(path)?;
+        // Interface method sets are what tells an uncalled-looking Go
+        // method apart from one whose calls dispatch through an
+        // interface, so this analyzer always pays for their extraction.
+        let graph = self
+            .builder
+            .clone()
+            .with_interface_facts(true)
+            .build(path)?;
         let report = Report::build(path, &graph);
         render_report(&report, format, || format_markdown(&report, self.top))
     }
@@ -230,6 +272,15 @@ struct Finding {
     /// name to match or was written as a path the resolver checked
     /// against this function and ruled out.
     ubiquitous_name_calls_outside_scope: usize,
+    /// Interfaces declared in the analyzed tree whose method set names
+    /// this method — same name, same parameter count. Calls to it can
+    /// dispatch through any of them, which no static edge records, so
+    /// a missing caller is expected rather than evidence; the row
+    /// ranks after unannotated rows in its bucket. The match is
+    /// structural, so it can be coincidental — acting on the row still
+    /// costs at most a failed build.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    may_satisfy_interfaces: Vec<String>,
 }
 
 impl Finding {
@@ -237,6 +288,12 @@ impl Finding {
     /// this function — the rows to verify before narrowing.
     fn possible_external_caller(&self) -> bool {
         self.ambiguous_calls_outside_scope > 0 || self.ubiquitous_name_calls_outside_scope > 0
+    }
+
+    /// Whether calls may reach this method through interface dispatch
+    /// — the annotation that ranks a row after its unannotated peers.
+    fn may_dispatch_via_interface(&self) -> bool {
+        !self.may_satisfy_interfaces.is_empty()
     }
 }
 
@@ -273,54 +330,11 @@ struct Summary {
     /// Findings carrying an ambiguous or name-matching unresolved call
     /// site from outside the proposed scope.
     possible_external_caller_count: usize,
+    /// Findings annotated as possibly satisfying an in-scope interface
+    /// — the rows whose missing callers interface dispatch explains.
+    interface_satisfying_count: usize,
     /// Modules holding at least one finding.
     module_count: usize,
-}
-
-/// The two languages whose adapters extract export status. Everything
-/// else is counted as skipped instead of being judged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuditLang {
-    /// Private items are visible in the defining module *and its
-    /// descendants*, and the intermediate `pub(in …)` scopes exist.
-    Rust,
-    /// The package is the only boundary: a caller one directory down is
-    /// as external as one in another repository.
-    Go,
-}
-
-impl AuditLang {
-    fn of(node: &CallGraphNode) -> Option<Self> {
-        match SourceLang::from_path(Path::new(&node.file)) {
-            Some(SourceLang::Rust) => Some(Self::Rust),
-            Some(SourceLang::Go) => Some(Self::Go),
-            _ => None,
-        }
-    }
-
-    /// The visibility that exposes a function beyond its own compilation
-    /// unit in this language.
-    fn public(self) -> NodeVisibility {
-        match self {
-            Self::Rust => NodeVisibility::Public,
-            Self::Go => NodeVisibility::Exported,
-        }
-    }
-
-    /// Whether a scope module also covers the modules below it. Rust
-    /// visibility is inherited downward; Go packages are flat.
-    fn scope_covers_descendants(self) -> bool {
-        matches!(self, Self::Rust)
-    }
-
-    /// The method names this language's resolver refuses to attribute
-    /// from a receiver call alone.
-    fn ubiquitous_names(self) -> UbiquitousMethodNames {
-        match self {
-            Self::Rust => GraphLanguage::Rust.ubiquitous_method_names(),
-            Self::Go => GraphLanguage::Go.ubiquitous_method_names(),
-        }
-    }
 }
 
 impl Report {
@@ -328,16 +342,18 @@ impl Report {
         let crate_dirs = rust_crate_dirs(graph);
         let re_exports = ReExports::scan(root, &crate_dirs);
         let public = public_nodes(graph);
-        let audited: Vec<(usize, AuditLang)> = public
+        let audited: Vec<(usize, ExportLang)> = public
             .iter()
             .copied()
             .filter(|&(idx, _)| !re_exports.covers(&graph.nodes[idx]))
             .collect();
 
         let callers = graph.resolved_callers();
+        let interface_index = InterfaceIndex::new(&graph.interfaces);
         let mut findings: Vec<(usize, Finding)> = Vec::new();
         for &(idx, lang) in &audited {
-            if let Some(finding) = classify(graph, idx, lang, callers.get(&idx)) {
+            if let Some(mut finding) = classify(graph, idx, lang, callers.get(&idx)) {
+                finding.may_satisfy_interfaces = interface_index.matching(&graph.nodes[idx], lang);
                 findings.push((idx, finding));
             }
         }
@@ -360,14 +376,14 @@ impl Report {
 
 /// Non-test functions declared public in a language that records the
 /// fact, paired with that language.
-fn public_nodes(graph: &CallGraph) -> Vec<(usize, AuditLang)> {
+fn public_nodes(graph: &CallGraph) -> Vec<(usize, ExportLang)> {
     graph
         .nodes
         .iter()
         .enumerate()
         .filter(|(_, node)| !node.is_test)
         .filter_map(|(idx, node)| {
-            let lang = AuditLang::of(node)?;
+            let lang = ExportLang::of(node)?;
             (node.visibility == lang.public()).then_some((idx, lang))
         })
         .collect()
@@ -379,7 +395,7 @@ fn public_nodes(graph: &CallGraph) -> Vec<(usize, AuditLang)> {
 fn rust_crate_dirs(graph: &CallGraph) -> BTreeMap<&str, &str> {
     let mut dirs: BTreeMap<&str, &str> = BTreeMap::new();
     for node in &graph.nodes {
-        if AuditLang::of(node) != Some(AuditLang::Rust) {
+        if ExportLang::of(node) != Some(ExportLang::Rust) {
             continue;
         }
         if let Some(crate_dir) = crate_dir_of(&node.file) {
@@ -399,7 +415,7 @@ fn audit_scope(
     let crates: BTreeSet<&str> = graph
         .nodes
         .iter()
-        .filter(|node| AuditLang::of(node) == Some(AuditLang::Rust))
+        .filter(|node| ExportLang::of(node) == Some(ExportLang::Rust))
         .map(|node| crate_of(&node.module))
         .collect();
     Audit {
@@ -415,7 +431,7 @@ fn audit_scope(
         unsupported_language_function_count: graph
             .nodes
             .iter()
-            .filter(|node| !node.is_test && AuditLang::of(node).is_none())
+            .filter(|node| !node.is_test && ExportLang::of(node).is_none())
             .count(),
     }
 }
@@ -643,7 +659,7 @@ fn normalize_use_path(path: &str) -> &str {
 fn classify(
     graph: &CallGraph,
     idx: usize,
-    lang: AuditLang,
+    lang: ExportLang,
     callers: Option<&BTreeSet<usize>>,
 ) -> Option<Finding> {
     let node = &graph.nodes[idx];
@@ -656,8 +672,8 @@ fn classify(
         .collect();
 
     let (scope, scope_module) = match lang {
-        AuditLang::Rust => rust_scope(&node.module, &caller_modules)?,
-        AuditLang::Go => go_scope(&node.module, &caller_modules)?,
+        ExportLang::Rust => rust_scope(&node.module, &caller_modules)?,
+        ExportLang::Go => go_scope(&node.module, &caller_modules)?,
     };
     Some(Finding {
         id: node.id.clone(),
@@ -678,6 +694,7 @@ fn classify(
         caller_modules: caller_modules.into_iter().map(ToOwned::to_owned).collect(),
         ambiguous_calls_outside_scope: 0,
         ubiquitous_name_calls_outside_scope: 0,
+        may_satisfy_interfaces: Vec::new(),
     })
 }
 
@@ -726,15 +743,15 @@ fn go_scope<'a>(
 
 /// The declaration that would still compile, spelled the way the
 /// language writes it.
-fn suggest(lang: AuditLang, scope: CallerScope, module: &str, scope_module: &str) -> String {
+fn suggest(lang: ExportLang, scope: CallerScope, module: &str, scope_module: &str) -> String {
     match (lang, scope) {
         (_, CallerScope::NoResolvedCallers) => {
             "verify: no resolved caller in the analyzed tree".to_owned()
         }
-        (AuditLang::Go, _) => "unexport: lowercase the initial letter".to_owned(),
-        (AuditLang::Rust, CallerScope::SameModule) => "drop `pub`".to_owned(),
-        (AuditLang::Rust, CallerScope::SameCrate) => "pub(crate)".to_owned(),
-        (AuditLang::Rust, CallerScope::AncestorModule) => {
+        (ExportLang::Go, _) => "unexport: lowercase the initial letter".to_owned(),
+        (ExportLang::Rust, CallerScope::SameModule) => "drop `pub`".to_owned(),
+        (ExportLang::Rust, CallerScope::SameCrate) => "pub(crate)".to_owned(),
+        (ExportLang::Rust, CallerScope::AncestorModule) => {
             if parent_of(module) == Some(scope_module) {
                 "pub(super)".to_owned()
             } else {
@@ -803,12 +820,12 @@ fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) 
         };
         for slot in slots {
             let (idx, finding) = &mut findings[slot];
-            let lang = AuditLang::of(&graph.nodes[*idx]);
+            let lang = ExportLang::of(&graph.nodes[*idx]);
             let inside = caller_module.is_some_and(|caller_module| {
                 in_scope(
                     caller_module,
                     &finding.scope_module,
-                    lang.is_some_and(AuditLang::scope_covers_descendants),
+                    lang.is_some_and(ExportLang::scope_covers_descendants),
                 )
             });
             if inside {
@@ -835,7 +852,7 @@ fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) 
 /// and it is worthless. Only that last class can still be a caller of
 /// `node`, and it is exactly the one this predicate keeps.
 fn gated_by_name(node: &CallGraphNode, callee: &str) -> bool {
-    AuditLang::of(node).is_some_and(|lang| lang.ubiquitous_names().contains(callee))
+    ExportLang::of(node).is_some_and(|lang| lang.ubiquitous_names().contains(callee))
 }
 
 fn summarize(modules: &[ModuleGroup], audited_function_count: usize) -> Summary {
@@ -854,13 +871,18 @@ fn summarize(modules: &[ModuleGroup], audited_function_count: usize) -> Summary 
         same_crate_count: count(CallerScope::SameCrate),
         no_resolved_caller_count: count(CallerScope::NoResolvedCallers),
         possible_external_caller_count: findings().filter(|f| f.possible_external_caller()).count(),
+        interface_satisfying_count: findings()
+            .filter(|f| f.may_dispatch_via_interface())
+            .count(),
         module_count: modules.len(),
     }
 }
 
 /// Group findings by defining module, most findings first. Rows inside a
-/// module follow the narrowing order (biggest reduction first), then
-/// source order, so a module's section reads as an edit list.
+/// module follow the narrowing order (biggest reduction first), with
+/// interface-annotated rows after their unannotated peers — a missing
+/// caller is expected for them, so they carry the weakest evidence —
+/// then source order, so a module's section reads as an edit list.
 fn module_groups(graph: &CallGraph, findings: Vec<(usize, Finding)>) -> Vec<ModuleGroup> {
     let mut by_module: BTreeMap<&str, Vec<Finding>> = BTreeMap::new();
     for (idx, finding) in findings {
@@ -873,12 +895,20 @@ fn module_groups(graph: &CallGraph, findings: Vec<(usize, Finding)>) -> Vec<Modu
         .into_iter()
         .map(|(module, mut findings)| {
             findings.sort_by(|a, b| {
-                (a.caller_scope, &a.file, a.start_line, &a.id).cmp(&(
-                    b.caller_scope,
-                    &b.file,
-                    b.start_line,
-                    &b.id,
-                ))
+                (
+                    a.caller_scope,
+                    a.may_dispatch_via_interface(),
+                    &a.file,
+                    a.start_line,
+                    &a.id,
+                )
+                    .cmp(&(
+                        b.caller_scope,
+                        b.may_dispatch_via_interface(),
+                        &b.file,
+                        b.start_line,
+                        &b.id,
+                    ))
             });
             ModuleGroup {
                 module: module.to_owned(),
@@ -1041,6 +1071,16 @@ fn render_counts(out: &mut String, summary: &Summary) {
         summary.no_resolved_caller_count,
         summary.possible_external_caller_count,
     );
+    if summary.interface_satisfying_count > 0 {
+        let _ = writeln!(
+            out,
+            "{} match a method of an interface declared in the analyzed tree by name and \
+             parameter count: their calls can dispatch through the interface, so a missing caller \
+             is expected there. Those rows are annotated and listed after the others in their \
+             bucket.",
+            summary.interface_satisfying_count,
+        );
+    }
 }
 
 impl ModuleSection for ModuleGroup {
@@ -1098,22 +1138,18 @@ fn render_finding(finding: &Finding) -> String {
             finding.scope_module,
         );
     }
+    if finding.may_dispatch_via_interface() {
+        let _ = write!(
+            row,
+            " — may satisfy interface {}: calls dispatch through the interface, invisible here",
+            render_backticked_list(&finding.may_satisfy_interfaces, INTERFACES_PER_ROW),
+        );
+    }
     row
 }
 
 fn render_caller_modules(modules: &[String]) -> String {
-    let listed = modules
-        .iter()
-        .take(CALLER_MODULES_PER_ROW)
-        .map(|m| format!("`{m}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let overflow = modules.len().saturating_sub(CALLER_MODULES_PER_ROW);
-    if overflow > 0 {
-        format!("{listed} +{overflow} more")
-    } else {
-        listed
-    }
+    render_backticked_list(modules, CALLER_MODULES_PER_ROW)
 }
 
 #[cfg(test)]
@@ -1720,6 +1756,172 @@ mod tests {
         assert_eq!(
             stringer["ubiquitous_name_calls_outside_scope"], 1,
             "`pkg/sub` is a different package, so its call is outside: {stringer}",
+        );
+    }
+
+    /// The interface-dispatch shape from issue #406: a port package
+    /// declares the interface, an adapter package implements it, and no
+    /// call in the tree names the concrete methods — the rows that used
+    /// to drown the report as bare "no resolved caller" noise.
+    fn write_interface_fixture(dir: &Path) {
+        write_file(
+            dir,
+            "port/store.go",
+            "package port\n\n\
+             type Store interface {\n\
+             \tGet(id string) string\n\
+             \tPut(id string, value string) error\n\
+             }\n",
+        );
+        write_file(
+            dir,
+            "pg/store.go",
+            "package pg\n\n\
+             type PgStore struct{}\n\n\
+             func (s *PgStore) Get(id string) string { return id }\n\n\
+             func (s *PgStore) Put(id string, value string) error { return nil }\n\n\
+             func (s *PgStore) Vacuum() {}\n\n\
+             func Get(id string) string { return id }\n",
+        );
+    }
+
+    /// An exported Go method matching an in-scope interface's method by
+    /// name and arity is annotated — not exempted — and ranks after the
+    /// unannotated rows of its bucket. A free function sharing the name
+    /// is not annotated: only method sets satisfy interfaces.
+    #[test]
+    fn go_methods_matching_an_in_scope_interface_are_annotated_and_rank_last() {
+        let dir = tempfile::tempdir().unwrap();
+        write_interface_fixture(dir.path());
+
+        let report = analyze_json(dir.path());
+        let pg = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["module"] == "pg")
+            .unwrap_or_else(|| panic!("report: {report}"));
+        let rows: Vec<(&str, Option<Vec<&str>>)> = pg["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["qualified_name"].as_str().unwrap(),
+                    f["may_satisfy_interfaces"]
+                        .as_array()
+                        .map(|interfaces| interfaces.iter().map(|i| i.as_str().unwrap()).collect()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                // Declared *after* the annotated methods, yet listed
+                // first: annotation ranks a row below unannotated peers.
+                ("pg::PgStore::Vacuum", None),
+                ("pg::Get", None),
+                ("pg::PgStore::Get", Some(vec!["port::Store"])),
+                ("pg::PgStore::Put", Some(vec!["port::Store"])),
+            ],
+            "report: {report}",
+        );
+        assert_eq!(report["summary"]["interface_satisfying_count"], 2);
+
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains(
+                "may satisfy interface `port::Store`: calls dispatch through the interface"
+            ),
+            "got: {md}",
+        );
+        assert!(
+            md.contains("2 match a method of an interface declared in the analyzed tree"),
+            "got: {md}",
+        );
+    }
+
+    /// The match is name *and* parameter count: an arity mismatch is no
+    /// dispatch candidate, and unnamed interface parameters still count
+    /// their slots.
+    #[rstest]
+    #[case::same_arity("Do(x int) int", true)]
+    #[case::unnamed_interface_params("Do(int) int", true)]
+    #[case::different_arity("Do(x int, y int) int", false)]
+    #[case::different_name("Run(x int) int", false)]
+    fn interface_annotation_requires_matching_name_and_arity(
+        #[case] spec: &str,
+        #[case] annotated: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "pkg/i.go",
+            &format!("package pkg\n\ntype I interface {{\n\t{spec}\n}}\n"),
+        );
+        write_file(
+            dir.path(),
+            "pkg/t.go",
+            "package pkg\n\ntype T struct{}\n\nfunc (t T) Do(x int) int { return x }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let finding = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .find(|f| f["qualified_name"] == "pkg::T::Do")
+            .unwrap_or_else(|| panic!("report: {report}"));
+        assert_eq!(
+            finding["may_satisfy_interfaces"].is_array(),
+            annotated,
+            "spec {spec}: {finding}",
+        );
+        assert_eq!(
+            analyze_md(dir.path()).contains("match a method of an interface"),
+            annotated,
+            "the summary sentence renders exactly when a row is annotated",
+        );
+    }
+
+    /// Annotation is orthogonal to the caller-scope bucket: a method
+    /// with resolved callers still carries it (unexporting an
+    /// interface-satisfying method breaks the satisfaction even when
+    /// every visible caller is local), and a method matching several
+    /// interfaces names them all.
+    #[test]
+    fn a_called_method_matching_interfaces_is_annotated_with_all_of_them() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "pkg/w.go",
+            "package pkg\n\n\
+             type I interface{ Do(x int) int }\n\n\
+             type J interface{ Do(y int) int }\n\n\
+             type T struct{}\n\n\
+             func (t T) Do(x int) int { return x }\n\n\
+             func Local(t T) int { return T.Do(t, 1) }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let finding = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .find(|f| f["qualified_name"] == "pkg::T::Do")
+            .unwrap_or_else(|| panic!("report: {report}"));
+        assert_eq!(finding["caller_scope"], "same_module", "got: {finding}");
+        assert_eq!(
+            finding["may_satisfy_interfaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["pkg::I", "pkg::J"],
+            "got: {finding}",
         );
     }
 

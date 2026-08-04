@@ -18,8 +18,11 @@
 //! The table only gates *receiver* calls. A typed path call
 //! (`Foo::clone(x)`) carries the owner in the path, so it resolves
 //! normally regardless of what is listed here.
+//!
+//! The third table here answers a different question — which attributes
+//! cannot conjure a caller — and is documented at its declaration.
 
-use lens_domain::{BuiltinFunctionNames, UbiquitousMethodNames};
+use lens_domain::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
 
 /// Rust's ubiquitous method names, sorted for binary search.
 pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames::new(&[
@@ -211,6 +214,42 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
 /// absorb every one of them.
 pub const BUILTIN_FUNCTION_NAMES: BuiltinFunctionNames = BuiltinFunctionNames::new(&["drop"]);
 
+/// Rust attribute paths that cannot make a function reachable, sorted
+/// for binary search.
+///
+/// Lints, layout and codegen hints, documentation: the compiler consumes
+/// them and no caller appears because of them. Everything else — an
+/// attribute macro that expands to a registration, `#[no_mangle]` and
+/// `#[export_name]` exposing a symbol to a linker, `#[ctor]`-style
+/// pre-main hooks — is left out, so a reachability analyzer reads it as
+/// "something outside the call graph may reach this". The asymmetry is
+/// deliberate: a missing entry costs one function that is reported as
+/// uncertain, an over-eager one costs a false "safe to delete".
+///
+/// `derive` is inert *for the annotated item*: it generates trait impls
+/// for a type, and cannot make the function it sits on callable.
+pub const INERT_ATTRIBUTE_NAMES: InertAttributeNames = InertAttributeNames::new(&[
+    "allow",
+    "automatically_derived",
+    "cfg",
+    "cfg_attr",
+    "cold",
+    "deny",
+    "deprecated",
+    "derive",
+    "expect",
+    "forbid",
+    "inline",
+    "must_use",
+    "non_exhaustive",
+    "repr",
+    "rustfmt::skip",
+    "should_panic",
+    "target_feature",
+    "track_caller",
+    "warn",
+]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +259,22 @@ mod tests {
     fn table_is_sorted_and_deduped() {
         assert!(UBIQUITOUS_METHOD_NAMES.is_sorted_and_deduped());
         assert!(BUILTIN_FUNCTION_NAMES.is_sorted_and_deduped());
+        assert!(INERT_ATTRIBUTE_NAMES.is_sorted_and_deduped());
+    }
+
+    #[rstest]
+    #[case::lint("allow", true)]
+    #[case::codegen_hint("inline", true)]
+    #[case::tool_attribute("rustfmt::skip", true)]
+    #[case::linker_symbol("no_mangle", false)]
+    #[case::export_name("export_name", false)]
+    #[case::attribute_macro("tokio::main", false)]
+    #[case::pre_main_hook("ctor", false)]
+    fn inert_table_covers_only_annotations_that_call_nothing(
+        #[case] name: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(INERT_ATTRIBUTE_NAMES.contains(name), expected);
     }
 
     #[rstest]

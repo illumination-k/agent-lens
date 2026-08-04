@@ -10,6 +10,7 @@
 use lens_domain::{WrapperFinding, args_pass_through_by, qualify};
 use tree_sitter::Node;
 
+use crate::attrs::name_looks_like_test_function;
 use crate::node_text::node_str;
 use crate::parser::{GoParseError, parse_tree};
 use crate::walk::{FnSite, walk_top_level_fns};
@@ -24,12 +25,23 @@ use crate::walk::{FnSite, walk_top_level_fns};
 const TRIVIAL_NULLARY_ADAPTERS: &[&str] = &["String", "Error", "Bytes", "GoString"];
 
 /// Extract wrapper findings from Go source.
+///
+/// `Test` / `Benchmark` / `Example` / `Fuzz` functions are skipped, as
+/// they are in the Rust and Python adapters: a test that forwards to a
+/// table-driven helper is scaffolding, not a wrapper to collapse. Go
+/// puts them in `_test.go` files, which the path filter already drops
+/// under `--exclude-tests`, so this only matters for a run that does not
+/// pass it — which is exactly the run that should not be told to delete
+/// a test.
 pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, GoParseError> {
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let mut out = Vec::new();
 
     walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
+        if name_looks_like_test_function(site.name) {
+            return;
+        }
         out.extend(analyze_function(&site, bytes));
     });
 
@@ -275,6 +287,7 @@ fn first_named_child(node: Node<'_>) -> Option<Node<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn detects_free_function_wrapper() {
@@ -292,6 +305,29 @@ mod tests {
         let src = "package p\nfunc Wrap(x int) int { return target(x+1) }\n";
         let got = find_wrappers(src).unwrap();
         assert!(got.is_empty());
+    }
+
+    /// A test that forwards to a table-driven helper is scaffolding, not
+    /// a wrapper to collapse — the same rule the Rust and Python
+    /// adapters apply to their own test shapes.
+    #[rstest]
+    #[case::test_fn("func TestThing(t *testing.T) { runCases(t) }")]
+    #[case::benchmark_fn("func BenchmarkThing(b *testing.B) { runBench(b) }")]
+    #[case::example_fn("func ExampleThing() { runExample() }")]
+    #[case::fuzz_fn("func FuzzThing(f *testing.F) { runFuzz(f) }")]
+    fn skips_go_test_entry_points(#[case] decl: &str) {
+        let src = format!("package p\n{decl}\n");
+        assert!(find_wrappers(&src).unwrap().is_empty(), "got: {src}");
+    }
+
+    /// The prefix rule is a whole-word one: `Tester` is production code
+    /// that happens to start with `Test`.
+    #[test]
+    fn a_name_merely_starting_with_test_is_still_analyzed() {
+        let src = "package p\nfunc Tester(x int) int { return target(x) }\n";
+        let got = find_wrappers(src).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "Tester");
     }
 
     #[test]

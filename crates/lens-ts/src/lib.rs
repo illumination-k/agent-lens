@@ -21,7 +21,9 @@ mod method_names;
 mod parser;
 #[cfg(test)]
 mod proptests;
+mod statements;
 mod tree;
+mod type_defs;
 mod walk;
 mod wrapper;
 
@@ -30,6 +32,8 @@ pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::{ContextSpanError, extract_context_spans};
 pub use coupling::{CouplingError, TsModule, build_module_tree, extract_edges};
-pub use method_names::{BUILTIN_FUNCTION_NAMES, UBIQUITOUS_METHOD_NAMES};
+pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use parser::{Dialect, TsParseError, TypeScriptParser};
+pub use statements::extract_statement_seqs;
+pub use type_defs::extract_type_defs;
 pub use wrapper::find_wrappers;

@@ -18,9 +18,11 @@
 //! min-lines = 8
 //! ```
 //!
-//! Keys are kebab-case so they line up with the CLI flags they mirror,
-//! and `deny_unknown_fields` turns a typo (`entrypont`) or an option set
-//! on the wrong tool into a parse error instead of a silent no-op.
+//! Keys are kebab-case because they *are* the CLI flags: each per-tool
+//! table deserializes into the same type that clap parses for that
+//! analyzer's flag group, so the two surfaces cannot drift apart.
+//! `deny_unknown_fields` turns a typo (`entrypont`) or an option set on
+//! the wrong tool into a parse error instead of a silent no-op.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -29,7 +31,32 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::analyze::{GraphDirection, GraphQueryKind, OutputFormat, PairKey, SimilarityMethod};
+use crate::analyze::OutputFormat;
+
+/// Per-tool option tables.
+///
+/// Each analyzer owns its own, next to the builder that consumes it (see
+/// `analyze::options`). The same type is also that analyzer's
+/// clap flag group, so a `[profile.<name>.<tool>]` table and the
+/// equivalent command line produce one value with no conversion between
+/// them — the keys here cannot drift from the flags they mirror because
+/// they are the flags. They are re-exported so the config surface still
+/// reads as one module.
+pub use crate::analyze::cohesion::CohesionOptions;
+pub use crate::analyze::complexity::ComplexityOptions;
+pub use crate::analyze::context_span::ContextSpanOptions;
+pub use crate::analyze::delegation::DelegationOptions;
+pub use crate::analyze::graph_query::GraphQueryOptions;
+pub use crate::analyze::hotspot::HotspotOptions;
+pub use crate::analyze::hubs::HubsOptions;
+pub use crate::analyze::impact::ImpactOptions;
+pub use crate::analyze::layers::LayersOptions;
+pub use crate::analyze::risk::RiskOptions;
+pub use crate::analyze::similarity::SimilarityOptions;
+pub use crate::analyze::unreachable::UnreachableOptions;
+pub use crate::analyze::untested::UntestedOptions;
+pub use crate::analyze::visibility::VisibilityOptions;
+pub use crate::analyze::wrapper::WrapperOptions;
 
 /// File name searched for when discovering a project config.
 pub const CONFIG_FILE_NAME: &str = "agent-lens.toml";
@@ -122,6 +149,8 @@ pub struct Profile {
     #[serde(default)]
     pub delegation: Option<DelegationOptions>,
     #[serde(default)]
+    pub unreachable: Option<UnreachableOptions>,
+    #[serde(default)]
     pub untested: Option<UntestedOptions>,
     #[serde(default)]
     pub visibility: Option<VisibilityOptions>,
@@ -159,6 +188,7 @@ pub enum ToolName {
     Layers,
     Risk,
     Similarity,
+    Unreachable,
     Untested,
     Visibility,
     Wrapper,
@@ -182,160 +212,12 @@ impl ToolName {
             Self::Layers => "layers",
             Self::Risk => "risk",
             Self::Similarity => "similarity",
+            Self::Unreachable => "unreachable",
             Self::Untested => "untested",
             Self::Visibility => "visibility",
             Self::Wrapper => "wrapper",
         }
     }
-}
-
-/// `[profile.<name>.similarity]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct SimilarityOptions {
-    pub threshold: Option<f64>,
-    /// Multi-threshold sweep ladder. Mirrors the `--sweep` CLI flag; when
-    /// set it supersedes `threshold` as the clustering cut.
-    pub sweep: Option<Vec<f64>>,
-    pub min_lines: Option<usize>,
-    pub top: Option<usize>,
-    /// Body-scoring algorithm: `tsed` (default) or `token`. Mirrors the
-    /// `--method` CLI flag.
-    pub method: Option<SimilarityMethod>,
-    /// Roll the per-pair doc-comment overlap up into the markdown
-    /// report. Mirrors the `--doc-overlap` CLI flag; JSON output carries
-    /// the per-pair values either way.
-    #[serde(default)]
-    pub doc_overlap: bool,
-    /// Name-anchored pairing key: `qualified` (alias `name`) or
-    /// `method`. Mirrors the `--paired-by` CLI flag; when set the report
-    /// lists name-matched pairs instead of threshold clusters.
-    pub paired_by: Option<PairKey>,
-    /// Floor below which a name match is treated as an unrelated
-    /// namesake instead of drift. Mirrors the `--drift-floor` CLI flag;
-    /// only read when `paired-by` is set.
-    pub drift_floor: Option<f64>,
-    #[serde(default)]
-    pub diff_only: bool,
-}
-
-/// `[profile.<name>.complexity]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ComplexityOptions {
-    pub min_score: Option<u32>,
-    pub top: Option<usize>,
-    #[serde(default)]
-    pub diff_only: bool,
-}
-
-/// `[profile.<name>.cohesion]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct CohesionOptions {
-    pub min_score: Option<usize>,
-    pub top: Option<usize>,
-    #[serde(default)]
-    pub diff_only: bool,
-}
-
-/// `[profile.<name>.hotspot]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct HotspotOptions {
-    pub since: Option<String>,
-    pub top: Option<usize>,
-}
-
-/// `[profile.<name>.risk]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct RiskOptions {
-    /// Git window for the churn axis only; centrality always reflects
-    /// the current source.
-    pub since: Option<String>,
-    pub top: Option<usize>,
-}
-
-/// `[profile.<name>.hubs]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct HubsOptions {
-    pub top: Option<usize>,
-}
-
-/// `[profile.<name>.impact]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ImpactOptions {
-    /// Seed symbols. When empty, seeds come from the unstaged diff.
-    #[serde(default)]
-    pub function: Vec<String>,
-    pub depth: Option<usize>,
-    pub top: Option<usize>,
-}
-
-/// `[profile.<name>.layers]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct LayersOptions {
-    pub top: Option<usize>,
-}
-
-/// `[profile.<name>.delegation]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct DelegationOptions {
-    pub top: Option<usize>,
-    #[serde(default)]
-    pub diff_only: bool,
-}
-
-/// `[profile.<name>.untested]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct UntestedOptions {
-    pub top: Option<usize>,
-}
-
-/// `[profile.<name>.visibility]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct VisibilityOptions {
-    pub top: Option<usize>,
-}
-
-/// `[profile.<name>.graph-query]` overrides. Unlike the other tool
-/// tables this one is mandatory when `graph-query` is listed in
-/// `tools` — a traversal without a verb and a start symbol has no
-/// meaning, so `query` and `symbol` are required keys and
-/// [`Config::validate`] rejects a profile that lists the tool without
-/// this table.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct GraphQueryOptions {
-    pub query: GraphQueryKind,
-    pub symbol: String,
-    pub to: Option<String>,
-    pub depth: Option<usize>,
-    pub direction: Option<GraphDirection>,
-    pub limit: Option<usize>,
-}
-
-/// `[profile.<name>.context-span]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ContextSpanOptions {
-    #[serde(default)]
-    pub entry_glob: Vec<String>,
-}
-
-/// `[profile.<name>.wrapper]` overrides.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct WrapperOptions {
-    #[serde(default)]
-    pub diff_only: bool,
 }
 
 /// Walk up from `start` (inclusive) and return the first `agent-lens.toml`.
@@ -402,8 +284,17 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyze::{
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphDirection,
+        GraphQueryKind, PairKey,
+    };
     use crate::test_support::write_file;
     use rstest::rstest;
+
+    /// Compare two `f64` option values without tripping `clippy::float_cmp`.
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < f64::EPSILON
+    }
 
     const FULL: &str = r#"
 [profile.web]
@@ -452,7 +343,7 @@ since = "90.days.ago"
         );
 
         let similarity = web.similarity.as_ref().unwrap();
-        assert_eq!(similarity.threshold, Some(0.9));
+        assert!(close(similarity.threshold, 0.9));
         assert_eq!(similarity.min_lines, Some(8));
         assert_eq!(similarity.top, Some(20));
         assert!(similarity.doc_overlap);
@@ -478,17 +369,20 @@ since = "90.days.ago"
         )
         .unwrap();
         let similarity = config.profile("web").unwrap().similarity.as_ref().unwrap();
-        assert_eq!(
-            similarity.sweep.as_deref(),
-            Some([0.6, 0.75, 0.85].as_slice())
-        );
-        assert_eq!(similarity.threshold, None);
+        assert_eq!(similarity.sweep, [0.6, 0.75, 0.85]);
+        // An absent key is the analyzer's default, not "unset": the
+        // options type is the clap flag group, so a profile that omits
+        // `threshold` gets exactly what the bare command line would.
+        assert!(close(similarity.threshold, DEFAULT_SIMILARITY_THRESHOLD));
         // Absent `doc-overlap` is off, not "unset" — the markdown rollup
         // is opt-in from both the CLI and the config file.
         assert!(!similarity.doc_overlap);
         // Absent `paired-by` leaves the clustering report in place.
         assert_eq!(similarity.paired_by, None);
-        assert_eq!(similarity.drift_floor, None);
+        assert!(close(
+            similarity.drift_floor,
+            DEFAULT_SIMILARITY_DRIFT_FLOOR
+        ));
     }
 
     #[rstest]
@@ -505,7 +399,7 @@ since = "90.days.ago"
         .unwrap();
         let similarity = config.profile("web").unwrap().similarity.as_ref().unwrap();
         assert_eq!(similarity.paired_by, Some(expected));
-        assert_eq!(similarity.drift_floor, Some(0.4));
+        assert!(close(similarity.drift_floor, 0.4));
     }
 
     #[test]

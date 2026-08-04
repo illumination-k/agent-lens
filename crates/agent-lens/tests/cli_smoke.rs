@@ -186,6 +186,245 @@ fn analyze_similarity_paired_by_reports_drifted_siblings(#[case] config: Option<
     );
 }
 
+const MIRROR_STRUCT_A_RS: &str = r#"
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub retries: u32,
+}
+"#;
+
+const MIRROR_STRUCT_B_RS: &str = r#"
+pub struct JsConfig {
+    pub host: String,
+    pub port: u16,
+    pub retries: u32,
+}
+"#;
+
+/// The types target has to be reachable both ways an analyzer is
+/// driven: the `--target` flag and the `target` profile key. The fixture
+/// is two mirror structs with no function bodies at all, so a passing
+/// assertion also proves the run compared type definitions rather than
+/// silently falling back to the (empty) function corpus.
+#[rstest]
+#[case::flag(None)]
+#[case::profile_key(Some(
+    "[profile.shapes]\npath = \".\"\nformat = \"md\"\ntools = [\"similarity\"]\n\n[profile.shapes.similarity]\ntarget = \"types\"\n"
+))]
+fn analyze_similarity_target_types_reports_mirror_structs(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", MIRROR_STRUCT_A_RS);
+    write_file(dir.path(), "b.rs", MIRROR_STRUCT_B_RS);
+
+    let output = match config {
+        None => agent_lens(
+            &[
+                "analyze",
+                "similarity",
+                ".",
+                "--format",
+                "md",
+                "--target",
+                "types",
+            ],
+            dir.path(),
+            None,
+        ),
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            agent_lens(&["run", "shapes"], dir.path(), None)
+        }
+    };
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("2 type(s)"), "got: {stdout}");
+    assert!(stdout.contains("2 types, similarity"), "got: {stdout}");
+    assert!(stdout.contains("a.rs:`Config`"), "got: {stdout}");
+    assert!(stdout.contains("b.rs:`JsConfig`"), "got: {stdout}");
+}
+
+/// JSON is the machine-facing contract: the types target must carry the
+/// `target` discriminator and per-unit `kind` labels.
+#[test]
+fn analyze_similarity_target_types_json_carries_target_and_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", MIRROR_STRUCT_A_RS);
+    write_file(dir.path(), "b.rs", MIRROR_STRUCT_B_RS);
+
+    let output = agent_lens(
+        &["analyze", "similarity", ".", "--target", "types"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["target"], "types", "got {json}");
+    let units = json["clusters"][0]["units"].as_array().unwrap();
+    assert!(units.iter().all(|u| u["kind"] == "struct"), "got {json}");
+}
+
+#[test]
+fn analyze_similarity_target_types_rejects_paired_by_method() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", MIRROR_STRUCT_A_RS);
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            ".",
+            "--target",
+            "types",
+            "--paired-by",
+            "method",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--paired-by method is incompatible with --target types"),
+        "got: {stderr}"
+    );
+}
+
+/// Two functions with different names, different signatures, and
+/// different surrounding work, sharing one repeated four-statement
+/// fragment. Function-granularity comparison cannot see it — the bodies
+/// as wholes are not similar — which is the whole reason `--target
+/// blocks` exists.
+const SHARED_BLOCK_A_RS: &str = r#"
+fn fetch_article(id: u64) -> String {
+    let client = build_client();
+    let url = format!("{}/article/{}", base_url(), id);
+    let request = client.get(&url);
+    let response = request.send();
+    let body = response.text();
+    body
+}
+"#;
+
+const SHARED_BLOCK_B_RS: &str = r#"
+fn fetch_author(name: &str, retries: u32) -> Vec<String> {
+    let mut collected = Vec::new();
+    for _ in 0..retries {
+        collected.push(name.to_owned());
+    }
+    let client = build_client();
+    let url = format!("{}/author/{}", base_url(), name);
+    let request = client.get(&url);
+    let response = request.send();
+    let body = response.text();
+    collected.push(body);
+    collected
+}
+"#;
+
+/// The blocks target has to be reachable both ways an analyzer is
+/// driven: the `--target` flag and the `target` profile key.
+#[rstest]
+#[case::flag(None)]
+#[case::profile_key(Some(
+    "[profile.fragments]\npath = \".\"\nformat = \"md\"\ntools = [\"similarity\"]\n\n[profile.fragments.similarity]\ntarget = \"blocks\"\n"
+))]
+fn analyze_similarity_target_blocks_reports_repeated_fragments(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", SHARED_BLOCK_A_RS);
+    write_file(dir.path(), "b.rs", SHARED_BLOCK_B_RS);
+
+    let output = match config {
+        None => agent_lens(
+            &[
+                "analyze",
+                "similarity",
+                ".",
+                "--format",
+                "md",
+                "--target",
+                "blocks",
+            ],
+            dir.path(),
+            None,
+        ),
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            agent_lens(&["run", "fragments"], dir.path(), None)
+        }
+    };
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("block(s)"), "got: {stdout}");
+    assert!(stdout.contains("2 blocks, similarity"), "got: {stdout}");
+    assert!(
+        stdout.contains("in 2 function(s) across 2 file(s)"),
+        "got: {stdout}",
+    );
+    // The report quotes the repeated source and breaks occurrences down
+    // by file rather than listing every member.
+    assert!(
+        stdout.contains("let request = client.get(&url);"),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains("occurrences: a.rs ×1, b.rs ×1"),
+        "got: {stdout}",
+    );
+}
+
+/// A function whose only duplication is with itself must report
+/// nothing: sliding windows overlap by construction, and without the
+/// overlap filter every multi-statement function would report as a
+/// cluster of its own sub-windows.
+#[test]
+fn analyze_similarity_target_blocks_ignores_overlapping_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", SHARED_BLOCK_A_RS);
+
+    let output = agent_lens(
+        &["analyze", "similarity", ".", "--target", "blocks"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["target"], "blocks", "got {json}");
+    assert_eq!(json["cluster_count"], 0, "got {json}");
+}
+
+#[test]
+fn analyze_similarity_target_blocks_rejects_paired_by() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.rs", SHARED_BLOCK_A_RS);
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            ".",
+            "--target",
+            "blocks",
+            "--paired-by",
+            "name",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--paired-by is incompatible with --target blocks"),
+        "got: {stderr}"
+    );
+}
+
 const DOCUMENTED_PAIR_RS: &str = r#"
 /// Validate the user id before persisting.
 fn validate_user(id: u64) -> bool {
@@ -442,6 +681,35 @@ fn run_profile_drives_impact_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_unreachable_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/main.rs",
+        "fn main() { covered(); }\n\
+         fn covered() -> usize { 1 }\n\
+         fn never_reached() -> usize { 2 }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.dead]\npath = \"src\"\ntools = [\"unreachable\"]\n\n\
+         [profile.dead.unreachable]\ntop = 5\ntier = \"unknown\"\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "dead"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "unreachable");
+    let report = &json["results"][0]["report"];
+    assert_eq!(report["summary"]["confirmed_count"], 1);
+    assert_eq!(
+        report["modules"][0]["findings"][0]["qualified_name"],
+        "crate::never_reached",
+    );
+    assert_eq!(report["modules"][0]["findings"][0]["tier"], "confirmed");
+}
+
+#[test]
 fn run_profile_drives_untested_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(
@@ -639,6 +907,142 @@ fn run_with_unknown_profile_exits_nonzero() {
 fn run_without_a_config_file_exits_nonzero() {
     let dir = tempfile::tempdir().unwrap();
     let output = agent_lens(&["run", "audit"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("agent-lens failed"), "got: {stderr}");
+}
+
+#[test]
+fn baseline_create_snapshots_profile_metrics() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\", \"cohesion\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["profile"], "audit");
+    assert_eq!(json["target"], "src");
+    assert_eq!(json["tools"][0]["tool"], "complexity");
+    assert_eq!(json["tools"][0]["metrics"]["file_count"], 1);
+    assert_eq!(json["tools"][0]["metrics"]["cyclomatic_max"], 2);
+    assert_eq!(json["tools"][1]["tool"], "cohesion");
+    // Outside a git tree the snapshot still stands; it just cannot say
+    // which commit it describes.
+    assert!(json.get("commit").is_none(), "got: {json}");
+    assert!(json.get("skipped").is_none(), "got: {json}");
+}
+
+/// A profile's `format` shapes the report a reader gets from `run`; a
+/// snapshot is built from structured fields either way.
+#[test]
+fn baseline_create_ignores_the_profiles_markdown_format() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["tools"][0]["metrics"]["function_count"], 1);
+}
+
+#[test]
+fn baseline_create_records_the_commit_and_repeats_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+
+    let first = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let second = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&first);
+    assert_eq!(
+        json["commit"].as_str().map(str::len),
+        Some(40),
+        "got: {json}"
+    );
+    // Nothing in a snapshot reads the clock, so re-running it against an
+    // unchanged tree must not produce a diff.
+    assert_eq!(first.stdout, second.stdout);
+}
+
+#[test]
+fn baseline_create_lists_analyzers_it_cannot_summarize() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"wrapper\", \"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["skipped"][0]["tool"], "wrapper");
+    assert!(json["skipped"][0]["reason"].is_string(), "got: {json}");
+    // The covered tools still make it into the snapshot.
+    assert_eq!(json["tools"][0]["tool"], "complexity");
+}
+
+#[test]
+fn baseline_create_writes_the_snapshot_to_out_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(
+        &[
+            "baseline",
+            "create",
+            "audit",
+            "--out",
+            "target/lens/baseline.json",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.stdout.is_empty(), "stdout: {:?}", output.stdout);
+    // The directory did not exist beforehand: a snapshot's natural home
+    // is a build path nothing has created yet.
+    let written = std::fs::read_to_string(dir.path().join("target/lens/baseline.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+    assert_eq!(json["tools"][0]["tool"], "complexity");
+    assert!(written.ends_with("}\n"), "got: {written}");
+}
+
+#[test]
+fn baseline_create_with_unknown_profile_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["baseline", "create", "missing"], dir.path(), None);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("agent-lens failed"), "got: {stderr}");

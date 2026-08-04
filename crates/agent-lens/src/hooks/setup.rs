@@ -6,13 +6,12 @@
 //! wired up anywhere under that event. Re-running the command is a
 //! no-op once everything is installed.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::hooks::setup_common;
+use crate::hooks::setup_common::{self, EventBlock, HooksDocument};
 
 const SETTINGS_RELATIVE: &str = ".claude/settings.json";
 
@@ -45,53 +44,8 @@ pub const SESSION_START_MATCHER: &str = setup_common::CLAUDE_SESSION_START_MATCH
 /// Commands the setup writes into `hooks.SessionStart`.
 pub const SESSION_START_COMMANDS: &[&str] = setup_common::CLAUDE_SESSION_START_COMMANDS;
 
-/// Per-event metadata used by [`merge`]. Field labels are baked in as
-/// `&'static str` so they can flow into [`SetupError::UnexpectedShape`]
-/// without an allocation.
-struct EventBlock {
-    /// Key under `hooks.` in settings.json (e.g. `"PostToolUse"`).
-    event: &'static str,
-    /// Field path used in error messages for the outer array.
-    array_field: &'static str,
-    /// Field path used in error messages for an entry in the array.
-    entry_field: &'static str,
-    /// Field path used in error messages for an entry's `hooks` array.
-    inner_array_field: &'static str,
-    /// Matcher string written for this event's block.
-    matcher: &'static str,
-    /// Commands the setup may install under this event.
-    commands: &'static [&'static str],
-}
-
-const EVENTS: &[EventBlock] = &[
-    EventBlock {
-        event: setup_common::SESSION_START_EVENT,
-        array_field: "hooks.SessionStart",
-        entry_field: "hooks.SessionStart[]",
-        inner_array_field: "hooks.SessionStart[].hooks",
-        matcher: SESSION_START_MATCHER,
-        commands: SESSION_START_COMMANDS,
-    },
-    EventBlock {
-        event: setup_common::PRE_TOOL_USE_EVENT,
-        array_field: "hooks.PreToolUse",
-        entry_field: "hooks.PreToolUse[]",
-        inner_array_field: "hooks.PreToolUse[].hooks",
-        matcher: PRE_TOOL_USE_MATCHER,
-        commands: PRE_TOOL_USE_COMMANDS,
-    },
-    EventBlock {
-        event: setup_common::POST_TOOL_USE_EVENT,
-        array_field: "hooks.PostToolUse",
-        entry_field: "hooks.PostToolUse[]",
-        inner_array_field: "hooks.PostToolUse[].hooks",
-        matcher: POST_TOOL_USE_MATCHER,
-        commands: POST_TOOL_USE_COMMANDS,
-    },
-];
-
 /// Where to install the hook entries.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum SettingsScope {
     /// `<project_root>/.claude/settings.json` (created if missing).
     Project,
@@ -132,7 +86,18 @@ pub enum SetupError {
     /// A field along the `hooks.PostToolUse[].hooks[].command` path has
     /// the wrong JSON type for us to merge into safely.
     #[error("{path:?} has an unexpected shape at .{field}")]
-    UnexpectedShape { path: PathBuf, field: &'static str },
+    UnexpectedShape { path: PathBuf, field: String },
+}
+
+fn io_error(path: PathBuf, source: std::io::Error) -> SetupError {
+    SetupError::Io { path, source }
+}
+
+fn shape_error(path: &Path, field: impl Into<String>) -> SetupError {
+    SetupError::UnexpectedShape {
+        path: path.to_path_buf(),
+        field: field.into(),
+    }
 }
 
 /// Resolve the on-disk `settings.json` path for the requested scope.
@@ -142,7 +107,7 @@ pub fn resolve_path(scope: SettingsScope, project_root: &Path) -> Result<PathBuf
     match scope {
         SettingsScope::Project => Ok(project_root.join(SETTINGS_RELATIVE)),
         SettingsScope::User => {
-            setup_common::home_scoped_path(SETTINGS_RELATIVE).ok_or(SetupError::HomeNotFound)
+            crate::paths::home_scoped_path(SETTINGS_RELATIVE).ok_or(SetupError::HomeNotFound)
         }
     }
 }
@@ -154,9 +119,17 @@ pub fn resolve_path(scope: SettingsScope, project_root: &Path) -> Result<PathBuf
 /// the `hooks.PostToolUse` path, is reported as an error so the user can
 /// inspect it before we clobber anything.
 pub fn plan(path: PathBuf) -> Result<SetupPlan, SetupError> {
-    let before = read_existing(&path)?;
+    let before = setup_common::read_existing_text(&path, io_error)?
+        .map(|text| {
+            serde_json::from_str::<Value>(&text).map_err(|source| SetupError::InvalidJson {
+                path: path.clone(),
+                source,
+            })
+        })
+        .transpose()?;
     let mut after = before.clone().unwrap_or_else(|| Value::Object(Map::new()));
-    let added_commands = merge(&path, &mut after)?;
+    let added_commands =
+        setup_common::merge_hook_commands(&path, &mut after, setup_common::CLAUDE_EVENTS)?;
     Ok(SetupPlan {
         path,
         before,
@@ -167,131 +140,90 @@ pub fn plan(path: PathBuf) -> Result<SetupPlan, SetupError> {
 
 /// Write the planned JSON to disk, creating parent directories if needed.
 pub fn apply(plan: &SetupPlan) -> Result<(), SetupError> {
-    if let Some(parent) = plan.path.parent() {
-        fs::create_dir_all(parent).map_err(|source| SetupError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
     let mut text =
         serde_json::to_string_pretty(&plan.after).map_err(|source| SetupError::InvalidJson {
             path: plan.path.clone(),
             source,
         })?;
     text.push('\n');
-    fs::write(&plan.path, text).map_err(|source| SetupError::Io {
-        path: plan.path.clone(),
-        source,
-    })
+    setup_common::write_with_parents(&plan.path, &text, io_error)
 }
 
-fn read_existing(path: &Path) -> Result<Option<Value>, SetupError> {
-    match fs::read_to_string(path) {
-        Ok(s) if s.trim().is_empty() => Ok(None),
-        Ok(s) => serde_json::from_str(&s)
-            .map(Some)
-            .map_err(|source| SetupError::InvalidJson {
-                path: path.to_path_buf(),
-                source,
-            }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(SetupError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
+impl HooksDocument for Value {
+    type Error = SetupError;
+
+    fn installed_commands(
+        &mut self,
+        path: &Path,
+        block: &EventBlock,
+    ) -> Result<Vec<String>, SetupError> {
+        let entries = event_entries(self, path, block)?;
+        let mut out = Vec::new();
+        for entry in entries.iter() {
+            let Some(entry_obj) = entry.as_object() else {
+                return Err(shape_error(path, format!("hooks.{}[]", block.event)));
+            };
+            let Some(hooks) = entry_obj.get("hooks") else {
+                continue;
+            };
+            let Some(hooks) = hooks.as_array() else {
+                return Err(shape_error(path, format!("hooks.{}[].hooks", block.event)));
+            };
+            for hook in hooks {
+                if let Some(cmd) = hook.get("command").and_then(Value::as_str) {
+                    out.push(cmd.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn append_matcher_group(
+        &mut self,
+        path: &Path,
+        block: &EventBlock,
+        commands: &[String],
+    ) -> Result<(), SetupError> {
+        let entries = event_entries(self, path, block)?;
+        entries.push(json!({
+            "matcher": block.matcher,
+            "hooks": commands
+                .iter()
+                .map(|cmd| json!({ "type": "command", "command": cmd }))
+                .collect::<Vec<_>>(),
+        }));
+        Ok(())
     }
 }
 
-fn merge(path: &Path, root: &mut Value) -> Result<Vec<String>, SetupError> {
+/// Navigate to the `hooks.<event>` array, creating the intermediate
+/// object/array when absent, and erroring when an existing field along
+/// the path has an incompatible JSON type.
+fn event_entries<'a>(
+    root: &'a mut Value,
+    path: &Path,
+    block: &EventBlock,
+) -> Result<&'a mut Vec<Value>, SetupError> {
     let root_obj = root
         .as_object_mut()
-        .ok_or_else(|| SetupError::UnexpectedShape {
-            path: path.to_path_buf(),
-            field: "(root)",
-        })?;
-
+        .ok_or_else(|| shape_error(path, "(root)"))?;
     let hooks = root_obj
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| SetupError::UnexpectedShape {
-            path: path.to_path_buf(),
-            field: "hooks",
-        })?;
-
-    let mut added: Vec<String> = Vec::new();
-    for block in EVENTS {
-        let entries = hooks
-            .entry(block.event)
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .ok_or_else(|| SetupError::UnexpectedShape {
-                path: path.to_path_buf(),
-                field: block.array_field,
-            })?;
-
-        let installed = collect_installed_commands(entries, path, block)?;
-        let missing: Vec<String> = block
-            .commands
-            .iter()
-            .filter(|cmd| {
-                !installed
-                    .iter()
-                    .any(|seen| setup_common::has_command_prefix(seen, cmd))
-            })
-            .map(|s| (*s).to_string())
-            .collect();
-
-        if !missing.is_empty() {
-            entries.push(json!({
-                "matcher": block.matcher,
-                "hooks": missing
-                    .iter()
-                    .map(|cmd| json!({ "type": "command", "command": cmd }))
-                    .collect::<Vec<_>>(),
-            }));
-            added.extend(missing);
-        }
-    }
-
-    Ok(added)
-}
-
-fn collect_installed_commands(
-    entries: &[Value],
-    path: &Path,
-    block: &EventBlock,
-) -> Result<Vec<String>, SetupError> {
-    let mut out = Vec::new();
-    for entry in entries {
-        let Some(entry_obj) = entry.as_object() else {
-            return Err(SetupError::UnexpectedShape {
-                path: path.to_path_buf(),
-                field: block.entry_field,
-            });
-        };
-        let Some(hooks) = entry_obj.get("hooks") else {
-            continue;
-        };
-        let Some(hooks) = hooks.as_array() else {
-            return Err(SetupError::UnexpectedShape {
-                path: path.to_path_buf(),
-                field: block.inner_array_field,
-            });
-        };
-        for hook in hooks {
-            if let Some(cmd) = hook.get("command").and_then(Value::as_str) {
-                out.push(cmd.to_string());
-            }
-        }
-    }
-    Ok(out)
+        .ok_or_else(|| shape_error(path, "hooks"))?;
+    hooks
+        .entry(block.event)
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| shape_error(path, format!("hooks.{}", block.event)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
     use tempfile::TempDir;
 
     fn read(path: &Path) -> Value {
@@ -601,7 +533,7 @@ mod tests {
 
         let err = plan(path).unwrap_err();
         assert!(
-            matches!(err, SetupError::UnexpectedShape { field: "hooks", .. }),
+            matches!(err, SetupError::UnexpectedShape { ref field, .. } if field == "hooks"),
             "expected UnexpectedShape at hooks, got {err:?}",
         );
     }
@@ -613,13 +545,13 @@ mod tests {
         fs::write(&path, r#"{"hooks": {"PostToolUse": {}}}"#).unwrap();
 
         let err = plan(path).unwrap_err();
-        assert!(matches!(
-            err,
-            SetupError::UnexpectedShape {
-                field: "hooks.PostToolUse",
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                err,
+                SetupError::UnexpectedShape { ref field, .. } if field == "hooks.PostToolUse"
+            ),
+            "expected UnexpectedShape at hooks.PostToolUse, got {err:?}",
+        );
     }
 
     #[test]
@@ -665,7 +597,7 @@ mod tests {
     fn setup_error_unexpected_shape_display_includes_field() {
         let err = SetupError::UnexpectedShape {
             path: PathBuf::from("/tmp/settings.json"),
-            field: "hooks.PostToolUse",
+            field: "hooks.PostToolUse".into(),
         };
         let msg = err.to_string();
         assert!(msg.contains("/tmp/settings.json"), "got {msg}");
@@ -696,7 +628,7 @@ mod tests {
         assert!(err.source().is_none());
         let err = SetupError::UnexpectedShape {
             path: PathBuf::from("/tmp/x"),
-            field: "hooks",
+            field: "hooks".into(),
         };
         assert!(err.source().is_none());
     }

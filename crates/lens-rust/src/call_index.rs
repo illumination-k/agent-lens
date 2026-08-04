@@ -22,7 +22,7 @@
 //!
 //! Treat the result as guidance for an LLM, not as a precise call graph.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use lens_domain::{
     CallShape, ImportShape, LexicalResolutionStatus, ReceiverExprKind, SyntaxFact, qualify,
@@ -31,7 +31,9 @@ use lens_domain::{
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Block, Expr, ExprCall, ExprMethodCall, Ident, ImplItem, Item, ItemUse, TraitItem, UseTree,
+    Block, Expr, ExprCall, ExprMethodCall, FnArg, GenericArgument, GenericParam, Generics,
+    ImplItem, Item, ItemFn, ItemUse, Local, Pat, PathArguments, Signature, TraitItem, Type,
+    TypeParamBound, UseTree, WherePredicate,
 };
 
 use crate::attrs::has_cfg_test;
@@ -64,6 +66,12 @@ pub struct CallSite {
     pub caller_impl_owner: Option<String>,
     /// Whether this was a free/path call or a receiver method call.
     pub call_kind: CallKind,
+    /// True when the callee is a bare name the enclosing function binds
+    /// to a callable — a closure or nested `fn` held in a `let`, or a
+    /// parameter of `Fn`/`FnMut`/`FnOnce`/`fn` type. The binding shadows
+    /// every definition outside the function, so such a call has no
+    /// workspace target.
+    pub callee_is_locally_bound: bool,
     /// Lexically visible `use` aliases at this call site.
     pub visible_aliases: Vec<UseAlias>,
     /// 1-based line number of the call expression.
@@ -161,6 +169,7 @@ impl From<CallSite> for CallShape {
                 .map(path_segments)
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             receiver_expr_kind: SyntaxFact::Known(receiver_expr_kind),
+            callee_is_locally_bound: SyntaxFact::Known(site.callee_is_locally_bound),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: site
                 .visible_aliases
@@ -212,6 +221,12 @@ struct CallVisitor {
     /// `Item::Impl` and popped on exit.
     impl_owners: Vec<Option<String>>,
     alias_scopes: Vec<BTreeMap<String, String>>,
+    /// Callable names bound in each enclosing function's own scope, one
+    /// entry per function scope — see [`local_callable_bindings`]. Only
+    /// the innermost entry applies: a nested `fn` does not see the outer
+    /// function's locals, while a closure body does (it shares the
+    /// scope, and the visitor never pushes one for it).
+    local_callables: Vec<HashSet<String>>,
     sites: Vec<CallSite>,
 }
 
@@ -223,6 +238,7 @@ impl CallVisitor {
             modules: vec![base_module.to_owned()],
             impl_owners: Vec::new(),
             alias_scopes: Vec::new(),
+            local_callables: Vec::new(),
             sites: Vec::new(),
         }
     }
@@ -283,16 +299,18 @@ impl CallVisitor {
                 }
                 self.impl_owners.pop();
             }
-            Item::Fn(item_fn) => self.visit_block_in_fn_scope(&item_fn.sig.ident, &item_fn.block),
+            Item::Fn(item_fn) => self.visit_block_in_fn_scope(&item_fn.sig, &item_fn.block),
             Item::Use(item_use) => self.add_aliases_from_use(item_use),
             other => visit::visit_item(self, other),
         }
     }
 
-    /// Push the qualified name of `ident` onto the caller stack, walk
-    /// `block`, and pop. Shared by the `Item::Fn` and `ImplItem::Fn`
-    /// arms — both used to spell this loop out themselves.
-    fn visit_block_in_fn_scope(&mut self, ident: &Ident, block: &Block) {
+    /// Push the qualified name of `sig`'s function onto the caller stack
+    /// along with the callables its own scope binds, walk `block`, and
+    /// pop both. Shared by the `Item::Fn` and `ImplItem::Fn` arms — both
+    /// used to spell this loop out themselves.
+    fn visit_block_in_fn_scope(&mut self, sig: &Signature, block: &Block) {
+        let ident = &sig.ident;
         let name = qualify(self.current_owner(), &ident.to_string());
         let qualified_name = self.current_owner().map_or_else(
             || qualify_module(self.current_module(), &ident.to_string()),
@@ -303,7 +321,10 @@ impl CallVisitor {
             qualified_name,
             impl_owner: self.current_owner().map(ToOwned::to_owned),
         });
+        self.local_callables
+            .push(local_callable_bindings(sig, block));
         visit::visit_block(self, block);
+        self.local_callables.pop();
         self.callers.pop();
     }
 
@@ -351,6 +372,8 @@ impl CallVisitor {
     ) {
         let caller = self.current_caller();
         let module = self.current_module().to_owned();
+        let callee_is_locally_bound =
+            call_kind == CallKind::Path && self.is_locally_bound(callee_path.as_deref());
         let callee_path = callee_path.map(|p| rewrite_crate_prefix(&p, &module));
         self.sites.push(CallSite {
             callee_name,
@@ -360,9 +383,22 @@ impl CallVisitor {
             caller_qualified_name: caller.as_ref().map(|c| c.qualified_name.clone()),
             caller_impl_owner: caller.and_then(|c| c.impl_owner),
             call_kind,
+            callee_is_locally_bound,
             visible_aliases: self.current_aliases(),
             line,
         });
+    }
+
+    /// A bare, single-segment callee that the innermost function scope
+    /// binds to a callable. A qualified path (`a::b::emit`) names its
+    /// owner and so is not shadowed by a local of the same name.
+    fn is_locally_bound(&self, callee_path: Option<&str>) -> bool {
+        let Some(path) = callee_path.filter(|path| !path.contains("::")) else {
+            return false;
+        };
+        self.local_callables
+            .last()
+            .is_some_and(|bound| bound.contains(path))
     }
 }
 
@@ -379,7 +415,7 @@ impl<'ast> Visit<'ast> for CallVisitor {
 
     fn visit_impl_item(&mut self, impl_item: &'ast ImplItem) {
         if let ImplItem::Fn(method) = impl_item {
-            self.visit_block_in_fn_scope(&method.sig.ident, &method.block);
+            self.visit_block_in_fn_scope(&method.sig, &method.block);
         } else {
             visit::visit_impl_item(self, impl_item);
         }
@@ -389,7 +425,7 @@ impl<'ast> Visit<'ast> for CallVisitor {
         if let TraitItem::Fn(method) = trait_item
             && let Some(block) = &method.default
         {
-            self.visit_block_in_fn_scope(&method.sig.ident, block);
+            self.visit_block_in_fn_scope(&method.sig, block);
         } else {
             visit::visit_trait_item(self, trait_item);
         }
@@ -412,6 +448,150 @@ impl<'ast> Visit<'ast> for CallVisitor {
         let callee_path = Some(format!("{receiver}.{}", call.method));
         self.record(callee_name, callee_path, CallKind::ReceiverMethod, line);
         visit::visit_expr_method_call(self, call);
+    }
+}
+
+/// Names bound to a callable inside one function's own scope: closures
+/// and nested `fn` items held in a `let`, `fn`-typed locals, and
+/// parameters of `Fn`/`FnMut`/`FnOnce`/`fn` type.
+///
+/// A call to one of these targets the binding, which shadows anything the
+/// workspace defines under that name. Without this the resolver's
+/// last-segment fallback attributes `emit(ev)` to whichever module
+/// happens to define an `emit`, fabricating a cross-module edge — and
+/// short local names (`emit`, `send`, `next`, `done`) collide with a
+/// method somewhere in any medium-sized corpus.
+///
+/// Bindings are collected body-wide rather than from the `let` onwards:
+/// a call that precedes its binding and means an outer name is rare, and
+/// losing an edge beats fabricating one.
+fn local_callable_bindings(sig: &Signature, block: &Block) -> HashSet<String> {
+    let callable_generics = fn_bounded_generics(&sig.generics);
+    let mut out = HashSet::new();
+    for input in &sig.inputs {
+        if let FnArg::Typed(pat_type) = input
+            && type_is_callable(&pat_type.ty, &callable_generics)
+            && let Some(name) = binding_ident(&pat_type.pat)
+        {
+            out.insert(name);
+        }
+    }
+    let mut collector = LocalBindingCollector {
+        out,
+        callable_generics,
+    };
+    collector.visit_block(block);
+    collector.out
+}
+
+/// Generic parameters carrying an `Fn`/`FnMut`/`FnOnce` bound, from both
+/// the parameter list (`fn f<F: Fn()>`) and the `where` clause.
+fn fn_bounded_generics(generics: &Generics) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for param in &generics.params {
+        if let GenericParam::Type(type_param) = param
+            && type_param.bounds.iter().any(bound_is_fn_trait)
+        {
+            out.insert(type_param.ident.to_string());
+        }
+    }
+    for predicate in generics.where_clause.iter().flat_map(|w| &w.predicates) {
+        if let WherePredicate::Type(predicate) = predicate
+            && predicate.bounds.iter().any(bound_is_fn_trait)
+            && let Some(ident) = type_path_last_ident(&predicate.bounded_ty)
+        {
+            out.insert(ident);
+        }
+    }
+    out
+}
+
+fn bound_is_fn_trait(bound: &TypeParamBound) -> bool {
+    matches!(bound, TypeParamBound::Trait(trait_bound)
+        if trait_bound
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| is_fn_trait_name(&segment.ident.to_string())))
+}
+
+fn is_fn_trait_name(name: &str) -> bool {
+    matches!(name, "Fn" | "FnMut" | "FnOnce")
+}
+
+/// Whether `ty` denotes something callable: a bare `fn` pointer, an
+/// `impl`/`dyn` `Fn*` bound, a generic parameter carrying such a bound,
+/// or any of those behind a reference or a wrapper like `Box<dyn Fn()>`.
+fn type_is_callable(ty: &Type, callable_generics: &HashSet<String>) -> bool {
+    match ty {
+        Type::BareFn(_) => true,
+        Type::ImplTrait(imp) => imp.bounds.iter().any(bound_is_fn_trait),
+        Type::TraitObject(obj) => obj.bounds.iter().any(bound_is_fn_trait),
+        Type::Reference(reference) => type_is_callable(&reference.elem, callable_generics),
+        Type::Paren(paren) => type_is_callable(&paren.elem, callable_generics),
+        Type::Group(group) => type_is_callable(&group.elem, callable_generics),
+        Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return false;
+            };
+            let name = segment.ident.to_string();
+            if is_fn_trait_name(&name) || callable_generics.contains(&name) {
+                return true;
+            }
+            // `Box<dyn Fn()>`, `Option<F>`, `Arc<dyn FnMut()>`.
+            match &segment.arguments {
+                PathArguments::AngleBracketed(args) => args.args.iter().any(|arg| {
+                    matches!(arg, GenericArgument::Type(inner)
+                        if type_is_callable(inner, callable_generics))
+                }),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The bound name of an irrefutable binding pattern (`emit`, `mut emit`,
+/// `&emit`). Destructuring patterns bind no single callable name.
+fn binding_ident(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(ident) => Some(ident.ident.to_string()),
+        Pat::Reference(reference) => binding_ident(&reference.pat),
+        Pat::Paren(paren) => binding_ident(&paren.pat),
+        Pat::Type(pat_type) => binding_ident(&pat_type.pat),
+        _ => None,
+    }
+}
+
+/// Collects the callable names one function body binds, without
+/// descending into nested `fn` items — their bodies are separate scopes.
+/// Closure bodies are walked, since a closure shares the enclosing
+/// function's scope and the call visitor attributes its calls there too.
+struct LocalBindingCollector {
+    out: HashSet<String>,
+    callable_generics: HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for LocalBindingCollector {
+    fn visit_local(&mut self, local: &'ast Local) {
+        let init_is_closure = local
+            .init
+            .as_ref()
+            .is_some_and(|init| matches!(&*init.expr, Expr::Closure(_)));
+        let typed_callable = match &local.pat {
+            Pat::Type(pat_type) => type_is_callable(&pat_type.ty, &self.callable_generics),
+            _ => false,
+        };
+        if (init_is_closure || typed_callable)
+            && let Some(name) = binding_ident(&local.pat)
+        {
+            self.out.insert(name);
+        }
+        visit::visit_local(self, local);
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+        self.out.insert(item.sig.ident.to_string());
     }
 }
 
@@ -604,6 +784,93 @@ mod tests {
     fn bare_function_call_records_callee_and_caller() {
         let sites = run("fn a() { b() }\n");
         assert_eq!(names(&sites), [(Some("b"), Some("a"))]);
+    }
+
+    /// A callee bound to a closure, a nested `fn`, or an `Fn`-typed
+    /// parameter in the caller's own scope is shadowed: the resolver must
+    /// be told so it does not fall back to a same-named function in
+    /// another module.
+    #[rstest]
+    #[case::closure_local("fn pump() { let emit = |e: u8| {}; emit(1); }", true)]
+    #[case::nested_fn("fn pump() { fn emit(e: u8) {} emit(1); }", true)]
+    #[case::fn_pointer_local("fn pump() { let emit: fn(u8) = other; emit(1); }", true)]
+    #[case::impl_fn_param("fn pump(emit: impl Fn(u8)) { emit(1); }", true)]
+    #[case::generic_fn_param("fn pump<F: Fn(u8)>(emit: F) { emit(1); }", true)]
+    #[case::where_bounded_param("fn pump<F>(emit: F) where F: FnMut(u8) { emit(1); }", true)]
+    #[case::boxed_dyn_fn_param("fn pump(emit: Box<dyn FnOnce(u8)>) { emit(1); }", true)]
+    #[case::reference_dyn_fn_param("fn pump(emit: &dyn Fn(u8)) { emit(1); }", true)]
+    #[case::fn_pointer_param("fn pump(emit: fn(u8)) { emit(1); }", true)]
+    #[case::binding_in_nested_block("fn pump() { if x { let emit = |e: u8| {}; emit(1); } }", true)]
+    #[case::closure_body_shares_the_scope(
+        "fn pump() { let emit = |e: u8| {}; run(|| emit(1)); }",
+        true
+    )]
+    #[case::parenthesised_fn_pointer_param("fn pump(emit: (fn(u8))) { emit(1); }", true)]
+    #[case::reference_pattern_param("fn pump(&emit: &fn(u8)) { emit(1); }", true)]
+    #[case::parenthesised_pattern_local("fn pump() { let (emit) = |e: u8| {}; emit(1); }", true)]
+    #[case::plain_local("fn pump() { let emit = compute(); emit(1); }", false)]
+    #[case::value_param("fn pump(emit: u8) { emit(1); }", false)]
+    // A generic bound that is not an `Fn` trait says nothing about
+    // callability, so the parameter is an ordinary value.
+    #[case::non_fn_generic_param("fn pump<T: Clone>(emit: T) { emit(1); }", false)]
+    #[case::non_fn_impl_trait_param("fn pump(emit: impl Clone) { emit(1); }", false)]
+    #[case::unbound_name("fn pump() { emit(1); }", false)]
+    fn local_callable_bindings_shadow_bare_calls(#[case] src: &str, #[case] expected: bool) {
+        let sites = run(src);
+        let site = sites
+            .iter()
+            .find(|site| site.callee_name.as_deref() == Some("emit"))
+            .expect("emit call site");
+        assert_eq!(site.callee_is_locally_bound, expected);
+    }
+
+    /// `Type::Group` wraps a type that arrived through a macro's token
+    /// stream, so it never appears in a file parsed from source — build
+    /// one directly to pin that the wrapper is peeled like `Type::Paren`.
+    #[test]
+    fn grouped_types_are_peeled_when_deciding_callability() {
+        let grouped = Type::Group(syn::TypeGroup {
+            group_token: Default::default(),
+            elem: Box::new(syn::parse_str("fn(u8)").unwrap()),
+        });
+        let grouped_value = Type::Group(syn::TypeGroup {
+            group_token: Default::default(),
+            elem: Box::new(syn::parse_str("u8").unwrap()),
+        });
+
+        assert!(type_is_callable(&grouped, &HashSet::new()));
+        assert!(!type_is_callable(&grouped_value, &HashSet::new()));
+    }
+
+    /// A qualified path names its owner, so a local `emit` does not
+    /// shadow `other::emit()`.
+    #[test]
+    fn qualified_paths_are_not_shadowed_by_a_local_binding() {
+        let sites = run("fn pump() { let emit = |e: u8| {}; other::emit(1); }");
+        let site = sites
+            .iter()
+            .find(|site| site.callee_path.as_deref() == Some("other::emit"))
+            .expect("qualified emit call site");
+        assert!(!site.callee_is_locally_bound);
+    }
+
+    /// A nested `fn` has its own scope: the outer function's locals are
+    /// not visible inside it, and its own bindings do not leak out.
+    #[test]
+    fn nested_fn_scopes_do_not_share_bindings() {
+        let src = "fn pump() { let emit = |e: u8| {}; fn inner() { emit(1); } emit(2); }";
+        let flags: Vec<_> = run(src)
+            .iter()
+            .filter(|site| site.callee_name.as_deref() == Some("emit"))
+            .map(|site| (site.caller_name.clone(), site.callee_is_locally_bound))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                (Some("inner".to_owned()), false),
+                (Some("pump".to_owned()), true),
+            ]
+        );
     }
 
     #[test]

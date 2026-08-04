@@ -14,6 +14,27 @@ pub(crate) fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
     }
 }
 
+/// Backticked items up to `cap`, the remainder rolled into a count.
+///
+/// Every analyzer that inlines a name list into a report row needs the
+/// same shape — a row that grows without bound costs more context than
+/// the finding is worth — so the cap belongs to the caller and the
+/// rendering belongs here.
+pub(crate) fn render_backticked_list(items: &[String], cap: usize) -> String {
+    let listed = items
+        .iter()
+        .take(cap)
+        .map(|item| format!("`{item}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let overflow = items.len().saturating_sub(cap);
+    if overflow > 0 {
+        format!("{listed} +{overflow} more")
+    } else {
+        listed
+    }
+}
+
 /// Cite the graph-confidence calibration: the modules whose call sites
 /// resolved worst, i.e. where this analyzer's numbers are most
 /// undercounted. `note` says what specifically is undercounted, since
@@ -157,6 +178,23 @@ mod tests {
     #[case::no_call_sites_at_all(vec![summary("a", 0, 0)])]
     fn nothing_is_rendered_without_unresolved_calls(#[case] modules: Vec<ModuleResolutionSummary>) {
         assert_eq!(render(&modules), "");
+    }
+
+    #[rstest]
+    #[case::empty(&[], 3, "")]
+    #[case::under_cap(&["a", "b"], 3, "`a`, `b`")]
+    #[case::exactly_at_cap(&["a", "b"], 2, "`a`, `b`")]
+    #[case::over_cap(&["a", "b", "c", "d"], 2, "`a`, `b` +2 more")]
+    // A cap of zero rolls everything into the count rather than
+    // panicking on the empty join.
+    #[case::zero_cap(&["a"], 0, " +1 more")]
+    fn backticked_list_caps_and_counts_the_remainder(
+        #[case] items: &[&str],
+        #[case] cap: usize,
+        #[case] expected: &str,
+    ) {
+        let items: Vec<String> = items.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(render_backticked_list(&items, cap), expected);
     }
 
     #[test]

@@ -124,3 +124,51 @@ cargo mutants --workspace --no-shuffle --iterate --jobs "$jobs" --in-diff target
 [tasks."ci:rust"]
 description = "Run Rust lint and test tasks"
 depends = ["lint:rust", "test:rust", "test:rust:doc"]
+
+# Dogfooding: run the freshly built binary over this repository's own
+# sources, driving the profiles in `agent-lens.toml`.
+#
+# Deliberately not a `test:*` / `ci:*` task. It builds in release mode and
+# walks the whole workspace, which is too slow for the inner loop, and its
+# value is a report a human or an agent reads — there is no assertion to
+# gate a merge on. What it *does* catch, and no unit test can, is an
+# analyzer that still returns `Ok` while saying something absurd about
+# code the maintainers know by heart.
+#
+# Every profile has to exit 0: an analyzer that panics, or that rejects a
+# profile the config schema says is valid, fails the run.
+[tasks.selftest]
+description = "Run agent-lens over its own sources (all agent-lens.toml profiles)"
+usage = '''
+arg "[profile]" help="Run only this profile instead of every one" default=""
+flag "--format <format>" help="Report format: md (default) or json" default="md"
+flag "--out <dir>" help="Write one report per profile here instead of stdout"
+'''
+run = '''
+set -eu
+format="${usage_format:-md}"
+out="${usage_out:-}"
+cargo build --release --locked
+bin="$(cargo metadata --format-version 1 --no-deps \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/agent-lens"
+
+if [ -n "${usage_profile:-}" ]; then
+  profiles="$usage_profile"
+else
+  # The profile list comes from the config itself, so a profile added to
+  # agent-lens.toml is covered without touching this task.
+  profiles="$(sed -n 's/^\[profile\.\([A-Za-z0-9_-]*\)\]$/\1/p' agent-lens.toml)"
+fi
+
+if [ -n "$out" ]; then
+  mkdir -p "$out"
+fi
+for profile in $profiles; do
+  echo "==> agent-lens run $profile --format $format" >&2
+  if [ -n "$out" ]; then
+    "$bin" run "$profile" --format "$format" > "$out/$profile.$format"
+  else
+    "$bin" run "$profile" --format "$format"
+  fi
+done
+'''

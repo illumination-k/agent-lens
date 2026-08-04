@@ -53,8 +53,10 @@ use super::call_graph::algo::{
 };
 use super::call_graph::model::{CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::churn::{ChurnError, ChurnScope};
+use super::churn::ChurnScope;
+use super::error_from::impl_from_churn_error;
 use super::format::render_module_confidence;
+use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
 
@@ -91,13 +93,18 @@ pub enum RiskError {
     NotInGitRepo { path: PathBuf },
 }
 
-impl From<ChurnError> for RiskError {
-    fn from(error: ChurnError) -> Self {
-        match error {
-            ChurnError::Io { path, source } => Self::Io { path, source },
-            ChurnError::Git { stderr } => Self::Git { stderr },
-            ChurnError::NotInGitRepo { path } => Self::NotInGitRepo { path },
-        }
+impl_from_churn_error!(RiskError);
+
+analyzer_options! {
+    /// `analyze risk` flags, and the `[profile.<name>.risk]` table.
+    pub struct RiskOptions {
+        @shared(ranking);
+        /// Restrict the churn axis to commits in this `--since=` window.
+        /// Accepts anything git's approxidate parser does (e.g.
+        /// `90.days.ago`, `2024-01-01`). Centrality is a property of the
+        /// current source and is unaffected.
+        #[arg(long)]
+        pub since: Option<String>,
     }
 }
 
@@ -111,6 +118,13 @@ pub struct RiskAnalyzer {
 }
 
 impl RiskAnalyzer {
+    /// Apply a whole [`RiskOptions`] group. The CLI flags and the
+    /// `[profile.<name>.risk]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: RiskOptions) -> Self {
+        self.with_top(opts.top).with_since_opt(opts.since)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

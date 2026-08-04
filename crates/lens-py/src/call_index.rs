@@ -17,8 +17,8 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, LineIndex,
-    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, qualify_module,
-    starts_uppercase,
+    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, callee_names_local_binding,
+    qualify_module, starts_uppercase,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport};
@@ -103,6 +103,9 @@ fn function_shape(site: &FnSite<'_>, module: &str, lines: &LineIndex) -> Functio
         visibility: SyntaxFact::Unknown,
         signature: SyntaxFact::Unknown,
         doc: crate::parser::docstring_text(func),
+        // Decorators are not extracted yet; `Unknown` keeps a
+        // framework-registered function from reading as unannotated.
+        attributes: SyntaxFact::Unknown,
         body: BodyShape {
             tree: function_body_tree(func),
         },
@@ -124,6 +127,7 @@ fn collect_calls_in_function(
         Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
         None => qualify_module(module, display_name),
     };
+    let locally_bound = local_callable_bindings(site.func);
     let mut visitor = FunctionBodyCallVisitor {
         module,
         caller_qualified_name: caller_qualified,
@@ -131,12 +135,92 @@ fn collect_calls_in_function(
         line_index: lines,
         imports,
         namespace_aliases,
+        locally_bound,
         out: Vec::new(),
     };
     for body_stmt in &site.func.body {
         visitor.visit_stmt(body_stmt);
     }
     out.extend(visitor.out);
+}
+
+/// Names bound to a callable inside `func`'s own scope: nested `def`s and
+/// `lambda`s held in a local, plus parameters annotated as `Callable`.
+///
+/// The walker keeps a function body atomic, so a nested `def` is never a
+/// graph node of its own and a call to it has no workspace target. Left
+/// to the resolver's name fallback, that call would instead land on
+/// whichever unrelated module happens to define the same name.
+///
+/// Bindings are collected body-wide rather than from the point of
+/// definition: a call that precedes its binding and means the outer name
+/// is rare, and losing an edge beats fabricating one.
+fn local_callable_bindings(func: &StmtFunctionDef) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for param in func.parameters.iter() {
+        if param.annotation().is_some_and(annotation_is_callable) {
+            names.insert(param.name().as_str().to_owned());
+        }
+    }
+    let mut collector = LocalBindingCollector { out: &mut names };
+    for stmt in &func.body {
+        collector.visit_stmt(stmt);
+    }
+    names
+}
+
+/// `Callable`, `typing.Callable[[int], None]`, `collections.abc.Callable`.
+fn annotation_is_callable(annotation: &Expr) -> bool {
+    match annotation {
+        Expr::Name(ExprName { id, .. }) => id.as_str() == "Callable",
+        Expr::Attribute(ExprAttribute { attr, .. }) => attr.as_str() == "Callable",
+        Expr::Subscript(subscript) => annotation_is_callable(&subscript.value),
+        // `"Callable[[int], None]"` as a string annotation.
+        Expr::StringLiteral(literal) => literal.value.to_str().starts_with("Callable"),
+        _ => false,
+    }
+}
+
+struct LocalBindingCollector<'a> {
+    out: &'a mut HashSet<String>,
+}
+
+impl<'ast> Visitor<'ast> for LocalBindingCollector<'_> {
+    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        match stmt {
+            Stmt::FunctionDef(nested) => {
+                self.out.insert(nested.name.as_str().to_owned());
+                // A nested `def`'s own body binds names in its scope, not
+                // in this one, so stop here.
+                return;
+            }
+            Stmt::Assign(assign) => {
+                if matches!(assign.value.as_ref(), Expr::Lambda(_)) {
+                    for target in &assign.targets {
+                        if let Expr::Name(name) = target {
+                            self.out.insert(name.id.to_string());
+                        }
+                    }
+                }
+            }
+            Stmt::AnnAssign(assign) => {
+                let binds_callable = assign
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| matches!(value.as_ref(), Expr::Lambda(_)))
+                    || annotation_is_callable(&assign.annotation);
+                if binds_callable && let Expr::Name(name) = assign.target.as_ref() {
+                    self.out.insert(name.id.to_string());
+                }
+            }
+            _ => {}
+        }
+        ruff_python_ast::visitor::walk_stmt(self, stmt);
+    }
+
+    // Lambda bodies are expressions in this scope's statements, but their
+    // parameters are not; nothing in an expression binds a name here.
+    fn visit_expr(&mut self, _expr: &'ast Expr) {}
 }
 
 struct FunctionBodyCallVisitor<'a> {
@@ -146,49 +230,48 @@ struct FunctionBodyCallVisitor<'a> {
     line_index: &'a LineIndex,
     imports: &'a [ImportShape],
     namespace_aliases: &'a HashSet<String>,
+    /// Callable names bound in this function's own scope — see
+    /// [`local_callable_bindings`].
+    locally_bound: HashSet<String>,
     out: Vec<CallShape>,
 }
 
 impl<'a, 'ast> Visitor<'ast> for FunctionBodyCallVisitor<'a> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         if let Expr::Call(call) = expr {
-            self.out.push(call_shape(
-                call,
-                self.line_index,
-                self.module,
-                &self.caller_qualified_name,
-                self.caller_owner.clone(),
-                self.imports,
-                self.namespace_aliases,
-            ));
+            let shape = self.call_shape(call);
+            self.out.push(shape);
         }
         walk_expr(self, expr);
     }
 }
 
-fn call_shape(
-    call: &ExprCall,
-    line_index: &LineIndex,
-    module: &str,
-    caller_qualified_name: &str,
-    caller_owner: Option<String>,
-    imports: &[ImportShape],
-    namespace_aliases: &HashSet<String>,
-) -> CallShape {
-    let facts = callee_facts(&call.func, namespace_aliases);
-    let line = line_index.line(call.range.start().to_u32());
-    CallShape {
-        caller_qualified_name: SyntaxFact::Known(Some(caller_qualified_name.to_owned())),
-        caller_module: SyntaxFact::Known(module.to_owned()),
-        caller_owner: SyntaxFact::Known(caller_owner),
-        callee_display_name: SyntaxFact::Known(facts.name),
-        callee_path_segments: facts
-            .path_segments
-            .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
-        receiver_expr_kind: SyntaxFact::Known(facts.receiver),
-        lexical_resolution: LexicalResolutionStatus::NotAttempted,
-        visible_imports: imports.to_vec(),
-        line,
+impl FunctionBodyCallVisitor<'_> {
+    /// The visitor already owns every caller-side fact a call shape
+    /// needs, so this reads them off `self` instead of taking them as a
+    /// parameter list.
+    fn call_shape(&self, call: &ExprCall) -> CallShape {
+        let facts = callee_facts(&call.func, self.namespace_aliases);
+        let line = self.line_index.line(call.range.start().to_u32());
+        let callee_is_locally_bound = callee_names_local_binding(
+            facts.receiver,
+            facts.path_segments.as_deref(),
+            &self.locally_bound,
+        );
+        CallShape {
+            caller_qualified_name: SyntaxFact::Known(Some(self.caller_qualified_name.clone())),
+            caller_module: SyntaxFact::Known(self.module.to_owned()),
+            caller_owner: SyntaxFact::Known(self.caller_owner.clone()),
+            callee_display_name: SyntaxFact::Known(facts.name),
+            callee_path_segments: facts
+                .path_segments
+                .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
+            receiver_expr_kind: SyntaxFact::Known(facts.receiver),
+            callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
+            lexical_resolution: LexicalResolutionStatus::NotAttempted,
+            visible_imports: self.imports.to_vec(),
+            line,
+        }
     }
 }
 
@@ -296,16 +379,14 @@ fn collect_imports(body: &[Stmt], module: &str) -> Vec<ImportShape> {
     out
 }
 
+/// Every import in this language names its module, alias, and symbol
+/// outright, so the three facts are always known.
 fn import_shape(
     local_alias: Option<String>,
     imported_module: String,
     exported_symbol: Option<String>,
 ) -> ImportShape {
-    ImportShape {
-        imported_module: SyntaxFact::Known(imported_module),
-        local_alias: SyntaxFact::Known(local_alias),
-        exported_symbol: SyntaxFact::Known(exported_symbol),
-    }
+    ImportShape::known(imported_module, local_alias, exported_symbol)
 }
 
 /// Resolve the lexical base module of a `from X import ...` statement.
@@ -360,6 +441,7 @@ fn function_span(func: &StmtFunctionDef, lines: &LineIndex) -> SourceSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn shapes(src: &str, module: &str) -> Vec<FunctionShape> {
         extract_function_shapes_with_module(src, module).unwrap()
@@ -367,6 +449,75 @@ mod tests {
 
     fn calls(src: &str, module: &str) -> Vec<CallShape> {
         extract_call_shapes_with_module(src, module).unwrap()
+    }
+
+    /// A callee bound to a nested `def`, a `lambda`, or a `Callable`
+    /// parameter in the caller's own scope is shadowed: the resolver must
+    /// be told so it does not fall back to a same-named module function.
+    #[rstest]
+    #[case::nested_def("def caller():\n    def emit(x):\n        pass\n    emit(1)\n", true)]
+    #[case::lambda_local("def caller():\n    emit = lambda x: x\n    emit(1)\n", true)]
+    #[case::annotated_lambda(
+        "def caller():\n    emit: Callable[[int], None] = lambda x: x\n    emit(1)\n",
+        true
+    )]
+    #[case::callable_param("def caller(emit: Callable[[int], None]):\n    emit(1)\n", true)]
+    #[case::qualified_callable_param("def caller(emit: typing.Callable):\n    emit(1)\n", true)]
+    #[case::string_annotated_param(
+        "def caller(emit: \"Callable[[int], None]\"):\n    emit(1)\n",
+        true
+    )]
+    #[case::annotated_only("def caller():\n    emit: Callable[[int], None]\n    emit(1)\n", true)]
+    #[case::binding_in_nested_block(
+        "def caller(flag):\n    if flag:\n        emit = lambda x: x\n    emit(1)\n",
+        true
+    )]
+    #[case::plain_local("def caller():\n    emit = compute()\n    emit(1)\n", false)]
+    #[case::value_param("def caller(emit: int):\n    emit(1)\n", false)]
+    #[case::unbound_name("def caller():\n    emit(1)\n", false)]
+    fn local_callable_bindings_shadow_bare_calls(#[case] src: &str, #[case] expected: bool) {
+        let call = calls(src, "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("emit"))
+            .expect("emit call site");
+        assert_eq!(call.callee_is_locally_bound(), expected);
+    }
+
+    /// A `lambda`'s own parameters bind in the lambda's scope, not the
+    /// enclosing function's, so they must not shadow calls around it.
+    #[test]
+    fn lambda_parameters_do_not_shadow_the_enclosing_scope() {
+        let src = "def caller():\n    run(lambda emit: emit(1))\n    emit(2)\n";
+        let outer = calls(src, "m")
+            .into_iter()
+            .filter(|call| call.callee_name() == Some("emit"))
+            .collect::<Vec<_>>();
+        assert!(
+            outer.iter().all(|call| !call.callee_is_locally_bound()),
+            "got {outer:?}",
+        );
+    }
+
+    /// Only the shadowed name is affected.
+    #[test]
+    fn other_calls_in_a_shadowing_function_are_untouched() {
+        let src = "def caller():\n    emit = lambda x: x\n    emit(1)\n    helper()\n";
+        let flags: Vec<_> = calls(src, "m")
+            .iter()
+            .map(|call| {
+                (
+                    call.callee_name().map(ToOwned::to_owned),
+                    call.callee_is_locally_bound(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                (Some("emit".to_owned()), true),
+                (Some("helper".to_owned()), false),
+            ]
+        );
     }
 
     #[test]

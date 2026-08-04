@@ -43,6 +43,11 @@ pub struct RustFunctionDef {
     pub impl_owner_kind: Option<OwnerKind>,
     /// Syntactic Rust visibility where it is available.
     pub visibility: VisibilityShape,
+    /// Attribute paths on the definition, arguments dropped and doc
+    /// comments excluded (`inline`, `cfg`, `tokio::main`). A method
+    /// carries its `impl` or `trait` block's attributes as well: an
+    /// annotation on the block applies to every method inside it.
+    pub attributes: Vec<String>,
 }
 
 /// Parse failures surfaced by [`RustParser`].
@@ -93,6 +98,7 @@ impl From<RustFunctionDef> for FunctionShape {
             visibility: SyntaxFact::Known(def.visibility),
             signature,
             doc: def.function.doc,
+            attributes: SyntaxFact::Known(def.attributes),
             body: BodyShape { tree: body_tree },
             span: SourceSpan {
                 start_line: def.function.start_line,
@@ -174,6 +180,7 @@ fn extract_item_functions(
                 impl_owner: None,
                 impl_owner_kind: None,
                 visibility: visibility_shape(&item_fn.vis),
+                attributes: crate::attrs::attribute_paths(&item_fn.attrs),
                 name,
             });
         }
@@ -208,6 +215,17 @@ fn extract_impl_functions(
     out: &mut Vec<RustFunctionDef>,
 ) {
     let owner = crate::common::type_path_last_ident(&item_impl.self_ty);
+    // A trait `impl` is reached through the trait: a caller can name
+    // `Trait::method` — or dispatch dynamically — and never mention this
+    // definition, which is why the two kinds of `impl` are not the same
+    // fact. The methods also carry no visibility of their own (the
+    // trait's is what governs), so `Private` on one of them says nothing.
+    let owner_kind = if item_impl.trait_.is_some() {
+        OwnerKind::TraitImpl
+    } else {
+        OwnerKind::Impl
+    };
+    let block_attributes = crate::attrs::attribute_paths(&item_impl.attrs);
     for impl_item in &item_impl.items {
         let syn::ImplItem::Fn(method) = impl_item else {
             continue;
@@ -232,8 +250,9 @@ fn extract_impl_functions(
             qualified_name,
             module: module.to_owned(),
             impl_owner: owner.clone(),
-            impl_owner_kind: owner.as_ref().map(|_| OwnerKind::Impl),
+            impl_owner_kind: owner.as_ref().map(|_| owner_kind),
             visibility: visibility_shape(&method.vis),
+            attributes: with_block_attributes(&block_attributes, &method.attrs),
             name,
         });
     }
@@ -246,6 +265,7 @@ fn extract_trait_functions(
     out: &mut Vec<RustFunctionDef>,
 ) {
     let owner = item_trait.ident.to_string();
+    let block_attributes = crate::attrs::attribute_paths(&item_trait.attrs);
     for trait_item in &item_trait.items {
         let syn::TraitItem::Fn(method) = trait_item else {
             continue;
@@ -270,9 +290,21 @@ fn extract_trait_functions(
             impl_owner: Some(owner.clone()),
             impl_owner_kind: Some(OwnerKind::Trait),
             visibility: visibility_shape(&item_trait.vis),
+            attributes: with_block_attributes(&block_attributes, &method.attrs),
             name,
         });
     }
+}
+
+/// A method's own attribute paths, prefixed by the ones its enclosing
+/// `impl` or `trait` block carries. An annotation on the block
+/// (`#[wasm_bindgen] impl …`, `#[cfg(test)] impl …`) governs every
+/// method inside it, so a consumer reading only the method's own
+/// attributes would miss it.
+fn with_block_attributes(block: &[String], attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut out = block.to_vec();
+    out.extend(crate::attrs::attribute_paths(attrs));
+    out
 }
 
 fn visibility_shape(vis: &syn::Visibility) -> VisibilityShape {
@@ -429,7 +461,7 @@ fn collect_pattern_names(pat: &syn::Pat, out: &mut Vec<String>) {
     }
 }
 
-fn collect_type_paths(ty: &syn::Type, out: &mut Vec<String>) {
+pub(crate) fn collect_type_paths(ty: &syn::Type, out: &mut Vec<String>) {
     match ty {
         syn::Type::Array(array) => collect_type_paths(&array.elem, out),
         syn::Type::BareFn(bare_fn) => {
@@ -508,7 +540,7 @@ fn collect_bound_paths(bound: &syn::TypeParamBound, out: &mut Vec<String>) {
     }
 }
 
-fn generic_summaries(generics: &syn::Generics) -> Vec<String> {
+pub(crate) fn generic_summaries(generics: &syn::Generics) -> Vec<String> {
     let mut out: Vec<String> = generics.params.iter().map(normalized_tokens).collect();
     if let Some(where_clause) = &generics.where_clause {
         out.extend(where_clause.predicates.iter().map(normalized_tokens));
@@ -548,7 +580,7 @@ fn block_tree(block: &syn::Block) -> TreeNode {
     TreeNode::with_children("Block", "", block.stmts.iter().map(stmt_tree).collect())
 }
 
-fn stmt_tree(stmt: &syn::Stmt) -> TreeNode {
+pub(crate) fn stmt_tree(stmt: &syn::Stmt) -> TreeNode {
     match stmt {
         syn::Stmt::Local(local) => {
             let mut children = vec![pat_tree(&local.pat)];
@@ -2016,5 +2048,60 @@ fn c(n: u32) -> u32 {
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].a.name, "a");
         assert_eq!(pairs[0].b.name, "b");
+    }
+
+    /// The two `impl` forms are different reachability facts: an
+    /// inherent method is reached by its own name, a trait `impl`
+    /// method through the trait — and the latter carries no visibility
+    /// of its own, so "private and uncalled" says nothing about it.
+    #[test]
+    fn trait_impls_and_inherent_impls_carry_different_owner_kinds() {
+        let src = "pub trait Greet { fn greeting(&self) -> usize; }\n\
+                   pub struct W;\n\
+                   impl W { fn helper(&self) -> usize { 1 } }\n\
+                   impl Greet for W { fn greeting(&self) -> usize { 2 } }\n";
+        let kinds: Vec<(String, Option<OwnerKind>)> = extract_functions_with_modules(src, "crate")
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.name, f.impl_owner_kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("helper".to_owned(), Some(OwnerKind::Impl)),
+                ("greeting".to_owned(), Some(OwnerKind::TraitImpl)),
+            ],
+        );
+    }
+
+    /// A method inherits the annotations of the block it sits in: the
+    /// attribute macro on an `impl` governs every method inside it, and
+    /// a consumer reading only the method's own attributes would miss
+    /// that.
+    #[test]
+    fn methods_carry_their_own_and_their_blocks_attributes() {
+        let src = "pub struct W;\n\
+                   #[wasm_bindgen]\n\
+                   impl W {\n\
+                   #[inline]\n\
+                   fn exposed(&self) -> usize { 1 }\n\
+                   }\n\
+                   #[no_mangle]\n\
+                   fn free() {}\n";
+        let attributes: Vec<(String, Vec<String>)> = extract_functions_with_modules(src, "crate")
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.name, f.attributes))
+            .collect();
+        assert_eq!(
+            attributes,
+            [
+                (
+                    "exposed".to_owned(),
+                    vec!["wasm_bindgen".to_owned(), "inline".to_owned()],
+                ),
+                ("free".to_owned(), vec!["no_mangle".to_owned()]),
+            ],
+        );
     }
 }

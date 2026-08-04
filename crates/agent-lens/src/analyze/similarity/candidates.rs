@@ -6,7 +6,7 @@ use lens_domain::{
     CandidateStrategy, TSEDOptions, collect_subtree_sizes, lsh_candidate_pairs_for_trees,
 };
 
-use super::{OwnedFunction, SimilarityMethod};
+use super::{OwnedUnit, SimilarityMethod};
 
 #[derive(Debug)]
 pub(super) struct TreeProfile {
@@ -60,6 +60,15 @@ impl TreeProfile {
     ) -> &'a lens_domain::SubtreeSizes {
         self.subtree_sizes
             .get_or_init(|| collect_subtree_sizes(tree))
+    }
+
+    /// Whether this profile carries the cheap-filter data (`from_tree`)
+    /// rather than the scoring-only shape (`from_tree_for_scoring`).
+    /// Test-only: lets `build_tree_profiles` callers pin which shape the
+    /// LSH gate selected.
+    #[cfg(test)]
+    pub(super) fn has_filters(&self) -> bool {
+        self.filters.is_some()
     }
 
     pub(super) fn exact_hash(&self, compare_values: bool) -> u64 {
@@ -181,6 +190,10 @@ pub(super) struct CandidatePairs {
     pub label_filtered_count: usize,
     pub arity_filtered_count: usize,
     pub shingle_filtered_count: usize,
+    /// Pairs dropped because the two units cover overlapping source
+    /// lines. Only ever non-zero for `--target blocks`; see
+    /// [`CandidatePairs::drop_overlapping`].
+    pub overlap_filtered_count: usize,
     pub strategy: CandidatePairStrategy,
 }
 
@@ -191,7 +204,35 @@ impl CandidatePairs {
             + self.label_filtered_count
             + self.arity_filtered_count
             + self.shingle_filtered_count
+            + self.overlap_filtered_count
     }
+
+    /// Drop pairs whose two units cover overlapping lines of the same
+    /// file.
+    ///
+    /// Essential for `--target blocks` and meaningless for the others.
+    /// Sliding windows mint one unit per statement run, so the window
+    /// starting at statement 3 and the window starting at statement 3
+    /// that is one statement longer are near-identical by construction —
+    /// and so are all their neighbours. Left in, every function with a
+    /// few statements reports itself as a cluster of "duplicates" and
+    /// real cross-function repetition is buried. Overlapping windows are
+    /// one piece of code compared against itself, never duplication.
+    pub(super) fn drop_overlapping(&mut self, corpus: &[OwnedUnit]) {
+        let before = self.pairs.len();
+        self.pairs.retain(|&(i, j)| {
+            corpus
+                .get(i)
+                .zip(corpus.get(j))
+                .is_none_or(|(a, b)| !units_overlap(a, b))
+        });
+        self.overlap_filtered_count += before - self.pairs.len();
+    }
+}
+
+/// True when two units cover overlapping lines of the same file.
+fn units_overlap(a: &OwnedUnit, b: &OwnedUnit) -> bool {
+    a.file == b.file && a.start_line() <= b.end_line() && b.start_line() <= a.end_line()
 }
 
 #[derive(Debug, Default)]
@@ -228,12 +269,13 @@ impl CandidatePairStrategy {
 /// bounded by those quantities, so the token method skips them and scores
 /// every enumerated pair.
 pub(super) fn candidate_pairs(
-    corpus: &[OwnedFunction],
+    corpus: &[OwnedUnit],
     min_lines: usize,
     profiles: &[TreeProfile],
     threshold: f64,
     opts: &TSEDOptions,
     method: SimilarityMethod,
+    allow_lsh: bool,
 ) -> CandidatePairs {
     let eligible_indices: Vec<usize> = corpus
         .iter()
@@ -246,11 +288,11 @@ pub(super) fn candidate_pairs(
     // cover the exact setting here; tighter banding has missed one-label
     // near-clones that still clear the analyzer threshold.
     strategy.lsh.num_bands = 24;
-    let use_lsh = strategy_uses_lsh(&strategy, eligible_indices.len());
+    let use_lsh = allow_lsh && strategy_uses_lsh(&strategy, eligible_indices.len());
     let (pairs, filter_counts) = if use_lsh {
         let trees: Vec<&lens_domain::TreeNode> = eligible_indices
             .iter()
-            .filter_map(|&i| corpus.get(i).map(OwnedFunction::body_tree))
+            .filter_map(|&i| corpus.get(i).map(OwnedUnit::body_tree))
             .collect();
         let lsh_pairs = lsh_candidate_pairs_for_trees(&trees, &strategy.lsh)
             .into_iter()
@@ -287,6 +329,7 @@ pub(super) fn candidate_pairs(
         pairs,
         eligible_function_count: eligible_indices.len(),
         size_filtered_count: filter_counts.size,
+        overlap_filtered_count: 0,
         label_filtered_count: filter_counts.label,
         arity_filtered_count: filter_counts.arity,
         shingle_filtered_count: filter_counts.shingle,
@@ -298,14 +341,14 @@ pub(super) fn candidate_pairs(
     }
 }
 
-fn same_test_class(corpus: &[OwnedFunction], i: usize, j: usize) -> bool {
+fn same_test_class(corpus: &[OwnedUnit], i: usize, j: usize) -> bool {
     match (corpus.get(i), corpus.get(j)) {
         (Some(a), Some(b)) => a.is_test == b.is_test,
         _ => false,
     }
 }
 
-pub(super) fn eligible_function_count(corpus: &[OwnedFunction], min_lines: usize) -> usize {
+pub(super) fn eligible_function_count(corpus: &[OwnedUnit], min_lines: usize) -> usize {
     corpus
         .iter()
         .filter(|function| function.line_count() >= min_lines)
@@ -520,11 +563,12 @@ where
 mod tests {
     use super::*;
 
-    fn owned_function(name: &str, is_test: bool) -> OwnedFunction {
-        OwnedFunction {
+    fn owned_function(name: &str, is_test: bool) -> OwnedUnit {
+        OwnedUnit {
             file: std::path::PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test,
+            kind: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -542,6 +586,56 @@ mod tests {
                 ),
             }),
         }
+    }
+
+    fn window(file: &str, start_line: usize, end_line: usize) -> OwnedUnit {
+        OwnedUnit {
+            file: std::path::PathBuf::from(file),
+            rel_path: file.to_owned(),
+            is_test: false,
+            kind: None,
+            shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
+                name: "f".to_owned(),
+                start_line,
+                end_line,
+                is_test: false,
+                signature: None,
+                doc: None,
+                tree: lens_domain::TreeNode::leaf("Block"),
+            }),
+        }
+    }
+
+    /// Windows sharing so much as one line are the same code seen
+    /// twice. Only pairs in different files, or disjoint in the same
+    /// file, survive.
+    #[test]
+    fn drop_overlapping_keeps_only_disjoint_or_cross_file_pairs() {
+        let corpus = vec![
+            window("a.rs", 10, 14), // 0
+            window("a.rs", 11, 13), // 1: nested inside 0
+            window("a.rs", 14, 18), // 2: shares line 14 with 0
+            window("a.rs", 20, 24), // 3: disjoint from 0
+            window("b.rs", 11, 13), // 4: same lines, different file
+        ];
+        let mut candidates = CandidatePairs {
+            pairs: vec![(0, 1), (0, 2), (0, 3), (0, 4), (1, 4)],
+            eligible_function_count: corpus.len(),
+            size_filtered_count: 0,
+            label_filtered_count: 0,
+            arity_filtered_count: 0,
+            shingle_filtered_count: 0,
+            overlap_filtered_count: 0,
+            strategy: CandidatePairStrategy::Cartesian,
+        };
+
+        candidates.drop_overlapping(&corpus);
+
+        assert_eq!(candidates.pairs, vec![(0, 3), (0, 4), (1, 4)]);
+        assert_eq!(candidates.overlap_filtered_count, 2);
+        // Dropped pairs stay in the enumerated total so the profiling
+        // counters still add up.
+        assert_eq!(candidates.total_len(), 5);
     }
 
     #[test]
@@ -562,16 +656,18 @@ mod tests {
             0.0,
             &lens_domain::TSEDOptions::default(),
             SimilarityMethod::Tsed,
+            true,
         );
 
         assert_eq!(candidates.pairs, vec![(0, 1), (0, 2), (1, 2)]);
     }
 
-    fn owned_function_with_tree(name: &str, tree: lens_domain::TreeNode) -> OwnedFunction {
-        OwnedFunction {
+    fn owned_function_with_tree(name: &str, tree: lens_domain::TreeNode) -> OwnedUnit {
+        OwnedUnit {
             file: std::path::PathBuf::from("lib.rs"),
             rel_path: "lib.rs".to_owned(),
             is_test: false,
+            kind: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -613,12 +709,75 @@ mod tests {
             .collect();
         let opts = lens_domain::TSEDOptions::default();
 
-        let tsed = candidate_pairs(&corpus, 1, &profiles, 0.99, &opts, SimilarityMethod::Tsed);
-        let token = candidate_pairs(&corpus, 1, &profiles, 0.99, &opts, SimilarityMethod::Token);
+        let tsed = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.99,
+            &opts,
+            SimilarityMethod::Tsed,
+            true,
+        );
+        let token = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.99,
+            &opts,
+            SimilarityMethod::Token,
+            true,
+        );
 
         assert!(tsed.pairs.is_empty(), "TSED should prune the disjoint pair");
         assert_eq!(token.pairs, vec![(0, 1)]);
         assert_eq!(token.total_len(), 1);
+    }
+
+    /// The types target passes `allow_lsh = false`; even a corpus past
+    /// the LSH switch-over must stay on the exact cartesian path, since
+    /// MinHash recall collapses on small type trees.
+    #[test]
+    fn allow_lsh_false_forces_cartesian_past_the_lsh_threshold() {
+        let corpus: Vec<OwnedUnit> = (0..200)
+            .map(|i| owned_function(&format!("t{i}"), false))
+            .collect();
+        let profiles: Vec<_> = corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
+            .collect();
+        let opts = lens_domain::TSEDOptions::default();
+
+        let gated = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.0,
+            &opts,
+            SimilarityMethod::Tsed,
+            false,
+        );
+        let open = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.0,
+            &opts,
+            SimilarityMethod::Tsed,
+            true,
+        );
+
+        assert!(
+            matches!(gated.strategy, CandidatePairStrategy::Cartesian),
+            "expected cartesian, got {}",
+            gated.strategy.as_str()
+        );
+        assert!(
+            matches!(open.strategy, CandidatePairStrategy::Lsh),
+            "expected lsh, got {}",
+            open.strategy.as_str()
+        );
+        // All-identical trees: the exact path must enumerate every pair.
+        assert_eq!(gated.pairs.len(), 200 * 199 / 2);
     }
 
     #[test]

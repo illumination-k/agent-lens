@@ -15,12 +15,25 @@ use std::path::Path;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
+use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
 use super::{
     AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64, read_source,
 };
+
+analyzer_options! {
+    /// `analyze cohesion` flags, and the `[profile.<name>.cohesion]` table.
+    pub struct CohesionOptions {
+        @shared(ranking, diff);
+        /// Minimum LCOM4 score included in the markdown ranking. The
+        /// markdown default is 2, which hides cohesive LCOM4=1 units;
+        /// pass `--min-score 1` to include them.
+        #[arg(long)]
+        pub min_score: Option<usize>,
+    }
+}
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -54,12 +67,21 @@ impl CohesionAnalyzer {
 
     delegate_filter_builders!(filter);
 
+    /// Apply a whole [`CohesionOptions`] group. The CLI flags and the
+    /// `[profile.<name>.cohesion]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: CohesionOptions) -> Self {
+        self.with_top(opts.top)
+            .with_min_score(opts.min_score)
+            .with_diff_only(opts.diff_only)
+    }
+
     /// Read `path`, analyze it, and produce a report in `format`.
     pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let files = self
+        let scan = self
             .filter
             .collect_per_file(path, |sf| self.analyze_file(sf))?;
-        let report = build_report(path, &files);
+        let report = build_report(path, scan.scanned_file_count, &scan.reports);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.min_score)
         })
@@ -149,7 +171,7 @@ impl PerFileShape for CohesionShape {
 type Report<'a> = PerFileReport<'a, CohesionShape, UnitView<'a>>;
 type FileView<'a> = super::runner::FileView<'a, CohesionShape, UnitView<'a>>;
 
-fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
+fn build_report<'a>(path: &Path, scanned_file_count: usize, files: &'a [FileReport]) -> Report<'a> {
     let views = files
         .iter()
         .map(|f| {
@@ -159,7 +181,7 @@ fn build_report<'a>(path: &Path, files: &'a [FileReport]) -> Report<'a> {
             )
         })
         .collect();
-    PerFileReport::new(path, views)
+    PerFileReport::new(path, scanned_file_count, views)
 }
 
 #[derive(Debug, Serialize)]
@@ -254,10 +276,12 @@ const DEFAULT_TOP: usize = 20;
 const DEFAULT_MIN_SCORE: usize = 2;
 
 fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<usize>) -> String {
+    // Scanned-file count, not with-findings count: a clean run must
+    // read as "files were analyzed, nothing found", not "0 file(s)".
     let mut out = format!(
-        "# Cohesion report: {} ({} file(s), {} unit(s))\n",
+        "# Cohesion report: {} ({} file(s) scanned, {} unit(s))\n",
         report.root(),
-        report.file_count(),
+        report.scanned_file_count(),
         report.item_count(),
     );
     if report.item_count() == 0 {
@@ -757,6 +781,7 @@ impl Port for Adapter {
             .analyze(&file, OutputFormat::Md)
             .unwrap();
         assert!(md.contains("No cohesion units"));
+        assert!(md.contains("1 file(s) scanned"), "got: {md}");
     }
 
     #[test]
@@ -898,6 +923,9 @@ impl A { fn gx(&self) -> i32 { self.x } }
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["file_count"], 1);
+        // Dropped from `files`, but still counted as scanned so an
+        // empty report can't be mistaken for "no files considered".
+        assert_eq!(parsed["scanned_file_count"], 2);
         assert_eq!(parsed["files"][0]["file"], "with_impl.rs");
     }
 

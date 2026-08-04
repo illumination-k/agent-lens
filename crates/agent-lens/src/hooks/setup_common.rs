@@ -2,10 +2,14 @@
 //! commands.
 //!
 //! The two setup files diverge on file format (JSON vs TOML), error
-//! types, and plan/summary shapes, but the path-resolution and
-//! command-prefix matching logic is identical and is collected here.
+//! types, and plan/summary shapes. Everything else — the per-event
+//! command tables, the merge control flow (collect installed commands,
+//! filter out the already-wired ones, append a fresh matcher group),
+//! path resolution, and command-prefix matching — is identical and is
+//! collected here. Each setup module supplies the format-specific
+//! document operations through [`HooksDocument`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const SESSION_START_EVENT: &str = "SessionStart";
 pub(crate) const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
@@ -37,10 +41,136 @@ pub(crate) const CODEX_POST_TOOL_USE_COMMANDS: &[&str] = &[
     "agent-lens codex-hook post-tool-use wrapper",
 ];
 
-/// Resolve `$HOME/<relative>` as a [`PathBuf`], or `None` if `$HOME` is
-/// unset. Each caller maps `None` to its own scope-specific error.
-pub(crate) fn home_scoped_path(relative: &str) -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(relative))
+/// Per-event metadata driving the merge loop: which key under `hooks.`
+/// the event lives at, the matcher written for a fresh block, and the
+/// handler commands the setup may install there.
+pub(crate) struct EventBlock {
+    pub event: &'static str,
+    pub matcher: &'static str,
+    pub commands: &'static [&'static str],
+}
+
+/// Events the Claude Code setup wires into `settings.json`.
+pub(crate) const CLAUDE_EVENTS: &[EventBlock] = &[
+    EventBlock {
+        event: SESSION_START_EVENT,
+        matcher: CLAUDE_SESSION_START_MATCHER,
+        commands: CLAUDE_SESSION_START_COMMANDS,
+    },
+    EventBlock {
+        event: PRE_TOOL_USE_EVENT,
+        matcher: CLAUDE_EDITING_TOOL_MATCHER,
+        commands: CLAUDE_PRE_TOOL_USE_COMMANDS,
+    },
+    EventBlock {
+        event: POST_TOOL_USE_EVENT,
+        matcher: CLAUDE_EDITING_TOOL_MATCHER,
+        commands: CLAUDE_POST_TOOL_USE_COMMANDS,
+    },
+];
+
+/// Events the Codex setup wires into `config.toml`.
+pub(crate) const CODEX_EVENTS: &[EventBlock] = &[
+    EventBlock {
+        event: SESSION_START_EVENT,
+        matcher: CODEX_SESSION_START_MATCHER,
+        commands: CODEX_SESSION_START_COMMANDS,
+    },
+    EventBlock {
+        event: PRE_TOOL_USE_EVENT,
+        matcher: CODEX_APPLY_PATCH_MATCHER,
+        commands: CODEX_PRE_TOOL_USE_COMMANDS,
+    },
+    EventBlock {
+        event: POST_TOOL_USE_EVENT,
+        matcher: CODEX_APPLY_PATCH_MATCHER,
+        commands: CODEX_POST_TOOL_USE_COMMANDS,
+    },
+];
+
+/// Format-specific document operations the shared merge loop drives.
+///
+/// Implemented once per config format (JSON `settings.json`, TOML
+/// `config.toml`). Both operations are expected to create the
+/// `hooks.<event>` container on demand and to report an incompatible
+/// existing shape through `Self::Error` rather than clobbering it.
+pub(crate) trait HooksDocument {
+    type Error;
+
+    /// Collect every handler command currently installed under
+    /// `hooks.<event>`, across all matcher groups.
+    fn installed_commands(
+        &mut self,
+        path: &Path,
+        block: &EventBlock,
+    ) -> Result<Vec<String>, Self::Error>;
+
+    /// Append a fresh matcher group carrying `commands` under
+    /// `hooks.<event>`.
+    fn append_matcher_group(
+        &mut self,
+        path: &Path,
+        block: &EventBlock,
+        commands: &[String],
+    ) -> Result<(), Self::Error>;
+}
+
+/// The merge engine shared by both setups: for each event, install the
+/// commands that aren't already wired up anywhere under that event
+/// (modulo trailing arguments and binary path — see
+/// [`has_command_prefix`]) as one fresh matcher group. Returns the
+/// commands that were added; an empty result means the document was left
+/// untouched.
+pub(crate) fn merge_hook_commands<D: HooksDocument>(
+    path: &Path,
+    doc: &mut D,
+    events: &[EventBlock],
+) -> Result<Vec<String>, D::Error> {
+    let mut added: Vec<String> = Vec::new();
+    for block in events {
+        let installed = doc.installed_commands(path, block)?;
+        let missing: Vec<String> = block
+            .commands
+            .iter()
+            .filter(|cmd| !installed.iter().any(|seen| has_command_prefix(seen, cmd)))
+            .map(|s| (*s).to_string())
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        doc.append_matcher_group(path, block, &missing)?;
+        added.extend(missing);
+    }
+    Ok(added)
+}
+
+/// Read the current contents of a settings/config file, treating a
+/// missing or blank file as "not there yet". Any other IO failure is
+/// mapped through `io_error` so each format keeps its own error type.
+pub(crate) fn read_existing_text<E>(
+    path: &Path,
+    io_error: impl FnOnce(PathBuf, std::io::Error) -> E,
+) -> Result<Option<String>, E> {
+    match std::fs::read_to_string(path) {
+        Ok(s) if s.trim().is_empty() => Ok(None),
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_error(path.to_path_buf(), source)),
+    }
+}
+
+/// Write `text` to `path`, creating parent directories first. IO
+/// failures are mapped through `io_error` so each format keeps its own
+/// error type.
+pub(crate) fn write_with_parents<E>(
+    path: &Path,
+    text: &str,
+    io_error: impl Fn(PathBuf, std::io::Error) -> E,
+) -> Result<(), E> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| io_error(parent.to_path_buf(), source))?;
+    }
+    std::fs::write(path, text).map_err(|source| io_error(path.to_path_buf(), source))
 }
 
 /// Outcome of computing a setup plan against an existing settings/config

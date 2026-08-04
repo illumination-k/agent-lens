@@ -49,6 +49,7 @@ use super::call_graph::algo::bfs;
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::{ModuleSection, render_module_confidence, render_module_sections};
+use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzerError, OutputFormat};
 
@@ -72,6 +73,13 @@ const NOTE: &str = "Structural, not coverage: this is \"no resolved call path fr
      site in test-reached code can hide a real path — the listing is an upper bound, and \
      functions an ambiguous edge might reach are flagged per row.";
 
+analyzer_options! {
+    /// `analyze untested` flags, and the `[profile.<name>.untested]` table.
+    pub struct UntestedOptions {
+        @shared(ranking);
+    }
+}
+
 /// Analyzer entry point for `analyze untested`.
 #[derive(Debug, Default, Clone)]
 pub struct UntestedAnalyzer {
@@ -80,6 +88,13 @@ pub struct UntestedAnalyzer {
 }
 
 impl UntestedAnalyzer {
+    /// Apply a whole [`UntestedOptions`] group. The CLI flags and the
+    /// `[profile.<name>.untested]` table are the same type, so this is the
+    /// only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: UntestedOptions) -> Self {
+        self.with_top(opts.top)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

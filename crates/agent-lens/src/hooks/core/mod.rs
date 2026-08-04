@@ -15,8 +15,10 @@ pub mod similarity;
 pub mod wrapper;
 
 pub use error::{HookError, ReadEditedSourceError};
-pub use runner::{CohesionHook, ComplexityHook, HookEnvelope, SimilarityHook, WrapperHook};
-pub use session_summary::{SessionSummaryError, render_summary};
+pub use runner::{
+    CohesionHook, ComplexityHook, HookEnvelope, SessionStartEnvelope, SimilarityHook, SummaryHook,
+    WrapperHook,
+};
 
 use std::path::Path;
 

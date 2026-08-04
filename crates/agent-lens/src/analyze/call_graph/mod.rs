@@ -19,7 +19,7 @@ pub(crate) mod resolve;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use lens_domain::{CallShape, FunctionComplexity, FunctionShape, WrapperFinding};
+use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
 use lens_rust::CallIndexOptions;
 
 use super::cargo_meta::CrateNameCache;
@@ -44,6 +44,11 @@ pub(crate) struct CallGraph {
     pub(crate) nodes: Vec<CallGraphNode>,
     pub(crate) edges: Vec<CallGraphEdge>,
     pub(crate) module_summary: Vec<ModuleResolutionSummary>,
+    /// Interface method sets declared in the scanned files. Empty
+    /// unless the graph was built with
+    /// [`CallGraphBuilder::with_interface_facts`]; only the Go adapter
+    /// extracts them today.
+    pub(crate) interfaces: Vec<InterfaceShape>,
 }
 
 impl CallGraph {
@@ -65,6 +70,7 @@ impl CallGraph {
             nodes,
             edges,
             module_summary,
+            interfaces: collect_interfaces(files),
         }
     }
 
@@ -164,6 +170,7 @@ pub(crate) struct CallGraphBuilder {
     only_tests: bool,
     exclude_tests: bool,
     delegation_facts: bool,
+    interface_facts: bool,
     path_filter: AnalyzePathFilter,
 }
 
@@ -173,6 +180,7 @@ impl CallGraphBuilder {
             only_tests: false,
             exclude_tests: false,
             delegation_facts: false,
+            interface_facts: false,
             path_filter: AnalyzePathFilter::new(),
         }
     }
@@ -182,6 +190,15 @@ impl CallGraphBuilder {
     /// which is one more parse per file than the graph itself needs.
     pub(crate) fn with_delegation_facts(mut self, delegation_facts: bool) -> Self {
         self.delegation_facts = delegation_facts;
+        self
+    }
+
+    /// Collect [`CallGraph::interfaces`] from the scanned files. Off by
+    /// default for the same reason as delegation facts: the extraction
+    /// is one more parse per (Go) file, and only the visibility
+    /// analyzer reads the result.
+    pub(crate) fn with_interface_facts(mut self, interface_facts: bool) -> Self {
+        self.interface_facts = interface_facts;
         self
     }
 
@@ -239,21 +256,40 @@ impl CallGraphBuilder {
         let mut files = Vec::new();
         let mut crate_cache = CrateNameCache::new();
         for source_file in collect_source_files(path, &filter)? {
-            if !matches!(
-                SourceLang::from_path(&source_file.path),
-                Some(
-                    SourceLang::Rust
-                        | SourceLang::TypeScript(_)
-                        | SourceLang::Python
-                        | SourceLang::Go
-                )
-            ) {
+            if !graphed_language(&source_file.path) {
                 continue;
             }
             let path_is_test = filter.is_test_path(&source_file.path);
             files.push(self.scan_file(path, &source_file, path_is_test, &mut crate_cache)?);
         }
         Ok(CallGraph::build(files))
+    }
+
+    /// Hand every source file the graph would scan to `visit`, as its
+    /// display path (the spelling [`CallGraphNode::file`] uses) and its
+    /// text.
+    ///
+    /// The text is read a second time rather than kept from
+    /// [`Self::build`]: only the reachability analyzer wants it, and
+    /// holding every file of a workspace in memory to spare it one
+    /// re-read would be paid for by every other analyzer. Returns the
+    /// number of files visited.
+    pub(crate) fn visit_source_texts(
+        &self,
+        path: &Path,
+        mut visit: impl FnMut(&str, &str),
+    ) -> Result<usize, AnalyzerError> {
+        let filter = self.collection_filter().compile(path)?;
+        let mut visited = 0;
+        for source_file in collect_source_files(path, &filter)? {
+            if !graphed_language(&source_file.path) {
+                continue;
+            }
+            let (_, source) = read_source(&source_file.path)?;
+            visit(&source_file.display_path, &source);
+            visited += 1;
+        }
+        Ok(visited)
     }
 
     fn scan_file(
@@ -277,6 +313,13 @@ impl CallGraphBuilder {
             .delegation_facts
             .then(|| extract_wrappers(lang, &source))
             .transpose()?;
+        let interfaces = (self.interface_facts && matches!(lang, SourceLang::Go))
+            .then(|| {
+                lens_golang::extract_interface_shapes_with_module(&source, &module)
+                    .map_err(parse_err)
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -287,6 +330,7 @@ impl CallGraphBuilder {
             calls,
             complexity,
             wrappers,
+            interfaces,
         })
     }
 
@@ -317,14 +361,14 @@ impl CallGraphBuilder {
 /// }
 /// ```
 ///
-/// Analyzers that also need the flag's value at report time (to phrase
+/// Analyzers that also need a flag's value at report time (to phrase
 /// the output differently, say) name the field to mirror it into:
 /// `only_tests => only_tests`.
 macro_rules! delegate_call_graph_builders {
     (
         $field:ident,
         $(#[$only_tests_doc:meta])* only_tests $(=> $only_tests_mirror:ident)?,
-        $(#[$exclude_tests_doc:meta])* exclude_tests,
+        $(#[$exclude_tests_doc:meta])* exclude_tests $(=> $exclude_tests_mirror:ident)?,
     ) => {
         $(#[$only_tests_doc])*
         pub fn with_only_tests(mut self, only_tests: bool) -> Self {
@@ -335,6 +379,7 @@ macro_rules! delegate_call_graph_builders {
 
         $(#[$exclude_tests_doc])*
         pub fn with_exclude_tests(mut self, exclude_tests: bool) -> Self {
+            $(self.$exclude_tests_mirror = exclude_tests;)?
             self.$field = self.$field.with_exclude_tests(exclude_tests);
             self
         }
@@ -347,6 +392,16 @@ macro_rules! delegate_call_graph_builders {
 }
 
 pub(crate) use delegate_call_graph_builders;
+
+/// Whether the file's extension maps to a language the graph is built
+/// from. Other supported extensions exist (the per-file analyzers read
+/// them), so this is the graph's own narrower gate.
+fn graphed_language(path: &Path) -> bool {
+    matches!(
+        SourceLang::from_path(path),
+        Some(SourceLang::Rust | SourceLang::TypeScript(_) | SourceLang::Python | SourceLang::Go)
+    )
+}
 
 fn parse_err<E>(e: E) -> AnalyzerError
 where
@@ -438,6 +493,9 @@ pub(crate) struct FileGraphInput {
     /// Thin-wrapper findings for this file, or `None` when delegation
     /// facts were not requested.
     pub(crate) wrappers: Option<Vec<WrapperFinding>>,
+    /// Interface declarations in this file. Empty unless interface
+    /// facts were requested (and the language extracts them).
+    pub(crate) interfaces: Vec<InterfaceShape>,
 }
 
 impl SourceLang {
@@ -449,6 +507,21 @@ impl SourceLang {
             Self::Go => GraphLanguage::Go,
         }
     }
+}
+
+/// Flatten the per-file interface declarations into one deterministic
+/// list, sorted by qualified name (declarations shadowing each other
+/// across files stay distinct entries — a method set is a method set).
+fn collect_interfaces(files: Vec<FileGraphInput>) -> Vec<InterfaceShape> {
+    let mut interfaces: Vec<InterfaceShape> =
+        files.into_iter().flat_map(|file| file.interfaces).collect();
+    interfaces.sort_by(|a, b| {
+        a.qualified_name
+            .known_value()
+            .cmp(&b.qualified_name.known_value())
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    interfaces
 }
 
 fn graph_language_label(files: &[FileGraphInput]) -> &'static str {
@@ -485,10 +558,17 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<CallGraphNode> {
                     .known_value()
                     .and_then(|owner| owner.as_ref())
                     .map(|owner| owner.display_name.clone()),
+                owner_kind: f
+                    .owner
+                    .known_value()
+                    .and_then(|owner| owner.as_ref())
+                    .map(|owner| owner.kind),
                 start_line: f.span.start_line,
                 end_line: f.span.end_line,
                 is_test: f.is_test || file.path_is_test,
                 visibility: NodeVisibility::from_shape(&f.visibility),
+                param_count: f.signature_shape().map(|s| s.parameter_count()),
+                attributes: f.attributes.known_value().cloned(),
                 weights: NodeWeights {
                     loc: f.line_count(),
                     cyclomatic_complexity: metrics.map(|m| m.cyclomatic),
@@ -1075,6 +1155,28 @@ mod tests {
             .map(|v| v.node)
             .collect();
         assert_eq!(callers_of_c, vec![c, b, a]);
+    }
+
+    /// Pointed at a file no graph language claims, the builder scans
+    /// nothing rather than failing: the path filter admits a named file
+    /// whatever its extension, so the language gate is what keeps a
+    /// README out of the parser.
+    #[test]
+    fn a_file_outside_the_graph_languages_contributes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let readme = write_file(dir.path(), "README.md", "# not source\n");
+        write_file(dir.path(), "src/lib.rs", "fn a() {}\n");
+
+        let graph = CallGraphBuilder::new().build(&readme).unwrap();
+        assert!(graph.nodes.is_empty(), "got {:?}", graph.nodes);
+        assert_eq!(graph.language, "unknown");
+
+        let mut visited = Vec::new();
+        let count = CallGraphBuilder::new()
+            .visit_source_texts(dir.path(), |file, _| visited.push(file.to_owned()))
+            .unwrap();
+        assert_eq!(visited, ["src/lib.rs"], "the markdown file is not source");
+        assert_eq!(count, 1);
     }
 
     /// The three properties the caller sets carry beyond being the

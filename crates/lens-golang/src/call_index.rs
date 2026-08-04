@@ -18,8 +18,8 @@ use std::collections::HashSet;
 
 use lens_domain::{
     BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, VisibilityShape, qualify_module,
-    starts_uppercase,
+    OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
+    VisibilityShape, callee_names_local_binding, qualify_module, starts_uppercase,
 };
 use tree_sitter::Node;
 
@@ -99,13 +99,43 @@ fn function_shape(site: &FnSite<'_, '_>, source: &[u8], module: &str) -> Functio
         module_path: SyntaxFact::Known(module.to_owned()),
         owner: SyntaxFact::Known(owner_shape),
         visibility: SyntaxFact::Known(visibility),
-        signature: SyntaxFact::Unknown,
+        signature: SyntaxFact::Known(parameter_signature(node, source)),
         doc: crate::parser::doc_comment_text(node, source),
+        attributes: SyntaxFact::Known(crate::parser::directive_names(node, source)),
         body: BodyShape {
             tree: crate::parser::function_body_tree(body, source),
         },
         span,
         is_test,
+    }
+}
+
+/// Project a declaration's parameter list into a [`SignatureShape`]
+/// that carries only the parameter slots (with their names, where
+/// declared — the receiver is not a slot). The call graph reads the
+/// slot count to match methods against interface method sets by arity;
+/// every other signature fact stays [`SyntaxFact::Unknown`] rather than
+/// being half-extracted here.
+fn parameter_signature(node: Node<'_>, source: &[u8]) -> SignatureShape {
+    let params = node
+        .child_by_field_name("parameters")
+        .map(|params| crate::parser::parameter_slot_names(params, source))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| ParameterShape {
+            name: SyntaxFact::Known(name),
+            type_annotation: SyntaxFact::Unknown,
+            type_paths: Vec::new(),
+        })
+        .collect();
+    SignatureShape {
+        name_tokens: SyntaxFact::Unknown,
+        params,
+        return_type: SyntaxFact::Unknown,
+        return_type_paths: Vec::new(),
+        receiver: SyntaxFact::Unknown,
+        generics: SyntaxFact::Unknown,
+        bounds: SyntaxFact::Unknown,
     }
 }
 
@@ -122,6 +152,7 @@ fn collect_calls_in_function(
         Some(class) => qualify_module(module, &format!("{class}::{}", site.name)),
         None => qualify_module(module, site.name),
     };
+    let locally_bound = local_callable_bindings(site, source);
     let ctx = CallContext {
         source,
         module,
@@ -129,8 +160,121 @@ fn collect_calls_in_function(
         caller_owner: owner.map(ToOwned::to_owned),
         imports,
         namespace_aliases,
+        locally_bound,
     };
     visit_calls(site.body, &ctx, out);
+}
+
+/// Names bound to a callable inside `site`'s own scope: closures held in
+/// a local (`emit := func(...) {...}`, `var emit = func...`, `emit =
+/// func...`) and function-typed parameters (`func pump(emit func(Event))`).
+///
+/// A call to one of these targets the local binding, so the resolver must
+/// not attribute it to a package-level function of the same name. Go
+/// scopes `:=` from its declaration to the end of the block; tracking
+/// that position would only matter for a call that precedes the binding
+/// and means the outer name, which is rare enough that whole-body scope
+/// is the better trade — dropping an edge beats fabricating one.
+fn local_callable_bindings(site: &FnSite<'_, '_>, source: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    if let Some(params) = site.node.child_by_field_name("parameters") {
+        collect_function_typed_params(params, source, &mut names);
+    }
+    collect_func_literal_bindings(site.body, source, &mut names);
+    names
+}
+
+/// Parameters whose declared type is a `func(...)` type.
+fn collect_function_typed_params(params: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+    let mut cursor = params.walk();
+    for param in params.named_children(&mut cursor) {
+        if param.kind() != "parameter_declaration" {
+            continue;
+        }
+        if !param
+            .child_by_field_name("type")
+            .is_some_and(|ty| ty.kind() == "function_type")
+        {
+            continue;
+        }
+        // A single declaration can name several parameters
+        // (`func(f, g func())`), each an `identifier` in the `name` field.
+        let mut inner = param.walk();
+        for child in param.named_children(&mut inner) {
+            if child.kind() == "identifier"
+                && let Some(name) = node_str(child, source)
+            {
+                out.insert(name.to_owned());
+            }
+        }
+    }
+}
+
+/// Identifiers on the left of a binding whose right-hand side is a
+/// `func_literal`, anywhere in the function body (nested blocks included).
+fn collect_func_literal_bindings(node: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+    if matches!(
+        node.kind(),
+        "short_var_declaration" | "assignment_statement" | "var_spec" | "const_spec"
+    ) {
+        collect_func_literal_binding_names(node, source, out);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_func_literal_bindings(child, source, out);
+    }
+}
+
+fn collect_func_literal_binding_names(node: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+    // `var emit func(Event)` declares a callable with no initialiser, so
+    // the type is the only evidence — the name/value pairing below would
+    // find nothing.
+    if node
+        .child_by_field_name("type")
+        .is_some_and(|ty| ty.kind() == "function_type")
+        && let Some(names) = node.child_by_field_name("name")
+    {
+        for name in expression_list_children(names) {
+            if name.kind() == "identifier"
+                && let Some(text) = node_str(name, source)
+            {
+                out.insert(text.to_owned());
+            }
+        }
+    }
+    // `left`/`right` for `:=` and `=`; `name`/`value` for `var`/`const`.
+    // Both sides are positional lists, so pair them by index: only the
+    // names whose own initialiser is a closure are bound to a callable.
+    let left = node
+        .child_by_field_name("left")
+        .or_else(|| node.child_by_field_name("name"));
+    let right = node
+        .child_by_field_name("right")
+        .or_else(|| node.child_by_field_name("value"));
+    let (Some(left), Some(right)) = (left, right) else {
+        return;
+    };
+    let names = expression_list_children(left);
+    let values = expression_list_children(right);
+    for (name, value) in names.iter().zip(values.iter()) {
+        if value.kind() == "func_literal"
+            && name.kind() == "identifier"
+            && let Some(text) = node_str(*name, source)
+        {
+            out.insert(text.to_owned());
+        }
+    }
+}
+
+/// Flatten an `expression_list` / `identifier_list` into its elements; a
+/// bare node (single-element list) stands for itself.
+fn expression_list_children(node: Node<'_>) -> Vec<Node<'_>> {
+    if matches!(node.kind(), "expression_list" | "identifier_list") {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).collect()
+    } else {
+        vec![node]
+    }
 }
 
 /// Bundle the caller-side facts shared by every recursive `visit_calls`
@@ -144,6 +288,9 @@ struct CallContext<'a> {
     caller_owner: Option<String>,
     imports: &'a [ImportShape],
     namespace_aliases: &'a HashSet<String>,
+    /// Callable names bound in this function's own scope — see
+    /// [`local_callable_bindings`].
+    locally_bound: HashSet<String>,
 }
 
 fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) {
@@ -151,6 +298,11 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
         && let Some(callee) = node.child_by_field_name("function")
     {
         let facts = callee_facts(callee, ctx.source, ctx.namespace_aliases);
+        let locally_bound = callee_names_local_binding(
+            facts.receiver,
+            facts.path_segments.as_deref(),
+            &ctx.locally_bound,
+        );
         out.push(CallShape {
             caller_qualified_name: SyntaxFact::Known(Some(ctx.caller_qualified_name.to_owned())),
             caller_module: SyntaxFact::Known(ctx.module.to_owned()),
@@ -160,6 +312,7 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
                 .path_segments
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             receiver_expr_kind: SyntaxFact::Known(facts.receiver),
+            callee_is_locally_bound: SyntaxFact::Known(locally_bound),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: ctx.imports.to_vec(),
             line: node.start_position().row + 1,
@@ -363,6 +516,7 @@ fn push_import_spec(spec: Node<'_>, source: &[u8], out: &mut Vec<ImportShape>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn shapes(src: &str, module: &str) -> Vec<FunctionShape> {
         extract_function_shapes_with_module(src, module).unwrap()
@@ -600,6 +754,26 @@ func caller() { (func() {})() }
         );
     }
 
+    /// The graph matches methods against interface method sets by
+    /// arity, so the call-index shapes carry parameter slots: grouped
+    /// names expand, unnamed types count one each, a variadic slot is
+    /// one, and the receiver is not a slot.
+    #[rstest]
+    #[case::grouped("func f(a, b int) {}", 2)]
+    #[case::unnamed("func f(int, string) {}", 2)]
+    #[case::variadic("func f(xs ...int) {}", 1)]
+    #[case::receiver_not_counted("func (s *S) f(x int) {}", 1)]
+    #[case::niladic("func f() {}", 0)]
+    fn shapes_carry_parameter_slot_counts(#[case] decl: &str, #[case] expected: usize) {
+        let funcs = shapes(&format!("package p\n{decl}\n"), "m");
+        assert_eq!(
+            funcs[0]
+                .signature_shape()
+                .map(SignatureShape::parameter_count),
+            Some(expected),
+        );
+    }
+
     #[test]
     fn test_named_functions_are_marked_is_test() {
         let src = "package p\n\nimport \"testing\"\n\nfunc TestThing(t *testing.T) {}\nfunc helper() {}\n";
@@ -664,6 +838,92 @@ func caller() { (func() {})() }
             !call.has_receiver_expression(),
             "block-imported package alias should be a path call",
         );
+    }
+
+    /// A callee bound to a closure or a function-typed parameter in the
+    /// caller's own scope is shadowed: the resolver must be told so it
+    /// does not fall back to a same-named package-level function.
+    #[rstest]
+    #[case::short_var_closure("func caller() {\n  emit := func(x int) {}\n  emit(1)\n}\n", true)]
+    #[case::var_closure("func caller() {\n  var emit = func(x int) {}\n  emit(1)\n}\n", true)]
+    #[case::var_function_type("func caller() {\n  var emit func(int)\n  emit(1)\n}\n", true)]
+    #[case::assignment_closure(
+        "func caller() {\n  var emit func(int)\n  emit = func(x int) {}\n  emit(1)\n}\n",
+        true
+    )]
+    #[case::function_typed_param("func caller(emit func(int)) {\n  emit(1)\n}\n", true)]
+    #[case::binding_in_nested_block(
+        "func caller() {\n  if true {\n    emit := func(x int) {}\n    emit(1)\n  }\n}\n",
+        true
+    )]
+    #[case::plain_local("func caller() {\n  emit := compute()\n  emit(1)\n}\n", false)]
+    #[case::value_typed_param("func caller(emit int) {\n  emit(1)\n}\n", false)]
+    #[case::unbound_name("func caller() {\n  emit(1)\n}\n", false)]
+    fn local_callable_bindings_shadow_bare_calls(#[case] body: &str, #[case] expected: bool) {
+        let calls = calls(&format!("package p\n\n{body}"), "m");
+        let call = calls
+            .iter()
+            .find(|call| call.callee_name() == Some("emit"))
+            .expect("emit call site");
+        assert_eq!(call.callee_is_locally_bound(), expected);
+    }
+
+    /// Only the shadowed name is affected: other calls in the same body
+    /// keep resolving normally.
+    #[test]
+    fn other_calls_in_a_shadowing_function_are_untouched() {
+        let src = concat!(
+            "package p\n\n",
+            "func caller() {\n",
+            "  emit := func(x int) {}\n",
+            "  emit(1)\n",
+            "  helper()\n",
+            "}\n",
+        );
+        let flags: Vec<_> = calls(src, "m")
+            .iter()
+            .map(|call| {
+                (
+                    call.callee_name().map(ToOwned::to_owned),
+                    call.callee_is_locally_bound(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                (Some("emit".to_owned()), true),
+                (Some("helper".to_owned()), false),
+            ]
+        );
+    }
+
+    /// A local `emit` does not shadow `pkg.emit()` or `obj.emit()` —
+    /// those are anchored by their prefix / receiver.
+    #[rstest]
+    #[case::namespace_path("helper.emit()")]
+    #[case::receiver_call("obj.emit()")]
+    fn prefixed_calls_are_not_shadowed_by_a_local_binding(#[case] call_expr: &str) {
+        let src = format!(
+            concat!(
+                "package p\n\n",
+                "import \"github.com/x/proj/helper\"\n\n",
+                "func caller(obj *Thing) {{\n",
+                "  emit := func(x int) {{}}\n",
+                "  _ = emit\n",
+                "  {call_expr}\n",
+                "}}\n",
+            ),
+            call_expr = call_expr,
+        );
+        let call = calls(&src, "m")
+            .into_iter()
+            .find(|call| {
+                call.callee_name() == Some("emit")
+                    && call.callee_path().is_some_and(|p| p.contains("::"))
+            })
+            .expect("prefixed emit call site");
+        assert!(!call.callee_is_locally_bound());
     }
 
     /// Calls inside a method body must be extracted with the receiver

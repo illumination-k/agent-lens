@@ -60,6 +60,14 @@ pub struct FunctionShape {
     /// Documentation text attached to the definition, comment markers
     /// stripped. `None` when absent or not extracted by the adapter.
     pub doc: Option<String>,
+    /// Non-doc annotations attached to the definition, as written and
+    /// without their arguments: Rust attribute paths (`no_mangle`,
+    /// `tokio::main`), Go compiler directives read off the doc comment
+    /// (`go:linkname`, `export`). `Known(vec![])` means the adapter
+    /// looked and found none; `Unknown` means it does not extract them,
+    /// which reachability analysis must read as "an entry marker may be
+    /// hiding here" rather than "there is none".
+    pub attributes: SyntaxFact<Vec<String>>,
     pub body: BodyShape,
     pub span: SourceSpan,
     pub is_test: bool,
@@ -93,6 +101,7 @@ impl From<FunctionDef> for FunctionShape {
                 .map(SignatureShape::from)
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             doc: def.doc,
+            attributes: SyntaxFact::Unknown,
             body: BodyShape { tree: body_tree },
             span: SourceSpan {
                 start_line: def.start_line,
@@ -101,6 +110,30 @@ impl From<FunctionDef> for FunctionShape {
             is_test: def.is_test,
         }
     }
+}
+
+/// Neutral representation of an interface-like declaration: the named
+/// method set a concrete type satisfies structurally (Go `interface`;
+/// a Rust `trait` would project the same way).
+///
+/// Only directly declared methods are carried. Embedded interfaces are
+/// not expanded — an embedded interface's methods are collected from
+/// its own declaration when that declaration is in scope, and an
+/// out-of-scope embed has no method set to expand anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceShape {
+    pub display_name: String,
+    pub qualified_name: SyntaxFact<String>,
+    pub methods: Vec<InterfaceMethodShape>,
+}
+
+/// One method an interface declares directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceMethodShape {
+    pub name: String,
+    /// Parameter slots, with grouped names expanded: `Do(a, b int)`
+    /// declares 2, `Do(int)` declares 1, a variadic slot counts as 1.
+    pub param_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,8 +145,14 @@ pub struct OwnerShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerKind {
     Class,
+    /// An inherent `impl` block: the methods are reached by name.
     Impl,
+    /// A trait declaration: the methods are the interface itself.
     Trait,
+    /// A trait `impl` block (`impl Trait for Type`): the methods are
+    /// reachable through the trait, so a call site can name the trait
+    /// method and never this definition.
+    TraitImpl,
     Receiver,
     Namespace,
     Module,
@@ -135,7 +174,7 @@ pub struct SignatureShape {
     pub params: Vec<ParameterShape>,
     pub return_type: SyntaxFact<Option<String>>,
     pub return_type_paths: Vec<String>,
-    pub receiver: SyntaxFact<ReceiverKind>,
+    pub receiver: SyntaxFact<ReceiverShape>,
     pub generics: SyntaxFact<Vec<String>>,
     pub bounds: SyntaxFact<Vec<String>>,
 }
@@ -172,7 +211,7 @@ impl SignatureShape {
             .flat_map(|items| items.iter().map(String::as_str))
     }
 
-    pub fn receiver_kind(&self) -> Option<ReceiverKind> {
+    pub fn receiver_shape(&self) -> Option<ReceiverShape> {
         self.receiver.known_value().copied()
     }
 }
@@ -196,7 +235,7 @@ impl From<FunctionSignature> for SignatureShape {
             params,
             return_type: SyntaxFact::Unknown,
             return_type_paths: signature.return_type_paths,
-            receiver: SyntaxFact::Known(signature.receiver.into()),
+            receiver: SyntaxFact::Known(signature.receiver),
             generics: SyntaxFact::Known(signature.generics),
             bounds: SyntaxFact::Unknown,
         }
@@ -208,25 +247,6 @@ pub struct ParameterShape {
     pub name: SyntaxFact<Option<String>>,
     pub type_annotation: SyntaxFact<Option<String>>,
     pub type_paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReceiverKind {
-    None,
-    Value,
-    Ref,
-    RefMut,
-}
-
-impl From<ReceiverShape> for ReceiverKind {
-    fn from(receiver: ReceiverShape) -> Self {
-        match receiver {
-            ReceiverShape::None => Self::None,
-            ReceiverShape::Value => Self::Value,
-            ReceiverShape::Ref => Self::Ref,
-            ReceiverShape::RefMut => Self::RefMut,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +263,15 @@ pub struct CallShape {
     pub callee_display_name: SyntaxFact<Option<String>>,
     pub callee_path_segments: SyntaxFact<Vec<String>>,
     pub receiver_expr_kind: SyntaxFact<ReceiverExprKind>,
+    /// Whether the callee name is bound in the caller's own local scope
+    /// — a closure or nested function assigned to a local name, or a
+    /// function-typed parameter. Such a call targets the local binding,
+    /// which shadows anything the workspace defines under that name, so
+    /// resolution must not attribute it to a global definition.
+    ///
+    /// `Unknown` when the adapter does not track local scopes; consumers
+    /// then behave as if the callee were not locally bound.
+    pub callee_is_locally_bound: SyntaxFact<bool>,
     pub lexical_resolution: LexicalResolutionStatus,
     pub visible_imports: Vec<ImportShape>,
     pub line: usize,
@@ -280,6 +309,14 @@ impl CallShape {
             .map(String::as_str)
     }
 
+    /// True only when the adapter positively determined that the callee
+    /// name is bound in the caller's local scope. [`SyntaxFact::Unknown`]
+    /// reads as "not locally bound", keeping adapters that do not track
+    /// scopes on the pre-existing resolution path.
+    pub fn callee_is_locally_bound(&self) -> bool {
+        matches!(self.callee_is_locally_bound, SyntaxFact::Known(true))
+    }
+
     pub fn has_receiver_expression(&self) -> bool {
         matches!(
             self.receiver_expr_kind,
@@ -293,6 +330,25 @@ pub enum ReceiverExprKind {
     None,
     SelfValue,
     Expression,
+}
+
+/// Whether a call site's callee is a bare name that the caller's own
+/// scope binds to a callable — the fact [`CallShape::callee_is_locally_bound`]
+/// carries.
+///
+/// Only single-segment plain calls qualify. A receiver call (`emit.run()`)
+/// names a method, not the binding, and a multi-segment path
+/// (`pkg::run()`) is already anchored by its prefix, so neither is
+/// shadowed by a local of that name.
+pub fn callee_names_local_binding(
+    receiver: ReceiverExprKind,
+    callee_path_segments: Option<&[String]>,
+    locally_bound: &std::collections::HashSet<String>,
+) -> bool {
+    if receiver != ReceiverExprKind::None || locally_bound.is_empty() {
+        return false;
+    }
+    matches!(callee_path_segments, Some([only]) if locally_bound.contains(only))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +367,28 @@ pub struct ImportShape {
     pub exported_symbol: SyntaxFact<Option<String>>,
 }
 
+impl ImportShape {
+    /// An import whose three parts the adapter read straight off the
+    /// syntax tree, so every field is [`SyntaxFact::Known`].
+    ///
+    /// This is the shape a language with explicit import statements
+    /// produces — TypeScript and Python both build every import this
+    /// way. It lives here rather than in each adapter because "all three
+    /// facts are known" is a statement about [`ImportShape`], not about
+    /// any one language.
+    pub fn known(
+        imported_module: String,
+        local_alias: Option<String>,
+        exported_symbol: Option<String>,
+    ) -> Self {
+        Self {
+            imported_module: SyntaxFact::Known(imported_module),
+            local_alias: SyntaxFact::Known(local_alias),
+            exported_symbol: SyntaxFact::Known(exported_symbol),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +401,32 @@ mod tests {
 
         assert_eq!(known.known_value().map(String::as_str), Some("value"));
         assert_eq!(unknown.known_value(), None);
+    }
+
+    #[test]
+    fn import_shape_known_marks_every_field_as_known() {
+        let shape = ImportShape::known(
+            "./mod".to_owned(),
+            Some("alias".to_owned()),
+            Some("symbol".to_owned()),
+        );
+        assert_eq!(
+            shape,
+            ImportShape {
+                imported_module: SyntaxFact::Known("./mod".to_owned()),
+                local_alias: SyntaxFact::Known(Some("alias".to_owned())),
+                exported_symbol: SyntaxFact::Known(Some("symbol".to_owned())),
+            }
+        );
+    }
+
+    /// An absent alias or symbol is a *known* absence — a default import
+    /// really has no named symbol — not an unread fact.
+    #[test]
+    fn import_shape_known_treats_none_as_a_known_absence() {
+        let shape = ImportShape::known("./mod".to_owned(), None, None);
+        assert_eq!(shape.local_alias, SyntaxFact::Known(None));
+        assert_eq!(shape.exported_symbol, SyntaxFact::Known(None));
     }
 
     #[test]
@@ -339,6 +443,7 @@ mod tests {
             visibility: SyntaxFact::Unknown,
             signature: SyntaxFact::Unknown,
             doc: None,
+            attributes: SyntaxFact::Unknown,
             body: BodyShape {
                 tree: TreeNode::leaf("Block"),
             },
@@ -397,7 +502,7 @@ mod tests {
         );
         assert_eq!(sig.return_type_paths, ["Result<User>"]);
         assert_eq!(sig.generics().collect::<Vec<_>>(), ["T: Clone"]);
-        assert_eq!(sig.receiver_kind(), Some(ReceiverKind::Ref));
+        assert_eq!(sig.receiver_shape(), Some(ReceiverShape::Ref));
     }
 
     #[test]
@@ -413,6 +518,7 @@ mod tests {
                 "parse".to_owned(),
             ]),
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::Expression),
+            callee_is_locally_bound: SyntaxFact::Known(false),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 12,
@@ -429,6 +535,94 @@ mod tests {
         assert_eq!(call.caller_owner(), Some("S"));
         assert!(call.has_receiver_expression());
         assert!(!path_call.has_receiver_expression());
+    }
+
+    /// `Unknown` means "the adapter does not track scopes", which must
+    /// read as not-shadowed — the same as an explicit `Known(false)`.
+    #[test]
+    fn callee_is_locally_bound_treats_unknown_as_not_bound() {
+        let call = CallShape {
+            callee_is_locally_bound: SyntaxFact::Known(true),
+            ..call_shape()
+        };
+        let not_bound = CallShape {
+            callee_is_locally_bound: SyntaxFact::Known(false),
+            ..call_shape()
+        };
+        let unknown = CallShape {
+            callee_is_locally_bound: SyntaxFact::Unknown,
+            ..call_shape()
+        };
+
+        assert!(call.callee_is_locally_bound());
+        assert!(!not_bound.callee_is_locally_bound());
+        assert!(!unknown.callee_is_locally_bound());
+    }
+
+    #[test]
+    fn callee_names_local_binding_matches_only_bare_calls_on_a_bound_name() {
+        let bound: std::collections::HashSet<String> = ["emit".to_owned()].into_iter().collect();
+        let empty = std::collections::HashSet::new();
+        let bare = ["emit".to_owned()];
+        let other = ["send".to_owned()];
+        let path = ["pkg".to_owned(), "emit".to_owned()];
+
+        // A bare call on a bound name is the one shadowed shape.
+        assert!(callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&bare),
+            &bound
+        ));
+        // A receiver call names a method on the receiver's type, and a
+        // multi-segment path is anchored by its prefix — a local of the
+        // same name shadows neither.
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::Expression,
+            Some(&bare),
+            &bound
+        ));
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::SelfValue,
+            Some(&bare),
+            &bound
+        ));
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&path),
+            &bound
+        ));
+        // Nothing bound under that name, or nothing bound at all.
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&other),
+            &bound
+        ));
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            Some(&bare),
+            &empty
+        ));
+        // An anonymous callee has no name to shadow.
+        assert!(!callee_names_local_binding(
+            ReceiverExprKind::None,
+            None,
+            &bound
+        ));
+    }
+
+    fn call_shape() -> CallShape {
+        CallShape {
+            caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),
+            caller_module: SyntaxFact::Known("crate::m".to_owned()),
+            caller_owner: SyntaxFact::Known(None),
+            callee_display_name: SyntaxFact::Known(Some("emit".to_owned())),
+            callee_path_segments: SyntaxFact::Known(vec!["emit".to_owned()]),
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            callee_is_locally_bound: SyntaxFact::Unknown,
+            lexical_resolution: LexicalResolutionStatus::NotAttempted,
+            visible_imports: Vec::new(),
+            line: 1,
+        }
     }
 
     fn signature() -> FunctionSignature {

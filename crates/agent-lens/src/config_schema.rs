@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 17] = [
+const TOOL_ORDER: [ToolName; 18] = [
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
@@ -33,6 +33,7 @@ const TOOL_ORDER: [ToolName; 17] = [
     ToolName::Impact,
     ToolName::Layers,
     ToolName::Untested,
+    ToolName::Unreachable,
     ToolName::Visibility,
     ToolName::Delegation,
     ToolName::GraphQuery,
@@ -52,7 +53,8 @@ struct Field {
     ty: &'static str,
     /// `required`, `optional`, or a `default: …` note.
     presence: &'static str,
-    /// What the key controls. Mirrors the doc comment in `config.rs`.
+    /// What the key controls. Mirrors the doc comment on the analyzer's
+    /// options struct, which is also that flag's `--help` text.
     desc: &'static str,
 }
 
@@ -74,7 +76,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, similarity, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, similarity, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -125,8 +127,8 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             Field {
                 key: "min-lines",
                 ty: "int",
-                presence: "default: 5",
-                desc: "Ignore functions shorter than this many lines. Omitting it applies the default, not \"no floor\".",
+                presence: "default: 5 (functions) / 3 (types)",
+                desc: "Ignore units shorter than this many lines. Omitting it applies the target-specific default, not \"no floor\".",
             },
             Field {
                 key: "top",
@@ -139,6 +141,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "\"tsed\" or \"token\"",
                 presence: "optional",
                 desc: "Body-scoring algorithm: tsed (tree-edit distance, default) or token (k-gram overlap).",
+            },
+            Field {
+                key: "target",
+                ty: "\"functions\" or \"types\"",
+                presence: "optional",
+                desc: "Comparison unit: functions (default) or type definitions (struct/class/interface/enum/alias member shapes). With types, paired-by only accepts the qualified/name key.",
             },
             Field {
                 key: "doc-overlap",
@@ -271,6 +279,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             presence: "optional",
             desc: "Cap the markdown module listing to the top N modules.",
         }],
+        ToolName::Unreachable => &[
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown module listing to the top N modules.",
+            },
+            Field {
+                key: "tier",
+                ty: "\"confirmed\", \"likely\", or \"unknown\"",
+                presence: "default: confirmed",
+                desc: "Lowest confidence tier rendered in markdown. JSON always carries every tier.",
+            },
+        ],
         ToolName::Visibility => &[Field {
             key: "top",
             ty: "int",
@@ -331,12 +353,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap the result set by node count.",
             },
         ],
-        ToolName::ContextSpan => &[Field {
-            key: "entry-glob",
-            ty: "array<string> (globs)",
-            presence: "default: []",
-            desc: "Entry-point globs used to seed the span walk.",
-        }],
+        ToolName::ContextSpan => &[
+            Field {
+                key: "entry-glob",
+                ty: "array<string> (globs)",
+                presence: "default: []",
+                desc: "Entry-point globs used to seed the span walk.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown module table to the top N spans.",
+            },
+        ],
         ToolName::Wrapper => &[Field {
             key: "diff-only",
             ty: "bool",
@@ -511,7 +541,8 @@ mod tests {
     use crate::config::{
         CohesionOptions, ComplexityOptions, ContextSpanOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        RiskOptions, SimilarityOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
+        RiskOptions, SimilarityOptions, UnreachableOptions, UntestedOptions, VisibilityOptions,
+        WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -539,6 +570,7 @@ mod tests {
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
         assert_tool_parity::<ImpactOptions>(ToolName::Impact);
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
+        assert_tool_parity::<UnreachableOptions>(ToolName::Unreachable);
         assert_tool_parity::<UntestedOptions>(ToolName::Untested);
         assert_tool_parity::<VisibilityOptions>(ToolName::Visibility);
         assert_tool_parity::<DelegationOptions>(ToolName::Delegation);
