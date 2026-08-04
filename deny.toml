@@ -27,14 +27,18 @@ wildcards = "deny"
 
 skip = [
   # `unicode_names2`, a build dependency of `ruff_python_parser`, still uses the
-  # phf 0.11 line while oxc 0.140 is on 0.14. Collapses when ruff bumps it.
+  # phf 0.11 line while oxc 0.141 is on 0.14. Collapses when ruff bumps it.
   { crate = "phf@0.11", reason = "unicode_names2 (via ruff_python_parser) lags oxc's phf 0.14" },
   { crate = "phf_generator@0.11", reason = "pulled by phf 0.11" },
   { crate = "phf_shared@0.11", reason = "pulled by phf 0.11" },
-  # `clap_derive` has moved to syn 3 while the rest of the proc-macro ecosystem
-  # (serde_derive, thiserror-impl, tracing-attributes, oxc_ast_macros, and
+  # `get-size2`, pulled by the ruff crates, is on the compact_str 0.9 line while
+  # oxc 0.141 moved to 0.10. Same shape as the phf entries above: collapses when
+  # ruff bumps it.
+  { crate = "compact_str@0.9", reason = "get-size2 (via the ruff crates) lags oxc's compact_str 0.10" },
+  # `clap_derive` and `thiserror-impl` have moved to syn 3 while the rest of the
+  # proc-macro ecosystem (serde_derive, tracing-attributes, oxc_ast_macros, and
   # `lens-rust`'s own parser) is still on syn 2.
-  { crate = "syn@2", reason = "proc-macro ecosystem and lens-rust are still on syn 2; clap_derive is on syn 3" },
+  { crate = "syn@2", reason = "proc-macro ecosystem and lens-rust are still on syn 2; clap_derive and thiserror-impl are on syn 3" },
 ]
 
 [advisories]
