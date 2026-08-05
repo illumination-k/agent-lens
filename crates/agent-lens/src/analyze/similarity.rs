@@ -1137,14 +1137,23 @@ fn score_candidate_pair(
     })
 }
 
-/// Whether both units are methods of `impl` blocks for the same trait.
-/// The trait dictates their shared signature, so the pair is scored on
-/// the body alone and the report carries the annotation.
+/// Whether both units implement the same method of the same trait
+/// (`impl Display for A`'s `fmt` against `impl Display for B`'s `fmt`).
+/// The trait dictates that pair's shared signature, so it is scored on
+/// the body alone and the report carries the annotation. Different
+/// methods of one trait are not exempt: the trait only fixes each
+/// method's own signature, so between two visitor methods a signature
+/// mismatch is real evidence and keeps its weight.
 fn same_trait_pair(a: &OwnedUnit, b: &OwnedUnit) -> bool {
-    matches!(
-        (a.implements(), b.implements()),
-        (Some(left), Some(right)) if left == right
-    )
+    let (Some(left), Some(right)) = (a.implements(), b.implements()) else {
+        return false;
+    };
+    left == right && bare_method_name(a.name()) == bare_method_name(b.name())
+}
+
+/// Last `::` segment of a display name (`Owner::method` → `method`).
+fn bare_method_name(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(_, last)| last)
 }
 
 fn score_token_candidate_pairs(
@@ -1221,8 +1230,9 @@ pub(super) struct SimilarityComponents {
     /// the scoring hot path never tokenizes doc prose. `None` unless
     /// both sides carry doc text.
     pub(super) doc_overlap: Option<f64>,
-    /// Both sides implement the same trait, so the signature component
-    /// was excluded from `similarity` (the trait dictates the match).
+    /// Both sides implement the same method of the same trait, so the
+    /// signature component was excluded from `similarity` (the trait
+    /// dictates the match).
     pub(super) same_trait: bool,
 }
 
@@ -2279,6 +2289,59 @@ impl fmt::Display for Beta {
         assert!(
             md.contains("all `impl Display` (signature excluded from score)"),
             "got: {md}",
+        );
+    }
+
+    /// The exemption is per method, not per trait: two *different*
+    /// methods of one trait each have their own dictated signature, so
+    /// between them a signature mismatch is real evidence — a visitor
+    /// impl's near-identical `visit_*` bodies must not be inflated into
+    /// the report by dropping the component that tells them apart.
+    #[test]
+    fn different_methods_of_one_trait_keep_the_blended_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+struct Recorder { hits: Vec<u64> }
+
+trait Visit {
+    fn visit_call(&mut self, id: u64);
+    fn visit_member(&mut self, id: u64);
+}
+
+impl Visit for Recorder {
+    fn visit_call(&mut self, id: u64) {
+        let doubled = id * 2;
+        let shifted = doubled + 1;
+        let capped = shifted.min(100);
+        self.hits.push(capped);
+    }
+
+    fn visit_member(&mut self, id: u64) {
+        let doubled = id * 2;
+        let shifted = doubled + 1;
+        let capped = shifted.min(100);
+        self.hits.push(capped);
+    }
+}
+"#;
+        let file = write_file(dir.path(), "lib.rs", src);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.7)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pair = &parsed["clusters"][0]["pairs"][0];
+        let similarity = pair["similarity"].as_f64().unwrap();
+        let body = pair["body_similarity"].as_f64().unwrap();
+        let signature = pair["signature_similarity"].as_f64().unwrap();
+        assert!(pair["same_trait"].is_null(), "got {pair}");
+        assert!(
+            (similarity
+                - (BODY_SIMILARITY_WEIGHT * body + SIGNATURE_SIMILARITY_WEIGHT * signature))
+                .abs()
+                < 1e-9,
+            "different methods must keep the blended score: {pair}",
         );
     }
 

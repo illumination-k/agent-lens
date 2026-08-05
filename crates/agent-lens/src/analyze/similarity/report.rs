@@ -331,10 +331,10 @@ pub(super) struct PairView<'a> {
     /// coincidences that likely should not be merged.
     #[serde(skip_serializing_if = "Option::is_none")]
     doc_overlap: Option<f64>,
-    /// Both sides implement the same trait: their signature match is
-    /// dictated by the trait, so `similarity` is the body score alone
-    /// (`signature_similarity` stays reported as a diagnostic). Omitted
-    /// when false.
+    /// Both sides implement the same method of the same trait: their
+    /// signature match is dictated by the trait, so `similarity` is the
+    /// body score alone (`signature_similarity` stays reported as a
+    /// diagnostic). Omitted when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     same_trait: bool,
 }
@@ -537,15 +537,15 @@ fn block_spread(cluster: &ClusterView<'_>) -> (usize, usize) {
     (functions.len(), files.len())
 }
 
-/// Trait name shared by every member of the cluster, if there is one.
-/// Only then is the tag a statement about the cluster rather than about
-/// some of its pairs — mixed clusters keep the per-pair JSON annotation.
+/// Trait name to tag the cluster with, present only when every pair in
+/// it was scored as a same-trait pair (same trait, same method). Only
+/// then is the tag a statement about the cluster rather than about some
+/// of its pairs — mixed clusters keep the per-pair JSON annotation.
 fn shared_trait<'a>(cluster: &ClusterView<'a>) -> Option<&'a str> {
-    let mut units = cluster.units.iter();
-    let first = units.next()?.implements?;
-    units
-        .all(|unit| unit.implements == Some(first))
-        .then_some(first)
+    if cluster.pairs.is_empty() || !cluster.pairs.iter().all(|pair| pair.same_trait) {
+        return None;
+    }
+    cluster.units.first()?.implements
 }
 
 /// The one-line summary heading a cluster's member list: size, the
