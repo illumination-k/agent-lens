@@ -7,6 +7,16 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
+    groups:
+      # `codeql.yml` pins init / autobuild / analyze to one SHA, and CodeQL
+      # refuses to run when they disagree — a per-action PR bumps one of the
+      # three and fails with "CodeQL job status was configuration error",
+      # which is what happened to #393 / #398 / #402. Grouping them means one
+      # PR carries all the pins at once. `upload-sarif` (used by `trivy.yml`)
+      # is in the same group because it ships from the same action repo.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   - package-ecosystem: "cargo"
     directory: "/"
