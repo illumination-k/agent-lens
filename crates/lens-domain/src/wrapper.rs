@@ -43,6 +43,18 @@ pub struct WrapperFinding {
     /// the analyzer ran on a single file (the call-site universe was
     /// not enumerated).
     pub reuse: Option<ReuseMetrics>,
+    /// Parameter-slot count of the wrapper's own signature, receiver
+    /// excluded, where the adapter records it — Go methods today.
+    /// `None` elsewhere. Lets the analyzer match a method wrapper
+    /// against interface method sets by name and arity.
+    pub param_count: Option<usize>,
+    /// Interfaces declared in the analyzed tree whose method set names
+    /// this wrapper by name and arity (Go's structural approximation of
+    /// "may satisfy"). Filled by the analyzer, not the adapters. A
+    /// non-empty list changes the recommended fix: the method may exist
+    /// to satisfy the interface, so the forwarding is removed by
+    /// embedding the inner value rather than by deleting the method.
+    pub may_satisfy_interfaces: Vec<String>,
 }
 
 /// "Low reuse" axis for a wrapper: how many places call it, how many

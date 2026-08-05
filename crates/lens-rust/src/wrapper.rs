@@ -96,6 +96,8 @@ fn analyze_fn(owner: Option<&str>, sig: &Signature, block: &Block) -> Option<Wra
         adapters,
         statement_count: block.stmts.len(),
         reuse: None,
+        param_count: None,
+        may_satisfy_interfaces: Vec::new(),
     })
 }
 

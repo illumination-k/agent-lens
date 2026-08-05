@@ -8,11 +8,11 @@
 //! context windows rather than for humans, in line with the project's
 //! "agent-friendly lint" ethos.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lens_domain::{ReuseMetrics, WrapperFinding};
+use lens_domain::{InterfaceShape, ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
 use super::options::analyzer_options;
@@ -71,6 +71,10 @@ impl WrapperAnalyzer {
             .filter
             .collect_per_file(path, |sf| self.scan_file(sf))?;
         let mut per_files = scan.reports;
+        // Interface satisfaction is matched against every interface the
+        // walk saw, in single-file mode as much as directory mode: "the
+        // analyzed tree" is whatever was scanned.
+        annotate_interface_satisfaction(&mut per_files);
         // Reuse metrics are workspace-wide by construction. A
         // single-file input only sees calls inside that one file, so
         // every cross-file rollup would trivially be 0. To avoid
@@ -101,23 +105,36 @@ impl WrapperAnalyzer {
         // in any language now get reuse metrics in directory mode —
         // previously this was a Rust-only signal.
         let calls = extract_calls(lang, &source).map_err(AnalyzerError::Parse)?;
-        if findings.is_empty() && calls.is_empty() {
+        // Go interface method sets seed the may-satisfy annotation: a
+        // Go method wrapper matching one by name and arity may exist to
+        // satisfy the interface, so the fix is embedding, not deletion.
+        // The empty module keeps the report's interface names bare.
+        let interfaces = match lang {
+            SourceLang::Go => lens_golang::extract_interface_shapes_with_module(&source, "")
+                .map_err(|e| AnalyzerError::Parse(Box::new(e)))?,
+            _ => Vec::new(),
+        };
+        if findings.is_empty() && calls.is_empty() && interfaces.is_empty() {
             return Ok(None);
         }
         Ok(Some(PerFile {
             file: file.display_path.clone(),
             findings,
             calls,
+            interfaces,
         }))
     }
 }
 
-/// Pass-1 row: a file that may carry wrappers, call references, or both.
-/// Files with neither are dropped before the row is built.
+/// Pass-1 row: a file that may carry wrappers, call references,
+/// interface declarations, or any mix. Files with none are dropped
+/// before the row is built.
 struct PerFile {
     file: String,
     findings: Vec<WrapperFinding>,
     calls: Vec<CallRef>,
+    /// Named interface method sets declared in this file (Go only).
+    interfaces: Vec<InterfaceShape>,
 }
 
 /// Language-neutral projection of a call site: the bare callee name
@@ -262,6 +279,45 @@ fn name_last_segment(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
 }
 
+/// Match every method wrapper against the interface method sets the
+/// walk collected, by name and parameter-slot count — the same
+/// structural "may satisfy" rule the visibility analyzer applies. Only
+/// findings carrying a `param_count` participate (Go methods today);
+/// everything else is left untouched.
+fn annotate_interface_satisfaction(per_files: &mut [PerFile]) {
+    // Method name → arity → interface names, deduplicated and sorted so
+    // the annotation order is stable across runs.
+    let mut by_method: BTreeMap<String, BTreeMap<usize, BTreeSet<String>>> = BTreeMap::new();
+    for interface in per_files.iter().flat_map(|per| &per.interfaces) {
+        let Some(name) = interface.qualified_name.known_value() else {
+            continue;
+        };
+        for method in &interface.methods {
+            by_method
+                .entry(method.name.clone())
+                .or_default()
+                .entry(method.param_count)
+                .or_default()
+                .insert(name.clone());
+        }
+    }
+    if by_method.is_empty() {
+        return;
+    }
+    for finding in per_files.iter_mut().flat_map(|per| &mut per.findings) {
+        let Some(param_count) = finding.param_count else {
+            continue;
+        };
+        let Some(names) = by_method
+            .get(name_last_segment(&finding.name))
+            .and_then(|by_arity| by_arity.get(&param_count))
+        else {
+            continue;
+        };
+        finding.may_satisfy_interfaces = names.iter().cloned().collect();
+    }
+}
+
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, BoxedError> {
@@ -313,6 +369,13 @@ struct WrapperView<'a> {
     /// a single-file run (the call-site universe was not enumerated).
     #[serde(skip_serializing_if = "Option::is_none")]
     reuse: Option<ReuseView>,
+    /// Interfaces declared in the scanned tree whose method set names
+    /// this wrapper by name and arity (Go). A non-empty list means the
+    /// method may exist to satisfy the interface: prefer replacing the
+    /// forwarding with embedding over deleting the method. Omitted when
+    /// empty.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    may_satisfy_interfaces: &'a [String],
 }
 
 /// JSON-facing mirror of [`ReuseMetrics`]. Defined locally so the
@@ -334,6 +397,7 @@ impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
             callee: f.callee.as_str(),
             adapters: &f.adapters,
             statement_count: f.statement_count,
+            may_satisfy_interfaces: &f.may_satisfy_interfaces,
             reuse: f.reuse.as_ref().map(|r| ReuseView {
                 call_sites: r.call_sites,
                 unique_callers: r.unique_callers,
@@ -385,10 +449,20 @@ fn format_markdown(report: &Report<'_>) -> String {
                 ),
                 None => String::new(),
             };
+            // Interface suffix: the annotation that flips the fix from
+            // "delete the method" to "embed the inner value".
+            let interfaces = if w.may_satisfy_interfaces.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  \u{2022} may satisfy `{}` — embedding could replace the forwarding",
+                    w.may_satisfy_interfaces.join("`, `"),
+                )
+            };
             let _ = writeln!(
                 out,
-                "- `{}` (L{}-{}) {}{}",
-                w.name, w.start_line, w.end_line, body, suffix,
+                "- `{}` (L{}-{}) {}{}{}",
+                w.name, w.start_line, w.end_line, body, suffix, interfaces,
             );
         }
     }
@@ -858,6 +932,69 @@ fn meaningful(xs: &[i32]) -> i32 {
         assert_eq!(reuse["call_sites"], 1, "got {parsed}");
         assert_eq!(reuse["unique_callers"], 1, "got {parsed}");
         assert_eq!(reuse["same_file_only"], false, "got {parsed}");
+    }
+
+    /// A Go method wrapper matching an in-tree interface's method by
+    /// name and arity is annotated rather than reported bare: the
+    /// method may exist to satisfy the interface, and the fix is
+    /// embedding the inner value, not deleting the method. The
+    /// interface lives in another file on purpose — the match is
+    /// against everything the walk scanned.
+    #[test]
+    fn go_method_wrappers_matching_an_interface_carry_the_annotation() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "store.go",
+            "package p\n\ntype Store interface {\n\tSave(id int) error\n\tDrop(id int, hard bool) error\n}\n",
+        );
+        write_file(
+            dir.path(),
+            "wrap.go",
+            "package p\n\ntype Wrapped struct{ inner Store }\n\n\
+             func (w Wrapped) Save(id int) error { return w.inner.Save(id) }\n\n\
+             func (w Wrapped) Drop(id int) error { return w.inner.Drop(id) }\n\n\
+             func Save(id int) error { return realSave(id) }\n",
+        );
+
+        let json = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let wrapper = |name: &str| {
+            parsed["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|f| f["wrappers"].as_array().unwrap())
+                .find(|w| w["name"] == name)
+                .unwrap_or_else(|| panic!("{name} wrapper missing: {parsed}"))
+                .clone()
+        };
+        assert_eq!(
+            wrapper("Wrapped::Save")["may_satisfy_interfaces"],
+            serde_json::json!(["Store"]),
+            "got {parsed}",
+        );
+        // Same method name, wrong arity: the interface declares two
+        // parameters for Drop, the wrapper takes one.
+        assert!(
+            wrapper("Wrapped::Drop")["may_satisfy_interfaces"].is_null(),
+            "got {parsed}",
+        );
+        // Free functions never satisfy an interface, whatever the name.
+        assert!(
+            wrapper("Save")["may_satisfy_interfaces"].is_null(),
+            "got {parsed}",
+        );
+
+        let md = WrapperAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("may satisfy `Store` — embedding could replace the forwarding"),
+            "got: {md}",
+        );
     }
 
     #[test]

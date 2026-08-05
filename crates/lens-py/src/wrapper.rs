@@ -118,6 +118,8 @@ fn analyze(
         // always one statement.
         statement_count: 1,
         reuse: None,
+        param_count: None,
+        may_satisfy_interfaces: Vec::new(),
     })
 }
 

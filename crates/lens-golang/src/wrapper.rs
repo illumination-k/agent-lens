@@ -12,7 +12,7 @@ use tree_sitter::Node;
 
 use crate::attrs::name_looks_like_test_function;
 use crate::node_text::node_str;
-use crate::parser::{GoParseError, parse_tree};
+use crate::parser::{GoParseError, parameter_slot_names, parse_tree};
 use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Zero-argument method calls that carry no semantic content of their
@@ -61,6 +61,15 @@ fn analyze_function(site: &FnSite<'_, '_>, source: &[u8]) -> Option<WrapperFindi
         return None;
     }
 
+    // Only methods can satisfy an interface, so the slot count — the
+    // arity half of the name-and-arity match against interface method
+    // sets — is recorded for methods alone. The same slot expansion as
+    // `interfaces.rs` keeps the two sides comparable.
+    let param_count = (site.is_method)
+        .then(|| node.child_by_field_name("parameters"))
+        .flatten()
+        .map(|params| parameter_slot_names(params, source).len());
+
     Some(WrapperFinding {
         name,
         start_line: node.start_position().row + 1,
@@ -69,6 +78,8 @@ fn analyze_function(site: &FnSite<'_, '_>, source: &[u8]) -> Option<WrapperFindi
         adapters,
         statement_count: 1,
         reuse: None,
+        param_count,
+        may_satisfy_interfaces: Vec::new(),
     })
 }
 
