@@ -1274,6 +1274,33 @@ mod tests {
         );
     }
 
+    /// The trait tag needs pairwise evidence: a cluster whose units name
+    /// a trait but whose pair list is empty (the block-cluster shape)
+    /// must not be tagged, because no pair was actually scored under the
+    /// same-trait rule. Guards the `pairs.is_empty()` arm on its own.
+    #[test]
+    fn shared_trait_requires_scored_pairs_not_just_annotated_units() {
+        let unit = UnitRef {
+            file: "lib.rs",
+            name: "Alpha::fmt",
+            kind: None,
+            start_line: 1,
+            end_line: 5,
+            is_test: false,
+            implements: Some("Display"),
+        };
+        let mut cluster = cluster_with_identifier_scores(&[]);
+        cluster.units = vec![unit, unit];
+
+        assert_eq!(shared_trait(&cluster), None);
+
+        // With a same-trait pair backing it, the tag appears.
+        let mut tagged = cluster_with_identifier_scores(&[Some(1.0)]);
+        tagged.pairs[0].same_trait = true;
+        tagged.units = vec![unit, unit];
+        assert_eq!(shared_trait(&tagged), Some("Display"));
+    }
+
     /// Cluster carrying only the per-pair doc scores the rollup reads.
     fn cluster_with_doc_scores(docs: &[Option<f64>]) -> ClusterView<'static> {
         let f = UnitRef {
