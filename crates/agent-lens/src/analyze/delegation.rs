@@ -97,7 +97,10 @@ const NOTE: &str = "Candidates, not verdicts: a row says every hop between the h
      depths are lower bounds. A hop marked as forwarding its arguments verbatim carries the \
      language's own wrapper evidence; a hop without that mark was classified from body shape \
      alone and can still be composing rather than forwarding (a constructor calling a \
-     constructor is the common case), so those are the rows to read first. Confidence is highest \
+     constructor is the common case), so those are the rows to read first. A hop marked as a \
+     trait-impl method forwards through an `impl Trait for Type` block — newtype and adapter \
+     forwarding (`Deref`, `From`, `Display` delegating to an inner value) is often the pattern \
+     working as intended, so weigh those hops lower. Confidence is highest \
      on Rust; TypeScript and Python carry no extracted export status (no facade exemption) and \
      their idioms are not modelled.";
 
@@ -260,6 +263,14 @@ struct Hop {
     statement_count: Option<usize>,
     /// Arguments are the parameters, passed straight through.
     pass_through: bool,
+    /// The hop is a method of an `impl Trait for Type` block. Newtype
+    /// and adapter forwarding (`Deref`, `From`, `Display` delegating to
+    /// an inner value) lives in exactly such blocks and is often the
+    /// pattern working as intended, so a chain made of these hops is a
+    /// weaker refactor signal than one made of free functions. Omitted
+    /// from JSON when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    trait_impl: bool,
     /// Resolved callers of this hop from outside the chain. The hop
     /// above is not counted — collapsing the chain is what removes it —
     /// so this is exactly the call sites that would have to be
@@ -692,6 +703,7 @@ fn build_chain(
                 loc: node.weights.loc,
                 statement_count: node.delegation.as_ref().and_then(|f| f.statement_count),
                 pass_through: node.delegation.as_ref().is_some_and(|f| f.pass_through),
+                trait_impl: node.owner_kind == Some(lens_domain::OwnerKind::TraitImpl),
                 caller_count: callers
                     .get(&idx)
                     .map_or(0, |callers| callers.difference(&on_chain).count()),
@@ -980,6 +992,9 @@ fn render_hop(hop: &Hop) -> String {
     row.push(')');
     if hop.pass_through {
         row.push_str("; args forwarded verbatim");
+    }
+    if hop.trait_impl {
+        row.push_str("; trait-impl method");
     }
     if hop.caller_count > 0 {
         let _ = write!(row, "; {} other caller(s) to move", hop.caller_count);
@@ -1388,6 +1403,47 @@ pub mod db {
             "the same-named function one module over does forward: {report}",
         );
         assert_eq!(report["chains"][0]["pass_through_hop_count"], 1);
+    }
+
+    /// A hop that lives in an `impl Trait for Type` block is marked so
+    /// a reader can discount idiomatic newtype forwarding; the flag is
+    /// omitted (not `false`) on every other hop so it costs nothing on
+    /// the common row.
+    #[test]
+    fn a_trait_impl_hop_is_marked_and_free_function_hops_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub struct Wrapper { pub inner: usize }
+pub trait Save { fn save(&self, id: usize) -> usize; }
+impl Save for Wrapper {
+    fn save(&self, id: usize) -> usize { crate::service::save(id) }
+}
+pub mod service {
+    pub fn save(id: usize) -> usize { crate::db::insert(id) }
+}
+pub mod db {
+    pub fn insert(id: usize) -> usize { id + 1 }
+    pub fn extra(id: usize) -> usize { id }
+}
+",
+        );
+
+        let report = analyze_json(dir.path());
+        let hops = report["chains"][0]["hops"].as_array().unwrap();
+        assert_eq!(hops[0]["qualified_name"], "crate::Wrapper::save");
+        assert_eq!(hops[0]["trait_impl"], true, "report: {report}");
+        assert!(
+            hops[1]["trait_impl"].is_null(),
+            "free-function hop must omit the flag: {report}",
+        );
+
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains("`crate::Wrapper::save` (src/lib.rs:4, 1 LOC, 1 stmt); trait-impl method"),
+            "got: {md}",
+        );
     }
 
     /// The shared path filters reach the graph this analyzer builds
