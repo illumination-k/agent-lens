@@ -89,6 +89,7 @@ fn function_def_from(
         is_test,
         signature: Some(signature_info(func, is_method)),
         doc: docstring_text(func),
+        implements: None,
         tree: function_body_tree(func),
     }
 }

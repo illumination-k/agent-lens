@@ -138,6 +138,7 @@ fn extract_with(source: &str, opts: WalkOptions) -> Result<Vec<FunctionDef>, Rus
             is_test: site.is_test,
             signature: Some(signature_info(site.sig)),
             doc: crate::attrs::doc_from_attrs(site.attrs),
+            implements: site.trait_name.map(str::to_owned),
             tree: function_tree(site.sig, site.block),
         });
     });
@@ -171,6 +172,7 @@ fn extract_item_functions(
                 is_test: in_test_context || crate::attrs::is_test_function(&item_fn.attrs),
                 signature: Some(signature_info(&item_fn.sig)),
                 doc: crate::attrs::doc_from_attrs(&item_fn.attrs),
+                implements: None,
                 tree: function_tree(&item_fn.sig, &item_fn.block),
             };
             out.push(RustFunctionDef {
@@ -225,6 +227,7 @@ fn extract_impl_functions(
     } else {
         OwnerKind::Impl
     };
+    let trait_name = crate::common::impl_trait_last_ident(item_impl);
     let block_attributes = crate::attrs::attribute_paths(&item_impl.attrs);
     for impl_item in &item_impl.items {
         let syn::ImplItem::Fn(method) = impl_item else {
@@ -243,6 +246,7 @@ fn extract_impl_functions(
             is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
             signature: Some(signature_info(&method.sig)),
             doc: crate::attrs::doc_from_attrs(&method.attrs),
+            implements: trait_name.clone(),
             tree: function_tree(&method.sig, &method.block),
         };
         out.push(RustFunctionDef {
@@ -281,6 +285,7 @@ fn extract_trait_functions(
             is_test: in_test_context || crate::attrs::is_test_function(&method.attrs),
             signature: Some(signature_info(&method.sig)),
             doc: crate::attrs::doc_from_attrs(&method.attrs),
+            implements: None,
             tree: function_tree(&method.sig, block),
         };
         out.push(RustFunctionDef {
@@ -1105,6 +1110,56 @@ mod tests {
     fn parse_functions(src: &str) -> Vec<FunctionDef> {
         let mut parser = RustParser::new();
         parser.extract_functions(src).unwrap()
+    }
+
+    /// `implements` names the trait only for `impl Trait for Type`
+    /// methods: free fns, inherent methods, and trait default bodies
+    /// carry `None`, and a qualified trait path keeps its last ident.
+    #[rstest]
+    #[case::free_fn("fn work() { let _ = 1; }", "work", None)]
+    #[case::inherent_method("struct S; impl S { fn work(&self) { let _ = 1; } }", "S::work", None)]
+    #[case::trait_default("trait T { fn work(&self) { let _ = 1; } }", "T::work", None)]
+    #[case::trait_impl(
+        "struct S; trait T { fn work(&self); } impl T for S { fn work(&self) { let _ = 1; } }",
+        "S::work",
+        Some("T")
+    )]
+    #[case::qualified_trait_path(
+        "struct S; impl std::fmt::Display for S {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"s\") }\n}",
+        "S::fmt",
+        Some("Display")
+    )]
+    fn implements_marks_trait_impl_methods_only(
+        #[case] src: &str,
+        #[case] name: &str,
+        #[case] implements: Option<&str>,
+    ) {
+        let functions = parse_functions(src);
+        let def = functions
+            .iter()
+            .find(|def| def.name == name)
+            .unwrap_or_else(|| panic!("{name} not extracted: {functions:?}"));
+        assert_eq!(def.implements.as_deref(), implements, "src: {src}");
+    }
+
+    /// The module-preserving extraction carries the same fact, so the
+    /// shape consumers (call graph) see it too.
+    #[test]
+    fn module_extraction_carries_implements_on_trait_impl_methods() {
+        let src = "struct S; trait T { fn work(&self); }\n\
+                   impl T for S { fn work(&self) { let _ = 1; } }\n\
+                   impl S { fn direct(&self) { let _ = 1; } }";
+        let defs = extract_functions_with_modules(src, "crate").unwrap();
+        let by_name = |name: &str| {
+            defs.iter()
+                .find(|def| def.qualified_name == name)
+                .unwrap_or_else(|| panic!("{name} not extracted"))
+        };
+        assert_eq!(
+            by_name("crate::S::work").function.implements.as_deref(),
+            Some("T"),
+        );
+        assert_eq!(by_name("crate::S::direct").function.implements, None);
     }
 
     fn has_label(tree: &TreeNode, label: &str) -> bool {

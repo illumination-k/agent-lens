@@ -43,6 +43,14 @@ pub struct FunctionDef {
     /// stripped. `None` when the function has no doc or the adapter does
     /// not extract docs for its language.
     pub doc: Option<String>,
+    /// Trait or interface this definition implements, where the language
+    /// marks it syntactically: the trait path's last identifier for a Rust
+    /// `impl Trait for Type` method. `None` for free functions, inherent
+    /// methods, trait default bodies, and languages with no syntactic
+    /// marker (Go satisfies interfaces structurally). Two functions
+    /// implementing the same trait share a signature by construction, so
+    /// signature-aware scoring must not read that match as evidence.
+    pub implements: Option<String>,
     pub tree: TreeNode,
 }
 
@@ -61,6 +69,7 @@ impl FunctionDef {
     ///     is_test: false,
     ///     signature: None,
     ///     doc: None,
+    ///     implements: None,
     ///     tree: TreeNode::leaf("Block"),
     /// };
     /// assert_eq!(f.line_count(), 6);
@@ -628,6 +637,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree,
         }
     }
@@ -672,6 +682,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 6);
@@ -686,6 +697,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);
@@ -700,6 +712,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree: TreeNode::leaf("Block"),
         };
         assert_eq!(f.line_count(), 1);
@@ -714,6 +727,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree: TreeNode::with_children(
                 "Function",
                 "",
@@ -729,6 +743,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree: TreeNode::leaf("Body"),
         };
         assert_eq!(body_only.body_tree().label, "Body");

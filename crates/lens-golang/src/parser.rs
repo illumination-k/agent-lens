@@ -113,6 +113,7 @@ fn function_def_from(site: &FnSite<'_, '_>, source: &[u8]) -> FunctionDef {
         is_test,
         signature: Some(signature_info(node, source, site.name)),
         doc: doc_comment_text(node, source),
+        implements: None,
         tree: build_tree(site.body, source, /* is_root = */ true),
     }
 }

@@ -278,6 +278,11 @@ pub(super) struct UnitRef<'a> {
     start_line: usize,
     end_line: usize,
     is_test: bool,
+    /// Trait this function implements (`impl Trait for Type` methods);
+    /// absent for everything else. Pairs of units naming the same trait
+    /// were scored on the body alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    implements: Option<&'a str>,
 }
 
 impl UnitRef<'_> {
@@ -303,6 +308,7 @@ impl<'a> From<&'a OwnedUnit> for UnitRef<'a> {
             start_line: f.start_line(),
             end_line: f.end_line(),
             is_test: f.is_test,
+            implements: f.implements(),
         }
     }
 }
@@ -325,6 +331,12 @@ pub(super) struct PairView<'a> {
     /// coincidences that likely should not be merged.
     #[serde(skip_serializing_if = "Option::is_none")]
     doc_overlap: Option<f64>,
+    /// Both sides implement the same trait: their signature match is
+    /// dictated by the trait, so `similarity` is the body score alone
+    /// (`signature_similarity` stays reported as a diagnostic). Omitted
+    /// when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    same_trait: bool,
 }
 
 impl<'a> PairView<'a> {
@@ -338,6 +350,7 @@ impl<'a> PairView<'a> {
             type_overlap: components.type_overlap,
             identifier_overlap: components.identifier_overlap,
             doc_overlap: components.doc_overlap,
+            same_trait: components.same_trait,
         }
     }
 }
@@ -524,6 +537,17 @@ fn block_spread(cluster: &ClusterView<'_>) -> (usize, usize) {
     (functions.len(), files.len())
 }
 
+/// Trait name shared by every member of the cluster, if there is one.
+/// Only then is the tag a statement about the cluster rather than about
+/// some of its pairs — mixed clusters keep the per-pair JSON annotation.
+fn shared_trait<'a>(cluster: &ClusterView<'a>) -> Option<&'a str> {
+    let mut units = cluster.units.iter();
+    let first = units.next()?.implements?;
+    units
+        .all(|unit| unit.implements == Some(first))
+        .then_some(first)
+}
+
 /// The one-line summary heading a cluster's member list: size, the
 /// similarity band, the identifier-overlap band, then the optional
 /// annotations — doc overlap when asked for, and the sweep survival
@@ -531,6 +555,9 @@ fn block_spread(cluster: &ClusterView<'_>) -> (usize, usize) {
 fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool, noun: &str) -> String {
     let identifier_tag = identifier_overlap_summary(cluster)
         .map(|summary| format!(", {summary}"))
+        .unwrap_or_default();
+    let trait_tag = shared_trait(cluster)
+        .map(|name| format!(", all `impl {name}` (signature excluded from score)"))
         .unwrap_or_default();
     let doc_tag = if doc_overlap {
         format!(", {}", doc_overlap_summary(cluster))
@@ -549,7 +576,7 @@ fn cluster_headline(cluster: &ClusterView<'_>, doc_overlap: bool, noun: &str) ->
         String::new()
     };
     format!(
-        "{} {noun}s, similarity {:.0}–{:.0}%{spread_tag}{identifier_tag}{doc_tag}{survival_tag}",
+        "{} {noun}s, similarity {:.0}–{:.0}%{spread_tag}{identifier_tag}{trait_tag}{doc_tag}{survival_tag}",
         cluster.size,
         cluster.min_similarity * 100.0,
         cluster.max_similarity * 100.0,
@@ -837,6 +864,7 @@ mod tests {
             rel_path: "lib.rs".to_owned(),
             is_test: false,
             kind: None,
+            implements: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -844,6 +872,7 @@ mod tests {
                 is_test: false,
                 signature: None,
                 doc: None,
+                implements: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
             }),
         }
@@ -857,6 +886,7 @@ mod tests {
             type_overlap: Some(similarity),
             identifier_overlap: Some(similarity),
             doc_overlap: None,
+            same_trait: false,
         }
     }
 
@@ -952,6 +982,7 @@ mod tests {
                     start_line,
                     end_line,
                     is_test: false,
+                    implements: None,
                 })
                 .collect(),
             pairs: Vec::new(),
@@ -1178,6 +1209,7 @@ mod tests {
             start_line: 1,
             end_line: 5,
             is_test: false,
+            implements: None,
         };
         ClusterView {
             size: 2,
@@ -1196,6 +1228,7 @@ mod tests {
                     type_overlap: None,
                     identifier_overlap,
                     doc_overlap: None,
+                    same_trait: false,
                 })
                 .collect(),
             snippet: None,
@@ -1250,6 +1283,7 @@ mod tests {
             start_line: 1,
             end_line: 5,
             is_test: false,
+            implements: None,
         };
         ClusterView {
             size: 2,
@@ -1268,6 +1302,7 @@ mod tests {
                     type_overlap: None,
                     identifier_overlap: None,
                     doc_overlap,
+                    same_trait: false,
                 })
                 .collect(),
             snippet: None,
@@ -1452,6 +1487,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
+                implements: None,
             },
             UnitRef {
                 file: "b.rs",
@@ -1460,6 +1496,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
+                implements: None,
             },
             components(0.34),
         )];
@@ -1524,6 +1561,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
+                implements: None,
             },
             UnitRef {
                 file: "b.rs",
@@ -1532,6 +1570,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 is_test: false,
+                implements: None,
             },
             components(0.35),
         )];

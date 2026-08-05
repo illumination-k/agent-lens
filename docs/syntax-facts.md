@@ -38,6 +38,15 @@ The body tree remains the existing `TreeNode` currency for structural
 similarity, but it is now nested under a neutral shape so language adapters can
 add comparable signature and ownership facts without CLI-specific structs.
 
+The lighter `FunctionDef` (the similarity corpus unit) additionally carries
+`implements`: the trait a definition implements, where the language marks it
+syntactically — the trait path's last identifier for a Rust
+`impl Trait for Type` method, `None` everywhere else (Go satisfies interfaces
+structurally, so no Go definition carries it). Similarity scoring uses it to
+drop the signature component on same-trait pairs: two implementations of one
+trait share a signature by construction, so that match is not evidence of
+duplication.
+
 ## TypeShape
 
 `TypeShape` (`lens_domain::type_shape`) is the type-definition unit compared

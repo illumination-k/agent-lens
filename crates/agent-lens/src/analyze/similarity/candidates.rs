@@ -569,6 +569,7 @@ mod tests {
             rel_path: "lib.rs".to_owned(),
             is_test,
             kind: None,
+            implements: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -576,6 +577,7 @@ mod tests {
                 is_test,
                 signature: None,
                 doc: None,
+                implements: None,
                 tree: lens_domain::TreeNode::with_children(
                     "Block",
                     "",
@@ -594,6 +596,7 @@ mod tests {
             rel_path: file.to_owned(),
             is_test: false,
             kind: None,
+            implements: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: "f".to_owned(),
                 start_line,
@@ -601,6 +604,7 @@ mod tests {
                 is_test: false,
                 signature: None,
                 doc: None,
+                implements: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
             }),
         }
@@ -668,6 +672,7 @@ mod tests {
             rel_path: "lib.rs".to_owned(),
             is_test: false,
             kind: None,
+            implements: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -675,6 +680,7 @@ mod tests {
                 is_test: false,
                 signature: None,
                 doc: None,
+                implements: None,
                 tree,
             }),
         }

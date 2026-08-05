@@ -227,6 +227,15 @@ struct ScoreWeights {
 }
 
 impl ScoreWeights {
+    /// Body-only weights, for pairs whose signature match carries no
+    /// information: two implementations of the same trait share a
+    /// signature by construction, so blending it in would inflate every
+    /// `impl Display` against every other `impl Display`.
+    const BODY_ONLY: Self = Self {
+        body: 1.0,
+        signature: 0.0,
+    };
+
     fn blend(self, body_similarity: f64, signature_similarity: f64) -> f64 {
         (self.body * body_similarity) + (self.signature * signature_similarity)
     }
@@ -1106,6 +1115,12 @@ fn score_candidate_pair(
     };
     let signature = signature_components(a.signature(), b.signature());
     let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
+    let same_trait = same_trait_pair(a, b);
+    let weights = if same_trait {
+        ScoreWeights::BODY_ONLY
+    } else {
+        weights
+    };
     Some(PairScore {
         i,
         j,
@@ -1116,9 +1131,20 @@ fn score_candidate_pair(
             type_overlap: signature.type_overlap,
             identifier_overlap: signature.identifier_overlap,
             doc_overlap: None,
+            same_trait,
         },
         exact_match,
     })
+}
+
+/// Whether both units are methods of `impl` blocks for the same trait.
+/// The trait dictates their shared signature, so the pair is scored on
+/// the body alone and the report carries the annotation.
+fn same_trait_pair(a: &OwnedUnit, b: &OwnedUnit) -> bool {
+    matches!(
+        (a.implements(), b.implements()),
+        (Some(left), Some(right)) if left == right
+    )
 }
 
 fn score_token_candidate_pairs(
@@ -1152,6 +1178,12 @@ fn score_token_candidate_pair(
     let body_similarity = token::token_similarity(token_profiles.get(i)?, token_profiles.get(j)?);
     let signature = signature_components(a.signature(), b.signature());
     let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
+    let same_trait = same_trait_pair(a, b);
+    let weights = if same_trait {
+        ScoreWeights::BODY_ONLY
+    } else {
+        weights
+    };
     Some(PairScore {
         i,
         j,
@@ -1162,6 +1194,7 @@ fn score_token_candidate_pair(
             type_overlap: signature.type_overlap,
             identifier_overlap: signature.identifier_overlap,
             doc_overlap: None,
+            same_trait,
         },
         exact_match: body_similarity >= 1.0,
     })
@@ -1188,6 +1221,9 @@ pub(super) struct SimilarityComponents {
     /// the scoring hot path never tokenizes doc prose. `None` unless
     /// both sides carry doc text.
     pub(super) doc_overlap: Option<f64>,
+    /// Both sides implement the same trait, so the signature component
+    /// was excluded from `similarity` (the trait dictates the match).
+    pub(super) same_trait: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1599,6 +1635,7 @@ fn delta(xs: &[i32]) -> i32 {
             rel_path: "lib.rs".to_owned(),
             is_test: false,
             kind: None,
+            implements: None,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line,
@@ -1606,6 +1643,7 @@ fn delta(xs: &[i32]) -> i32 {
                 is_test: false,
                 signature: None,
                 doc: None,
+                implements: None,
                 tree: lens_domain::TreeNode::leaf("Block"),
             }),
         }
@@ -1666,6 +1704,7 @@ fn delta(xs: &[i32]) -> i32 {
                 type_overlap: None,
                 identifier_overlap: None,
                 doc_overlap: None,
+                same_trait: false,
             }
         }
 
@@ -1728,6 +1767,7 @@ fn delta(xs: &[i32]) -> i32 {
                     type_overlap: Some(0.0),
                     identifier_overlap: Some(0.5),
                     doc_overlap: None,
+                    same_trait: false,
                 },
                 exact_match: false,
             },
@@ -1938,6 +1978,7 @@ fn delta(xs: &[i32]) -> i32 {
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                implements: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "left".to_owned(),
                     start_line: 1,
@@ -1953,6 +1994,7 @@ fn delta(xs: &[i32]) -> i32 {
                         receiver: lens_domain::ReceiverShape::None,
                     }),
                     doc: None,
+                    implements: None,
                     tree: left_body,
                 }),
             },
@@ -1961,6 +2003,7 @@ fn delta(xs: &[i32]) -> i32 {
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                implements: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "right".to_owned(),
                     start_line: 7,
@@ -1976,6 +2019,7 @@ fn delta(xs: &[i32]) -> i32 {
                         receiver: lens_domain::ReceiverShape::None,
                     }),
                     doc: None,
+                    implements: None,
                     tree: right_body,
                 }),
             },
@@ -2159,6 +2203,101 @@ fn validate_order_id(id: OrderId) -> bool {
         // Neither function is documented, so the diagnostic doc component
         // must be absent rather than reported as 0.
         assert!(pair["doc_overlap"].is_null(), "got {pair}");
+    }
+
+    /// Two implementations of one trait share their signature by
+    /// construction, so the pair scores on the body alone and says so.
+    /// Without this, every `impl Display` inflates against every other
+    /// `impl Display` through a signature match the trait dictated.
+    const SAME_TRAIT_IMPLS: &str = r#"
+use std::fmt;
+
+struct Alpha { items: Vec<u64> }
+struct Beta { items: Vec<u64> }
+
+impl fmt::Display for Alpha {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut total = 0;
+        for item in &self.items {
+            total += item;
+        }
+        write!(f, "alpha {total}")
+    }
+}
+
+impl fmt::Display for Beta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut sum = 0;
+        for entry in &self.items {
+            sum += entry;
+        }
+        write!(f, "beta {sum}")
+    }
+}
+"#;
+
+    #[test]
+    fn same_trait_pairs_score_on_the_body_alone_and_carry_the_annotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", SAME_TRAIT_IMPLS);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.7)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pair = &parsed["clusters"][0]["pairs"][0];
+        let similarity = pair["similarity"].as_f64().unwrap();
+        let body = pair["body_similarity"].as_f64().unwrap();
+        let signature = pair["signature_similarity"].as_f64().unwrap();
+
+        assert!(
+            (similarity - body).abs() < 1e-9,
+            "same-trait pair must score on the body alone: {pair}",
+        );
+        assert!(
+            similarity < BODY_SIMILARITY_WEIGHT * body + SIGNATURE_SIMILARITY_WEIGHT * signature,
+            "the trait-dictated signature match must not inflate the score: {pair}",
+        );
+        assert_eq!(pair["same_trait"], true, "got {pair}");
+        let units = parsed["clusters"][0]["units"].as_array().unwrap();
+        assert!(
+            units.iter().all(|unit| unit["implements"] == "Display"),
+            "got {units:?}",
+        );
+    }
+
+    #[test]
+    fn markdown_tags_clusters_whose_members_all_implement_one_trait() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", SAME_TRAIT_IMPLS);
+
+        let md = SimilarityAnalyzer::new()
+            .with_threshold(0.7)
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("all `impl Display` (signature excluded from score)"),
+            "got: {md}",
+        );
+    }
+
+    /// Inherent methods carry no trait, so their pairs keep the blended
+    /// score and the JSON omits the annotation instead of printing
+    /// `same_trait: false` on every row.
+    #[test]
+    fn inherent_method_pairs_keep_the_blended_score_and_omit_the_annotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
+
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.7)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pair = &parsed["clusters"][0]["pairs"][0];
+        assert!(pair["same_trait"].is_null(), "got {pair}");
+        assert!(pair["a"]["implements"].is_null(), "got {pair}");
     }
 
     #[test]
@@ -3052,6 +3191,7 @@ def beta(ys):
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                implements: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "left".to_owned(),
                     start_line: 1,
@@ -3067,6 +3207,7 @@ def beta(ys):
                         receiver: lens_domain::ReceiverShape::None,
                     }),
                     doc: None,
+                    implements: None,
                     tree: lens_domain::TreeNode::with_children(
                         "Block",
                         "",
@@ -3083,6 +3224,7 @@ def beta(ys):
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                implements: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "right".to_owned(),
                     start_line: 7,
@@ -3098,6 +3240,7 @@ def beta(ys):
                         receiver: lens_domain::ReceiverShape::None,
                     }),
                     doc: None,
+                    implements: None,
                     tree: lens_domain::TreeNode::with_children(
                         "Block",
                         "",
@@ -3157,6 +3300,7 @@ def beta(ys):
                 rel_path: "lib.rs".to_owned(),
                 is_test: false,
                 kind: None,
+                implements: None,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: name.to_owned(),
                     start_line: 1,
@@ -3164,6 +3308,7 @@ def beta(ys):
                     is_test: false,
                     signature: None,
                     doc: None,
+                    implements: None,
                     tree: body(third),
                 }),
             }

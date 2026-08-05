@@ -72,6 +72,11 @@ pub(crate) struct FnSite<'a> {
     /// True only for methods inside `impl Trait for Type` blocks. Trait
     /// default methods are not trait impl methods.
     pub(crate) is_trait_impl: bool,
+    /// Trailing identifier of the implemented trait's path, for methods
+    /// inside `impl Trait for Type` blocks. `None` everywhere else,
+    /// including trait default methods — there `owner` already names the
+    /// trait.
+    pub(crate) trait_name: Option<&'a str>,
     pub(crate) is_test: bool,
     /// Outer attributes on the fn item, including `#[doc]` lines.
     pub(crate) attrs: &'a [Attribute],
@@ -163,6 +168,7 @@ where
     visit(FnSite {
         owner: None,
         is_trait_impl: false,
+        trait_name: None,
         is_test,
         attrs: &item_fn.attrs,
         sig: &item_fn.sig,
@@ -188,12 +194,14 @@ where
 {
     let owner = type_path_last_ident(&item_impl.self_ty);
     let is_trait_impl = item_impl.trait_.is_some();
+    let trait_name = impl_trait_last_ident(item_impl);
     for impl_item in &item_impl.items {
         if let ImplItem::Fn(method) = impl_item {
             let is_test = in_test_context || is_test_function(&method.attrs);
             visit(FnSite {
                 owner: owner.as_deref(),
                 is_trait_impl,
+                trait_name: trait_name.as_deref(),
                 is_test,
                 attrs: &method.attrs,
                 sig: &method.sig,
@@ -201,6 +209,17 @@ where
             });
         }
     }
+}
+
+/// Trailing identifier of the trait an `impl Trait for Type` block
+/// implements (`Display` for `impl fmt::Display for Foo`), generics
+/// dropped. `None` for inherent `impl` blocks.
+pub(crate) fn impl_trait_last_ident(item_impl: &ItemImpl) -> Option<String> {
+    item_impl
+        .trait_
+        .as_ref()
+        .and_then(|(path, _)| path.segments.last())
+        .map(|seg| seg.ident.to_string())
 }
 
 fn walk_trait<F>(item_trait: &ItemTrait, in_test_context: bool, visit: &mut F)
@@ -217,6 +236,7 @@ where
             visit(FnSite {
                 owner: Some(&owner),
                 is_trait_impl: false,
+                trait_name: None,
                 is_test,
                 attrs: &method.attrs,
                 sig: &method.sig,

@@ -322,6 +322,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree: TreeNode::with_children("Block", "", children),
         }
     }
@@ -488,6 +489,7 @@ mod tests {
                 is_test: false,
                 signature: None,
                 doc: None,
+                implements: None,
                 tree: TreeNode::leaf("Lit"),
             },
             FunctionDef {
@@ -497,6 +499,7 @@ mod tests {
                 is_test: false,
                 signature: None,
                 doc: None,
+                implements: None,
                 tree: TreeNode::leaf("Lit"),
             },
         ];
@@ -543,6 +546,7 @@ mod tests {
             is_test: false,
             signature: None,
             doc: None,
+            implements: None,
             tree: TreeNode::with_children("Block", "", children),
         }
     }
