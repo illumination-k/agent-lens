@@ -31,6 +31,11 @@ pub(super) struct OwnedUnit {
     /// Language-facing kind label (`"struct"`, `"interface"`, …) for a
     /// type unit; `None` for a function.
     pub(super) kind: Option<&'static str>,
+    /// Trait this function implements, when the language marks it
+    /// syntactically (`impl Trait for Type` methods). Two units carrying
+    /// the same trait name share their signature by construction, so
+    /// scoring drops the signature component for such pairs.
+    pub(super) implements: Option<String>,
     pub(super) shape: FunctionShape,
 }
 
@@ -65,6 +70,10 @@ impl OwnedUnit {
 
     pub(super) fn is_type(&self) -> bool {
         self.kind.is_some()
+    }
+
+    pub(super) fn implements(&self) -> Option<&str> {
+        self.implements.as_deref()
     }
 }
 
@@ -134,6 +143,7 @@ fn collect_file(
                     rel_path: file.display_path.clone(),
                     is_test,
                     kind: None,
+                    implements: def.implements.clone(),
                     shape: FunctionShape::from(def),
                 })
             })
@@ -147,6 +157,7 @@ fn collect_file(
                     rel_path: file.display_path.clone(),
                     is_test,
                     kind: Some(type_shape.kind_label),
+                    implements: None,
                     shape: type_shape.into_function_shape(),
                 })
             })
@@ -173,6 +184,7 @@ fn collect_file(
                 rel_path: file.display_path.clone(),
                 is_test: window.is_test,
                 kind: None,
+                implements: None,
                 shape: window.into_function_shape(),
             })
             .collect()

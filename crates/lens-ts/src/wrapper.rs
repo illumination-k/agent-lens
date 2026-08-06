@@ -96,6 +96,8 @@ fn analyze_tail(
         // the visible body is structurally a single statement.
         statement_count: 1,
         reuse: None,
+        param_count: None,
+        may_satisfy_interfaces: Vec::new(),
     })
 }
 

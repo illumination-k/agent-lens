@@ -233,6 +233,7 @@ impl FunctionVisitor for FunctionDefCollector {
             is_test,
             signature: Some(signature),
             doc,
+            implements: None,
             tree: function_body_tree(item.body),
         });
     }

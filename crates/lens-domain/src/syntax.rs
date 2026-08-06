@@ -464,6 +464,7 @@ mod tests {
             is_test: true,
             signature: Some(signature()),
             doc: Some("Parse a user from its id.".to_owned()),
+            implements: None,
             tree: TreeNode::with_children(
                 "Function",
                 "",
