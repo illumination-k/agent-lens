@@ -67,6 +67,12 @@ min-lines = 8
 [profile.self.context-span]
 top = 15
 
+[profile.self.coupling]
+top = 15
+
+[profile.self.wrapper]
+top = 15
+
 [profile.self.delegation]
 top = 15
 
