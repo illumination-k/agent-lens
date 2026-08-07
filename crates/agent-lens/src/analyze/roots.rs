@@ -68,9 +68,11 @@ impl AnalyzeRoots {
 
     /// The single root, when there is exactly one.
     ///
-    /// The graph-rooted analyzers (`coupling`, `context-span`) need one
-    /// entry point rather than a set of trees, and the hook cores always
-    /// analyze one directory; both go through this.
+    /// A few behaviours are only defined for a one-root scope — a single
+    /// file keeps its spelled display path rather than a base-relative
+    /// one, which the churn scope behind `hotspot` and `risk` has to
+    /// mirror when it keys graph paths into git's path space — and this
+    /// is how that case is recognised.
     pub fn single(&self) -> Option<&Path> {
         match self.roots.as_slice() {
             [only] => Some(only),
