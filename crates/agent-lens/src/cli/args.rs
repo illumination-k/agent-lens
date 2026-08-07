@@ -963,7 +963,9 @@ pub(super) struct AnalyzePathArgs {
     pub(super) exclude_tests: bool,
     /// Exclude paths matching this glob. Repeatable. Bare patterns also
     /// match at any depth, so `--exclude generated.rs` matches
-    /// `src/generated.rs`.
+    /// `src/generated.rs`. A pattern containing `/` is anchored at the
+    /// analyzed path — with several PATHs, at their deepest common
+    /// ancestor, the same base display paths use.
     #[arg(long = "exclude", value_name = "GLOB")]
     pub(super) exclude: Vec<String>,
 }

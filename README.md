@@ -438,7 +438,8 @@ trees you care about are siblings and their only common ancestor is the repo
 root. This is not the same as one run per tree: `similarity` clusters across
 the whole corpus and the call-graph analyzers resolve edges across it, so a
 finding spanning two trees is only visible in a combined run. Display paths
-are written relative to the paths' deepest common ancestor. `coupling` and
+— and the base a `/`-containing `--exclude` glob is anchored at — are
+relative to the paths' deepest common ancestor. `coupling` and
 `context-span` grow one module graph out of one entry point, so they keep the
 single-`PATH` signature.
 

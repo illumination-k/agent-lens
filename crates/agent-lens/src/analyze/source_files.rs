@@ -157,6 +157,54 @@ mod tests {
         assert!(matches!(err, AnalyzerError::PathNotFound { .. }), "{err:?}");
     }
 
+    /// `--exclude` globs are matched in the same path space display
+    /// paths live in, so a `/`-anchored pattern is relative to the
+    /// roots' common ancestor rather than to whichever root reached the
+    /// file. Bare patterns keep matching at any depth either way.
+    #[test]
+    fn exclude_globs_are_anchored_at_the_shared_base() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "packages/generated/api.rs", "fn a() {}\n");
+        write_file(dir.path(), "packages/src/lib.rs", "fn b() {}\n");
+        write_file(dir.path(), "cli/src/generated.rs", "fn c() {}\n");
+        write_file(dir.path(), "cli/src/main.rs", "fn d() {}\n");
+
+        let roots = AnalyzeRoots::new([dir.path().join("packages"), dir.path().join("cli")]);
+        let anchored = AnalyzePathFilter::new()
+            .with_exclude_patterns(vec!["packages/generated/**".to_owned()])
+            .compile(roots.base())
+            .unwrap();
+        assert_eq!(
+            collect_source_files(&roots, &anchored)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.display_path)
+                .collect::<Vec<_>>(),
+            [
+                "cli/src/generated.rs",
+                "cli/src/main.rs",
+                "packages/src/lib.rs"
+            ],
+        );
+
+        let bare = AnalyzePathFilter::new()
+            .with_exclude_patterns(vec!["generated.rs".to_owned()])
+            .compile(roots.base())
+            .unwrap();
+        assert_eq!(
+            collect_source_files(&roots, &bare)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.display_path)
+                .collect::<Vec<_>>(),
+            [
+                "cli/src/main.rs",
+                "packages/generated/api.rs",
+                "packages/src/lib.rs",
+            ],
+        );
+    }
+
     /// The single-root spellings are unchanged: a directory root gives
     /// root-relative names, a file root gives the path as spelled.
     #[test]
