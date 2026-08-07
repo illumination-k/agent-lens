@@ -57,21 +57,52 @@ use serde::Serialize;
 
 use super::module_graph::{GraphPolicy, build_graph, module_paths};
 use super::module_label::ModuleLabeler;
+use super::options::analyzer_options;
 use super::{AnalyzePathFilter, CouplingAnalyzerError, OutputFormat, format_optional_f64};
 
-/// Stateless analyzer entry point. Kept as a struct so per-run
-/// configuration (filters, thresholds) can be added later without
-/// breaking the CLI surface.
+analyzer_options! {
+    /// `analyze coupling` flags, and the `[profile.<name>.coupling]` table.
+    pub struct CouplingOptions {
+        @shared(ranking);
+    }
+}
+
+/// Modules listed in markdown when `--top` is not given. JSON always
+/// carries every module; this only bounds the rendered table, which has
+/// one row per module and is therefore the longest report the analyzer
+/// family produces on a large package.
+const DEFAULT_TOP: usize = 20;
+
+/// Coupled pairs listed in markdown. The pair list is a supporting
+/// exhibit rather than the report's ranking, so it keeps its own tighter
+/// cap and `--top` can only narrow it further.
+const TOP_PAIRS_LIMIT: usize = 10;
+
+/// Analyzer entry point.
 #[derive(Debug, Default, Clone)]
 pub struct CouplingAnalyzer {
     path_filter: AnalyzePathFilter,
+    top: Option<usize>,
 }
 
 impl CouplingAnalyzer {
     pub fn new() -> Self {
-        Self {
-            path_filter: AnalyzePathFilter::new(),
-        }
+        Self::default()
+    }
+
+    /// Cap the markdown module table to the top-N rows by IFC, and the
+    /// coupled-pair list to at most that many. JSON output always
+    /// carries every module. `None` uses the markdown default of 20.
+    pub fn with_top(mut self, top: Option<usize>) -> Self {
+        self.top = top;
+        self
+    }
+
+    /// Apply a whole [`CouplingOptions`] group. The CLI flags and the
+    /// `[profile.<name>.coupling]` table are the same type, so this is
+    /// the only seam between parsed options and the analyzer.
+    pub fn with_options(self, opts: CouplingOptions) -> Self {
+        self.with_top(opts.top)
     }
 
     pub fn with_only_tests(mut self, only_tests: bool) -> Self {
@@ -96,10 +127,10 @@ impl CouplingAnalyzer {
     /// walk a directory for packages and `.py` files respectively.
     pub fn analyze(
         &self,
-        path: &Path,
+        path: impl AsRef<Path>,
         format: OutputFormat,
     ) -> Result<String, CouplingAnalyzerError> {
-        let mut graph = build_graph(path, GraphPolicy::COUPLING)?;
+        let mut graph = build_graph(path.as_ref(), GraphPolicy::COUPLING)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: std::collections::HashSet<&ModulePath> =
@@ -113,7 +144,7 @@ impl CouplingAnalyzer {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
             }
-            OutputFormat::Md => Ok(format_markdown(&view)),
+            OutputFormat::Md => Ok(format_markdown(&view, self.top)),
         }
     }
 }
@@ -267,9 +298,8 @@ impl PairView {
     }
 }
 
-const TOP_PAIRS_LIMIT: usize = 10;
-
-fn format_markdown(view: &ReportView<'_>) -> String {
+fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
+    let limit = top.unwrap_or(DEFAULT_TOP);
     let mut out = format!(
         "# Coupling report: {} ({} module(s), {} edge(s), {} cycle(s))\n",
         view.crate_root, view.module_count, view.edge_count, view.cycle_count,
@@ -278,17 +308,20 @@ fn format_markdown(view: &ReportView<'_>) -> String {
         out.push_str("\n_No modules discovered._\n");
         return out;
     }
-    render_modules_table(&mut out, &view.modules);
+    render_modules_table(&mut out, &view.modules, limit);
+    // Cycles are deliberately uncapped: a truncated cycle list reads as
+    // "these are the cycles" while hiding the rest, and the list is
+    // short whenever the news is good.
     render_cycles(&mut out, &view.cycles);
-    render_pairs(&mut out, &view.pairs);
+    render_pairs(&mut out, &view.pairs, limit.min(TOP_PAIRS_LIMIT));
     out
 }
 
-fn render_modules_table(out: &mut String, modules: &[ModuleView]) {
+fn render_modules_table(out: &mut String, modules: &[ModuleView], limit: usize) {
     // writeln! into a String cannot fail; the result is swallowed
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
-    let _ = writeln!(out, "\n## Modules (by IFC desc)\n");
+    let _ = writeln!(out, "\n## Modules (by IFC desc, top {limit})\n");
     let _ = writeln!(out, "| module | fan_in | fan_out | ifc | instability |");
     let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
     let mut sorted: Vec<&ModuleView> = modules.iter().collect();
@@ -299,7 +332,7 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView]) {
             .then_with(|| b.fan_out.cmp(&a.fan_out))
             .then_with(|| a.path.cmp(&b.path))
     });
-    for m in sorted {
+    for m in sorted.iter().take(limit) {
         let _ = writeln!(
             out,
             "| {} | {} | {} | {} | {} |",
@@ -308,6 +341,13 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView]) {
             m.fan_out,
             m.ifc,
             format_optional_f64(m.instability, 2),
+        );
+    }
+    let omitted = sorted.len().saturating_sub(limit);
+    if omitted > 0 {
+        let _ = writeln!(
+            out,
+            "\n_{omitted} lower-IFC module(s) not shown; raise --top or use --format json._",
         );
     }
 }
@@ -322,12 +362,12 @@ fn render_cycles(out: &mut String, cycles: &[CycleView]) {
     }
 }
 
-fn render_pairs(out: &mut String, pairs: &[PairView]) {
+fn render_pairs(out: &mut String, pairs: &[PairView], limit: usize) {
     if pairs.is_empty() {
         return;
     }
     let _ = writeln!(out, "\n## Top coupled pairs\n");
-    for p in pairs.iter().take(TOP_PAIRS_LIMIT) {
+    for p in pairs.iter().take(limit) {
         let _ = writeln!(out, "- {} ↔ {} ({} symbol(s))", p.a, p.b, p.shared_symbols);
     }
 }
@@ -430,6 +470,47 @@ mod tests {
         assert!(md.contains("crate::a"));
         assert!(md.contains("crate::b"));
         assert!(md.contains("Top coupled pairs"));
+    }
+
+    /// The module table is the report's longest section — one row per
+    /// module — so `--top` has to bound it, and the rows it dropped have
+    /// to be counted rather than silently missing.
+    #[test]
+    fn markdown_module_table_is_capped_by_top_and_reports_what_it_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = small_crate(dir.path());
+        let md = CouplingAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("(by IFC desc, top 1)"), "got: {md}");
+        // Three modules exist (crate, crate::a, crate::b); one row of
+        // the table survives and the other two are accounted for.
+        assert_eq!(md.matches("| crate").count(), 1, "got: {md}");
+        assert!(md.contains("_2 lower-IFC module(s) not shown"), "got: {md}",);
+
+        // Above the module count the note disappears entirely.
+        let md = CouplingAnalyzer::new()
+            .with_top(Some(50))
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(!md.contains("not shown"), "got: {md}");
+        assert_eq!(md.matches("| crate").count(), 3, "got: {md}");
+    }
+
+    /// JSON is the machine-readable half and must stay complete: `--top`
+    /// is a markdown-rendering cap, not a filter on the analysis.
+    #[test]
+    fn top_does_not_touch_the_json_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = small_crate(dir.path());
+        let json = CouplingAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["module_count"], 3);
+        assert_eq!(parsed["modules"].as_array().map(Vec::len), Some(3));
     }
 
     #[test]
@@ -578,7 +659,7 @@ mod tests {
             "use crate::a::Foo;\npub struct Bar;\nfn _y(_f: Foo) {}\n",
         );
         let json = CouplingAnalyzer::new()
-            .analyze(&dir.path().join("lib.rs"), OutputFormat::Json)
+            .analyze(dir.path().join("lib.rs"), OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["cycle_count"], 1);
@@ -966,7 +1047,7 @@ mod tests {
             "use crate::a::Foo;\npub struct Bar;\nfn _y(_f: Foo) {}\n",
         );
         let md = CouplingAnalyzer::new()
-            .analyze(&dir.path().join("lib.rs"), OutputFormat::Md)
+            .analyze(dir.path().join("lib.rs"), OutputFormat::Md)
             .unwrap();
         assert!(md.contains("Dependency cycles"));
         assert!(md.contains("instability"));

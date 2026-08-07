@@ -193,9 +193,10 @@ impl ContextSpanAnalyzer {
     /// produce a report in `format`.
     pub fn analyze(
         &self,
-        path: &Path,
+        path: impl AsRef<Path>,
         format: OutputFormat,
     ) -> Result<String, ContextSpanAnalyzerError> {
+        let path = path.as_ref();
         let mut graph = if self.entry_globs.is_empty() {
             build_graph(path, GraphPolicy::CONTEXT_SPAN)?
         } else {
@@ -753,7 +754,7 @@ mod tests {
             "use crate::a::Foo;\npub struct Bar;\nfn _y(_f: Foo) {}\n",
         );
         let json = ContextSpanAnalyzer::new()
-            .analyze(&dir.path().join("lib.rs"), OutputFormat::Json)
+            .analyze(dir.path().join("lib.rs"), OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let modules = parsed["modules"].as_array().unwrap();

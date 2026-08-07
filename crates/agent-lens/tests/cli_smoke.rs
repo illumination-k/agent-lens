@@ -526,6 +526,112 @@ fn analyze_command_prints_report_with_single_trailing_newline() {
     assert!(!stdout.ends_with("\n\n"), "got: {stdout:?}");
 }
 
+/// End-to-end shape of the monorepo case: two sibling trees, one
+/// invocation, one report whose clusters span both.
+#[test]
+fn analyze_accepts_several_paths_and_reports_across_them() {
+    const BODY: &str = "\
+fn %NAME%(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+";
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "packages/core/src/lib.rs",
+        &BODY.replace("%NAME%", "alpha"),
+    );
+    write_file(
+        dir.path(),
+        "cli/src/main.rs",
+        &BODY.replace("%NAME%", "beta"),
+    );
+    write_file(
+        dir.path(),
+        "web/src/lib.rs",
+        &BODY.replace("%NAME%", "gamma"),
+    );
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            "packages",
+            "cli",
+            "--format",
+            "md",
+            "--threshold",
+            "0.5",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Similarity report: packages, cli"),
+        "the report names every root: {stdout}",
+    );
+    assert!(stdout.contains("packages/core/src/lib.rs"), "got: {stdout}");
+    assert!(stdout.contains("cli/src/main.rs"), "got: {stdout}");
+    assert!(
+        !stdout.contains("web/src/lib.rs"),
+        "an untargeted tree must stay out: {stdout}",
+    );
+}
+
+/// `coupling` grows one module graph from one entry, so it keeps the
+/// single-PATH signature and says so rather than ignoring the extra.
+#[test]
+fn analyze_coupling_rejects_a_second_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a/src/lib.rs", "pub fn a() {}\n");
+    write_file(dir.path(), "b/src/lib.rs", "pub fn b() {}\n");
+
+    let output = agent_lens(&["analyze", "coupling", "a", "b"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unexpected argument"), "got: {stderr}");
+}
+
+/// `--top` is what bounds a `--format md` report, and the two analyzers
+/// that used to reject it are the ones with the longest listings.
+#[rstest]
+#[case::coupling(&["analyze", "coupling", "src/lib.rs", "--format", "md", "--top", "1"], "top 1")]
+#[case::wrapper(&["analyze", "wrapper", "src", "--format", "md", "--top", "1"], "not shown")]
+fn top_bounds_the_markdown_report(#[case] args: &[&str], #[case] expected: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", "pub mod a;\npub mod b;\n");
+    write_file(
+        dir.path(),
+        "src/a.rs",
+        "pub fn helper() {}\npub fn one(x: &str) -> String { inner_one(x) }\n",
+    );
+    write_file(
+        dir.path(),
+        "src/b.rs",
+        "pub fn two(x: &str) -> String { crate::a::helper(); inner_two(x) }\n\
+         pub fn three(x: &str) -> String { inner_three(x) }\n",
+    );
+
+    let output = agent_lens(args, dir.path(), None);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(expected), "got: {stdout}");
+}
+
 #[rstest]
 #[case::claude_session_start(&["hook", "session-start", "summary"])]
 #[case::claude_pre_tool_use(&["hook", "pre-tool-use", "complexity"])]

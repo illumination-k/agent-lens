@@ -17,6 +17,8 @@ use std::process::Command;
 
 use lens_domain::FileChurn;
 
+use super::AnalyzeRoots;
+
 /// Failures raised while asking git for churn.
 ///
 /// Deliberately narrower than any analyzer's error type: each analyzer
@@ -38,39 +40,85 @@ pub(crate) enum ChurnError {
     NotInGitRepo { path: PathBuf },
 }
 
-/// A resolved analysis target, anchored in its git working tree.
+/// A resolved analysis scope, anchored in its git working tree.
 #[derive(Debug, Clone)]
 pub(crate) struct ChurnScope {
-    /// The canonicalized analysis target (file or directory).
-    target: PathBuf,
-    /// Working-tree root containing [`Self::target`].
+    /// The canonicalized analysis targets (files or directories), in the
+    /// order the caller gave them. Never empty.
+    targets: Vec<PathBuf>,
+    /// Working-tree root containing every entry of [`Self::targets`].
     repo_root: PathBuf,
-    /// [`Self::target`] relative to the repo root, or `None` when the
-    /// caller pointed at the repo root itself.
-    scope_rel: Option<String>,
+    /// Each target relative to the repo root — the git pathspecs the log
+    /// is scoped by. Empty means repo-wide, either because the caller
+    /// pointed at the repo root or because one of several targets did.
+    scope_rels: Vec<String>,
+    /// The display base's offset from the repo root: what
+    /// [`Self::key_for_display`] prefixes a target-relative path with.
+    display_rel: Option<String>,
+    /// Whether the scope is one single file, whose display path is the
+    /// path as the caller spelled it rather than a base-relative one.
+    single_file: bool,
 }
 
 impl ChurnScope {
-    /// Canonicalize `path` and locate the git working tree around it.
-    pub(crate) fn resolve(path: &Path) -> Result<Self, ChurnError> {
-        let target = path.canonicalize().map_err(|source| ChurnError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    /// Canonicalize every root and locate the git working tree around
+    /// them.
+    ///
+    /// All roots must live in the same working tree; the first one
+    /// decides which, and a root outside it is reported as
+    /// [`ChurnError::NotInGitRepo`] rather than silently producing zero
+    /// churn for every file under it.
+    pub(crate) fn resolve(roots: &AnalyzeRoots) -> Result<Self, ChurnError> {
+        let mut targets = Vec::with_capacity(roots.paths().len());
+        for root in roots.paths() {
+            targets.push(canonicalize(root)?);
+        }
+        let Some(first) = targets.first() else {
+            return Err(ChurnError::NotInGitRepo {
+                path: PathBuf::from("."),
+            });
+        };
         let repo_root =
-            crate::paths::git_repo_root(&target).ok_or_else(|| ChurnError::NotInGitRepo {
-                path: path.to_path_buf(),
+            crate::paths::git_repo_root(first).ok_or_else(|| ChurnError::NotInGitRepo {
+                path: roots.paths()[0].clone(),
             })?;
-        let scope_rel = relative_to(&target, &repo_root);
+
+        // A target that *is* the repo root makes the whole scope
+        // repo-wide: pathspecs are a union, and the widest one wins.
+        let mut scope_rels = Vec::with_capacity(targets.len());
+        for (target, spelled) in targets.iter().zip(roots.paths()) {
+            if !target.starts_with(&repo_root) {
+                return Err(ChurnError::NotInGitRepo {
+                    path: spelled.clone(),
+                });
+            }
+            match relative_to(target, &repo_root) {
+                Some(rel) => scope_rels.push(rel),
+                None => {
+                    scope_rels.clear();
+                    break;
+                }
+            }
+        }
+
+        let single_file = roots.single().is_some_and(|root| root.is_file());
+        let display_rel = if single_file {
+            scope_rels.first().cloned()
+        } else {
+            relative_to(&canonicalize(roots.base())?, &repo_root)
+        };
         Ok(Self {
-            target,
+            targets,
             repo_root,
-            scope_rel,
+            scope_rels,
+            display_rel,
+            single_file,
         })
     }
 
-    pub(crate) fn target(&self) -> &Path {
-        &self.target
+    /// The canonicalized analysis targets. Never empty.
+    pub(crate) fn targets(&self) -> &[PathBuf] {
+        &self.targets
     }
 
     pub(crate) fn repo_root(&self) -> &Path {
@@ -92,8 +140,9 @@ impl ChurnScope {
         if let Some(s) = since {
             cmd.arg(format!("--since={s}"));
         }
-        if let Some(scope) = &self.scope_rel {
-            cmd.arg("--").arg(scope);
+        if !self.scope_rels.is_empty() {
+            cmd.arg("--");
+            cmd.args(&self.scope_rels);
         }
 
         let output = cmd.output().map_err(|source| ChurnError::Io {
@@ -128,27 +177,34 @@ impl ChurnScope {
         relative_to(file, &self.repo_root).unwrap_or_else(|| file.display().to_string())
     }
 
-    /// Repo-root-relative key for a *target*-relative display path — the
+    /// Repo-root-relative key for a *base*-relative display path — the
     /// path space [`super::SourceFile::display_path`] and therefore every
     /// call-graph node id lives in.
     ///
-    /// This is the join fix: prefixing with the target's own offset from
-    /// the repo root puts graph-derived paths in git's path space. A
-    /// single-file target is its own display path, so the offset already
+    /// This is the join fix: prefixing with the display base's own offset
+    /// from the repo root puts graph-derived paths in git's path space.
+    /// A single-file scope is its own display path, so the offset already
     /// *is* the answer.
     pub(crate) fn key_for_display(&self, display_path: &str) -> String {
-        if self.target.is_file() {
+        if self.single_file {
             return self
-                .scope_rel
+                .display_rel
                 .clone()
                 .unwrap_or_else(|| display_path.replace('\\', "/"));
         }
         let display_path = display_path.replace('\\', "/");
-        match &self.scope_rel {
-            Some(scope) => format!("{scope}/{display_path}"),
+        match &self.display_rel {
+            Some(base) => format!("{base}/{display_path}"),
             None => display_path,
         }
     }
+}
+
+fn canonicalize(path: &Path) -> Result<PathBuf, ChurnError> {
+    path.canonicalize().map_err(|source| ChurnError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Express `target` as a `/`-separated path relative to `base`,
@@ -190,7 +246,7 @@ mod tests {
         run_git(dir.path(), &["add", "."]);
         run_git(dir.path(), &["commit", "-q", "-m", "tweak"]);
 
-        let scope = ChurnScope::resolve(dir.path()).unwrap();
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
         let churn = scope.collect(None).unwrap();
         let lib = churn
             .iter()
@@ -211,7 +267,7 @@ mod tests {
     fn since_window_scopes_the_history() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let scope = ChurnScope::resolve(dir.path()).unwrap();
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
         assert!(scope.collect(Some("2099-01-01")).unwrap().is_empty());
     }
 
@@ -222,7 +278,8 @@ mod tests {
     fn subdirectory_target_joins_on_repo_relative_paths() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let scope = ChurnScope::resolve(&dir.path().join("crates/app")).unwrap();
+        let scope =
+            ChurnScope::resolve(&AnalyzeRoots::from(&dir.path().join("crates/app"))).unwrap();
 
         let churn = scope.collect(None).unwrap();
         assert!(
@@ -236,11 +293,79 @@ mod tests {
         );
     }
 
+    /// Several targets are one scope: the log is bounded by their union
+    /// of pathspecs, and display paths key against their common base.
+    #[test]
+    fn several_targets_scope_the_log_to_their_union() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(dir.path(), "packages/core/lib.rs", "pub fn a() {}\n");
+        write_file(dir.path(), "cli/main.rs", "fn main() {}\n");
+        write_file(dir.path(), "web/app.ts", "export function c() {}\n");
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let roots = AnalyzeRoots::new([dir.path().join("packages"), dir.path().join("cli")]);
+        let scope = ChurnScope::resolve(&roots).unwrap();
+        let churn = scope.collect(None).unwrap();
+        let paths: Vec<&str> = churn.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["cli/main.rs", "packages/core/lib.rs"],
+            "the untargeted `web` tree must stay out of the churn",
+        );
+        // Display paths are base-relative (base is the repo root here),
+        // so they are already in git's path space.
+        assert_eq!(
+            scope.key_for_display("packages/core/lib.rs"),
+            "packages/core/lib.rs",
+        );
+    }
+
+    /// A nested common base still lifts display paths into git's space —
+    /// the same join fix the single-target case needs, computed from the
+    /// base rather than from one target.
+    #[test]
+    fn several_targets_under_a_subdirectory_key_on_repo_relative_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let roots = AnalyzeRoots::new([
+            dir.path().join("crates/app/src/lib.rs"),
+            dir.path().join("crates/app/src/other.rs"),
+        ]);
+        let scope = ChurnScope::resolve(&roots).unwrap();
+        assert_eq!(
+            scope.key_for_display("lib.rs"),
+            "crates/app/src/lib.rs",
+            "display paths are relative to the targets' common ancestor",
+        );
+    }
+
+    /// A target outside the first one's working tree is an error, not a
+    /// silent zero-churn join.
+    #[test]
+    fn a_target_outside_the_working_tree_is_rejected() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let outside = tempfile::tempdir().unwrap();
+        write_file(outside.path(), "lone.rs", "fn x() {}\n");
+
+        let roots =
+            AnalyzeRoots::new([repo.path().join("crates/app"), outside.path().to_path_buf()]);
+        let err = ChurnScope::resolve(&roots).unwrap_err();
+        assert!(
+            matches!(err, ChurnError::NotInGitRepo { .. }),
+            "got {err:?}"
+        );
+    }
+
     #[test]
     fn repo_root_target_leaves_display_paths_untouched() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let scope = ChurnScope::resolve(dir.path()).unwrap();
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
         assert_eq!(
             scope.key_for_display("crates/app/src/lib.rs"),
             "crates/app/src/lib.rs",
@@ -256,7 +381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
         let file = dir.path().join("crates/app/src/lib.rs");
-        let scope = ChurnScope::resolve(&file).unwrap();
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(&file)).unwrap();
         assert_eq!(
             scope.key_for_display(&file.display().to_string()),
             "crates/app/src/lib.rs",
@@ -268,7 +393,7 @@ mod tests {
     fn absolute_paths_key_relative_to_the_repo_root() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        let scope = ChurnScope::resolve(dir.path()).unwrap();
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
         let file = scope.repo_root().join("crates/app/src/lib.rs");
         assert_eq!(scope.key_for_absolute(&file), "crates/app/src/lib.rs");
         assert_eq!(
@@ -282,7 +407,7 @@ mod tests {
     fn target_outside_a_git_working_tree_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "lone.rs", "fn x() {}\n");
-        let err = ChurnScope::resolve(dir.path()).unwrap_err();
+        let err = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap_err();
         assert!(
             matches!(err, ChurnError::NotInGitRepo { .. }),
             "got {err:?}"
@@ -291,7 +416,8 @@ mod tests {
 
     #[test]
     fn missing_path_surfaces_an_io_error() {
-        let err = ChurnScope::resolve(Path::new("/definitely/does/not/exist")).unwrap_err();
+        let err = ChurnScope::resolve(&AnalyzeRoots::from(Path::new("/definitely/does/not/exist")))
+            .unwrap_err();
         assert!(matches!(err, ChurnError::Io { .. }), "got {err:?}");
     }
 

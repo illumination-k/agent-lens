@@ -34,7 +34,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde::Serialize;
 
@@ -42,7 +41,7 @@ use super::call_graph::algo::{self, BfsVisit};
 use super::call_graph::model::{CallGraphNode, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders, match_symbol};
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -212,10 +211,15 @@ impl GraphQueryAnalyzer {
         exclude_tests,
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
         self.validate()?;
-        let graph = self.builder.build(path)?;
-        let report = Report::build(path, &graph, self);
+        let graph = self.builder.build(&roots)?;
+        let report = Report::build(&roots, &graph, self);
         render_report(&report, format, || format_markdown(&report))
     }
 
@@ -374,10 +378,10 @@ struct Report {
 }
 
 impl Report {
-    fn build(root: &Path, graph: &CallGraph, spec: &GraphQueryAnalyzer) -> Self {
+    fn build(roots: &AnalyzeRoots, graph: &CallGraph, spec: &GraphQueryAnalyzer) -> Self {
         let mut report = Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             query: spec.query,
             symbol: spec.symbol.clone(),
@@ -796,6 +800,7 @@ mod tests {
     use crate::test_support::write_file;
     use rstest::rstest;
     use serde_json::Value;
+    use std::path::Path;
 
     /// A small diamond: `top` calls two helpers, both funnel into
     /// `sink`.

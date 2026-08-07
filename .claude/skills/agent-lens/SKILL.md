@@ -34,10 +34,23 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 
 `similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` and `unreachable` judge Rust and Go only — TypeScript and Python carry no extracted export status, and both say how many functions they skipped for that reason (`unreachable` treats them as entry points, so nothing they call is reported). `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot` and `risk` require a git working tree.
 
+## Several paths in one run
+
+Every analyzer except `coupling` and `context-span` takes more than one PATH, and walks them all into a single report:
+
+```bash
+agent-lens analyze similarity packages cli web/src --format md --exclude-tests
+```
+
+Reach for this in a monorepo, where the trees you care about are siblings and their only common ancestor is the repo root (which drags in `node_modules`, generated output, and everything else). It is not the same as running the analyzer once per tree: `similarity` clusters across the whole corpus and the call-graph analyzers resolve edges across it, so a duplicate or a call spanning two trees is only visible in one combined run. Display paths are written relative to the paths' deepest common ancestor, so each file keeps the tree it came from in its name.
+
+`coupling` and `context-span` grow one module graph out of one entry point, so they keep the single-PATH signature. Use `--entry-glob` for `context-span` when a TS/JS framework has many entries; for `coupling`, pick a representative entry.
+
 ## Output format
 
 - Default `stdout` is JSON — pipe into `jq` for ad-hoc filtering.
 - Pass `--format md` when feeding the report into another agent's context window.
+- Every analyzer that can emit a long markdown report takes `--top` to bound it, `cycles` excepted (a truncated cycle list reads as the whole list). JSON always carries the full result — `--top` is a rendering cap, not a filter.
 - Diagnostics go to `stderr` via `tracing`. Set `RUST_LOG=debug` for verbose.
 
 ## Always prefer `--diff-only` for in-progress edits
@@ -55,6 +68,12 @@ agent-lens analyze similarity crates/lens-rust/src/foo.rs --diff-only --format m
 
 # Cross-file duplicates across a directory tree
 agent-lens analyze similarity crates/lens-rust/src --format md
+
+# Cross-tree duplicates: several roots, one corpus
+agent-lens analyze similarity crates/lens-py crates/lens-golang --format md
+
+# Crate-wide structure, bounded to the 15 most-coupled modules
+agent-lens analyze coupling crates/agent-lens --format md --top 15
 
 # Crate-wide structure (Rust crate)
 agent-lens analyze coupling crates/agent-lens --format md

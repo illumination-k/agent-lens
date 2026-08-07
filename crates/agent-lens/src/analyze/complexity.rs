@@ -11,7 +11,6 @@
 //! ethos.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
@@ -21,7 +20,8 @@ use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
 use super::{
-    AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64, read_source,
+    AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64,
+    read_source,
 };
 
 analyzer_options! {
@@ -76,12 +76,18 @@ impl ComplexityAnalyzer {
             .with_diff_only(opts.diff_only)
     }
 
-    /// Read `path`, analyze it, and produce a report in `format`.
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+    /// Walk `roots`, analyze them, and produce a report in `format`.
+    /// Accepts a single path or several — see [`AnalyzeRoots`].
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
         let scan = self
             .filter
-            .collect_per_file(path, |sf| self.analyze_file(sf))?;
-        let report = build_report(path, scan.scanned_file_count, &scan.reports);
+            .collect_per_file(&roots, |sf| self.analyze_file(sf))?;
+        let report = build_report(&roots, scan.scanned_file_count, &scan.reports);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.min_score)
         })
@@ -132,7 +138,11 @@ impl PerFileShape for ComplexityShape {
 type Report<'a> = PerFileReport<'a, ComplexityShape, FunctionView<'a>, Summary>;
 type FileView<'a> = super::runner::FileView<'a, ComplexityShape, FunctionView<'a>>;
 
-fn build_report<'a>(path: &Path, scanned_file_count: usize, files: &'a [FileReport]) -> Report<'a> {
+fn build_report<'a>(
+    roots: &AnalyzeRoots,
+    scanned_file_count: usize,
+    files: &'a [FileReport],
+) -> Report<'a> {
     let views = files
         .iter()
         .map(|f| {
@@ -142,7 +152,7 @@ fn build_report<'a>(path: &Path, scanned_file_count: usize, files: &'a [FileRepo
             )
         })
         .collect();
-    PerFileReport::new(path, scanned_file_count, views).with_summary(Summary::from_files(files))
+    PerFileReport::new(roots, scanned_file_count, views).with_summary(Summary::from_files(files))
 }
 
 #[derive(Debug, Serialize)]
@@ -367,6 +377,7 @@ fn render_top_functions(
 mod tests {
     use super::*;
     use crate::test_support::{run_git, write_file};
+    use std::path::Path;
 
     #[test]
     fn json_report_includes_function_metrics_and_summary() {
@@ -502,7 +513,7 @@ fn dispatch(n: i32) -> i32 {
     fn missing_path_errors_as_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let err = ComplexityAnalyzer::new()
-            .analyze(&dir.path().join("nope"), OutputFormat::Json)
+            .analyze(dir.path().join("nope"), OutputFormat::Json)
             .unwrap_err();
         assert!(matches!(err, AnalyzerError::PathNotFound { .. }), "{err:?}");
     }

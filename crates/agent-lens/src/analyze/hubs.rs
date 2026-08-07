@@ -29,7 +29,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde::Serialize;
 
@@ -43,7 +42,7 @@ use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builder
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -106,9 +105,14 @@ impl HubsAnalyzer {
         self
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let graph = self.builder.build(path)?;
-        let report = Report::build(path, &graph, self.only_tests);
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
+        let graph = self.builder.build(&roots)?;
+        let report = Report::build(&roots, &graph, self.only_tests);
         render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
@@ -230,7 +234,7 @@ struct Report {
 }
 
 impl Report {
-    fn build(root: &Path, graph: &CallGraph, only_tests: bool) -> Self {
+    fn build(roots: &AnalyzeRoots, graph: &CallGraph, only_tests: bool) -> Self {
         let metrics = NodeMetrics::compute(graph, only_tests);
         let entries: Vec<HubEntry> = metrics.to_entries(&graph.nodes);
 
@@ -284,7 +288,7 @@ impl Report {
 
         Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             node_count: graph.nodes.len(),
             candidate_count: entries.len(),
@@ -653,6 +657,7 @@ mod tests {
     use crate::test_support::write_file;
     use rstest::rstest;
     use serde_json::Value;
+    use std::path::Path;
 
     fn analyze_json(path: &Path) -> Value {
         let json = HubsAnalyzer::new()

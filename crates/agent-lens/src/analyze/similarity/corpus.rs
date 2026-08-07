@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use lens_domain::{BlockWindowOptions, FunctionShape, SignatureShape, TreeNode, block_windows};
@@ -10,7 +10,7 @@ use super::PROFILE_TARGET;
 use super::SimilarityTarget;
 use super::extract::{extract_functions, extract_statement_seqs, extract_types};
 use crate::analyze::{
-    AnalyzePathFilter, AnalyzerError, SourceFile, collect_source_files, read_source,
+    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, SourceFile, collect_source_files, read_source,
 };
 
 /// A single comparison unit plus the file it originated from. The corpus
@@ -77,10 +77,11 @@ impl OwnedUnit {
     }
 }
 
-/// Collect every unit of `target`'s kind under `path` into a flat
+/// Collect every unit of `target`'s kind under `roots` into a flat
 /// corpus, tagging each with the file it came from. Single-file inputs
 /// return a 1-element per-file slice; directory inputs walk recursively,
-/// honouring `.gitignore`.
+/// honouring `.gitignore`. Several roots are walked into one corpus, so a
+/// cluster spanning two of them is still found.
 ///
 /// `min_lines` is only consulted for [`SimilarityTarget::Blocks`], where
 /// it bounds the window population at collection time rather than
@@ -88,7 +89,7 @@ impl OwnedUnit {
 /// length would be an order of magnitude larger than the one anybody
 /// asked for.
 pub(super) fn collect_corpus(
-    path: &Path,
+    roots: &AnalyzeRoots,
     path_filter: &AnalyzePathFilter,
     selection: FunctionSelection,
     target: SimilarityTarget,
@@ -99,9 +100,9 @@ pub(super) fn collect_corpus(
     } else {
         path_filter.clone()
     };
-    let filter = collection_filter.compile(path)?;
+    let filter = collection_filter.compile(roots.base())?;
     let started = Instant::now();
-    let files = collect_source_files(path, &filter)?;
+    let files = collect_source_files(roots, &filter)?;
 
     let parsed: Vec<Vec<OwnedUnit>> = files
         .par_iter()
@@ -115,7 +116,7 @@ pub(super) fn collect_corpus(
     let file_count = files.len();
     debug!(
         target: PROFILE_TARGET,
-        root = %path.display(),
+        root = %roots.display(),
         file_count,
         unit_count = out.len(),
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,

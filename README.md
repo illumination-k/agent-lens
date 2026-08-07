@@ -223,7 +223,7 @@ agent-lens analyze complexity src/foo.rs --diff-only
 # Module-level Fan-In / Fan-Out / Henry-Kafura IFC, Instability, and
 # cyclic SCCs for a Rust crate, TS/JS module graph, Go module, or
 # Python package tree
-agent-lens analyze coupling crates/agent-lens
+agent-lens analyze coupling crates/agent-lens --format md --top 15
 
 # Static function call graph for visualization tooling
 agent-lens analyze function-graph crates/agent-lens
@@ -248,6 +248,10 @@ agent-lens analyze wrapper src/foo.rs
 
 # Wrapper findings limited to functions overlapping `git diff -U0` hunks
 agent-lens analyze wrapper src/foo.rs --diff-only
+
+# Several trees in one report: a duplicate spanning two of them is only
+# visible here, not in three separate runs
+agent-lens analyze similarity packages cli web/src --format md --exclude-tests
 ```
 
 ### As a profile runner
@@ -428,6 +432,21 @@ Analyzer commands share `PATH`, `--format json|md`, `--only-tests`,
 `--exclude-tests`, and repeatable `--exclude GLOB`. Directory analyzers walk
 recursively with `.gitignore` semantics.
 
+Every analyzer except `coupling` and `context-span` takes more than one
+`PATH` and walks them all into a single report — the monorepo case, where the
+trees you care about are siblings and their only common ancestor is the repo
+root. This is not the same as one run per tree: `similarity` clusters across
+the whole corpus and the call-graph analyzers resolve edges across it, so a
+finding spanning two trees is only visible in a combined run. Display paths
+are written relative to the paths' deepest common ancestor. `coupling` and
+`context-span` grow one module graph out of one entry point, so they keep the
+single-`PATH` signature.
+
+`--top N` bounds the length of a `--format md` report and is accepted by every
+analyzer that can produce a long one; `cycles` is the exception, since a
+truncated cycle list reads as the whole list. JSON output always carries the
+full result — `--top` is a rendering cap, not a filter on the analysis.
+
 Analyzer-specific options today:
 
 | Analyzer         | Extra options                                                                                                                                                                            |
@@ -435,7 +454,7 @@ Analyzer-specific options today:
 | `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--diff-only`, `--top N` |
 | `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
 | `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
-| `wrapper`        | `--diff-only`                                                                                                                                                                            |
+| `wrapper`        | `--diff-only`, `--top N`                                                                                                                                                                 |
 | `delegation`     | `--diff-only`, `--top N`                                                                                                                                                                 |
 | `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                               |
 | `risk`           | `--since VALUE`, `--top N`                                                                                                                                                               |
@@ -446,7 +465,7 @@ Analyzer-specific options today:
 | `untested`       | `--top N`                                                                                                                                                                                |
 | `visibility`     | `--top N`                                                                                                                                                                                |
 | `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                                                  |
-| `coupling`       | shared analyzer options only                                                                                                                                                             |
+| `coupling`       | `--top N`                                                                                                                                                                                |
 | `cycles`         | shared analyzer options only                                                                                                                                                             |
 | `function-graph` | shared analyzer options only                                                                                                                                                             |
 | `context-span`   | shared analyzer options only                                                                                                                                                             |

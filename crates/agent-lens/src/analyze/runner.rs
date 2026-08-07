@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 
 use super::{
-    AnalyzePathFilter, AnalyzerError, OutputFormat, SourceFile, changed_line_ranges,
+    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, changed_line_ranges,
     collect_source_files, overlaps_any,
 };
 
@@ -72,15 +72,15 @@ impl FilterConfig {
             .with_exclude_patterns(self.exclude.clone())
     }
 
-    /// Compile the path filter against `path` and walk it (single file
-    /// or directory, respecting `.gitignore`), returning every
+    /// Compile the path filter against `roots` and walk them (single
+    /// files or directories, respecting `.gitignore`), returning every
     /// supported source file the analyzer should inspect.
-    fn collect_source_files(&self, path: &Path) -> Result<Vec<SourceFile>, AnalyzerError> {
-        let filter = self.path_filter().compile(path)?;
-        collect_source_files(path, &filter)
+    fn collect_source_files(&self, roots: &AnalyzeRoots) -> Result<Vec<SourceFile>, AnalyzerError> {
+        let filter = self.path_filter().compile(roots.base())?;
+        collect_source_files(roots, &filter)
     }
 
-    /// Walk `path` and run `analyze_one` on every supported source
+    /// Walk `roots` and run `analyze_one` on every supported source
     /// file. Files for which `analyze_one` returns `Ok(None)` are
     /// dropped so directory-mode reports stay signal-dense, but they
     /// still count towards `scanned_file_count` — the report must be
@@ -88,12 +88,12 @@ impl FilterConfig {
     /// than the misleading "0 file(s)".
     pub fn collect_per_file<R>(
         &self,
-        path: &Path,
+        roots: &AnalyzeRoots,
         mut analyze_one: impl FnMut(&SourceFile) -> Result<Option<R>, AnalyzerError>,
     ) -> Result<PerFileScan<R>, AnalyzerError> {
         let mut reports = Vec::new();
         let mut scanned_file_count = 0;
-        for source_file in self.collect_source_files(path)? {
+        for source_file in self.collect_source_files(roots)? {
             scanned_file_count += 1;
             if let Some(report) = analyze_one(&source_file)? {
                 reports.push(report);
@@ -229,9 +229,13 @@ impl<'a, S, V, X> PerFileReport<'a, S, V, X> {
     /// the number of source files the walk inspected, which is at least
     /// `files.len()` — files without findings are scanned but produce
     /// no [`FileView`].
-    pub fn new(root: &Path, scanned_file_count: usize, files: Vec<FileView<'a, S, V>>) -> Self {
+    pub fn new(
+        roots: &AnalyzeRoots,
+        scanned_file_count: usize,
+        files: Vec<FileView<'a, S, V>>,
+    ) -> Self {
         Self {
-            root: root.display().to_string(),
+            root: roots.display(),
             scanned_file_count,
             files,
             summary: None,
@@ -344,7 +348,7 @@ mod tests {
 
         let cfg = FilterConfig::default();
         let scan: PerFileScan<String> = cfg
-            .collect_per_file(dir.path(), |sf| {
+            .collect_per_file(&AnalyzeRoots::from(dir.path()), |sf| {
                 if sf.display_path.ends_with("drop.rs") {
                     Ok(None)
                 } else {
@@ -363,7 +367,7 @@ mod tests {
 
         let cfg = FilterConfig::default();
         let err = cfg
-            .collect_per_file::<()>(dir.path(), |_| {
+            .collect_per_file::<()>(&AnalyzeRoots::from(dir.path()), |_| {
                 Err(AnalyzerError::UnsupportedExtension {
                     path: PathBuf::from("synthetic"),
                 })
@@ -468,7 +472,8 @@ mod tests {
 
     #[test]
     fn per_file_report_serializes_under_the_shape_field_names() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 3, sample_files());
+        let report: TestReport<'_> =
+            TestReport::new(&AnalyzeRoots::from(Path::new("/src")), 3, sample_files());
         let json = to_json(&report);
 
         assert_eq!(json["root"], "/src");
@@ -486,7 +491,8 @@ mod tests {
 
     #[test]
     fn per_file_report_omits_summary_when_absent() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 3, sample_files());
+        let report: TestReport<'_> =
+            TestReport::new(&AnalyzeRoots::from(Path::new("/src")), 3, sample_files());
         let json = to_json(&report);
         assert!(report.summary().is_none());
         assert!(
@@ -497,8 +503,8 @@ mod tests {
 
     #[test]
     fn per_file_report_emits_attached_summary() {
-        let report =
-            TestReport::new(Path::new("/src"), 3, sample_files()).with_summary("corpus-wide");
+        let report = TestReport::new(&AnalyzeRoots::from(Path::new("/src")), 3, sample_files())
+            .with_summary("corpus-wide");
         let json = to_json(&report);
         assert_eq!(report.summary().copied(), Some("corpus-wide"));
         assert_eq!(json["summary"], "corpus-wide");
@@ -510,7 +516,8 @@ mod tests {
 
     #[test]
     fn per_file_report_counts_are_derived_from_the_files() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 3, sample_files());
+        let report: TestReport<'_> =
+            TestReport::new(&AnalyzeRoots::from(Path::new("/src")), 3, sample_files());
         assert_eq!(report.scanned_file_count(), 3);
         assert_eq!(report.item_count(), 3);
         assert_eq!(report.root(), "/src");
@@ -519,7 +526,8 @@ mod tests {
 
     #[test]
     fn empty_report_counts_zero() {
-        let report: TestReport<'_> = TestReport::new(Path::new("/src"), 0, Vec::new());
+        let report: TestReport<'_> =
+            TestReport::new(&AnalyzeRoots::from(Path::new("/src")), 0, Vec::new());
         let json = to_json(&report);
         assert_eq!(report.item_count(), 0);
         assert_eq!(json["scanned_file_count"], 0);

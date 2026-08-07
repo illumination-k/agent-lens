@@ -24,8 +24,8 @@ use lens_rust::CallIndexOptions;
 
 use super::cargo_meta::CrateNameCache;
 use super::{
-    AnalyzePathFilter, AnalyzerError, LineRange, SourceFile, SourceLang, changed_line_ranges,
-    collect_source_files, read_source,
+    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, LineRange, SourceFile, SourceLang,
+    changed_line_ranges, collect_source_files, read_source,
 };
 use model::{
     CallGraphEdge, CallGraphNode, DelegationFacts, EdgeWeights, GraphLanguage,
@@ -238,11 +238,11 @@ impl CallGraphBuilder {
     /// diff-seeded analyzers see exactly the graph's file set.
     pub(crate) fn changed_line_ranges_by_display_path(
         &self,
-        path: &Path,
+        roots: &AnalyzeRoots,
     ) -> Result<BTreeMap<String, Vec<LineRange>>, AnalyzerError> {
-        let filter = self.collection_filter().compile(path)?;
+        let filter = self.collection_filter().compile(roots.base())?;
         let mut out = BTreeMap::new();
-        for source_file in collect_source_files(path, &filter)? {
+        for source_file in collect_source_files(roots, &filter)? {
             let ranges = changed_line_ranges(&source_file.path);
             if !ranges.is_empty() {
                 out.insert(source_file.display_path, ranges);
@@ -251,16 +251,21 @@ impl CallGraphBuilder {
         Ok(out)
     }
 
-    pub(crate) fn build(&self, path: &Path) -> Result<CallGraph, AnalyzerError> {
-        let filter = self.collection_filter().compile(path)?;
+    pub(crate) fn build(&self, roots: &AnalyzeRoots) -> Result<CallGraph, AnalyzerError> {
+        let filter = self.collection_filter().compile(roots.base())?;
         let mut files = Vec::new();
         let mut crate_cache = CrateNameCache::new();
-        for source_file in collect_source_files(path, &filter)? {
+        for source_file in collect_source_files(roots, &filter)? {
             if !graphed_language(&source_file.path) {
                 continue;
             }
             let path_is_test = filter.is_test_path(&source_file.path);
-            files.push(self.scan_file(path, &source_file, path_is_test, &mut crate_cache)?);
+            files.push(self.scan_file(
+                roots.base(),
+                &source_file,
+                path_is_test,
+                &mut crate_cache,
+            )?);
         }
         Ok(CallGraph::build(files))
     }
@@ -276,12 +281,12 @@ impl CallGraphBuilder {
     /// number of files visited.
     pub(crate) fn visit_source_texts(
         &self,
-        path: &Path,
+        roots: &AnalyzeRoots,
         mut visit: impl FnMut(&str, &str),
     ) -> Result<usize, AnalyzerError> {
-        let filter = self.collection_filter().compile(path)?;
+        let filter = self.collection_filter().compile(roots.base())?;
         let mut visited = 0;
-        for source_file in collect_source_files(path, &filter)? {
+        for source_file in collect_source_files(roots, &filter)? {
             if !graphed_language(&source_file.path) {
                 continue;
             }
@@ -969,7 +974,9 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), fixture.file, fixture.source);
-        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
 
         assert_eq!(
             call_outcome(&graph, fixture.ubiquitous_caller, fixture.ubiquitous_callee),
@@ -1086,7 +1093,9 @@ mod tests {
     fn plain_calls_to_builtins_do_not_become_workspace_edges(#[case] fixture: BuiltinFixture) {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), fixture.file, fixture.source);
-        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
 
         assert_eq!(
             call_outcome(&graph, fixture.builtin_caller, fixture.builtin_callee),
@@ -1135,7 +1144,9 @@ mod tests {
             "fn a() { b(); }\nfn b() { a(); c(); }\nfn c() {}\n",
         );
 
-        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
         assert_eq!(graph.language, "rust");
         let index = graph.node_index_by_id();
         let a = index["src/lib.rs:a:1"];
@@ -1167,13 +1178,17 @@ mod tests {
         let readme = write_file(dir.path(), "README.md", "# not source\n");
         write_file(dir.path(), "src/lib.rs", "fn a() {}\n");
 
-        let graph = CallGraphBuilder::new().build(&readme).unwrap();
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(&readme))
+            .unwrap();
         assert!(graph.nodes.is_empty(), "got {:?}", graph.nodes);
         assert_eq!(graph.language, "unknown");
 
         let mut visited = Vec::new();
         let count = CallGraphBuilder::new()
-            .visit_source_texts(dir.path(), |file, _| visited.push(file.to_owned()))
+            .visit_source_texts(&AnalyzeRoots::from(dir.path()), |file, _| {
+                visited.push(file.to_owned())
+            })
             .unwrap();
         assert_eq!(visited, ["src/lib.rs"], "the markdown file is not source");
         assert_eq!(count, 1);
@@ -1192,7 +1207,9 @@ mod tests {
             "fn a() { c(); c(); }\nfn b() { c(); }\nfn c() { c(); }\n",
         );
 
-        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
         let index = graph.node_index_by_id();
         let a = index["src/lib.rs:a:1"];
         let b = index["src/lib.rs:b:2"];
@@ -1225,7 +1242,9 @@ mod tests {
              fn unresolved() { nowhere(); }\n",
         );
 
-        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
         assert!(
             graph
                 .edges
@@ -1239,6 +1258,34 @@ mod tests {
         );
     }
 
+    /// The call graph's counterpart to the similarity case: a call edge
+    /// from one root into another only exists if both roots were scanned
+    /// into the same graph.
+    #[test]
+    fn several_roots_build_one_graph_with_edges_between_them() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "core/src/lib.rs", "pub fn helper() {}\n");
+        write_file(dir.path(), "cli/src/main.rs", "fn main() { helper(); }\n");
+        // Untouched by the roots below, so its call must stay out.
+        write_file(dir.path(), "web/src/lib.rs", "fn other() { helper(); }\n");
+
+        let roots = AnalyzeRoots::new([dir.path().join("core"), dir.path().join("cli")]);
+        let graph = CallGraphBuilder::new().build(&roots).unwrap();
+
+        let files: Vec<&str> = graph.nodes.iter().map(|n| n.file.as_str()).collect();
+        assert_eq!(
+            files,
+            ["cli/src/main.rs", "core/src/lib.rs"],
+            "got {files:?}"
+        );
+        let (resolution, target) = call_outcome(&graph, "main", "helper");
+        assert_eq!(resolution, Resolution::Resolved);
+        assert!(
+            target.is_some_and(|t| t.ends_with("helper")),
+            "got {target:?}",
+        );
+    }
+
     #[test]
     fn per_module_summary_counts_call_sites_by_resolution() {
         let dir = tempfile::tempdir().unwrap();
@@ -1249,7 +1296,9 @@ mod tests {
              mod b { fn caller() { crate::a::known(); } }\n",
         );
 
-        let graph = CallGraphBuilder::new().build(dir.path()).unwrap();
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
         let summary: Vec<(&str, usize, usize, usize)> = graph
             .module_summary
             .iter()

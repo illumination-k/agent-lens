@@ -45,6 +45,7 @@ use crate::analyze::OutputFormat;
 pub use crate::analyze::cohesion::CohesionOptions;
 pub use crate::analyze::complexity::ComplexityOptions;
 pub use crate::analyze::context_span::ContextSpanOptions;
+pub use crate::analyze::coupling::CouplingOptions;
 pub use crate::analyze::delegation::DelegationOptions;
 pub use crate::analyze::graph_query::GraphQueryOptions;
 pub use crate::analyze::hotspot::HotspotOptions;
@@ -146,6 +147,8 @@ pub struct Profile {
     pub graph_query: Option<GraphQueryOptions>,
     #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
+    #[serde(default)]
+    pub coupling: Option<CouplingOptions>,
     #[serde(default)]
     pub delegation: Option<DelegationOptions>,
     #[serde(default)]
@@ -420,7 +423,7 @@ since = "90.days.ago"
         "[profile.web]\npath = \"web/\"\ntools = [\"similarity\"]\n\n[profile.web.similarity]\ntreshold = 0.9\n"
     )]
     #[case::table_for_optionless_tool(
-        "[profile.web]\npath = \"web/\"\ntools = [\"coupling\"]\n\n[profile.web.coupling]\ntop = 5\n"
+        "[profile.web]\npath = \"web/\"\ntools = [\"cycles\"]\n\n[profile.web.cycles]\ntop = 5\n"
     )]
     #[case::unknown_top_level_key("widget = true\n")]
     fn rejects_unknown_keys(#[case] toml_src: &str) {

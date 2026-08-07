@@ -74,7 +74,7 @@ use super::format::{
 };
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -154,7 +154,12 @@ impl VisibilityAnalyzer {
         self
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
         // Interface method sets are what tells an uncalled-looking Go
         // method apart from one whose calls dispatch through an
         // interface, so this analyzer always pays for their extraction.
@@ -162,8 +167,8 @@ impl VisibilityAnalyzer {
             .builder
             .clone()
             .with_interface_facts(true)
-            .build(path)?;
-        let report = Report::build(path, &graph);
+            .build(&roots)?;
+        let report = Report::build(&roots, &graph);
         render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
@@ -338,9 +343,9 @@ struct Summary {
 }
 
 impl Report {
-    fn build(root: &Path, graph: &CallGraph) -> Self {
+    fn build(roots: &AnalyzeRoots, graph: &CallGraph) -> Self {
         let crate_dirs = rust_crate_dirs(graph);
-        let re_exports = ReExports::scan(root, &crate_dirs);
+        let re_exports = ReExports::scan(roots.base(), &crate_dirs);
         let public = public_nodes(graph);
         let audited: Vec<(usize, ExportLang)> = public
             .iter()
@@ -363,10 +368,16 @@ impl Report {
         let summary = summarize(&modules, audited.len());
         Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             note: NOTE,
-            audit: audit_scope(root, graph, &crate_dirs, public.len(), audited.len()),
+            audit: audit_scope(
+                roots.base(),
+                graph,
+                &crate_dirs,
+                public.len(),
+                audited.len(),
+            ),
             modules,
             resolution: graph.module_summary.clone(),
             summary,

@@ -11,7 +11,7 @@ Three analyzers cover the "is this already written?" and "why does this take fou
 - `wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
 - `delegation` — what `wrapper` becomes when it stacks: chains where every hop only forwards, reported with the terminus (the function doing the work) as the headline, plus a per-module roll-up that flags modules built almost entirely out of forwarders.
 
-All three parse Rust, TypeScript / JavaScript, Python, and Go (parser is selected from the file extension). All accept either a single file or a directory; in directory mode they walk recursively (respecting `.gitignore` like ripgrep). `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file; `delegation` needs a directory to see across files at all.
+All three parse Rust, TypeScript / JavaScript, Python, and Go (parser is selected from the file extension). All accept files or directories, and more than one of either; in directory mode they walk recursively (respecting `.gitignore` like ripgrep). `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file; `delegation` needs a directory to see across files at all.
 
 ## Workflow
 
@@ -37,12 +37,18 @@ agent-lens analyze delegation <dir>  --diff-only --format md
 
 ### 3. If the user is auditing a whole file or crate
 
-All three accept a directory, so you don't need to loop manually. `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file; `delegation` needs the directory to follow a chain across files:
+All three accept a directory, so you don't need to loop manually. `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file (capped at `--top`, default 20); `delegation` needs the directory to follow a chain across files:
 
 ```bash
 agent-lens analyze similarity crates/<name>/src --format md
 agent-lens analyze wrapper    crates/<name>/src --format md
 agent-lens analyze delegation crates/<name>/src --format md
+```
+
+In a monorepo the trees you care about are usually siblings, and their only common ancestor drags in `node_modules` and generated output. Pass them all at once instead — one corpus, so a duplicate spanning two of them is found where three separate runs cannot see it:
+
+```bash
+agent-lens analyze similarity packages cli web/src --format md --exclude-tests
 ```
 
 ## Tuning the threshold

@@ -59,7 +59,7 @@ use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builder
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, LineRange, OutputFormat, SourceLang, overlaps_any};
+use super::{AnalyzeRoots, AnalyzerError, LineRange, OutputFormat, SourceLang, overlaps_any};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -169,13 +169,18 @@ impl DelegationAnalyzer {
         self
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let graph = self.builder.build(path)?;
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
+        let graph = self.builder.build(&roots)?;
         let changed = self
             .diff_only
-            .then(|| self.builder.changed_line_ranges_by_display_path(path))
+            .then(|| self.builder.changed_line_ranges_by_display_path(&roots))
             .transpose()?;
-        let report = Report::build(path, &graph, changed.as_ref());
+        let report = Report::build(&roots, &graph, changed.as_ref());
         render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
@@ -331,7 +336,7 @@ struct Summary {
 
 impl Report {
     fn build(
-        root: &Path,
+        roots: &AnalyzeRoots,
         graph: &CallGraph,
         changed: Option<&BTreeMap<String, Vec<LineRange>>>,
     ) -> Self {
@@ -359,7 +364,7 @@ impl Report {
         let summary = summarize(&chains, &modules);
         Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             note: NOTE,
             audit: Audit {

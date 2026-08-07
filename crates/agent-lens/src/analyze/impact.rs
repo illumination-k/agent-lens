@@ -29,7 +29,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde::Serialize;
 
@@ -38,7 +37,7 @@ use super::call_graph::model::{CallGraphNode, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders, match_symbol};
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat, overlaps_any};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat, overlaps_any};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -126,16 +125,25 @@ impl ImpactAnalyzer {
         exclude_tests,
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let graph = self.builder.build(path)?;
-        let seeds = self.resolve_seeds(path, &graph)?;
-        let report = Report::build(path, &graph, self, seeds);
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
+        let graph = self.builder.build(&roots)?;
+        let seeds = self.resolve_seeds(&roots, &graph)?;
+        let report = Report::build(&roots, &graph, self, seeds);
         render_report(&report, format, || format_markdown(&report, self.top))
     }
 
     /// Seed node indices: explicit `--function` symbols when given,
     /// otherwise functions overlapping the unstaged diff.
-    fn resolve_seeds(&self, path: &Path, graph: &CallGraph) -> Result<Seeds, AnalyzerError> {
+    fn resolve_seeds(
+        &self,
+        roots: &AnalyzeRoots,
+        graph: &CallGraph,
+    ) -> Result<Seeds, AnalyzerError> {
         if !self.functions.is_empty() {
             let mut seeds = Vec::new();
             for symbol in &self.functions {
@@ -161,7 +169,7 @@ impl ImpactAnalyzer {
             seeds.dedup();
             return Ok(Seeds::Resolved(seeds));
         }
-        let changed = self.builder.changed_line_ranges_by_display_path(path)?;
+        let changed = self.builder.changed_line_ranges_by_display_path(roots)?;
         let seeds: Vec<usize> = graph
             .nodes
             .iter()
@@ -330,10 +338,10 @@ const BOUNDS_NOTE: &str = "Counts follow resolved call edges only: heuristic ove
      entirely (lower bound; see the per-function excluded counts).";
 
 impl Report {
-    fn build(root: &Path, graph: &CallGraph, spec: &ImpactAnalyzer, seeds: Seeds) -> Self {
+    fn build(roots: &AnalyzeRoots, graph: &CallGraph, spec: &ImpactAnalyzer, seeds: Seeds) -> Self {
         let mut report = Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             depth_limit: spec.depth.unwrap_or(DEFAULT_IMPACT_DEPTH),
             seed_source: spec.seed_source(),
@@ -696,6 +704,7 @@ mod tests {
     use crate::test_support::{run_git, write_file};
     use rstest::rstest;
     use serde_json::Value;
+    use std::path::Path;
 
     /// A four-hop chain with a test at the top:
     /// `db_insert <- repo_save <- service_save <- api_save <- tests::saves`.
