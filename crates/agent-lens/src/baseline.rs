@@ -25,8 +25,14 @@
 //! omitted rather than defaulted to zero — "no functions were measured"
 //! and "the worst function scored 0" are different facts, and only one
 //! of them should survive into a comparison.
+//!
+//! [`compare`] is where a snapshot becomes a check: it measures a fresh
+//! snapshot against a stored one and tightens the stored one with
+//! whatever improved.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+pub mod compare;
 
 use std::collections::BTreeMap;
 use std::path::Path;
