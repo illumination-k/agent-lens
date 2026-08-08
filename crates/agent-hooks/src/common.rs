@@ -103,6 +103,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The trait's provided body has to reach the implementor's own
+    /// `common` block — one per engine, so a macro impl that pointed at
+    /// the wrong field would show up here.
+    #[test]
+    fn with_system_message_fills_the_common_block() {
+        let claude = crate::claude_code::PostToolUseOutput::with_system_message("note");
+        assert_eq!(claude.common, CommonHookOutput::system_message("note"));
+        assert_ne!(claude, crate::claude_code::PostToolUseOutput::default());
+
+        let codex = crate::codex::PreToolUseOutput::with_system_message("note");
+        assert_eq!(codex.common, CommonHookOutput::system_message("note"));
+        assert_ne!(codex, crate::codex::PreToolUseOutput::default());
+    }
+
     #[test]
     fn system_message_sets_only_that_field() {
         let out = CommonHookOutput::system_message("note");
