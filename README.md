@@ -200,6 +200,19 @@ agent-lens analyze similarity crates/lens-rust/src --format md --doc-overlap
 # ones a threshold report structurally cannot reach — surface worst-first
 agent-lens analyze similarity . --format md --paired-by name
 
+# Compare something other than function bodies. `--target types` compares
+# type definitions on their member shape — Rust struct / enum / alias, TS
+# interface / type alias / enum, Python annotated classes, dataclasses and
+# Enum subclasses, Go struct / alias — so duplicated DTOs and drifted mirror
+# types surface the way duplicated functions do
+agent-lens analyze similarity crates --format md --target types
+
+# `--target blocks` compares statement runs *inside* function bodies: the
+# error-mapping tail repeated at 55 call sites, the URL-assembly preamble in
+# every endpoint method. Whole-definition comparison structurally cannot see
+# those, because the enclosing functions differ; the repeated fragment does
+agent-lens analyze similarity crates --format md --target blocks
+
 # All analyzers accept path filters: focus tests, drop tests, or exclude globs
 agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
@@ -273,8 +286,8 @@ tools = ["similarity", "complexity", "cohesion"] # analyzers to run, in order
 
 # Per-tool overrides live in [profile.<name>.<tool>] sub-tables and mirror the
 # matching CLI flags. Tables are optional; omitted options use the analyzer's
-# CLI default. `coupling`, `cycles`, and `function-graph` take no table —
-# they have no extra options.
+# CLI default. `cycles` and `function-graph` take no table — they have no
+# extra options, so declaring one is a parse error.
 [profile.web.similarity]
 threshold = 0.9
 min-lines = 8
@@ -450,29 +463,37 @@ full result — `--top` is a rendering cap, not a filter on the analysis.
 
 Analyzer-specific options today:
 
-| Analyzer         | Extra options                                                                                                                                                                            |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `similarity`     | `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--diff-only`, `--top N` |
-| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
-| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                |
-| `wrapper`        | `--diff-only`, `--top N`                                                                                                                                                                 |
-| `delegation`     | `--diff-only`, `--top N`                                                                                                                                                                 |
-| `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                               |
-| `risk`           | `--since VALUE`, `--top N`                                                                                                                                                               |
-| `hubs`           | `--top N`                                                                                                                                                                                |
-| `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                                                 |
-| `layers`         | `--top N`                                                                                                                                                                                |
-| `unreachable`    | `--tier confirmed\|likely\|unknown`, `--top N`                                                                                                                                           |
-| `untested`       | `--top N`                                                                                                                                                                                |
-| `visibility`     | `--top N`                                                                                                                                                                                |
-| `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                                                  |
-| `coupling`       | `--top N`                                                                                                                                                                                |
-| `cycles`         | shared analyzer options only                                                                                                                                                             |
-| `function-graph` | shared analyzer options only                                                                                                                                                             |
-| `context-span`   | shared analyzer options only                                                                                                                                                             |
+| Analyzer         | Extra options                                                                                                                                                                                                                                  |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `similarity`     | `--target functions\|types\|blocks`, `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--doc-overlap`, `--diff-only`, `--top N` |
+| `complexity`     | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                                                                      |
+| `cohesion`       | `--diff-only`, `--top N`, `--min-score N`                                                                                                                                                                                                      |
+| `wrapper`        | `--diff-only`, `--top N`                                                                                                                                                                                                                       |
+| `delegation`     | `--diff-only`, `--top N`                                                                                                                                                                                                                       |
+| `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                                                                                     |
+| `risk`           | `--since VALUE`, `--top N`                                                                                                                                                                                                                     |
+| `hubs`           | `--top N`                                                                                                                                                                                                                                      |
+| `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--top N`                                                                                                                                                                                       |
+| `layers`         | `--top N`                                                                                                                                                                                                                                      |
+| `unreachable`    | `--tier confirmed\|likely\|unknown`, `--top N`                                                                                                                                                                                                 |
+| `untested`       | `--top N`                                                                                                                                                                                                                                      |
+| `visibility`     | `--top N`                                                                                                                                                                                                                                      |
+| `graph-query`    | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                                                                                                        |
+| `coupling`       | `--top N`                                                                                                                                                                                                                                      |
+| `cycles`         | shared analyzer options only                                                                                                                                                                                                                   |
+| `function-graph` | shared analyzer options only                                                                                                                                                                                                                   |
+| `context-span`   | `--entry-glob GLOB` (repeatable), `--top N`                                                                                                                                                                                                    |
 
 `--sweep` conflicts with `--threshold`, `--paired-by` conflicts with `--sweep`,
-and `--drift-floor` requires `--paired-by`.
+and `--drift-floor` requires `--paired-by`. `--min-lines` defaults per target:
+5 for `functions`, 3 for `types` and `blocks`. `--target types` accepts only
+the `qualified` / `name` pairing key — `method` has no meaning for a type and
+is rejected.
+
+`context-span --entry-glob` is for frameworks with many implicit entries
+(Next.js App Router, file-routed Remix / Astro): pass it repeatedly to merge
+several TS/JS entry trees into one report, with `PATH` as the project root the
+patterns are evaluated against.
 
 Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
@@ -663,9 +684,9 @@ non-zero.
 
 | Subcommand       | What it surfaces                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Languages                 |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `similarity`     | Function pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance. Single file or directory; reports cross-file pairs in directory mode.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Rust, TS / JS, Python, Go |
-| `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Rust, TS / JS, Python, Go |
-| `delegation`     | Chains of functions that only forward (`api::save -> service::save -> repo::save -> db::insert`), with per-hop `file:line`, the terminus that does the work as the headline, and a per-module roll-up of delegator ratio and target concentration (lasagna layers). Generalizes `wrapper` from one hop to many; forwarders that log, lock, or validate are deliberately not counted.                                                                                                                                                                                                                                                                                                                                                                            | Rust, TS / JS, Python, Go |
+| `similarity`     | Near-duplicate pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance, folded into complete-link clusters. `--target` picks the unit: `functions` (default), `types` (definitions compared on their member shape — struct / enum / interface / alias), or `blocks` (statement runs _inside_ function bodies, the copy-paste whole-definition comparison cannot see). Two implementations of the _same_ trait method are scored on the body alone, since a shared trait dictates the signature by construction — so trait-impl boilerplate stops being inflated past its honest body similarity.                                                                                                                            | Rust, TS / JS, Python, Go |
+| `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, … A Go method wrapper matching an in-scope interface method (name + arity) is annotated as such, since it cannot simply be deleted — embedding the inner value is the idiomatic fix.                                                                                                                                                                                                                                                                                                                                                                                                                                               | Rust, TS / JS, Python, Go |
+| `delegation`     | Chains of functions that only forward (`api::save -> service::save -> repo::save -> db::insert`), with per-hop `file:line`, the terminus that does the work as the headline, and a per-module roll-up of delegator ratio and target concentration (lasagna layers). Generalizes `wrapper` from one hop to many; forwarders that log, lock, or validate are deliberately not counted, and hops the language put there (trait-impl methods — `Deref`, `From`, `Display` forwarding to an inner value) are marked so they can be weighed lower.                                                                                                                                                                                                                    | Rust, TS / JS, Python, Go |
 | `cohesion`       | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Rust, TS / JS, Python, Go |
 | `complexity`     | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Rust, TS / JS, Python, Go |
 | `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Rust, TS / JS, Python, Go |
@@ -701,10 +722,8 @@ TS/JS and Python modules are one-per-file, so their labels are the file's
 path relative to the module tree's source root. The same spelling is used
 in the `SessionStart` coupling thumbnail.
 
-For `complexity`, `cohesion`, `similarity`, `hotspot`, `risk`, `hubs`,
-`impact`, `layers`, `unreachable`, `untested`, `visibility`, and
-`delegation`, `--top` caps
-the Markdown ranking while JSON stays complete. `--min-score` filters the Markdown
+Every analyzer except `cycles` accepts `--top`, which caps the Markdown
+ranking while JSON stays complete. `--min-score` filters the Markdown
 ranking for `complexity` (cognitive score) and `cohesion` (LCOM4); for
 `similarity` it is an alias of `--threshold`.
 
@@ -736,6 +755,17 @@ TypeScript / JavaScript, Python, and Go adapters. `visibility` and
 `unreachable` are wired through the Rust and Go adapters only, because
 TypeScript and Python carry no extracted export status; `delegation` runs everywhere but can only apply
 its facade exemption where export status exists.
+
+In TypeScript / JavaScript, a callback passed to a statement-level call is a
+unit like any other, so a vitest / jest suite is not an empty module — which
+matters most to `untested`, whose whole premise is test reachability. A
+callback registered with a recognised harness callee (`describe`, `it`,
+`test`, `suite`, `specify`, `bench`, the `before*` / `after*` hooks, modifier
+chains like `it.skip` included) is named after that callee and its literal
+title, so a finding reads `describe#1("groupFor")::it#2("uses the crate
+name")` rather than `closure#1::closure#2`; other callbacks — IIFEs,
+`app.listen(() => …)` — are extracted as `closure#N`.
+
 `function-graph` uses a syntactic call-site index rather than type inference
 or macro expansion. Its JSON is meant for external visualization: callers can
 switch graph layers between structure (`fan_in`/`fan_out`, call counts),
@@ -746,7 +776,9 @@ maintainability (`loc`, complexity, MI), and later runtime overlays
 
 ```
 crates/
-├── agent-lens/    # the CLI binary (clap dispatch + agent-lens.toml profile runner)
+├── agent-lens/    # the CLI binary: clap dispatch, hook handlers, the analyzers
+│                  # and call-graph passes, the agent-lens.toml profile runner,
+│                  # baseline snapshots, and the bundled skills
 ├── agent-hooks/   # Claude Code & Codex hook protocol schemas + Hook trait
 ├── lens-domain/   # language-neutral primitives: TreeNode, APTED, TSED,
 │                  # FunctionDef, CohesionUnit, FunctionComplexity,
@@ -765,7 +797,9 @@ Responsibility split:
   primitives and nothing else.
 - **`agent-hooks`** defines the stdin/stdout JSON types for both supported
   agents and the `Hook` trait handlers implement.
-- **`agent-lens`** is a thin CLI shell over the above three.
+- **`agent-lens`** binds the above together and owns everything that needs a
+  whole corpus rather than one AST: the call graph and the passes over it, the
+  git-churn joins, report rendering, the profile runner, and the CLI itself.
 
 ## Development
 
@@ -897,10 +931,10 @@ build-provenance attestations alongside the archives.
 ## Roadmap
 
 The near-term direction is to keep improving the analyzer surfaces that help
-agents make better edit decisions: duplication, wrappers,
-delegation chains, cohesion, complexity, coupling, context span, hotspots,
-change risk, and call-graph structure (hubs, cycles, queries, impact, layers,
-untested, visibility).
+agents make better edit decisions: duplication (of functions, types, and
+statement blocks), wrappers, delegation chains, cohesion, complexity, coupling,
+context span, hotspots, change risk, and call-graph structure (hubs, cycles,
+queries, impact, layers, untested, unreachable, visibility).
 
 New metrics are prioritised by _does this change how an agent decides what to
 do?_ rather than _does it look nice in a dashboard?_
