@@ -151,6 +151,12 @@ fn collect_file(
             .collect(),
         SimilarityTarget::Types => extract_types(lang, &source)?
             .into_iter()
+            // A definition nothing was extracted from is not a small
+            // shape, it is an absent one: it matches every other empty
+            // shape at 1.0 regardless of what the two declarations say.
+            // `--min-lines` cannot catch these — a marker interface and
+            // an empty enum can both be spelled across several lines.
+            .filter(|type_shape| !type_shape.is_shapeless())
             .filter_map(|type_shape| {
                 let is_test = type_shape.is_test || path_is_test;
                 selection.includes(is_test).then(|| OwnedUnit {

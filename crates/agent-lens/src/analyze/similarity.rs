@@ -4244,6 +4244,103 @@ impl Counter {
         assert_eq!(touched["cluster_count"], 1, "got {touched}");
     }
 
+    /// Regression for issue #425. Method signatures used to be dropped
+    /// from the data-shape model, so an interface spelled entirely with
+    /// them reduced to an empty shape — and every empty shape matched
+    /// every other one at 95-99%. A 2-method repository, a 1-method
+    /// health check, and an index-signature bag are unrelated and must
+    /// not cluster.
+    #[test]
+    fn types_target_does_not_cluster_unrelated_method_only_interfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "article-repository.ts",
+            "export interface IArticleRepository {\n    retrieveArticleBySlug(slug: string): Promise<Article>;\n    listArticles(): Promise<Article[]>;\n}\n",
+        );
+        write_file(
+            dir.path(),
+            "health-repository.ts",
+            "export interface IHealthRepository {\n    checkDatabase(): Promise<boolean>;\n    // padding so the span clears --min-lines\n}\n",
+        );
+        write_file(
+            dir.path(),
+            "logger.ts",
+            "export interface LogContext {\n    [key: string]: unknown;\n    // padding so the span clears --min-lines\n}\n",
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Types)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["unit_count"], 3, "got {parsed}");
+        assert_eq!(parsed["cluster_count"], 0, "got {parsed}");
+    }
+
+    /// The other half of the fix: dropping method-only interfaces from
+    /// the corpus would have silenced the false cluster too, but it would
+    /// also have made a duplicated contract invisible. The method set now
+    /// decides — two spellings of one contract cluster, and renaming the
+    /// methods breaks the cluster even though both shapes stay the same
+    /// size.
+    #[rstest]
+    #[case::same_contract("readAll(): Promise<Row[]>;\n    write(row: Row): Promise<void>;", 1)]
+    #[case::different_methods(
+        "countAll(): Promise<number>;\n    reset(seed: Seed): Promise<Seed>;",
+        0
+    )]
+    fn types_target_clusters_on_the_method_set(
+        #[case] second_body: &str,
+        #[case] expected_clusters: u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "store.ts",
+            "export interface IRowStore {\n    readAll(): Promise<Row[]>;\n    write(row: Row): Promise<void>;\n}\n",
+        );
+        write_file(
+            dir.path(),
+            "repository.ts",
+            &format!("export interface IRowRepository {{\n    {second_body}\n}}\n"),
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Types)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["unit_count"], 2, "got {parsed}");
+        assert_eq!(parsed["cluster_count"], expected_clusters, "got {parsed}");
+    }
+
+    /// A definition nothing was extracted from never reaches the corpus.
+    /// `--min-lines` cannot do this job: all three of these clear the cut
+    /// and would still match each other at 1.0.
+    #[test]
+    fn types_target_drops_shapeless_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "marker.ts",
+            "export interface Marker {\n\n}\n\nexport interface Tag {\n\n}\n",
+        );
+        write_file(dir.path(), "unit.rs", "struct Unit;\n\nenum Never {\n\n}\n");
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Types)
+            .with_min_lines(1)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["unit_count"], 0, "got {parsed}");
+        assert_eq!(parsed["cluster_count"], 0, "got {parsed}");
+    }
+
     #[test]
     fn enforce_candidate_pair_limit_surfaces_concrete_numbers() {
         let err = enforce_candidate_pair_limit(20_000, 13_000_001, 13_000_000, 5, "lsh")
