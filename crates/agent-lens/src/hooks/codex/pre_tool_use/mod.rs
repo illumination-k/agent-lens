@@ -16,7 +16,7 @@
 //!   that way and lets future Codex versions opt into a richer surface
 //!   without a schema change here.
 
-use agent_hooks::codex::{CommonHookOutput, PreToolUseInput, PreToolUseOutput};
+use agent_hooks::codex::{CommonOutput as _, PreToolUseInput, PreToolUseOutput};
 
 use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
 
@@ -32,13 +32,7 @@ impl HookEnvelope for CodexPreToolUse {
     }
 
     fn wrap_report(report: String) -> Self::Output {
-        PreToolUseOutput {
-            common: CommonHookOutput {
-                system_message: Some(report),
-                ..CommonHookOutput::default()
-            },
-            ..PreToolUseOutput::default()
-        }
+        PreToolUseOutput::with_system_message(report)
     }
 }
 

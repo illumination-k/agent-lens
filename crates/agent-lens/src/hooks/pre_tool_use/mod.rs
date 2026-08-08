@@ -12,7 +12,7 @@
 //! than failing the tool call. `Edit` / `MultiEdit` always target
 //! existing files, so a missing file there is still a hard error.
 
-use agent_hooks::claude_code::{CommonHookOutput, PreToolUseInput, PreToolUseOutput};
+use agent_hooks::claude_code::{CommonOutput as _, PreToolUseInput, PreToolUseOutput};
 
 use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
 
@@ -29,13 +29,7 @@ impl HookEnvelope for ClaudeCodePreToolUse {
     }
 
     fn wrap_report(report: String) -> Self::Output {
-        PreToolUseOutput {
-            common: CommonHookOutput {
-                system_message: Some(report),
-                ..CommonHookOutput::default()
-            },
-            ..PreToolUseOutput::default()
-        }
+        PreToolUseOutput::with_system_message(report)
     }
 }
 

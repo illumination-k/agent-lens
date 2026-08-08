@@ -1,5 +1,4 @@
-//! `codex-hook setup` — wire `agent-lens`'s PostToolUse handlers into a
-//! Codex `config.toml` so users don't have to hand-edit it.
+//! Codex's `config.toml` format for the setup engine.
 //!
 //! Codex's hook config is the same shape as Claude Code's, just spelled
 //! in TOML: a `[[hooks.PostToolUse]]` block declares an optional
@@ -10,18 +9,22 @@
 //! locations: `~/.codex/config.toml`, `~/.codex/hooks.json`, and the
 //! same two under `<repo>/.codex/`. We only touch `config.toml`.
 //!
-//! The merge mirrors the Claude Code setup: existing tables are
-//! preserved, comments and formatting on adjacent keys survive thanks
-//! to `toml_edit`, and a handler is installed only when no existing
+//! [`CodexConfig`] supplies the TOML-specific half to
+//! [`crate::hooks::setup_engine`]; the merge control flow is shared with
+//! the Claude Code setup. Existing tables are preserved, comments and
+//! formatting on adjacent keys survive thanks to `toml_edit`, and a
+//! handler is installed only when no existing
 //! `[[hooks.PostToolUse.hooks]]` entry already starts with the same
 //! command. Re-running is a no-op once every handler is wired up.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde::Serialize;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
-use crate::hooks::setup_common::{self, EventBlock, HooksDocument};
+use crate::hooks::setup_engine::{
+    ConfigFormat, EventBlock, POST_TOOL_USE_EVENT, PRE_TOOL_USE_EVENT, SESSION_START_EVENT,
+    SetupError,
+};
 
 const CONFIG_RELATIVE: &str = ".codex/config.toml";
 
@@ -29,160 +32,116 @@ const CONFIG_RELATIVE: &str = ".codex/config.toml";
 /// is the only source-modifying tool today and is the one our handlers
 /// care about; anchoring keeps a future `apply_patch_v2` from sneaking
 /// in.
-pub const POST_TOOL_USE_MATCHER: &str = setup_common::CODEX_APPLY_PATCH_MATCHER;
+pub const POST_TOOL_USE_MATCHER: &str = APPLY_PATCH_MATCHER;
 
 /// Commands the setup writes into `[[hooks.PostToolUse.hooks]]`. One
 /// entry per installed handler; matching against the leading prefix of
 /// an existing `command` string makes the merge tolerant of user-added
 /// flags.
-pub const POST_TOOL_USE_COMMANDS: &[&str] = setup_common::CODEX_POST_TOOL_USE_COMMANDS;
+pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens codex-hook post-tool-use similarity",
+    "agent-lens codex-hook post-tool-use wrapper",
+];
 
 /// Regex Codex matches the about-to-run tool name against. The pre-edit
 /// handlers reason about the same `apply_patch` payload as the post-edit
 /// handlers, so the matcher matches [`POST_TOOL_USE_MATCHER`] today.
-pub const PRE_TOOL_USE_MATCHER: &str = setup_common::CODEX_APPLY_PATCH_MATCHER;
+pub const PRE_TOOL_USE_MATCHER: &str = APPLY_PATCH_MATCHER;
 
 /// Commands the setup writes into `[[hooks.PreToolUse.hooks]]`.
-pub const PRE_TOOL_USE_COMMANDS: &[&str] = setup_common::CODEX_PRE_TOOL_USE_COMMANDS;
+pub const PRE_TOOL_USE_COMMANDS: &[&str] = &[
+    "agent-lens codex-hook pre-tool-use complexity",
+    "agent-lens codex-hook pre-tool-use cohesion",
+];
 
 /// Regex Codex matches the SessionStart `source` field against
 /// (`startup` / `resume` / `clear`). A summary on every clear would be
 /// noisy, so by default we only fire on a fresh start or a resumed
 /// session.
-pub const SESSION_START_MATCHER: &str = setup_common::CODEX_SESSION_START_MATCHER;
+pub const SESSION_START_MATCHER: &str = "^(startup|resume)$";
 
 /// Commands the setup writes into `[[hooks.SessionStart.hooks]]`.
-pub const SESSION_START_COMMANDS: &[&str] = setup_common::CODEX_SESSION_START_COMMANDS;
+pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens codex-hook session-start summary"];
 
-/// Where to install the hook entries.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum ConfigScope {
-    /// `<project_root>/.codex/config.toml` (created if missing).
-    Project,
-    /// `$HOME/.codex/config.toml` (created if missing). This is Codex's
-    /// canonical location and the default.
-    User,
-}
+const APPLY_PATCH_MATCHER: &str = "^apply_patch$";
 
-/// Outcome of computing a setup plan against an existing config file.
-/// The payload is the raw `config.toml` text.
-pub type SetupPlan = setup_common::SetupPlan<String>;
+/// Codex's `config.toml` as a setup target.
+#[derive(Debug, Clone, Copy)]
+pub struct CodexConfig;
 
-/// Compact summary of a setup run, suitable for JSON-on-stdout output.
-#[derive(Debug, Serialize)]
-pub struct SetupSummary<'a> {
-    pub path: &'a Path,
-    pub wrote: bool,
-    pub added_commands: &'a [String],
-    pub config: &'a str,
-}
+impl ConfigFormat for CodexConfig {
+    type Document = DocumentMut;
+    /// `toml_edit` round-trips comments and formatting, so the payload
+    /// stays raw text and `changed()` compares what would actually land
+    /// on disk.
+    type Payload = String;
 
-#[derive(Debug, thiserror::Error)]
-pub enum SetupError {
-    /// `$HOME` is not set, so the user-scope path can't be resolved.
-    #[error("$HOME is not set; cannot resolve user-scope config.toml")]
-    HomeNotFound,
-    #[error("failed to access {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("{path:?} is not valid TOML: {source}")]
-    InvalidToml {
-        path: PathBuf,
-        #[source]
-        source: toml_edit::TomlError,
-    },
-    /// A field along the `hooks.PostToolUse[].hooks[].command` path has
-    /// the wrong TOML type for us to merge into safely.
-    #[error("{path:?} has an unexpected shape at .{field}")]
-    UnexpectedShape { path: PathBuf, field: String },
-}
+    const RELATIVE_PATH: &'static str = CONFIG_RELATIVE;
+    const FILE_LABEL: &'static str = "config.toml";
+    const FORMAT: &'static str = "TOML";
+    const SUMMARY_KEY: &'static str = "config";
+    const EVENTS: &'static [EventBlock] = &[
+        EventBlock {
+            event: SESSION_START_EVENT,
+            matcher: SESSION_START_MATCHER,
+            commands: SESSION_START_COMMANDS,
+        },
+        EventBlock {
+            event: PRE_TOOL_USE_EVENT,
+            matcher: PRE_TOOL_USE_MATCHER,
+            commands: PRE_TOOL_USE_COMMANDS,
+        },
+        EventBlock {
+            event: POST_TOOL_USE_EVENT,
+            matcher: POST_TOOL_USE_MATCHER,
+            commands: POST_TOOL_USE_COMMANDS,
+        },
+    ];
 
-fn io_error(path: PathBuf, source: std::io::Error) -> SetupError {
-    SetupError::Io { path, source }
-}
-
-fn shape_error(path: &Path, field: impl Into<String>) -> SetupError {
-    SetupError::UnexpectedShape {
-        path: path.to_path_buf(),
-        field: field.into(),
+    fn read_payload(_path: &Path, text: &str) -> Result<String, SetupError> {
+        Ok(text.to_owned())
     }
-}
 
-/// Resolve the on-disk Codex `config.toml` path for the requested scope.
-///
-/// `project_root` is only consulted for [`ConfigScope::Project`]. The
-/// caller is expected to supply the actual project root (e.g. `git
-/// rev-parse --show-toplevel`, falling back to `cwd`); this function
-/// just joins the relative path so it stays trivially testable.
-pub fn resolve_path(scope: ConfigScope, project_root: &Path) -> Result<PathBuf, SetupError> {
-    match scope {
-        ConfigScope::Project => Ok(project_root.join(CONFIG_RELATIVE)),
-        ConfigScope::User => {
-            crate::paths::home_scoped_path(CONFIG_RELATIVE).ok_or(SetupError::HomeNotFound)
+    fn to_document(path: &Path, payload: Option<&String>) -> Result<DocumentMut, SetupError> {
+        match payload {
+            Some(text) => text
+                .parse::<DocumentMut>()
+                .map_err(|source| SetupError::parse(path, Self::FORMAT, source)),
+            None => Ok(DocumentMut::new()),
         }
     }
-}
 
-/// Compute the post-merge TOML for `path` without touching the
-/// filesystem.
-///
-/// A missing or empty file produces a plan that creates one. A file
-/// that doesn't parse, or whose `hooks.PostToolUse` shape is
-/// incompatible, is reported as an error so the user can inspect it
-/// before we clobber anything.
-pub fn plan(path: PathBuf) -> Result<SetupPlan, SetupError> {
-    let before = setup_common::read_existing_text(&path, io_error)?;
-    let mut doc = match before.as_deref() {
-        Some(s) => s
-            .parse::<DocumentMut>()
-            .map_err(|source| SetupError::InvalidToml {
-                path: path.clone(),
-                source,
-            })?,
-        None => DocumentMut::new(),
-    };
-    let added_commands =
-        setup_common::merge_hook_commands(&path, &mut doc, setup_common::CODEX_EVENTS)?;
-    Ok(SetupPlan {
-        path,
-        before,
-        after: doc.to_string(),
-        added_commands,
-    })
-}
+    fn to_payload(document: &DocumentMut) -> String {
+        document.to_string()
+    }
 
-/// Write the planned TOML to disk, creating parent directories if
-/// needed.
-pub fn apply(plan: &SetupPlan) -> Result<(), SetupError> {
-    setup_common::write_with_parents(&plan.path, &plan.after, io_error)
-}
-
-impl HooksDocument for DocumentMut {
-    type Error = SetupError;
+    fn render(_path: &Path, payload: &String) -> Result<String, SetupError> {
+        Ok(payload.clone())
+    }
 
     fn installed_commands(
-        &mut self,
+        document: &mut DocumentMut,
         path: &Path,
         block: &EventBlock,
     ) -> Result<Vec<String>, SetupError> {
-        let entries = event_entries(self, path, block)?;
+        let entries = event_entries(document, path, block)?;
         let mut out = Vec::new();
         for group in entries.iter() {
             let Some(handlers_item) = group.get("hooks") else {
                 continue;
             };
             let Some(handlers) = handlers_item.as_array_of_tables() else {
-                return Err(shape_error(path, format!("hooks.{}[].hooks", block.event)));
+                return Err(SetupError::shape(
+                    path,
+                    format!("hooks.{}[].hooks", block.event),
+                ));
             };
             for handler in handlers.iter() {
                 let Some(cmd_item) = handler.get("command") else {
                     continue;
                 };
                 let Some(cmd) = cmd_item.as_str() else {
-                    return Err(shape_error(
+                    return Err(SetupError::shape(
                         path,
                         format!("hooks.{}[].hooks[].command", block.event),
                     ));
@@ -194,12 +153,12 @@ impl HooksDocument for DocumentMut {
     }
 
     fn append_matcher_group(
-        &mut self,
+        document: &mut DocumentMut,
         path: &Path,
         block: &EventBlock,
         commands: &[String],
     ) -> Result<(), SetupError> {
-        let entries = event_entries(self, path, block)?;
+        let entries = event_entries(document, path, block)?;
         let mut group = Table::new();
         group.insert("matcher", value(block.matcher));
         let mut handlers = ArrayOfTables::new();
@@ -230,19 +189,30 @@ fn event_entries<'a>(
     });
     let hooks = hooks_item
         .as_table_mut()
-        .ok_or_else(|| shape_error(path, "hooks"))?;
+        .ok_or_else(|| SetupError::shape(path, "hooks"))?;
     hooks
         .entry(block.event)
         .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()))
         .as_array_of_tables_mut()
-        .ok_or_else(|| shape_error(path, format!("hooks.{}", block.event)))
+        .ok_or_else(|| SetupError::shape(path, format!("hooks.{}", block.event)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    use crate::hooks::setup_engine;
+
+    fn plan(path: PathBuf) -> Result<setup_engine::SetupPlan<String>, SetupError> {
+        setup_engine::plan::<CodexConfig>(path)
+    }
+
+    fn apply(plan: &setup_engine::SetupPlan<String>) -> Result<(), SetupError> {
+        setup_engine::apply::<CodexConfig>(plan)
+    }
 
     fn parse(text: &str) -> DocumentMut {
         text.parse().unwrap()
@@ -498,7 +468,10 @@ type = \"prompt\"
         fs::write(&path, "this = is = not = toml").unwrap();
 
         let err = plan(path).unwrap_err();
-        assert!(matches!(err, SetupError::InvalidToml { .. }));
+        assert!(
+            matches!(err, SetupError::Parse { format, .. } if format == "TOML"),
+            "expected a TOML parse error, got {err:?}",
+        );
     }
 
     #[test]
@@ -533,7 +506,8 @@ type = \"prompt\"
     #[test]
     fn resolve_path_project_joins_relative() {
         let root = Path::new("/tmp/proj");
-        let p = resolve_path(ConfigScope::Project, root).unwrap();
+        let p = setup_engine::resolve_path::<CodexConfig>(setup_engine::SetupScope::Project, root)
+            .unwrap();
         assert_eq!(p, root.join(".codex/config.toml"));
     }
 }

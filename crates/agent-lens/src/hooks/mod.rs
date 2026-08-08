@@ -4,14 +4,19 @@
 //! historical reasons (they were the first to land); Codex handlers are
 //! namespaced under [`codex`]. The CLI wires each handler to a clap
 //! subcommand so typos surface at parse time.
+//!
+//! Only the engine-specific adapters are per-agent. The analysis and the
+//! runners live in [`core`], and the `settings.json` / `config.toml`
+//! merge lives in [`setup_engine`]; [`setup`] and [`codex::setup`] each
+//! contribute just the format half of it.
 
 pub mod codex;
-pub(crate) mod core;
+pub mod core;
 pub mod post_tool_use;
 pub mod pre_tool_use;
 pub mod session_start;
 pub mod setup;
-pub(crate) mod setup_common;
+pub mod setup_engine;
 
 use std::path::Path;
 

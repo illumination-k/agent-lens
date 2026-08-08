@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::context::{CommonHookOutput, HookContext};
+use super::context::HookContext;
+use crate::common::CommonHookOutput;
 
 /// Input payload for the `PreToolUse` hook.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

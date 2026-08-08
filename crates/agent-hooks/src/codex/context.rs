@@ -17,44 +17,6 @@ pub struct HookContext {
     pub model: String,
 }
 
-/// Output fields shared across most Codex hook responses.
-///
-/// Each hook-specific output flattens this struct to inherit the common
-/// fields while keeping its own decision / hook-specific payload. Note that
-/// `PreToolUse` and `PermissionRequest` only honor `system_message` today;
-/// the other fields are parsed but ignored for those events.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CommonHookOutput {
-    /// Whether Codex should continue after the hook runs.
-    #[serde(rename = "continue", default, skip_serializing_if = "Option::is_none")]
-    pub continue_: Option<bool>,
-
-    /// Reason recorded when `continue_` is `Some(false)`.
-    #[serde(
-        rename = "stopReason",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub stop_reason: Option<String>,
-
-    /// Surfaced as a warning in the UI or event stream.
-    #[serde(
-        rename = "systemMessage",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub system_message: Option<String>,
-
-    /// Parsed but not yet implemented by Codex; preserved so handlers can
-    /// set it without losing forward compatibility.
-    #[serde(
-        rename = "suppressOutput",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub suppress_output: Option<bool>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,33 +83,5 @@ mod tests {
     fn hook_context_rejects_missing_required_field(#[case] v: Value, #[case] expected: &str) {
         let err = serde_json::from_value::<HookContext>(v).unwrap_err();
         assert!(err.to_string().contains(expected), "{err}");
-    }
-
-    #[test]
-    fn common_hook_output_default_serializes_to_empty_object() {
-        let v = serde_json::to_value(CommonHookOutput::default()).unwrap();
-        assert_eq!(v, json!({}));
-    }
-
-    #[test]
-    fn common_hook_output_uses_camel_case_keys() {
-        let out = CommonHookOutput {
-            continue_: Some(true),
-            stop_reason: Some("done".into()),
-            system_message: Some("note".into()),
-            suppress_output: Some(false),
-        };
-        let v = serde_json::to_value(&out).unwrap();
-        assert_eq!(
-            v,
-            json!({
-                "continue": true,
-                "stopReason": "done",
-                "systemMessage": "note",
-                "suppressOutput": false,
-            })
-        );
-        let parsed: CommonHookOutput = serde_json::from_value(v).unwrap();
-        assert_eq!(parsed, out);
     }
 }

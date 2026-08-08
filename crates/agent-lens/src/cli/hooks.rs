@@ -1,260 +1,236 @@
-//! The hook handlers: stdin-driven `hook` / `codex-hook` subcommands and
-//! the setup commands that wire them into agent configs.
+//! The stdin-driven `hook` / `codex-hook` handlers. The commands that
+//! wire them into an agent's config live in [`super::setup`].
+//!
+//! # Failure mode
+//!
+//! Hook handlers are advisory: whatever `agent-lens` has to say about the
+//! file being edited is context, never a gate on the agent's tool call.
+//! So a handler that fails still answers in the agent's own response
+//! schema — the failure is reported through the same `systemMessage` /
+//! `additionalContext` field a report would have used, prefixed with
+//! `agent-lens ... hook failed:`, and the process exits 0 so the agent
+//! parses it. The full error also goes to stderr through `tracing`.
+//!
+//! This covers everything from a malformed stdin payload to an analyzer
+//! panicking on a pathological file. The alternative — exiting non-zero
+//! with an empty stdout — leaves the agent with no structured response at
+//! all, and (on Claude Code) a non-zero exit is a louder signal than an
+//! advisory hook has any business sending.
+//!
+//! The `setup` commands are not hooks and keep the ordinary CLI
+//! contract: an error propagates and the process exits non-zero.
 
 use std::io::{self, Read};
-use std::path::Path;
 
 use agent_hooks::Hook;
 use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::hooks::codex::post_tool_use::{
-    SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
+    CodexPostToolUse, SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
 };
 use agent_lens::hooks::codex::pre_tool_use::{
-    CohesionHook as CodexPreCohesionHook, ComplexityHook as CodexPreComplexityHook,
+    CodexPreToolUse, CohesionHook as CodexPreCohesionHook, ComplexityHook as CodexPreComplexityHook,
 };
-use agent_lens::hooks::codex::session_start::SummaryHook as CodexSessionStartSummaryHook;
-use agent_lens::hooks::codex::setup::{self as codex_setup, SetupSummary as CodexSetupSummary};
-use agent_lens::hooks::post_tool_use::{SimilarityHook, WrapperHook};
-use agent_lens::hooks::pre_tool_use::{CohesionHook, ComplexityHook};
-use agent_lens::hooks::session_start::SummaryHook as SessionStartSummaryHook;
-use agent_lens::hooks::setup::{self, SetupSummary};
-use tracing::info;
+use agent_lens::hooks::codex::session_start::{
+    CodexSessionStart, SummaryHook as CodexSessionStartSummaryHook,
+};
+use agent_lens::hooks::core::{HookEnvelope, SessionStartEnvelope};
+use agent_lens::hooks::post_tool_use::{ClaudeCodePostToolUse, SimilarityHook, WrapperHook};
+use agent_lens::hooks::pre_tool_use::{ClaudeCodePreToolUse, CohesionHook, ComplexityHook};
+use agent_lens::hooks::session_start::{
+    ClaudeCodeSessionStart, SummaryHook as SessionStartSummaryHook,
+};
+use tracing::error;
 
 use super::args::{
-    CodexPostToolUseCommand, CodexPreToolUseCommand, CodexSessionStartCommand, CodexSetupArgs,
-    PostToolUseCommand, PreToolUseCommand, SessionStartCommand, SetupArgs,
+    CodexPostToolUseCommand, CodexPreToolUseCommand, CodexSessionStartCommand, PostToolUseCommand,
+    PreToolUseCommand, SessionStartCommand,
 };
 use super::write_stdout_json;
 
 pub(super) fn run_session_start(
     cmd: SessionStartCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ClaudeCodeHookInput::SessionStart(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
-        return Err("expected a SessionStart hook payload on stdin".into());
-    };
-    let output = match cmd {
-        SessionStartCommand::Summary => SessionStartSummaryHook::new().handle(input)?,
-    };
-    write_stdout_json(&output)
+    run_hook(
+        "session-start",
+        ClaudeCodeSessionStart::wrap_summary,
+        || {
+            let input = expect_event("SessionStart", |payload| match payload {
+                ClaudeCodeHookInput::SessionStart(input) => Some(input),
+                _ => None,
+            })?;
+            match cmd {
+                SessionStartCommand::Summary => Ok(SessionStartSummaryHook::new().handle(input)?),
+            }
+        },
+    )
 }
 
 pub(super) fn run_pre_tool_use(cmd: PreToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let ClaudeCodeHookInput::PreToolUse(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
-        return Err("expected a PreToolUse hook payload on stdin".into());
-    };
-    let output = match cmd {
-        PreToolUseCommand::Complexity => ComplexityHook::new().handle(input)?,
-        PreToolUseCommand::Cohesion => CohesionHook::new().handle(input)?,
-    };
-    write_stdout_json(&output)
+    run_hook("pre-tool-use", ClaudeCodePreToolUse::wrap_report, || {
+        let input = expect_event("PreToolUse", |payload| match payload {
+            ClaudeCodeHookInput::PreToolUse(input) => Some(input),
+            _ => None,
+        })?;
+        Ok(match cmd {
+            PreToolUseCommand::Complexity => ComplexityHook::new().handle(input)?,
+            PreToolUseCommand::Cohesion => CohesionHook::new().handle(input)?,
+        })
+    })
 }
 
 pub(super) fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let ClaudeCodeHookInput::PostToolUse(input) = read_stdin_json::<ClaudeCodeHookInput>()? else {
-        return Err("expected a PostToolUse hook payload on stdin".into());
-    };
-    let output = match cmd {
-        PostToolUseCommand::Similarity => SimilarityHook::new().handle(input)?,
-        PostToolUseCommand::Wrapper => WrapperHook::new().handle(input)?,
-    };
-    write_stdout_json(&output)
-}
-
-pub(super) fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let path = setup::resolve_path(args.scope, &cwd)?;
-    let plan = setup::plan(path)?;
-    let wrote = apply_setup_plan(
-        args.dry_run,
-        plan.changed(),
-        SetupApplyContext {
-            path: &plan.path,
-            added_commands: plan.added_commands.len(),
-            dry_run_message: "dry-run: leaving settings.json untouched",
-            wrote_message: "wrote settings.json",
-            unchanged_message: "settings.json already configured; nothing to do",
-        },
-        || setup::apply(&plan).map_err(Into::into),
-    )?;
-    write_stdout_json(&SetupSummary {
-        path: &plan.path,
-        wrote,
-        added_commands: &plan.added_commands,
-        settings: &plan.after,
+    run_hook("post-tool-use", ClaudeCodePostToolUse::wrap_report, || {
+        let input = expect_event("PostToolUse", |payload| match payload {
+            ClaudeCodeHookInput::PostToolUse(input) => Some(input),
+            _ => None,
+        })?;
+        Ok(match cmd {
+            PostToolUseCommand::Similarity => SimilarityHook::new().handle(input)?,
+            PostToolUseCommand::Wrapper => WrapperHook::new().handle(input)?,
+        })
     })
-}
-
-pub(super) fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let project_root = agent_lens::paths::git_repo_root(&cwd).unwrap_or(cwd);
-    let path = codex_setup::resolve_path(args.scope, &project_root)?;
-    let plan = codex_setup::plan(path)?;
-    let wrote = apply_setup_plan(
-        args.dry_run,
-        plan.changed(),
-        SetupApplyContext {
-            path: &plan.path,
-            added_commands: plan.added_commands.len(),
-            dry_run_message: "dry-run: leaving config.toml untouched",
-            wrote_message: "wrote config.toml",
-            unchanged_message: "config.toml already configured; nothing to do",
-        },
-        || codex_setup::apply(&plan).map_err(Into::into),
-    )?;
-    write_stdout_json(&CodexSetupSummary {
-        path: &plan.path,
-        wrote,
-        added_commands: &plan.added_commands,
-        config: &plan.after,
-    })
-}
-
-fn apply_setup_plan(
-    dry_run: bool,
-    changed: bool,
-    context: SetupApplyContext<'_>,
-    apply: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    if dry_run {
-        info!(path = %context.path.display(), "{}", context.dry_run_message);
-        return Ok(false);
-    }
-
-    if !changed {
-        info!(path = %context.path.display(), "{}", context.unchanged_message);
-        return Ok(false);
-    }
-
-    apply()?;
-    info!(
-        path = %context.path.display(),
-        added = context.added_commands,
-        "{}",
-        context.wrote_message,
-    );
-    Ok(true)
-}
-
-struct SetupApplyContext<'a> {
-    path: &'a Path,
-    added_commands: usize,
-    dry_run_message: &'static str,
-    wrote_message: &'static str,
-    unchanged_message: &'static str,
-}
-
-pub(super) fn run_codex_pre_tool_use(
-    cmd: CodexPreToolUseCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let CodexHookInput::PreToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
-        return Err("expected a Codex PreToolUse hook payload on stdin".into());
-    };
-    let output = match cmd {
-        CodexPreToolUseCommand::Complexity => CodexPreComplexityHook::new().handle(input)?,
-        CodexPreToolUseCommand::Cohesion => CodexPreCohesionHook::new().handle(input)?,
-    };
-    write_stdout_json(&output)
-}
-
-pub(super) fn run_codex_post_tool_use(
-    cmd: CodexPostToolUseCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let CodexHookInput::PostToolUse(input) = read_stdin_json::<CodexHookInput>()? else {
-        return Err("expected a Codex PostToolUse hook payload on stdin".into());
-    };
-    let output = match cmd {
-        CodexPostToolUseCommand::Similarity => CodexSimilarityHook::new().handle(input)?,
-        CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
-    };
-    write_stdout_json(&output)
 }
 
 pub(super) fn run_codex_session_start(
     cmd: CodexSessionStartCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let CodexHookInput::SessionStart(input) = read_stdin_json::<CodexHookInput>()? else {
-        return Err("expected a Codex SessionStart hook payload on stdin".into());
-    };
-    let output = match cmd {
-        CodexSessionStartCommand::Summary => CodexSessionStartSummaryHook::new().handle(input)?,
-    };
+    run_hook(
+        "codex session-start",
+        CodexSessionStart::wrap_summary,
+        || {
+            let input = expect_event("Codex SessionStart", |payload| match payload {
+                CodexHookInput::SessionStart(input) => Some(input),
+                _ => None,
+            })?;
+            match cmd {
+                CodexSessionStartCommand::Summary => {
+                    Ok(CodexSessionStartSummaryHook::new().handle(input)?)
+                }
+            }
+        },
+    )
+}
+
+pub(super) fn run_codex_pre_tool_use(
+    cmd: CodexPreToolUseCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_hook("codex pre-tool-use", CodexPreToolUse::wrap_report, || {
+        let input = expect_event("Codex PreToolUse", |payload| match payload {
+            CodexHookInput::PreToolUse(input) => Some(input),
+            _ => None,
+        })?;
+        Ok(match cmd {
+            CodexPreToolUseCommand::Complexity => CodexPreComplexityHook::new().handle(input)?,
+            CodexPreToolUseCommand::Cohesion => CodexPreCohesionHook::new().handle(input)?,
+        })
+    })
+}
+
+pub(super) fn run_codex_post_tool_use(
+    cmd: CodexPostToolUseCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_hook("codex post-tool-use", CodexPostToolUse::wrap_report, || {
+        let input = expect_event("Codex PostToolUse", |payload| match payload {
+            CodexHookInput::PostToolUse(input) => Some(input),
+            _ => None,
+        })?;
+        Ok(match cmd {
+            CodexPostToolUseCommand::Similarity => CodexSimilarityHook::new().handle(input)?,
+            CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
+        })
+    })
+}
+
+/// Run one hook handler and write its response to stdout.
+///
+/// A failure anywhere in `run` — bad stdin, wrong event, a handler
+/// blowing up — is logged to stderr and then handed to `report_failure`,
+/// the envelope's own report constructor, so the agent still receives a
+/// well-formed response. See the module docs for why the error travels
+/// in-band.
+fn run_hook<O: serde::Serialize>(
+    event: &str,
+    report_failure: impl FnOnce(String) -> O,
+    run: impl FnOnce() -> Result<O, Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output = run().unwrap_or_else(|err| report_failure(failure_report(event, &*err)));
     write_stdout_json(&output)
 }
 
-fn read_stdin_json<T: serde::de::DeserializeOwned>() -> Result<T, Box<dyn std::error::Error>> {
+/// Log a hook failure to stderr and render the line the agent sees in
+/// place of a report.
+fn failure_report(event: &str, err: &dyn std::error::Error) -> String {
+    error!(event, error = %err, "hook failed; reporting it in the hook response");
+    format!("agent-lens {event} hook failed: {err}")
+}
+
+/// Read a hook payload from stdin and narrow it to the event this
+/// subcommand handles.
+fn expect_event<I: serde::de::DeserializeOwned, T>(
+    event: &str,
+    narrow: impl FnOnce(I) -> Option<T>,
+) -> Result<T, Box<dyn std::error::Error>> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
-    Ok(serde_json::from_str(&buf)?)
+    narrow(serde_json::from_str(&buf)?)
+        .ok_or_else(|| format!("expected a {event} hook payload on stdin").into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_hooks::claude_code::PostToolUseOutput;
 
+    /// The end-to-end path is covered by the CLI smoke tests; these pin
+    /// the two halves `run_hook` composes — the message, and the envelope
+    /// field each engine carries it in.
     #[test]
-    fn apply_setup_plan_reports_and_runs_only_when_changed() {
-        let path = Path::new("settings.json");
-        let context = || SetupApplyContext {
-            path,
-            added_commands: 1,
-            dry_run_message: "dry run",
-            wrote_message: "wrote",
-            unchanged_message: "unchanged",
-        };
-
-        let dry_run_applied = std::cell::Cell::new(false);
-        let wrote = apply_setup_plan(true, true, context(), || {
-            dry_run_applied.set(true);
-            Ok(())
-        })
-        .unwrap();
-        assert!(!wrote);
-        assert!(!dry_run_applied.get());
-
-        let unchanged_applied = std::cell::Cell::new(false);
-        let wrote = apply_setup_plan(false, false, context(), || {
-            unchanged_applied.set(true);
-            Ok(())
-        })
-        .unwrap();
-        assert!(!wrote);
-        assert!(!unchanged_applied.get());
-
-        let changed_applied = std::cell::Cell::new(false);
-        let wrote = apply_setup_plan(false, true, context(), || {
-            changed_applied.set(true);
-            Ok(())
-        })
-        .unwrap();
-        assert!(wrote);
-        assert!(changed_applied.get());
+    fn a_failure_is_reported_in_the_claude_envelope() {
+        let out = ClaudeCodePostToolUse::wrap_report(failure_report(
+            "post-tool-use",
+            &io::Error::other("stdin was not JSON"),
+        ));
+        assert_ne!(
+            out,
+            PostToolUseOutput::default(),
+            "an empty response would leave the agent with no signal",
+        );
+        let msg = out
+            .common
+            .system_message
+            .expect("a failure must still produce a report");
+        assert!(msg.contains("post-tool-use hook failed"), "got {msg}");
+        assert!(msg.contains("stdin was not JSON"), "got {msg}");
     }
 
     #[test]
-    fn scope_project_finds_no_root_outside_a_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        // tempdir() returns a fresh path; nothing inside it is git-tracked.
-        assert!(agent_lens::paths::git_repo_root(dir.path()).is_none());
+    fn a_failure_is_reported_in_the_codex_envelope() {
+        // Codex injects context through `additionalContext`, not
+        // `systemMessage`; the failure has to follow the same route.
+        let out = CodexPostToolUse::wrap_report(failure_report(
+            "codex post-tool-use",
+            &io::Error::other("boom"),
+        ));
+        let msg = out
+            .hook_specific_output
+            .and_then(|extra| extra.additional_context)
+            .expect("a failure must still produce a report");
+        assert!(msg.contains("codex post-tool-use hook failed"), "got {msg}");
+        assert!(msg.contains("boom"), "got {msg}");
     }
 
     #[test]
-    fn scope_project_anchors_at_the_repo_root_from_a_subdirectory() {
-        let dir = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let nested = dir.path().join("nested/inner");
-        std::fs::create_dir_all(&nested).unwrap();
-        let resolved = agent_lens::paths::git_repo_root(&nested).expect("inside the new repo");
-        // Resolve symlinks on both sides — macOS tempdirs live under
-        // /private/var/... while git emits /var/..., so a literal
-        // comparison is fragile.
-        let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
-        let canonical_resolved = std::fs::canonicalize(&resolved).unwrap();
-        assert_eq!(canonical_resolved, canonical_dir);
+    fn a_failure_is_reported_in_the_session_start_envelope() {
+        let out = ClaudeCodeSessionStart::wrap_summary(failure_report(
+            "session-start",
+            &io::Error::other("no git tree"),
+        ));
+        let msg = out
+            .hook_specific_output
+            .and_then(|extra| extra.additional_context)
+            .expect("a failure must still produce a summary");
+        assert!(msg.contains("session-start hook failed"), "got {msg}");
+        assert!(msg.contains("no git tree"), "got {msg}");
     }
 }

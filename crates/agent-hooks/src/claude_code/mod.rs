@@ -16,7 +16,8 @@ mod stop;
 mod subagent_stop;
 mod user_prompt_submit;
 
-pub use context::{CommonHookOutput, HookContext, PermissionMode};
+pub use crate::common::{CommonHookOutput, CommonOutput};
+pub use context::{HookContext, PermissionMode};
 pub use post_tool_use::{PostToolUseInput, PostToolUseOutput};
 pub use pre_tool_use::{
     PermissionDecision, PreToolUseDecision, PreToolUseHookSpecificOutput, PreToolUseInput,
@@ -32,6 +33,15 @@ pub use user_prompt_submit::{
 };
 
 use serde::{Deserialize, Serialize};
+
+crate::common::impl_common_output!(
+    SessionStartOutput,
+    PreToolUseOutput,
+    PostToolUseOutput,
+    UserPromptSubmitOutput,
+    StopOutput,
+    SubagentStopOutput,
+);
 
 /// A tagged union over every Claude Code hook input.
 ///
