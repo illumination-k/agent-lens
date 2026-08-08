@@ -16,6 +16,7 @@ mod complexity;
 mod context_span;
 mod coupling;
 mod method_names;
+mod module_path;
 mod parser;
 #[cfg(test)]
 mod proptests;
@@ -30,6 +31,7 @@ pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::{build_context_span_report, extract_context_spans};
 pub use coupling::{CouplingError, PythonModule, build_module_tree, extract_edges};
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
+pub use module_path::module_segments;
 pub use parser::{PythonParseError, PythonParser};
 pub use statements::extract_statement_seqs;
 pub use type_defs::extract_type_defs;

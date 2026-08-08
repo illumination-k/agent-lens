@@ -842,8 +842,12 @@ mod tests {
             .map(|n| n["qualified_name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"helper::helper"));
-        assert!(names.contains(&"index::caller"));
-        assert!(names.contains(&"index::local"));
+        // `index.ts` at the root is the root module — `./` and
+        // `./index.ts` are the same import to TS — so it collapses the
+        // way `lens_ts::module_segments` says, leaving the graph's
+        // placeholder for a module path with no segments.
+        assert!(names.contains(&"module::caller"));
+        assert!(names.contains(&"module::local"));
 
         let helper = edge_by_callee(&report, "helper");
         assert_eq!(helper["from"], "index.ts:caller:3");
@@ -857,7 +861,7 @@ mod tests {
         assert_eq!(local["resolution"], "resolved");
         assert_eq!(
             target_qualified_name(&report, local).as_deref(),
-            Some("index::local"),
+            Some("module::local"),
         );
     }
 

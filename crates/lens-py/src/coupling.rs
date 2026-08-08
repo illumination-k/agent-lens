@@ -14,6 +14,8 @@ use ruff_python_ast::visitor::{Visitor, walk_stmt};
 use ruff_python_ast::{Stmt, StmtImport, StmtImportFrom};
 use ruff_python_parser::{ParseError, parse_module};
 
+use crate::module_path::module_segments;
+
 /// Failures raised while building module nodes from Python files.
 #[derive(Debug, thiserror::Error)]
 pub enum CouplingError {
@@ -119,28 +121,14 @@ fn parse_one(file: &Path, path: ModulePath) -> Result<PythonModule, CouplingErro
     })
 }
 
+/// Name a discovered file after its location below the analysis root,
+/// rooted at `crate` the way every adapter's module tree is. The segment
+/// rules themselves live in [`crate::module_path::module_segments`] so
+/// the call graph names the same file the same way.
 fn module_path_for_rel(rel: &Path) -> ModulePath {
-    let mut segs: Vec<String> = rel
-        .iter()
-        .map(|s| s.to_string_lossy().to_string())
-        .collect();
-    if let Some(last) = segs.last_mut()
-        && let Some(stripped) = last.strip_suffix(".py")
-    {
-        *last = stripped.to_owned();
-    }
-    if segs.last().is_some_and(|s| s == "__init__") {
-        segs.pop();
-    }
-    let mut out = String::from("crate");
-    for s in segs {
-        if s.is_empty() {
-            continue;
-        }
-        out.push_str("::");
-        out.push_str(&s);
-    }
-    ModulePath::new(out)
+    let mut parts = vec!["crate".to_owned()];
+    parts.extend(module_segments(rel));
+    ModulePath::new(parts.join("::"))
 }
 
 /// Collect every inter-module import edge in `modules`.

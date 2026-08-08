@@ -104,7 +104,7 @@ pub use hotspot::{FileChurn, FileComplexity, HotspotEntry, compute_hotspots};
 pub use line_index::LineIndex;
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use method_names::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
-pub use naming::{identifier_tokens, qualify, qualify_module, starts_uppercase};
+pub use naming::{identifier_tokens, path_segments, qualify, qualify_module, starts_uppercase};
 pub use risk::{FileCentrality, RiskEntry, compute_risk};
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, InterfaceMethodShape, InterfaceShape,

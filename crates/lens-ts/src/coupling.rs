@@ -17,6 +17,7 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{Visit, walk::walk_import_expression};
 use oxc_parser::Parser;
 
+use crate::module_path::module_segments;
 use crate::parser::{Dialect, TsParseError};
 
 /// Failures raised while discovering a TS/JS module graph.
@@ -316,21 +317,14 @@ fn common_source_root(discovered: &[(PathBuf, Vec<ImportLink>)]) -> PathBuf {
     root
 }
 
+/// Name a discovered file after its location below `root_dir`, rooted
+/// at `crate` the way every adapter's module tree is. The segment rules
+/// themselves live in [`crate::module_path::module_segments`] so the
+/// call graph names the same file the same way.
 fn file_to_module_path(file: &Path, root_dir: &Path) -> ModulePath {
     let rel = file.strip_prefix(root_dir).unwrap_or(file);
     let mut parts = vec!["crate".to_owned()];
-    for comp in rel.components() {
-        let mut s = comp.as_os_str().to_string_lossy().to_string();
-        if let Some((stem, _)) = s.rsplit_once('.') {
-            s = stem.to_owned();
-        }
-        if s == "index" {
-            continue;
-        }
-        if !s.is_empty() {
-            parts.push(s);
-        }
-    }
+    parts.extend(module_segments(rel));
     ModulePath::new(parts.join("::"))
 }
 

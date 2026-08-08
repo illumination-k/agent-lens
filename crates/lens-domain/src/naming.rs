@@ -7,6 +7,12 @@
 //! and `lens-golang`, so it lives here. Two spellings of "no owner" are
 //! in play, hence both [`qualify`] (`Option<&str>`) and
 //! [`qualify_module`] (empty string).
+//!
+//! [`path_segments`] is the same idea one level down: every adapter that
+//! names a module after its file location starts by chopping a relative
+//! path into segments, and they should all chop it the same way.
+
+use std::path::{Component, Path};
 
 /// Build a fully-qualified function name from an optional owner.
 ///
@@ -28,6 +34,29 @@ pub fn qualify(owner: Option<&str>, method: &str) -> String {
 #[inline]
 pub fn qualify_module(module: &str, name: &str) -> String {
     qualify((!module.is_empty()).then_some(module), name)
+}
+
+/// Split a path relative to the analysis root into module-path segments.
+///
+/// Only [`Component::Normal`] parts survive: a leading `./`, a stray
+/// `..`, and any root prefix are dropped rather than leaking into a
+/// module name. Segments keep their file extension — stripping it is a
+/// per-language rule, so each adapter's own derivation
+/// (`lens_ts::module_segments`, `lens_py::module_segments`,
+/// `lens_golang::package_segments`) applies it on top of this.
+///
+/// An empty path — the analysis root itself — yields no segments, which
+/// callers read as "the root module".
+pub fn path_segments(rel: &Path) -> Vec<String> {
+    rel.components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => {
+                let segment = segment.to_string_lossy();
+                (!segment.is_empty()).then(|| segment.into_owned())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether `value`'s first character is an ASCII uppercase letter.
@@ -120,6 +149,19 @@ mod tests {
     #[case("Ünicode", false)]
     fn starts_uppercase_is_ascii_only(#[case] value: &str, #[case] expected: bool) {
         assert_eq!(starts_uppercase(value), expected);
+    }
+
+    #[rstest]
+    #[case("pkg/util/util.go", vec!["pkg", "util", "util.go"])]
+    #[case("main.ts", vec!["main.ts"])]
+    // Relative-path noise never becomes a module segment.
+    #[case("./src/./main.py", vec!["src", "main.py"])]
+    #[case("../sibling/mod.rs", vec!["sibling", "mod.rs"])]
+    // The analysis root itself has no segments.
+    #[case("", Vec::<&str>::new())]
+    #[case(".", Vec::<&str>::new())]
+    fn path_segments_keeps_only_normal_components(#[case] rel: &str, #[case] expected: Vec<&str>) {
+        assert_eq!(path_segments(Path::new(rel)), expected);
     }
 
     #[test]
