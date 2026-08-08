@@ -23,6 +23,8 @@
 //! actually experiences the code. They are *additionally* reported as
 //! their own `<parent>::closure#N` units (see [`crate::walk`]), so a
 //! callback that is complex in its own right is still visible directly.
+//! The same holds for the callbacks a module-scope call registers, which
+//! is what gives a `describe`/`it` suite any units at all.
 //!
 //! The traversal that finds function-shaped items lives in
 //! [`crate::walk`]; this module only converts each [`FunctionItem`] into
@@ -801,5 +803,36 @@ function setup(x: number): void {
             .expect("the callback must be its own unit");
         // The `if` inside the callback gives it a cyclomatic of 2.
         assert_eq!(handler.cyclomatic, 2);
+    }
+
+    #[test]
+    fn a_vitest_suite_reports_its_cases_rather_than_no_functions() {
+        // A test file holds its logic in harness callbacks, never in
+        // declarations; reporting "no functions found" for one is the
+        // failure this covers.
+        let units = extract(
+            r#"
+describe("classify", () => {
+    it("branches on the threshold", () => {
+        if (classify(1) === "low") {
+            expect(classify(9)).toBe("high");
+        }
+    });
+});
+"#,
+        );
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "describe#1(\"classify\")",
+                "describe#1(\"classify\")::it#1(\"branches on the threshold\")",
+            ],
+        );
+        let case = units
+            .iter()
+            .find(|u| u.name.ends_with("it#1(\"branches on the threshold\")"))
+            .expect("the case must be its own unit");
+        assert_eq!(case.cyclomatic, 2);
     }
 }

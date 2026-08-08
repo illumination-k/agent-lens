@@ -12,7 +12,8 @@
 //! recursively, mirroring how `lens-rust` walks inline `mod foo {}`.
 //! Functions defined *inside* another function body — callbacks, event
 //! handlers, closures — are extracted too, each as a `<parent>::closure#N`
-//! unit minted by [`crate::walk`].
+//! unit minted by [`crate::walk`], as are the callbacks a module-scope
+//! call registers (`describe("…", () => …)`, named by [`crate::harness`]).
 //!
 //! The actual AST traversal lives in [`crate::walk`]; this module is the
 //! [`LanguageParser`]-shaped adapter that converts each visited
@@ -30,6 +31,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use crate::attrs::{name_looks_like_test_class, name_looks_like_test_function};
+use crate::harness::{is_harness_segment, is_synthetic_segment};
 use crate::tree::{expr_tree, function_body_tree};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
@@ -396,10 +398,15 @@ fn jsdoc_text(raw: &str) -> Option<String> {
 /// `walk_module_body`) so a namespaced free function shows up bare
 /// here.
 ///
-/// A nested function (`<parent>::closure#N`) carries no test marker of
-/// its own — it inherits the classification of the enclosing named
-/// function or method, so the `::closure#N` chain is peeled off first.
+/// A callback registered with a test harness (`it#1("adds")`) is test
+/// code by construction, wherever it sits and whatever the file is
+/// called. A plain nested function (`<parent>::closure#N`) carries no
+/// marker of its own — it inherits the classification of the enclosing
+/// named function or method, so synthetic segments are peeled off first.
 pub(crate) fn is_test_item(qualified: &str) -> bool {
+    if qualified.split("::").any(is_harness_segment) {
+        return true;
+    }
     let base = strip_nested_segments(qualified);
     match base.rsplit_once("::") {
         Some((owner, method)) => {
@@ -409,28 +416,19 @@ pub(crate) fn is_test_item(qualified: &str) -> bool {
     }
 }
 
-/// Peel any trailing `::closure#N` segments minted by [`crate::walk`] for
+/// Peel any trailing synthetic segments minted by [`crate::walk`] for
 /// nested functions, returning the qualified name of the enclosing named
 /// function or method (e.g. `test_foo::closure#1` → `test_foo`).
 fn strip_nested_segments(name: &str) -> &str {
     let mut base = name;
     while let Some((head, tail)) = base.rsplit_once("::") {
-        if is_nested_segment(tail) {
+        if is_synthetic_segment(tail) {
             base = head;
         } else {
             break;
         }
     }
     base
-}
-
-/// True iff `segment` is a `closure#<digits>` segment — the shape
-/// [`crate::walk`] mints for a nested function. A real identifier can
-/// never collide: `#` is only legal in a `#private` field, never mid-name.
-fn is_nested_segment(segment: &str) -> bool {
-    segment
-        .strip_prefix(crate::walk::NESTED_SEGMENT_PREFIX)
-        .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn statement_tree(stmt: &Statement) -> TreeNode {
@@ -1148,26 +1146,120 @@ function Wrap() { return <div><span>a</span><span>b</span></div>; }
     #[case::closure_in_production_method("Service::compute::closure#1", false)]
     #[case::closure_in_production_function("compute::closure#1", false)]
     #[case::private_method_is_not_a_closure_segment("Service::#closure", false)]
+    #[case::harness_callback("describe#1(\"groupFor\")::it#2(\"maps\")", true)]
+    #[case::closure_inside_harness_callback("it#1(\"maps\")::closure#1", true)]
+    #[case::harness_callback_in_production_function("mount::it#1(\"maps\")", true)]
     fn is_test_item_peels_closure_segments(#[case] qualified: &str, #[case] expected: bool) {
         assert_eq!(is_test_item(qualified), expected);
     }
 
-    /// Only a `closure#<digits>` segment is a nested-function marker. An
-    /// empty or non-numeric index must not match, so a real name can
-    /// never be mistaken for a synthetic one.
+    /// Peeling stops at the first segment the source actually named, so a
+    /// closure's classification comes from its enclosing function.
     #[rstest]
-    #[case::numbered("closure#1", true)]
-    #[case::multi_digit("closure#42", true)]
-    #[case::empty_index("closure#", false)]
-    #[case::non_digit_index("closure#a", false)]
-    #[case::no_hash("closure", false)]
-    #[case::private_method("#closure", false)]
-    #[case::plain_name("helper", false)]
-    fn is_nested_segment_matches_only_closure_indices(
-        #[case] segment: &str,
-        #[case] expected: bool,
+    #[case::closure("test_run::closure#1", "test_run")]
+    #[case::deep_closure("Svc::check::closure#1::closure#2", "Svc::check")]
+    #[case::titled_callback("mount::it#1(\"maps\")", "mount")]
+    #[case::nothing_to_peel("Service::compute", "Service::compute")]
+    #[case::private_method_is_not_synthetic("Service::#closure", "Service::#closure")]
+    fn strip_nested_segments_stops_at_the_first_real_name(
+        #[case] qualified: &str,
+        #[case] expected: &str,
     ) {
-        assert_eq!(is_nested_segment(segment), expected);
+        assert_eq!(strip_nested_segments(qualified), expected);
+    }
+
+    /// The shape of essentially every vitest / jest suite: a module-level
+    /// call whose callbacks hold the whole file. Before these were
+    /// walked, such a file extracted zero functions.
+    #[test]
+    fn module_level_harness_callbacks_are_extracted_and_named_after_the_call() {
+        let src = "import { describe, it } from \"vitest\";\n\
+             describe(\"checkConsistency\", () => {\n\
+                 it(\"accepts numbers that agree\", () => {\n\
+                     expect(checkConsistency(counted)).toEqual([]);\n\
+                 });\n\
+                 it(\"rejects a mismatch\", () => {\n\
+                     expect(checkConsistency(other)).toHaveLength(1);\n\
+                 });\n\
+             });\n";
+        let funcs = parse_functions(src);
+        assert_eq!(
+            names(&funcs),
+            [
+                "describe#1(\"checkConsistency\")",
+                "describe#1(\"checkConsistency\")::it#1(\"accepts numbers that agree\")",
+                "describe#1(\"checkConsistency\")::it#2(\"rejects a mismatch\")",
+            ],
+        );
+        assert!(
+            funcs.iter().all(|f| f.is_test),
+            "a harness callback is test code by construction",
+        );
+    }
+
+    #[test]
+    fn sibling_module_level_suites_get_distinct_names() {
+        // Both suites are the first callback of their own statement; only
+        // a file-wide counter keeps them apart.
+        let src = "describe(\"a\", () => {});\ndescribe(\"b\", () => {});\n";
+        let funcs = parse_functions(src);
+        assert_eq!(names(&funcs), ["describe#1(\"a\")", "describe#2(\"b\")"]);
+    }
+
+    #[rstest]
+    #[case::hook("beforeEach(() => {\n    reset();\n});\n", "beforeEach#1")]
+    #[case::modifier("it.skip(\"pends\", () => {\n    run();\n});\n", "it#1(\"pends\")")]
+    #[case::table(
+        "it.each([1, 2])(\"adds %i\", (n) => {\n    run(n);\n});\n",
+        "it#1(\"adds %i\")"
+    )]
+    #[case::template_title(
+        "it(`adds numbers`, () => {\n    run();\n});\n",
+        "it#1(\"adds numbers\")"
+    )]
+    #[case::tagged_template_table(
+        "it.each`\n  a\n  ${1}\n`(\"adds $a\", ({ a }) => {\n    run(a);\n});\n",
+        "it#1(\"adds $a\")"
+    )]
+    #[case::function_expression_callback(
+        "it(\"adds\", function () {\n    run();\n});\n",
+        "it#1(\"adds\")"
+    )]
+    #[case::computed_title("it(caseName, () => {\n    run();\n});\n", "it#1")]
+    // An interpolated title has no value until the suite runs, so half of
+    // it would be a worse name than none at all.
+    #[case::interpolated_title("it(`adds ${n}`, () => {\n    run();\n});\n", "it#1")]
+    #[case::playwright(
+        "test.describe(\"suite\", () => {\n    run();\n});\n",
+        "test#1(\"suite\")"
+    )]
+    fn harness_callback_names_follow_the_registering_call(
+        #[case] src: &str,
+        #[case] expected: &str,
+    ) {
+        let funcs = parse_functions(src);
+        assert_eq!(names(&funcs), [expected]);
+    }
+
+    /// The descent is general, not test-only: a statement-level call is
+    /// walked whatever it registers. Without a harness callee the unit
+    /// keeps the positional `closure#N` name and stays production code.
+    #[rstest]
+    #[case::server_callback("app.listen(3000, () => {\n    log(\"up\");\n});\n")]
+    #[case::iife("(() => {\n    log(\"up\");\n})();\n")]
+    fn module_level_callbacks_outside_a_harness_stay_closures(#[case] src: &str) {
+        let funcs = parse_functions(src);
+        assert_eq!(names(&funcs), ["closure#1"]);
+        assert!(!funcs[0].is_test);
+    }
+
+    #[test]
+    fn a_test_title_cannot_split_a_qualified_name() {
+        // `::` in a title would otherwise mint extra name segments and
+        // make the unit look like it lives under an owner.
+        let src = "it(\"handles Foo::bar() well\", () => {\n    run();\n});\n";
+        let funcs = parse_functions(src);
+        assert_eq!(names(&funcs), ["it#1(\"handles Foo bar well\")"]);
     }
 
     #[test]

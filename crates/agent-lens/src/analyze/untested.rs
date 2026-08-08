@@ -834,6 +834,37 @@ mod tests {
         assert_eq!(untested_names(&report), [expected_untested]);
     }
 
+    /// A vitest / jest suite declares nothing: every call it makes sits
+    /// in a `describe` / `it` callback. A file like this used to
+    /// contribute no roots at all, so the functions it exercises were
+    /// reported as untested.
+    #[test]
+    fn a_vitest_suite_covers_the_functions_its_cases_call() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.ts",
+            "export function covered(): number { return 1; }\n\
+             export function untestedOne(): number { return 2; }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/lib.test.ts",
+            "import { describe, expect, it } from \"vitest\";\n\
+             import { covered } from \"./lib\";\n\
+             describe(\"covered\", () => {\n\
+                 it(\"returns one\", () => {\n\
+                     expect(covered()).toBe(1);\n\
+                 });\n\
+             });\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["test_roots"]["absent"], false, "report: {report}");
+        assert_eq!(report["summary"]["prod_function_count"], 2);
+        assert_eq!(untested_names(&report), ["src::lib::untestedOne"]);
+    }
+
     /// Three modules of untested code so both sides of the module cap
     /// are observable: `--top` truncates and says how many it dropped,
     /// and an uncapped run says nothing at all.
