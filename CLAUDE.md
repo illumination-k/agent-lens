@@ -11,10 +11,13 @@ This library is pre-alpha and under active development. The API is not stable an
 
 Unlike ordinary linting, its output is tuned to be useful when placed in an LLM context: keep the signal dense, avoid decorative output, and prefer structured data that an agent can reason over.
 
-The project bundles two related surfaces:
+The project bundles three related surfaces:
 
 - Hook handlers that integrate with coding-agent workflows and surface focused context at useful moments.
-- On-demand analyzers that report codebase shape: duplication, wrappers, delegation chains, cohesion, complexity, coupling, context span, hotspots, change risk, and call-graph structure (hubs, cycles, queries, impact, layers, untested, visibility).
+- On-demand analyzers that report codebase shape: duplication (functions, type definitions, and statement blocks), wrappers, delegation chains, cohesion, complexity, coupling, context span, hotspots, change risk, and call-graph structure (hubs, cycles, queries, impact, layers, untested, unreachable, visibility).
+- A profile runner (`agent-lens run <profile>`) and metric snapshots (`agent-lens baseline create <profile>`) over an `agent-lens.toml`, plus `agent-lens skills install` for the bundled Claude Code skills.
+
+`agent-lens help --md` prints the whole command surface as one Markdown document and `agent-lens config schema` prints the `agent-lens.toml` reference. Both are generated from the code, so read them rather than trusting a doc when the two disagree.
 
 ## Development Process
 
@@ -70,3 +73,13 @@ mise run bench:rust --baseline base
 Keep stdout reserved for protocol data and analyzer results. Send logs and diagnostics to stderr through `tracing`.
 
 Treat analyzer output as agent-facing context, not human-facing decoration. Do not add colors, animations, emoji, or verbose prose to analyzer output unless there is a concrete agent-useful reason.
+
+## Documentation
+
+A change to the CLI surface is not done until `README.md` matches it. The parts that drift are the ones restating a fact the code already owns:
+
+- the analyzer options table and the per-tool `agent-lens.toml` tables — a new flag, a new enum value, or a table where declaring one used to be a parse error,
+- the analyzer descriptions under "What's in the box",
+- the language-support claims, when an adapter gains or loses a capability.
+
+Diff those against `agent-lens help --md` and `agent-lens config schema` rather than against memory. Both are generated from the code and are the source of truth; the README is a narrative over them, so it is the side that gets corrected.
