@@ -205,6 +205,46 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
+    fn source_file(display_path: &str) -> SourceFile {
+        SourceFile {
+            path: PathBuf::from(display_path),
+            display_path: display_path.to_owned(),
+        }
+    }
+
+    /// Whether the root is a directory decides two of the four
+    /// languages, so pin both sides of that guard. With a single file as
+    /// the root there is no layout to place it in: Rust names the crate
+    /// and TS/JS the placeholder, rather than reading the bare file name
+    /// as a module. Point the same file at a directory root and the
+    /// name comes back.
+    #[rstest]
+    #[case(SourceLang::Rust, "helper.rs", "crate", "crate::helper")]
+    #[case(
+        SourceLang::TypeScript(lens_ts::Dialect::Ts),
+        "helper.ts",
+        "module",
+        "helper"
+    )]
+    fn single_file_roots_name_the_root_not_the_file(
+        #[case] lang: SourceLang,
+        #[case] file: &str,
+        #[case] as_single_file: &str,
+        #[case] under_a_directory: &str,
+    ) {
+        let source_file = source_file(file);
+        // A path that does not exist is not a directory, which is what
+        // a single-file root looks like here.
+        assert_eq!(
+            module_path_for(Path::new(file), &source_file, lang, None, ""),
+            as_single_file,
+        );
+        assert_eq!(
+            module_path_for(Path::new("."), &source_file, lang, None, ""),
+            under_a_directory,
+        );
+    }
+
     #[rstest]
     #[case("lib.rs", "crate")]
     #[case("main.rs", "crate")]
