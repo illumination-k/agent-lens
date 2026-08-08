@@ -18,8 +18,7 @@ use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
 use oxc_syntax::scope::ScopeFlags;
 
-use crate::attrs::name_looks_like_test_function;
-use crate::parser::{Dialect, TsParseError};
+use crate::parser::{Dialect, TsParseError, is_test_item};
 use crate::tree::function_body_tree;
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
@@ -125,7 +124,11 @@ impl FunctionVisitor for FunctionShapeCollector {
                 start_line: item.start_line,
                 end_line: item.end_line,
             },
-            is_test: name_looks_like_test_function(&item.name),
+            // Syntactic evidence only: a `describe`/`it` callback or an
+            // xUnit-style name. The graph ORs this with the file's path,
+            // so a test that lives in a conventionally named file is
+            // still marked when its name says nothing.
+            is_test: is_test_item(&item.name),
         });
     }
 }
@@ -682,6 +685,41 @@ mod tests {
         assert_eq!(
             calls[0].caller_qualified_name(),
             Some("src::main::setup::closure#1"),
+        );
+    }
+
+    #[test]
+    fn a_test_case_body_owns_the_calls_it_makes() {
+        // Every call a vitest suite makes lives in a harness callback. If
+        // those bodies are not units, the call graph has no test node to
+        // start a reachability walk from — the shape of issue #424.
+        let source = "import { checkConsistency } from \"./integrity\";\n\
+             describe(\"checkConsistency\", () => {\n\
+                 it(\"accepts agreeing numbers\", () => {\n\
+                     checkConsistency(counted);\n\
+                 });\n\
+             });\n";
+        let module = "src::integrity_test";
+
+        let functions = extract_function_shapes_with_module(source, Dialect::Ts, module).unwrap();
+        let case = functions
+            .iter()
+            .find(|f| {
+                f.qualified_name
+                    .known_value()
+                    .is_some_and(|name| name.ends_with("it#1(\"accepts agreeing numbers\")"))
+            })
+            .expect("the case must be its own function shape");
+        assert!(case.is_test, "a harness callback is test code");
+
+        let calls = extract_call_shapes_with_module(source, Dialect::Ts, module).unwrap();
+        let covered = calls
+            .iter()
+            .find(|c| c.callee_name() == Some("checkConsistency"))
+            .expect("the call under test must be recorded");
+        assert_eq!(
+            covered.caller_qualified_name(),
+            case.qualified_name.known_value().map(String::as_str),
         );
     }
 }

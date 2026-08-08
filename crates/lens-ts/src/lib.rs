@@ -17,6 +17,7 @@ mod cohesion;
 mod complexity;
 mod context_span;
 mod coupling;
+mod harness;
 mod method_names;
 mod parser;
 #[cfg(test)]

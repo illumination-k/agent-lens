@@ -3,12 +3,12 @@
 //!
 //! TypeScript / JavaScript has no `#[test]`-equivalent attribute. The
 //! standard frameworks (Jest, Mocha, Vitest, AVA) lean on top-level
-//! `describe()` / `it()` / `test()` calls with arrow-function
-//! callbacks — callbacks that the walker already skips because they
-//! aren't bound to a name. What's left is the smaller class of named,
-//! declaration-level test artefacts (xUnit-style `class TestFoo {}`
-//! suites, hand-written `function test_foo()` runners) which we
-//! recognise here by name.
+//! `describe()` / `it()` / `test()` calls with arrow-function callbacks;
+//! those are recognised from the registering call itself, in
+//! [`crate::harness`]. What is left for this module is the smaller class
+//! of named, declaration-level test artefacts (xUnit-style
+//! `class TestFoo {}` suites, hand-written `function test_foo()` runners)
+//! which we recognise here by name.
 //!
 //! The helpers are intentionally conservative: anything more elaborate
 //! than the canonical `test` / `test_*` and `Test*` shapes falls

@@ -10,6 +10,15 @@
 //! order; see [`scan_nested_functions`]). The walk is depth-first: a
 //! function is emitted before any function found inside its body.
 //!
+//! A statement-level call carries functions too, and in a TS test suite
+//! it carries all of them: `describe("…", () => …)` at module scope is an
+//! expression statement, not a declaration. Those callbacks are emitted
+//! as module-scope units named after the call
+//! (`describe#1("groupFor")::it#2("uses the crate name")`, see
+//! [`crate::harness`]) so a vitest / jest file contributes its bodies to
+//! every analyzer instead of reading as an empty module. The same descent
+//! picks up IIFEs and `app.listen(() => …)`.
+//!
 //! The shape of the AST traversal used to be duplicated between
 //! [`crate::parser`] (which collects [`lens_domain::FunctionDef`]) and
 //! [`crate::complexity`] (which collects [`lens_domain::FunctionComplexity`]).
@@ -24,16 +33,12 @@
 //! the AST shape.
 
 use oxc_ast::ast::*;
-use oxc_ast_visit::Visit;
+use oxc_ast_visit::{Visit, walk};
 use oxc_syntax::scope::ScopeFlags;
 
 use lens_domain::LineIndex;
 
-/// Name infix used for a function nested inside another function's body.
-/// The walker mints `<parent>::closure#<N>` (`N` is 1-based, source
-/// order); [`crate::parser`] parses the prefix back out so a nested
-/// function inherits the test classification of its enclosing function.
-pub(crate) const NESTED_SEGMENT_PREFIX: &str = "closure#";
+use crate::harness::{CLOSURE_CALLEE, call_title, harness_callee, synthetic_segment};
 
 /// One extracted function unit. The walker has already resolved the
 /// 1-based inclusive line range and the qualified name (e.g.
@@ -68,16 +73,27 @@ pub(crate) fn walk_program<V: FunctionVisitor>(
     line_index: &LineIndex,
     visitor: &mut V,
 ) {
+    // Module-scope callbacks are numbered across the whole file, not per
+    // statement, so two top-level `describe(…)` blocks cannot both mint
+    // `describe#1`. The same counter threads through `namespace` blocks
+    // for the same reason.
+    let mut units = ModuleUnitCounter::default();
     for stmt in &program.body {
-        walk_stmt(stmt, None, line_index, visitor);
+        walk_stmt(stmt, None, line_index, visitor, &mut units);
     }
 }
+
+/// Running count of module-scope units minted for one file — see
+/// [`walk_program`].
+#[derive(Default)]
+struct ModuleUnitCounter(usize);
 
 fn walk_stmt<V: FunctionVisitor>(
     stmt: &Statement,
     owner: Option<&str>,
     line_index: &LineIndex,
     visitor: &mut V,
+    units: &mut ModuleUnitCounter,
 ) {
     match stmt {
         Statement::FunctionDeclaration(f) => {
@@ -91,7 +107,7 @@ fn walk_stmt<V: FunctionVisitor>(
         }
         Statement::ExportNamedDeclaration(e) => {
             if let Some(decl) = &e.declaration {
-                walk_decl(decl, owner, e.span.start, line_index, visitor);
+                walk_decl(decl, owner, e.span.start, line_index, visitor, units);
             }
         }
         Statement::ExportDefaultDeclaration(e) => match &e.declaration {
@@ -103,8 +119,11 @@ fn walk_stmt<V: FunctionVisitor>(
         },
         Statement::TSModuleDeclaration(m) => {
             if let Some(body) = &m.body {
-                walk_module_body(body, line_index, visitor);
+                walk_module_body(body, line_index, visitor, units);
             }
+        }
+        Statement::ExpressionStatement(e) => {
+            scan_expression_functions(&e.expression, line_index, visitor, units);
         }
         _ => {}
     }
@@ -116,6 +135,7 @@ fn walk_decl<V: FunctionVisitor>(
     attach_start: u32,
     line_index: &LineIndex,
     visitor: &mut V,
+    units: &mut ModuleUnitCounter,
 ) {
     match decl {
         Declaration::FunctionDeclaration(f) => {
@@ -129,7 +149,7 @@ fn walk_decl<V: FunctionVisitor>(
         }
         Declaration::TSModuleDeclaration(m) => {
             if let Some(body) = &m.body {
-                walk_module_body(body, line_index, visitor);
+                walk_module_body(body, line_index, visitor, units);
             }
         }
         _ => {}
@@ -140,16 +160,17 @@ fn walk_module_body<V: FunctionVisitor>(
     body: &TSModuleDeclarationBody,
     line_index: &LineIndex,
     visitor: &mut V,
+    units: &mut ModuleUnitCounter,
 ) {
     match body {
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                walk_stmt(stmt, None, line_index, visitor);
+                walk_stmt(stmt, None, line_index, visitor, units);
             }
         }
         TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
             if let Some(body) = &nested.body {
-                walk_module_body(body, line_index, visitor);
+                walk_module_body(body, line_index, visitor, units);
             }
         }
     }
@@ -276,13 +297,36 @@ fn scan_nested_functions<V: FunctionVisitor>(
     scanner.visit_function_body(body);
 }
 
-/// [`Visit`] adapter that finds the functions directly nested in a body.
+/// Emit every function carried by a module-scope expression, using the
+/// file-wide [`ModuleUnitCounter`] so names stay unique across statements.
 ///
-/// Every node type apart from the two function shapes uses the default
-/// walk, so the scan reaches functions buried deep inside expressions and
-/// JSX. The two function arms emit the nested unit and then re-enter
-/// [`scan_nested_functions`] for its body rather than letting the default
-/// walk descend — that keeps `closure#N` indices scoped to one parent.
+/// The units have no enclosing function to be named after, so their names
+/// are bare segments: `describe#1("groupFor")`, `closure#4`.
+fn scan_expression_functions<V: FunctionVisitor>(
+    expr: &Expression,
+    line_index: &LineIndex,
+    visitor: &mut V,
+    units: &mut ModuleUnitCounter,
+) {
+    let mut scanner = NestedScanner {
+        visitor,
+        parent: "",
+        line_index,
+        counter: units.0,
+    };
+    scanner.visit_expression(expr);
+    units.0 = scanner.counter;
+}
+
+/// [`Visit`] adapter that finds the functions directly nested in a body
+/// or a module-scope expression.
+///
+/// Every node type apart from the two function shapes and harness calls
+/// uses the default walk, so the scan reaches functions buried deep
+/// inside expressions and JSX. The function arms emit the nested unit and
+/// then re-enter [`scan_nested_functions`] for its body rather than
+/// letting the default walk descend — that keeps `#N` indices scoped to
+/// one parent.
 struct NestedScanner<'s, V> {
     visitor: &'s mut V,
     parent: &'s str,
@@ -291,9 +335,20 @@ struct NestedScanner<'s, V> {
 }
 
 impl<V: FunctionVisitor> NestedScanner<'_, V> {
-    fn emit(&mut self, params: &FormalParameters, body: &FunctionBody, start: u32) {
+    fn emit(
+        &mut self,
+        callee: &str,
+        title: Option<&str>,
+        params: &FormalParameters,
+        body: &FunctionBody,
+        start: u32,
+    ) {
         self.counter += 1;
-        let name = format!("{}::{NESTED_SEGMENT_PREFIX}{}", self.parent, self.counter);
+        let segment = synthetic_segment(callee, self.counter, title);
+        let name = match self.parent {
+            "" => segment,
+            parent => format!("{parent}::{segment}"),
+        };
         self.visitor.on_function(FunctionItem {
             name: name.clone(),
             start_line: self.line_index.line(start),
@@ -310,12 +365,58 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
 impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: ScopeFlags) {
         if let Some(body) = &func.body {
-            self.emit(&func.params, body, func.span.start);
+            self.emit(CLOSURE_CALLEE, None, &func.params, body, func.span.start);
         }
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
-        self.emit(&arrow.params, &arrow.body, arrow.span.start);
+        self.emit(
+            CLOSURE_CALLEE,
+            None,
+            &arrow.params,
+            &arrow.body,
+            arrow.span.start,
+        );
+    }
+
+    /// A callback registered with a test harness is named after the call
+    /// that registers it rather than by position, so `it#2("adds")` says
+    /// which case a finding is about. Everything else — the callee
+    /// expression, non-function arguments — takes the default walk, so a
+    /// closure inside `it.each([…])`'s table is still found.
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        let Some(callee) = harness_callee(&call.callee) else {
+            walk::walk_call_expression(self, call);
+            return;
+        };
+        let title = call_title(call);
+        self.visit_expression(&call.callee);
+        for arg in &call.arguments {
+            match arg.as_expression().and_then(callback_shape) {
+                Some((params, body, start)) => {
+                    self.emit(callee, title.as_deref(), params, body, start);
+                }
+                None => self.visit_argument(arg),
+            }
+        }
+    }
+}
+
+/// The parameters, body and span start of an argument that is written as
+/// a function; `None` for anything else, including a function passed by
+/// reference (`it("adds", checkAdds)`) which is a call, not a body.
+fn callback_shape<'b, 'a>(
+    expr: &'b Expression<'a>,
+) -> Option<(&'b FormalParameters<'a>, &'b FunctionBody<'a>, u32)> {
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => {
+            Some((&arrow.params, &arrow.body, arrow.span.start))
+        }
+        Expression::FunctionExpression(func) => func
+            .body
+            .as_ref()
+            .map(|body| (&*func.params, &**body, func.span.start)),
+        _ => None,
     }
 }
 
