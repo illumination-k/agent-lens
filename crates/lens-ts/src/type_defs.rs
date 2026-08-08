@@ -4,9 +4,10 @@
 //! including exported and `namespace`-nested ones — into the neutral
 //! [`TypeShape`]. A `type X = { … }` object literal becomes a
 //! [`TypeDefKind::Record`] like an interface; any other alias target is
-//! an [`TypeDefKind::Alias`]. Interface method signatures and `class`
-//! bodies are function-shaped surface and stay with function
-//! extraction.
+//! an [`TypeDefKind::Alias`]. An interface member is a member whether it
+//! is spelled as a property, a method, a call / construct signature, or
+//! an index signature — see [`signature_members`]. `class` bodies are
+//! function-shaped surface and stay with function extraction.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -18,7 +19,9 @@ use lens_domain::{
 };
 
 use crate::attrs::name_looks_like_test_class;
-use crate::parser::{Dialect, TsParseError, jsdoc_by_attach_offset, ts_type_paths};
+use crate::parser::{
+    Dialect, TsParseError, formal_parameter_type_paths, jsdoc_by_attach_offset, ts_type_paths,
+};
 use crate::walk::method_key_name;
 
 /// Extract every `interface` / `type` alias / `enum` in `source`.
@@ -195,28 +198,123 @@ fn enum_shape(decl: &TSEnumDeclaration, attach: u32, ctx: &ExtractContext) -> Ty
     }
 }
 
-/// Property signatures become members; method / call / construct /
-/// index signatures are function-shaped or nameless and contribute
-/// nothing in the data-shape model.
+/// Every signature in the body becomes a member.
+///
+/// A property signature contributes its declared type. The other four
+/// forms are function-shaped or nameless, but dropping them would leave a
+/// method-only interface — the normal spelling of a repository or service
+/// contract — with no members at all, and an empty shape matches every
+/// other empty shape vacuously. So each is rendered into the *same*
+/// currency a property holding that value would carry: a method signature
+/// becomes its arrow type, so `load(): void` and `load: () => void` (the
+/// same declaration in TypeScript) produce the same member.
+///
+/// Getters and setters are rendered as the accessor's own arrow type
+/// rather than as the property type they stand for; the accessor spelling
+/// is rare enough in interfaces that the extra branch would not pay for
+/// itself.
 fn signature_members(signatures: &[TSSignature], ctx: &ExtractContext) -> Vec<TypeMemberShape> {
     signatures
         .iter()
-        .filter_map(|signature| {
-            let TSSignature::TSPropertySignature(property) = signature else {
-                return None;
-            };
-            let name = method_key_name(&property.key);
-            let member = match &property.type_annotation {
-                Some(annotation) => type_member(name, &annotation.type_annotation, ctx),
-                None => TypeMemberShape {
-                    name,
-                    type_text: None,
-                    type_paths: Vec::new(),
-                },
-            };
-            Some(member)
+        .map(|signature| match signature {
+            TSSignature::TSPropertySignature(property) => {
+                let name = method_key_name(&property.key);
+                match &property.type_annotation {
+                    Some(annotation) => type_member(name, &annotation.type_annotation, ctx),
+                    None => TypeMemberShape {
+                        name,
+                        type_text: None,
+                        type_paths: Vec::new(),
+                    },
+                }
+            }
+            TSSignature::TSMethodSignature(method) => function_member(
+                method_key_name(&method.key),
+                "",
+                method.type_parameters.as_deref(),
+                &method.params,
+                method.return_type.as_deref(),
+                ctx,
+            ),
+            TSSignature::TSCallSignatureDeclaration(call) => function_member(
+                None,
+                "",
+                call.type_parameters.as_deref(),
+                &call.params,
+                call.return_type.as_deref(),
+                ctx,
+            ),
+            TSSignature::TSConstructSignatureDeclaration(construct) => function_member(
+                None,
+                "new ",
+                construct.type_parameters.as_deref(),
+                &construct.params,
+                construct.return_type.as_deref(),
+                ctx,
+            ),
+            TSSignature::TSIndexSignature(index) => index_member(index, ctx),
         })
         .collect()
+}
+
+/// Render a callable signature as the arrow type a property holding it
+/// would declare: `<T>(a: string) => T`. An omitted return annotation is
+/// spelled `any`, which is what TypeScript infers for it.
+fn function_member(
+    name: Option<String>,
+    prefix: &str,
+    type_parameters: Option<&TSTypeParameterDeclaration>,
+    params: &FormalParameters,
+    return_type: Option<&TSTypeAnnotation>,
+    ctx: &ExtractContext,
+) -> TypeMemberShape {
+    let mut type_paths = Vec::new();
+    formal_parameter_type_paths(params, &mut type_paths);
+    let rendered: Vec<String> = params
+        .items
+        .iter()
+        .map(|param| ctx.text(param.span))
+        .chain(params.rest.iter().map(|rest| ctx.text(rest.span)))
+        .collect();
+    let generics = type_parameters.map(|params| ctx.text(params.span));
+    let returns = match return_type {
+        Some(annotation) => {
+            ts_type_paths(&annotation.type_annotation, &mut type_paths);
+            ctx.text(annotation.type_annotation.span())
+        }
+        None => "any".to_owned(),
+    };
+    TypeMemberShape {
+        name,
+        type_text: Some(format!(
+            "{prefix}{}({}) => {returns}",
+            generics.unwrap_or_default(),
+            rendered.join(", "),
+        )),
+        type_paths,
+    }
+}
+
+/// Render an index signature as `[string]: unknown`. The key *name*
+/// (`key`, `k`, `_`) is a local binding with no bearing on the shape, so
+/// only its type survives.
+fn index_member(index: &TSIndexSignature, ctx: &ExtractContext) -> TypeMemberShape {
+    let mut type_paths = Vec::new();
+    let keys: Vec<String> = index
+        .parameters
+        .iter()
+        .map(|parameter| {
+            ts_type_paths(&parameter.type_annotation.type_annotation, &mut type_paths);
+            ctx.text(parameter.type_annotation.type_annotation.span())
+        })
+        .collect();
+    ts_type_paths(&index.type_annotation.type_annotation, &mut type_paths);
+    let value = ctx.text(index.type_annotation.type_annotation.span());
+    TypeMemberShape {
+        name: None,
+        type_text: Some(format!("[{}]: {value}", keys.join(", "))),
+        type_paths,
+    }
 }
 
 fn type_member(name: Option<String>, ty: &TSType, ctx: &ExtractContext) -> TypeMemberShape {
@@ -286,11 +384,106 @@ export interface User<T> {
         assert_eq!(shape.generics, ["T"]);
         assert_eq!(shape.span.start_line, 3);
         assert_eq!(shape.span.end_line, 8);
-        // The method signature is not a data member.
         let names: Vec<_> = shape.members.iter().map(|m| m.name.as_deref()).collect();
-        assert_eq!(names, [Some("id"), Some("names"), Some("extra")]);
+        assert_eq!(
+            names,
+            [Some("id"), Some("names"), Some("extra"), Some("load")]
+        );
         assert_eq!(shape.members[1].type_text.as_deref(), Some("Array<string>"));
         assert_eq!(shape.members[1].type_paths, ["Array", "string"]);
+    }
+
+    /// The regression behind issue #425: a repository / service contract
+    /// is spelled entirely with method signatures. Dropping those left an
+    /// empty shape, and every empty shape matched every other one, so a
+    /// 5-method repository, a 1-method health check, and an index-signature
+    /// bag all landed in a single 95-99% cluster.
+    #[test]
+    fn method_only_interface_keeps_its_method_set() {
+        let shapes = extract(
+            r#"
+export interface IArticleRepository {
+    retrieveArticleBySlug(slug: string): Promise<Article>;
+    listArticles(): Promise<Article[]>;
+}
+"#,
+        );
+
+        let members = &shapes[0].members;
+        let names: Vec<_> = members.iter().map(|m| m.name.as_deref()).collect();
+        assert_eq!(names, [Some("retrieveArticleBySlug"), Some("listArticles")]);
+        assert_eq!(
+            members[0].type_text.as_deref(),
+            Some("(slug: string) => Promise<Article>"),
+        );
+        assert_eq!(members[0].type_paths, ["string", "Promise", "Article"]);
+        assert_eq!(
+            members[1].type_text.as_deref(),
+            Some("() => Promise<Article[]>")
+        );
+    }
+
+    /// `load(): void` and `load: () => void` declare the same thing in
+    /// TypeScript. They must reduce to the same member, or a mirror
+    /// interface that swapped spellings reads as drift.
+    #[test]
+    fn method_and_property_spellings_of_one_signature_agree() {
+        let method = extract("interface A { load(a: string, ...rest: number[]): void }");
+        let property = extract("interface B { load: (a: string, ...rest: number[]) => void }");
+
+        let normalize = |shape: &TypeShape| {
+            shape.members[0]
+                .type_text
+                .as_deref()
+                .map(lens_domain::normalize_type_text)
+        };
+        assert_eq!(normalize(&method[0]), normalize(&property[0]));
+        assert_eq!(
+            method[0].members[0].type_paths,
+            property[0].members[0].type_paths
+        );
+    }
+
+    #[rstest]
+    #[case::no_return_annotation("interface I { run(); }", "() => any", &[])]
+    #[case::generic_method("interface I { map<T>(v: T): T }", "<T>(v: T) => T", &["T", "T"])]
+    #[case::call_signature("interface I { (a: string): number }", "(a: string) => number", &["string", "number"])]
+    #[case::construct_signature(
+        "interface I { new (a: string): Widget }",
+        "new (a: string) => Widget",
+        &["string", "Widget"]
+    )]
+    #[case::index_signature("interface I { [key: string]: unknown }", "[string]: unknown", &["string"])]
+    fn callable_and_index_signatures_render_as_member_types(
+        #[case] source: &str,
+        #[case] expected_text: &str,
+        #[case] expected_paths: &[&str],
+    ) {
+        let shapes = extract(source);
+
+        let member = &shapes[0].members[0];
+        assert_eq!(member.type_text.as_deref(), Some(expected_text));
+        assert_eq!(member.type_paths, expected_paths);
+    }
+
+    /// The index key binding is a local name with no bearing on the
+    /// shape, so two bags spelled with different key names agree.
+    #[test]
+    fn index_signature_ignores_the_key_binding_name() {
+        let a = extract("interface A { [key: string]: unknown }");
+        let b = extract("interface B { [k: string]: unknown }");
+
+        assert_eq!(a[0].members, b[0].members);
+    }
+
+    /// An empty interface is still empty — nothing was dropped, there was
+    /// nothing there. The similarity corpus, not the extractor, decides
+    /// what to do with a shapeless definition.
+    #[test]
+    fn empty_interface_stays_shapeless() {
+        let shapes = extract("interface Marker {}");
+
+        assert!(shapes[0].is_shapeless());
     }
 
     #[rstest]

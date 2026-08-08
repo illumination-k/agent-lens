@@ -334,10 +334,31 @@ pub(crate) fn ts_type_paths(ty: &TSType, out: &mut Vec<String>) {
             }
         }
         TSType::TSParenthesizedType(p) => ts_type_paths(&p.type_annotation, out),
+        // A callback's own parameter and return types are the only thing
+        // distinguishing `(id: UserId) => Article` from `() => void`, and
+        // `--target types` renders every interface method as one of these.
+        TSType::TSFunctionType(f) => {
+            formal_parameter_type_paths(&f.params, out);
+            ts_type_paths(&f.return_type.type_annotation, out);
+        }
         TSType::TSNumberKeyword(_) => out.push("number".to_owned()),
         TSType::TSStringKeyword(_) => out.push("string".to_owned()),
         TSType::TSBooleanKeyword(_) => out.push("boolean".to_owned()),
         _ => {}
+    }
+}
+
+/// Collect the type paths every parameter slot annotates, rest slot
+/// included. Shared by function-type descent here and by the interface
+/// method members `--target types` renders.
+pub(crate) fn formal_parameter_type_paths(params: &FormalParameters, out: &mut Vec<String>) {
+    let annotations = params
+        .items
+        .iter()
+        .map(|param| &param.type_annotation)
+        .chain(params.rest.iter().map(|rest| &rest.type_annotation));
+    for annotation in annotations.flatten() {
+        ts_type_paths(&annotation.type_annotation, out);
     }
 }
 
@@ -534,6 +555,18 @@ function f(
                 sig.parameter_type_paths,
             );
         }
+    }
+
+    /// A callback parameter's inner types are the only thing that tells
+    /// two callbacks apart; without descending into the function type,
+    /// `(cb: (id: UserId) => Article) => void` carries no type paths at
+    /// all.
+    #[test]
+    fn ts_type_paths_descend_into_function_types() {
+        let src = "function f(cb: (id: UserId, ...rest: Flag[]) => Article): void {}\n";
+        let funcs = parse_functions(src);
+        let sig = funcs[0].signature.as_ref().expect("signature populated");
+        assert_eq!(sig.parameter_type_paths, ["UserId", "Flag", "Article"]);
     }
 
     #[test]

@@ -83,6 +83,19 @@ pub struct TypeShape {
 }
 
 impl TypeShape {
+    /// Whether the definition reduces to a bare root node: no members and
+    /// no variants.
+    ///
+    /// Such a shape carries no evidence at all, so it does not compare
+    /// *highly* against another shapeless definition — it compares
+    /// *vacuously*, at 1.0, against every one of them. A marker
+    /// interface, a unit struct, and an empty enum would form a single
+    /// cluster whose only shared property is that nothing was extracted.
+    /// The similarity corpus drops these before pairing.
+    pub fn is_shapeless(&self) -> bool {
+        self.members.is_empty() && self.variants.is_empty()
+    }
+
     /// Render the comparison tree. Member facts go into node *labels*
     /// (`Field(user_id: Vec<String>)`), never into `value`: APTED,
     /// token profiles, and exact-match hashing all compare labels only.
@@ -251,6 +264,36 @@ mod tests {
             },
             is_test: false,
         }
+    }
+
+    /// Both an empty record and an empty enum render as a bare root, so
+    /// they score 1.0 against each other. The flag is what lets the
+    /// corpus drop them before that happens.
+    #[rstest]
+    #[case::empty_record(TypeDefKind::Record, false, false, true)]
+    #[case::empty_enum(TypeDefKind::Enum, false, false, true)]
+    #[case::has_member(TypeDefKind::Record, true, false, false)]
+    #[case::has_variant(TypeDefKind::Enum, false, true, false)]
+    fn is_shapeless_when_no_member_and_no_variant(
+        #[case] kind: TypeDefKind,
+        #[case] with_member: bool,
+        #[case] with_variant: bool,
+        #[case] expected: bool,
+    ) {
+        let mut shape = record("Thing", Vec::new());
+        shape.kind = kind;
+        if with_member {
+            shape.members.push(member(Some("id"), Some("u64"), &[]));
+        }
+        if with_variant {
+            shape.variants.push(TypeVariantShape {
+                name: "Only".to_owned(),
+                members: Vec::new(),
+            });
+        }
+
+        assert_eq!(shape.is_shapeless(), expected);
+        assert_eq!(shape.tree().subtree_size() == 1, expected);
     }
 
     #[test]

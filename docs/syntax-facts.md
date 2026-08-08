@@ -63,6 +63,22 @@ The language-facing spelling lives in `kind_label`, a fixed vocabulary
 in reports. Members carry the declared name, the normalized annotation text,
 and the referenced type paths.
 
+A TS interface member is a member whatever its spelling: a method, call, or
+construct signature contributes the arrow type a property holding it would
+declare (`load(): void` and `load: () => void` are one declaration in
+TypeScript and produce one member), and an index signature contributes
+`[string]: unknown` with the key binding's local name dropped. This is what
+lets a method-only contract — the normal shape of a repository or service
+interface — compare on its method set.
+
+`is_shapeless()` marks a definition with no members and no variants. Such a
+shape renders as a bare root node, so it does not score _highly_ against
+another shapeless definition, it scores _vacuously_, at 1.0, against every
+one of them; the similarity corpus drops these before pairing rather than
+let a marker interface, a unit struct, and an empty enum form one cluster.
+`--min-lines` cannot stand in for this — an empty definition can still be
+spelled across several lines.
+
 Rendering into the comparison currency lives in the domain, not the
 adapters, so every language emits one label vocabulary: the root label is
 the neutral kind, each member becomes a leaf labelled
