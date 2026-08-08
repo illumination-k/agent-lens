@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
 use tree_sitter::Node;
 
+use crate::module_path::package_segments;
+
 use crate::node_text::node_str;
 use crate::parser::{GoParseError, parse_tree, unquote_go_string_literal};
 
@@ -182,17 +184,15 @@ fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), CouplingEr
     Ok(())
 }
 
+/// Name a discovered package directory after its location below the
+/// analysis root, rooted at `crate` the way every adapter's module tree
+/// is. The segment rules themselves live in
+/// [`crate::module_path::package_segments`] so the call graph names the
+/// same package the same way.
 fn module_path_for_rel(rel: &Path) -> ModulePath {
-    let mut out = String::from("crate");
-    for segment in rel.iter() {
-        let s = segment.to_string_lossy();
-        if s.is_empty() {
-            continue;
-        }
-        out.push_str("::");
-        out.push_str(&s);
-    }
-    ModulePath::new(out)
+    let mut parts = vec!["crate".to_owned()];
+    parts.extend(package_segments(rel));
+    ModulePath::new(parts.join("::"))
 }
 
 /// Parse a single `.go` file and pull every resolved import path out of
