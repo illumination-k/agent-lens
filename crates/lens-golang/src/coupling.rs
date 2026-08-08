@@ -25,7 +25,6 @@ use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
 use tree_sitter::Node;
 
 use crate::module_path::package_segments;
-
 use crate::node_text::node_str;
 use crate::parser::{GoParseError, parse_tree, unquote_go_string_literal};
 
