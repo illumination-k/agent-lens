@@ -41,7 +41,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde::Serialize;
 
@@ -51,7 +50,7 @@ use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builder
 use super::format::{ModuleSection, render_module_confidence, render_module_sections};
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -116,9 +115,14 @@ impl UntestedAnalyzer {
         self
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let graph = self.builder.build(path)?;
-        let report = Report::build(path, &graph);
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
+        let graph = self.builder.build(&roots)?;
+        let report = Report::build(&roots, &graph);
         render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
@@ -225,9 +229,9 @@ struct Summary {
 }
 
 impl Report {
-    fn build(root: &Path, graph: &CallGraph) -> Self {
+    fn build(roots: &AnalyzeRoots, graph: &CallGraph) -> Self {
         let adjacency = graph.resolved_adjacency();
-        let roots: Vec<usize> = graph
+        let test_entries: Vec<usize> = graph
             .nodes
             .iter()
             .enumerate()
@@ -236,7 +240,7 @@ impl Report {
             .collect();
 
         let mut reached = vec![false; graph.nodes.len()];
-        for visit in bfs(&adjacency, &roots) {
+        for visit in bfs(&adjacency, &test_entries) {
             reached[visit.node] = true;
         }
         let untested: Vec<usize> = graph
@@ -272,10 +276,10 @@ impl Report {
 
         Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             note: NOTE,
-            test_roots: test_roots(graph, &roots),
+            test_roots: test_roots(graph, &test_entries),
             bounds: Bounds {
                 unresolved_call_count_in_reached: edges.unresolved_in_reached,
                 ambiguous_call_count_in_reached: edges.ambiguous_in_reached,
@@ -541,6 +545,7 @@ mod tests {
     use crate::test_support::write_file;
     use rstest::rstest;
     use serde_json::Value;
+    use std::path::Path;
 
     fn analyze_json(path: &Path) -> Value {
         let json = UntestedAnalyzer::new()

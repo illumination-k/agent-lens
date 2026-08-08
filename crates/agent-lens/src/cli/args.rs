@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-use agent_lens::analyze::OutputFormat;
 use agent_lens::analyze::cohesion::CohesionOptions;
 use agent_lens::analyze::complexity::ComplexityOptions;
 use agent_lens::analyze::context_span::ContextSpanOptions;
+use agent_lens::analyze::coupling::CouplingOptions;
 use agent_lens::analyze::delegation::DelegationOptions;
 use agent_lens::analyze::graph_query::GraphQueryOptions;
 use agent_lens::analyze::hotspot::HotspotOptions;
@@ -19,6 +19,7 @@ use agent_lens::analyze::unreachable::UnreachableOptions;
 use agent_lens::analyze::untested::UntestedOptions;
 use agent_lens::analyze::visibility::VisibilityOptions;
 use agent_lens::analyze::wrapper::WrapperOptions;
+use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
 use agent_lens::hooks::codex::setup as codex_setup;
 use agent_lens::hooks::setup::SettingsScope;
 use agent_lens::skills;
@@ -370,7 +371,8 @@ pub(super) enum AnalyzeCommand {
     /// Report LCOM4 cohesion units (`impl` blocks, classes, or module
     /// units).
     ///
-    /// Accepts either a single source file or a directory; in directory
+    /// Accepts source files or directories, and more than one of
+    /// either — several paths are walked into one report. In directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep) and groups findings per file. The parser is chosen from
     /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
@@ -381,7 +383,8 @@ pub(super) enum AnalyzeCommand {
     /// Report per-function complexity metrics (Cyclomatic, Cognitive,
     /// Max Nesting, Halstead Volume, Maintainability Index).
     ///
-    /// Accepts either a single source file or a directory; in directory
+    /// Accepts source files or directories, and more than one of
+    /// either — several paths are walked into one report. In directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep), groups findings per file, and aggregates the top-level
     /// summary across the whole corpus. The parser is chosen from each
@@ -404,9 +407,14 @@ pub(super) enum AnalyzeCommand {
     /// `.cjs`) whose relative imports define the module graph, a
     /// `.go` file or Go module directory (containing `go.mod`), or a
     /// `.py` file or package directory whose in-tree imports define the
-    /// module graph.
+    /// module graph. The graph grows outwards from that one entry, so
+    /// unlike the file-walking analyzers this takes exactly one `path`.
+    /// JSON is the default and carries every module; `--format md` caps
+    /// the module table at `--top` (default 20) and the coupled-pair
+    /// list at `--top` or 10, whichever is smaller. Dependency cycles
+    /// are never truncated.
     #[command(after_long_help = examples::COUPLING)]
-    Coupling(AnalyzeCommonArgs),
+    Coupling(AnalyzeCouplingArgs),
     /// Report function-level call cycles: groups of 2+ functions that
     /// call each other, directly or transitively, with advisory
     /// cheapest-cut suggestions for breaking each group.
@@ -630,9 +638,12 @@ pub(super) enum AnalyzeCommand {
     Risk(AnalyzeRiskArgs),
     /// Report clusters of near-duplicate functions.
     ///
-    /// Accepts either a single source file or a directory; in directory
-    /// mode the analyzer walks recursively (respecting `.gitignore` like
-    /// ripgrep) and reports cross-file clusters alongside in-file ones.
+    /// Accepts source files or directories, and more than one of
+    /// either — several paths are walked into one corpus, so a cluster
+    /// spanning two of them is found where per-path runs would miss it.
+    /// In directory mode the analyzer walks recursively (respecting
+    /// `.gitignore` like ripgrep) and reports cross-file clusters
+    /// alongside in-file ones.
     /// Function bodies are compared via TSED on their normalised AST;
     /// pairs scoring at or above `--threshold` are folded into complete-link
     /// clusters where every member is similar to every other (no chaining
@@ -729,18 +740,65 @@ pub(super) enum AnalyzeCommand {
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
-    /// Accepts either a single source file or a directory; in directory
+    /// Accepts source files or directories, and more than one of
+    /// either — several paths are walked into one report. In directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep) and groups findings per file. The parser is chosen from
     /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
-    /// The JSON format is the default machine-readable output;
-    /// `--format md` emits a compact summary tuned for LLM context.
+    /// The JSON format is the default machine-readable output and always
+    /// carries every finding; `--format md` emits a compact summary
+    /// tuned for LLM context, capped at `--top` wrappers (default 20) in
+    /// file order, with the remainder counted at the end.
     #[command(after_long_help = examples::WRAPPER)]
     Wrapper(AnalyzeWrapperArgs),
 }
 
 #[derive(Debug, Clone, Args)]
 pub(super) struct AnalyzeCommonArgs {
+    /// One or more source files or directories to analyze. Several
+    /// paths are walked into a single report, so a finding spanning two
+    /// of them (a duplicate, a call edge) is still found — which running
+    /// the analyzer once per tree cannot do. Display paths are written
+    /// relative to the paths' deepest common ancestor.
+    #[arg(required = true, num_args = 1.., value_name = "PATH")]
+    pub(super) paths: Vec<PathBuf>,
+    /// Output format. Defaults to JSON.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    pub(super) format: OutputFormat,
+    #[command(flatten)]
+    pub(super) path_filter: AnalyzePathArgs,
+}
+
+impl AnalyzeCommonArgs {
+    /// Build the args for a single root — the shape a profile entry and
+    /// every internal caller hands over.
+    pub(super) fn single(
+        path: PathBuf,
+        format: OutputFormat,
+        path_filter: AnalyzePathArgs,
+    ) -> Self {
+        Self {
+            paths: vec![path],
+            format,
+            path_filter,
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (AnalyzeRoots, OutputFormat, AnalyzePathArgs) {
+        (AnalyzeRoots::new(self.paths), self.format, self.path_filter)
+    }
+}
+
+/// The single-entry counterpart to [`AnalyzeCommonArgs`], for the
+/// graph-rooted analyzers.
+///
+/// `coupling` and `context-span` grow their module graph outwards from
+/// one entry point — a crate root, a TS/JS entry file, a Go module — so
+/// "several roots" has no meaning for them: two entry points are two
+/// graphs, not a wider one. They keep the single-PATH signature, and the
+/// error a non-entry path already produces stays the right answer.
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeRootArgs {
     /// Path to a source file, Rust crate root, or directory to analyze.
     pub(super) path: PathBuf,
     /// Output format. Defaults to JSON.
@@ -750,7 +808,7 @@ pub(super) struct AnalyzeCommonArgs {
     pub(super) path_filter: AnalyzePathArgs,
 }
 
-impl AnalyzeCommonArgs {
+impl AnalyzeRootArgs {
     pub(super) fn into_parts(self) -> (PathBuf, OutputFormat, AnalyzePathArgs) {
         (self.path, self.format, self.path_filter)
     }
@@ -781,9 +839,17 @@ pub(super) struct AnalyzeComplexityArgs {
 #[derive(Debug, Clone, Args)]
 pub(super) struct AnalyzeContextSpanArgs {
     #[command(flatten)]
-    pub(super) common: AnalyzeCommonArgs,
+    pub(super) common: AnalyzeRootArgs,
     #[command(flatten)]
     pub(super) opts: ContextSpanOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeCouplingArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeRootArgs,
+    #[command(flatten)]
+    pub(super) opts: CouplingOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -897,7 +963,9 @@ pub(super) struct AnalyzePathArgs {
     pub(super) exclude_tests: bool,
     /// Exclude paths matching this glob. Repeatable. Bare patterns also
     /// match at any depth, so `--exclude generated.rs` matches
-    /// `src/generated.rs`.
+    /// `src/generated.rs`. A pattern containing `/` is anchored at the
+    /// analyzed path — with several PATHs, at their deepest common
+    /// ancestor, the same base display paths use.
     #[arg(long = "exclude", value_name = "GLOB")]
     pub(super) exclude: Vec<String>,
 }
@@ -1073,7 +1141,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.common.paths, [PathBuf::from("src/lib.rs")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert!(args.opts.diff_only);
         assert!(args.common.path_filter.exclude_tests);
@@ -1445,7 +1513,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Hubs(args)) = cli.command else {
             panic!("expected analyze hubs");
         };
-        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(10));
         assert!(args.common.path_filter.exclude_tests);
@@ -1468,7 +1536,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Layers(args)) = cli.command else {
             panic!("expected analyze layers");
         };
-        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(8));
         assert!(args.common.path_filter.exclude_tests);
@@ -1481,7 +1549,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Layers(args)) = cli.command else {
             panic!("expected analyze layers");
         };
-        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.paths, [PathBuf::from(".")]);
         assert_eq!(args.common.format, OutputFormat::Json);
         assert_eq!(args.opts.top, None);
     }
@@ -1504,7 +1572,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Unreachable(args)) = cli.command else {
             panic!("expected analyze unreachable");
         };
-        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.tier, Some(UnreachableTier::Unknown));
         assert_eq!(args.opts.top, Some(12));
@@ -1540,7 +1608,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
             panic!("expected analyze untested");
         };
-        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(30));
         assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
@@ -1553,7 +1621,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
             panic!("expected analyze untested");
         };
-        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.paths, [PathBuf::from(".")]);
         assert_eq!(args.common.format, OutputFormat::Json);
         assert_eq!(args.opts.top, None);
     }
@@ -1576,7 +1644,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
             panic!("expected analyze visibility");
         };
-        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(30));
         assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
@@ -1589,7 +1657,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
             panic!("expected analyze visibility");
         };
-        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.paths, [PathBuf::from(".")]);
         assert_eq!(args.common.format, OutputFormat::Json);
         assert_eq!(args.opts.top, None);
     }
@@ -1611,7 +1679,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
             panic!("expected analyze delegation");
         };
-        assert_eq!(args.common.path, PathBuf::from("crates"));
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(30));
         assert!(args.opts.diff_only);
@@ -1624,9 +1692,116 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
             panic!("expected analyze delegation");
         };
-        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.paths, [PathBuf::from(".")]);
         assert_eq!(args.common.format, OutputFormat::Json);
         assert_eq!(args.opts.top, None);
+        assert!(!args.opts.diff_only);
+    }
+
+    /// The monorepo case the multi-PATH signature exists for: several
+    /// trees in one invocation, with the flags still parsed as flags.
+    #[test]
+    fn parses_several_analyze_paths() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "packages",
+            "cli",
+            "web/src",
+            "--format",
+            "md",
+            "--exclude-tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(
+            args.common.paths,
+            [
+                PathBuf::from("packages"),
+                PathBuf::from("cli"),
+                PathBuf::from("web/src"),
+            ],
+        );
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert!(args.common.path_filter.exclude_tests);
+    }
+
+    /// A repeatable option before the paths must not swallow them.
+    #[test]
+    fn a_repeatable_option_does_not_absorb_the_trailing_paths() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "wrapper",
+            "--exclude",
+            "generated/**",
+            "packages",
+            "cli",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Wrapper(args)) = cli.command else {
+            panic!("expected analyze wrapper");
+        };
+        assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
+        assert_eq!(
+            args.common.paths,
+            [PathBuf::from("packages"), PathBuf::from("cli")],
+        );
+    }
+
+    /// Every analyzer needs somewhere to look: an omitted PATH is a
+    /// parse error, not an implicit `.`.
+    #[test]
+    fn analyze_requires_at_least_one_path() {
+        let err = Cli::try_parse_from(["agent-lens", "analyze", "similarity", "--format", "md"])
+            .expect_err("PATH is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// The graph-rooted analyzers grow one module graph from one entry,
+    /// so a second path is a mistake worth reporting rather than a
+    /// silently ignored argument.
+    #[rstest]
+    #[case::coupling("coupling")]
+    #[case::context_span("context-span")]
+    fn graph_rooted_analyzers_take_exactly_one_path(#[case] tool: &str) {
+        let err = Cli::try_parse_from(["agent-lens", "analyze", tool, "packages", "cli"])
+            .expect_err("a second path is not an entry point");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn parses_analyze_coupling_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "coupling",
+            "src/lib.rs",
+            "--format",
+            "md",
+            "--top",
+            "15",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Coupling(args)) = cli.command else {
+            panic!("expected analyze coupling");
+        };
+        assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.top, Some(15));
+    }
+
+    #[test]
+    fn parses_analyze_wrapper_with_top() {
+        let cli = Cli::try_parse_from(["agent-lens", "analyze", "wrapper", "src", "--top", "7"])
+            .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Wrapper(args)) = cli.command else {
+            panic!("expected analyze wrapper");
+        };
+        assert_eq!(args.opts.top, Some(7));
         assert!(!args.opts.diff_only);
     }
 
@@ -1637,8 +1812,9 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Coupling(args)) = cli.command else {
             panic!("expected analyze coupling");
         };
-        assert_eq!(args.path, PathBuf::from("."));
-        assert_eq!(args.format, OutputFormat::Json);
+        assert_eq!(args.common.path, PathBuf::from("."));
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.opts.top, None);
     }
 
     #[test]
@@ -1648,7 +1824,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Cycles(args)) = cli.command else {
             panic!("expected analyze cycles");
         };
-        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.paths, [PathBuf::from(".")]);
         assert_eq!(args.format, OutputFormat::Json);
     }
 
@@ -1667,7 +1843,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Cycles(args)) = cli.command else {
             panic!("expected analyze cycles");
         };
-        assert_eq!(args.path, PathBuf::from("src"));
+        assert_eq!(args.paths, [PathBuf::from("src")]);
         assert_eq!(args.format, OutputFormat::Md);
         assert!(args.path_filter.exclude_tests);
     }
@@ -1679,7 +1855,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
             panic!("expected analyze function-graph");
         };
-        assert_eq!(args.path, PathBuf::from("."));
+        assert_eq!(args.paths, [PathBuf::from(".")]);
         assert_eq!(args.format, OutputFormat::Json);
     }
 
@@ -1697,7 +1873,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
             panic!("expected analyze function-graph");
         };
-        assert_eq!(args.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(args.paths, [PathBuf::from("src/lib.rs")]);
         assert_eq!(args.format, OutputFormat::Md);
     }
 

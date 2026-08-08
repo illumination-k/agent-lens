@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::Path;
 
 use lens_domain::SimilarCluster;
 use serde::Serialize;
 
 use super::{OwnedUnit, SimilarityComponents, SimilarityTarget};
+use crate::analyze::AnalyzeRoots;
 
 /// Longest representative snippet rendered for a block cluster. Long
 /// enough to show the repeated shape, short enough that a 40-cluster
@@ -42,7 +42,7 @@ pub(super) struct Report<'a> {
 impl<'a> Report<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        path: &Path,
+        roots: &AnalyzeRoots,
         method: &'static str,
         target: &'static str,
         threshold: f64,
@@ -52,7 +52,7 @@ impl<'a> Report<'a> {
         clusters: &'a [ClusterView<'a>],
     ) -> Self {
         Self {
-            root: path.display().to_string(),
+            root: roots.display(),
             method,
             target,
             unit_count,
@@ -632,7 +632,7 @@ pub(super) struct PairedReport<'a> {
 /// through verbatim and a nine-argument constructor is easy to
 /// mis-order at the call site.
 pub(super) struct PairedReportInputs<'p> {
-    pub path: &'p Path,
+    pub roots: &'p AnalyzeRoots,
     pub method: &'static str,
     pub target: &'static str,
     pub paired_by: &'static str,
@@ -648,7 +648,7 @@ impl<'a> PairedReport<'a> {
     pub(super) fn new(inputs: PairedReportInputs<'_>, mut groups: Vec<DriftGroupView<'a>>) -> Self {
         sort_by_drift(&mut groups);
         Self {
-            root: inputs.path.display().to_string(),
+            root: inputs.roots.display(),
             method: inputs.method,
             target: inputs.target,
             paired_by: inputs.paired_by,
@@ -856,6 +856,7 @@ fn drift_headline(group: &DriftGroupView<'_>, noun: &str) -> String {
 mod tests {
     use super::*;
     use rstest::rstest;
+    use std::path::Path;
     use std::path::PathBuf;
 
     fn owned_function(name: &str) -> OwnedUnit {
@@ -1079,7 +1080,7 @@ mod tests {
         cluster.set_snippet(vec!["let a = 1;".to_owned(), "let b = 2;".to_owned()]);
         let clusters = [cluster];
         let report = Report::new(
-            Path::new("src"),
+            &AnalyzeRoots::from(Path::new("src")),
             "tsed",
             "blocks",
             0.85,
@@ -1537,7 +1538,7 @@ mod tests {
     fn paired_report(groups: Vec<DriftGroupView<'static>>) -> PairedReport<'static> {
         PairedReport::new(
             PairedReportInputs {
-                path: Path::new("src"),
+                roots: &AnalyzeRoots::from(Path::new("src")),
                 method: "tsed",
                 target: "functions",
                 paired_by: "qualified",

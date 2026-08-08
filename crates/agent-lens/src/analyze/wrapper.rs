@@ -10,7 +10,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
-use std::path::Path;
 
 use lens_domain::{InterfaceShape, ReuseMetrics, WrapperFinding};
 use serde::Serialize;
@@ -19,14 +18,20 @@ use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
-use super::{AnalyzerError, OutputFormat, SourceFile, SourceLang, read_source};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, SourceLang, read_source};
 
 analyzer_options! {
     /// `analyze wrapper` flags, and the `[profile.<name>.wrapper]` table.
     pub struct WrapperOptions {
-        @shared(diff);
+        @shared(ranking, diff);
     }
 }
+
+/// Wrappers listed in markdown when `--top` is not given. JSON always
+/// carries every finding; this only bounds the rendered listing, which
+/// grows with the codebase and is the half that lands in an agent's
+/// context.
+const DEFAULT_TOP: usize = 20;
 
 /// Analyzer entry point. Stateless today; kept as a struct so per-run
 /// configuration (filters, thresholds) can be added without breaking the
@@ -34,6 +39,7 @@ analyzer_options! {
 #[derive(Debug, Default, Clone)]
 pub struct WrapperAnalyzer {
     filter: FilterConfig,
+    top: Option<usize>,
 }
 
 impl WrapperAnalyzer {
@@ -43,33 +49,50 @@ impl WrapperAnalyzer {
 
     delegate_filter_builders!(filter);
 
+    /// Cap the markdown listing to the first N wrappers, in file order.
+    /// JSON output always carries every finding. `None` uses the
+    /// markdown default of 20.
+    pub fn with_top(mut self, top: Option<usize>) -> Self {
+        self.top = top;
+        self
+    }
+
     /// Apply a whole [`WrapperOptions`] group. The CLI flags and the
     /// `[profile.<name>.wrapper]` table are the same type, so this is the
     /// only seam between parsed options and the analyzer.
     pub fn with_options(self, opts: WrapperOptions) -> Self {
-        self.with_diff_only(opts.diff_only)
+        self.with_top(opts.top).with_diff_only(opts.diff_only)
     }
 
-    /// Read `path`, analyze it, and produce a report in `format`.
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let (files, scanned_file_count) = self.collect_file_reports(path)?;
-        let report = build_report(path, scanned_file_count, &files);
-        render_report(&report, format, || format_markdown(&report))
+    /// Walk `roots`, analyze them, and produce a report in `format`.
+    /// Accepts a single path or several — see [`AnalyzeRoots`].
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
+        let (files, scanned_file_count) = self.collect_file_reports(&roots)?;
+        let report = build_report(&roots, scanned_file_count, &files);
+        render_report(&report, format, || format_markdown(&report, self.top))
     }
 
-    /// Resolve `path` to a list of per-file reports plus the number of
+    /// Resolve `roots` to a list of per-file reports plus the number of
     /// source files scanned to produce them. Single-file inputs produce
     /// a one-element vec; directory inputs walk recursively, honouring
     /// `.gitignore`. Files with no findings are dropped so the output
     /// stays signal-dense, but they still count as scanned.
-    fn collect_file_reports(&self, path: &Path) -> Result<(Vec<FileReport>, usize), AnalyzerError> {
+    fn collect_file_reports(
+        &self,
+        roots: &AnalyzeRoots,
+    ) -> Result<(Vec<FileReport>, usize), AnalyzerError> {
         // Pass 1: produce wrapper findings AND a call-site index for
         // every supported source file. Splitting it from the metric
         // rollup lets reuse metrics see calls in files that themselves
         // contain no wrappers.
         let scan = self
             .filter
-            .collect_per_file(path, |sf| self.scan_file(sf))?;
+            .collect_per_file(roots, |sf| self.scan_file(sf))?;
         let mut per_files = scan.reports;
         // Interface satisfaction is matched against every interface the
         // walk saw, in single-file mode as much as directory mode: "the
@@ -81,7 +104,7 @@ impl WrapperAnalyzer {
         // emitting that misleading "0 sites" signal we leave reuse at
         // `None` in single-file mode and only annotate when the input
         // path is a directory.
-        if path.is_dir() {
+        if roots.paths().iter().any(|root| root.is_dir()) {
             annotate_reuse(&mut per_files);
         }
         let files = per_files
@@ -344,7 +367,11 @@ impl PerFileShape for WrapperShape {
 
 type Report<'a> = PerFileReport<'a, WrapperShape, WrapperView<'a>>;
 
-fn build_report<'a>(path: &Path, scanned_file_count: usize, files: &'a [FileReport]) -> Report<'a> {
+fn build_report<'a>(
+    roots: &AnalyzeRoots,
+    scanned_file_count: usize,
+    files: &'a [FileReport],
+) -> Report<'a> {
     let views = files
         .iter()
         .map(|f| {
@@ -354,7 +381,7 @@ fn build_report<'a>(path: &Path, scanned_file_count: usize, files: &'a [FileRepo
             )
         })
         .collect();
-    PerFileReport::new(path, scanned_file_count, views)
+    PerFileReport::new(roots, scanned_file_count, views)
 }
 
 #[derive(Debug, Serialize)]
@@ -407,7 +434,8 @@ impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
     }
 }
 
-fn format_markdown(report: &Report<'_>) -> String {
+fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
+    let limit = top.unwrap_or(DEFAULT_TOP);
     // The header counts *scanned* files, not files with findings, so a
     // clean run reads "8 file(s) scanned, 0 wrapper(s)" instead of the
     // misleading "0 file(s)" that looks like nothing was analyzed.
@@ -421,58 +449,98 @@ fn format_markdown(report: &Report<'_>) -> String {
         out.push_str("\n_No thin forwarding wrappers found._\n");
         return out;
     }
+    // The listing has no ranking to take a top-N of, so the cap is spent
+    // in file order and what it cut is stated at the end: an agent that
+    // needs the rest can raise `--top` or read the JSON, but it has to
+    // know there is a rest.
+    let mut budget = limit;
     for file in report.files() {
+        if budget == 0 {
+            break;
+        }
+        let shown = file.count().min(budget);
+        budget -= shown;
         // writeln! into a String cannot fail; the result is swallowed
         // deliberately rather than unwrapped to satisfy the workspace's
         // `unwrap_used` lint.
-        let _ = writeln!(out, "\n## {} ({} wrapper(s))", file.file(), file.count());
-        for w in file.items() {
-            // Body shape: callee chain plus optional adapter suffix.
-            let body = if w.adapters.is_empty() {
-                format!("-> {}", w.callee)
-            } else {
-                format!("-> {} [via {}]", w.callee, w.adapters.join(""))
-            };
-            // Reuse suffix: only attached when the finding had reuse
-            // metrics (directory mode). Kept terse so the line stays
-            // scannable at agent-context density.
-            let suffix = match &w.reuse {
-                Some(r) => format!(
-                    "  \u{2022} {} site(s), {} caller(s), {}",
-                    r.call_sites,
-                    r.unique_callers,
-                    if r.same_file_only {
-                        "same-file"
-                    } else {
-                        "cross-file"
-                    },
-                ),
-                None => String::new(),
-            };
-            // Interface suffix: the annotation that flips the fix from
-            // "delete the method" to "embed the inner value".
-            let interfaces = if w.may_satisfy_interfaces.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "  \u{2022} may satisfy `{}` — embedding could replace the forwarding",
-                    w.may_satisfy_interfaces.join("`, `"),
-                )
-            };
-            let _ = writeln!(
-                out,
-                "- `{}` (L{}-{}) {}{}{}",
-                w.name, w.start_line, w.end_line, body, suffix, interfaces,
-            );
+        let _ = writeln!(
+            out,
+            "\n## {} ({})",
+            file.file(),
+            file_heading_count(shown, file.count()),
+        );
+        for w in file.items().iter().take(shown) {
+            let _ = writeln!(out, "{}", wrapper_row(w));
         }
     }
+    let omitted = report.item_count().saturating_sub(limit);
+    if omitted > 0 {
+        let _ = writeln!(
+            out,
+            "\n_{omitted} more wrapper(s) not shown (--top {limit}); raise --top or use \
+             --format json for the full list._",
+        );
+    }
     out
+}
+
+/// A file section's wrapper count. A partially listed file says so: the
+/// total is the file's, and an agent reading only that section must not
+/// take the rows it can see for all of them.
+fn file_heading_count(shown: usize, total: usize) -> String {
+    if shown < total {
+        format!("{shown} of {total} wrapper(s)")
+    } else {
+        format!("{total} wrapper(s)")
+    }
+}
+
+/// One wrapper's markdown line: name and span, the forwarding body, and
+/// the two optional annotations that change what to do about it.
+fn wrapper_row(w: &WrapperView<'_>) -> String {
+    // Body shape: callee chain plus optional adapter suffix.
+    let body = if w.adapters.is_empty() {
+        format!("-> {}", w.callee)
+    } else {
+        format!("-> {} [via {}]", w.callee, w.adapters.join(""))
+    };
+    // Reuse chip: only attached when the finding had reuse metrics
+    // (directory mode). Kept terse so the line stays scannable at
+    // agent-context density.
+    let reuse = match &w.reuse {
+        Some(r) => format!(
+            "  \u{2022} {} site(s), {} caller(s), {}",
+            r.call_sites,
+            r.unique_callers,
+            if r.same_file_only {
+                "same-file"
+            } else {
+                "cross-file"
+            },
+        ),
+        None => String::new(),
+    };
+    // Interface chip: the annotation that flips the fix from "delete the
+    // method" to "embed the inner value".
+    let interfaces = if w.may_satisfy_interfaces.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  \u{2022} may satisfy `{}` — embedding could replace the forwarding",
+            w.may_satisfy_interfaces.join("`, `"),
+        )
+    };
+    format!(
+        "- `{}` (L{}-{}) {body}{reuse}{interfaces}",
+        w.name, w.start_line, w.end_line,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{run_git, write_file};
+    use std::path::Path;
 
     #[test]
     fn json_report_lists_wrappers() {
@@ -535,6 +603,66 @@ fn meaningful(x: i32) -> i32 { let y = x + 1; y * 2 }
         assert!(md.contains("via"));
         assert!(md.contains(".unwrap()"));
         assert!(md.contains(".into()"));
+    }
+
+    /// The listing has no ranking, so `--top` spends its budget in file
+    /// order — and must say what it left out, both per partially-shown
+    /// file and in total.
+    #[test]
+    fn markdown_listing_is_capped_by_top_and_reports_what_it_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            "fn one(x: &str) -> String { inner_one(x) }\n\
+             fn two(x: &str) -> String { inner_two(x) }\n",
+        );
+        write_file(
+            dir.path(),
+            "b.rs",
+            "fn three(x: &str) -> String { inner_three(x) }\n",
+        );
+
+        let md = WrapperAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("3 wrapper(s)"), "header keeps the total: {md}");
+        assert!(md.contains("## a.rs (1 of 2 wrapper(s))"), "got: {md}");
+        assert!(md.contains("`one`"), "got: {md}");
+        assert!(!md.contains("`two`"), "got: {md}");
+        // The second file never starts: the budget ran out inside a.rs.
+        assert!(!md.contains("## b.rs"), "got: {md}");
+        assert!(md.contains("_2 more wrapper(s) not shown"), "got: {md}");
+
+        // A budget above the finding count lists everything, with no
+        // "of N" qualifier and no trailing note.
+        let md = WrapperAnalyzer::new()
+            .with_top(Some(10))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("## a.rs (2 wrapper(s))"), "got: {md}");
+        assert!(md.contains("## b.rs (1 wrapper(s))"), "got: {md}");
+        assert!(!md.contains("not shown"), "got: {md}");
+    }
+
+    /// JSON is the machine-readable half and must stay complete: `--top`
+    /// is a markdown-rendering cap, not a filter on the analysis.
+    #[test]
+    fn top_does_not_touch_the_json_report() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a.rs",
+            "fn one(x: &str) -> String { inner_one(x) }\n\
+             fn two(x: &str) -> String { inner_two(x) }\n",
+        );
+        let json = WrapperAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["wrapper_count"], 2, "got {parsed}");
     }
 
     #[test]

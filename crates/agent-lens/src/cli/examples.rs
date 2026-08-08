@@ -65,7 +65,7 @@ pub const ROOT: &str = concat!(
 Examples:
 
     agent-lens analyze hotspot . --format md --top 15
-    agent-lens analyze similarity src/ --format md
+    agent-lens analyze similarity packages cli --format md
     agent-lens hook setup --dry-run     # wire hooks into settings.json
     agent-lens run audit                # a profile from agent-lens.toml
     agent-lens baseline create audit    # that profile's metrics, snapshotted
@@ -81,6 +81,17 @@ pub const ANALYZE: &str = concat!(
     "
 Every analyzer takes the same path filters: `--only-tests`,
 `--exclude-tests`, and a repeatable `--exclude <GLOB>`.
+
+Every analyzer but `coupling` and `context-span` takes more than one PATH
+— `analyze similarity packages cli web/src` walks all three into one
+report, which is what finds a duplicate spanning two of them. Display
+paths are written relative to the paths' deepest common ancestor.
+`coupling` and `context-span` grow a module graph out of a single entry
+point, so they keep the one-PATH signature.
+
+`--top` bounds the length of a `--format md` report. Every analyzer that
+can produce a long one accepts it; `cycles` does not, because a truncated
+cycle list reads as the whole list.
 
 ",
     routing!()
@@ -105,7 +116,7 @@ Examples:
 pub const COUPLING: &str = "\
 Examples:
 
-    agent-lens analyze coupling src/lib.rs --format md
+    agent-lens analyze coupling src/lib.rs --format md --top 15
     agent-lens analyze coupling ./crates/core --format md
     agent-lens analyze coupling src/index.ts --exclude-tests --format md
     agent-lens analyze coupling ./src/mypkg --format md
@@ -220,6 +231,7 @@ pub const SIMILARITY: &str = "\
 Examples:
 
     agent-lens analyze similarity src/ --format md
+    agent-lens analyze similarity packages cli web/src --format md
     agent-lens analyze similarity src/ --sweep 0.6,0.75,0.85 --format md
     agent-lens analyze similarity . --diff-only --format md
     agent-lens analyze similarity src/ --doc-overlap --format md
@@ -232,7 +244,8 @@ Examples:
 pub const WRAPPER: &str = "\
 Examples:
 
-    agent-lens analyze wrapper src/ --format md
+    agent-lens analyze wrapper src/ --format md --top 30
+    agent-lens analyze wrapper packages cli --format md
     agent-lens analyze wrapper . --diff-only --format md
 ";
 

@@ -30,8 +30,8 @@ use super::churn::ChurnScope;
 use super::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
 use super::{
-    AnalyzePathFilter, AnalyzerError, CompiledPathFilter, OutputFormat, PathFilterError,
-    SourceLang, collect_source_files,
+    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, CompiledPathFilter, OutputFormat,
+    PathFilterError, SourceLang, collect_source_files,
 };
 
 /// Errors raised while running the hotspot analyzer.
@@ -132,8 +132,16 @@ impl HotspotAnalyzer {
         self
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, HotspotError> {
-        let scope = ChurnScope::resolve(path)?;
+    /// Walk `roots`, join their churn with complexity, and produce a
+    /// report in `format`. Accepts a single path or several — see
+    /// [`AnalyzeRoots`]; every root must sit in the same working tree.
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, HotspotError> {
+        let roots = roots.into();
+        let scope = ChurnScope::resolve(&roots)?;
         let filter = self.path_filter.compile(scope.repo_root())?;
 
         let mut churn = scope.collect(self.since.as_deref())?;
@@ -141,12 +149,7 @@ impl HotspotAnalyzer {
         let complexity = collect_complexity(&scope, &filter)?;
         let entries = compute_hotspots(churn, complexity);
 
-        let view = ReportView::new(
-            scope.target(),
-            scope.repo_root(),
-            self.since.as_deref(),
-            &entries,
-        );
+        let view = ReportView::new(&roots, scope.repo_root(), self.since.as_deref(), &entries);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(HotspotError::Serialize)
@@ -160,9 +163,12 @@ fn collect_complexity(
     scope: &ChurnScope,
     filter: &CompiledPathFilter,
 ) -> Result<Vec<FileComplexity>, HotspotError> {
-    let target = scope.target();
-    let files = collect_source_files(target, filter)
-        .map_err(|error| source_collection_error(target, error))?;
+    // The walk runs on the canonicalized targets so every file keys on
+    // its absolute path, which is what makes overlapping roots collapse
+    // to one entry per file rather than double-counting complexity.
+    let targets = AnalyzeRoots::new(scope.targets().to_vec());
+    let files = collect_source_files(&targets, filter)
+        .map_err(|error| source_collection_error(targets.base(), error))?;
 
     let mut out = Vec::with_capacity(files.len());
     for source_file in files {
@@ -232,13 +238,13 @@ struct ReportView<'a> {
 
 impl<'a> ReportView<'a> {
     fn new(
-        target: &Path,
+        roots: &AnalyzeRoots,
         repo_root: &Path,
         since: Option<&'a str>,
         entries: &'a [HotspotEntry],
     ) -> Self {
         Self {
-            target: target.display().to_string(),
+            target: roots.display(),
             repo_root: repo_root.display().to_string(),
             since,
             file_count: entries.len(),
@@ -448,7 +454,7 @@ mod tests {
         init_repo_with_two_files(dir.path());
         // Pointing at src/a.rs alone should still find churn for it.
         let json = HotspotAnalyzer::new()
-            .analyze(&dir.path().join("src/a.rs"), OutputFormat::Json)
+            .analyze(dir.path().join("src/a.rs"), OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let files = parsed["files"].as_array().unwrap();

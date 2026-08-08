@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use lens_domain::{FileCentrality, RiskEntry, compute_risk};
 use serde::Serialize;
@@ -58,7 +58,7 @@ use super::error_from::impl_from_churn_error;
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -162,14 +162,22 @@ impl RiskAnalyzer {
         self
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, RiskError> {
-        let scope = ChurnScope::resolve(path)?;
+    /// Walk `roots`, join their churn with call-graph centrality, and
+    /// produce a report in `format`. Accepts a single path or several —
+    /// see [`AnalyzeRoots`]; every root must sit in the same working tree.
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, RiskError> {
+        let roots = roots.into();
+        let scope = ChurnScope::resolve(&roots)?;
         let churn = scope.collect(self.since.as_deref())?;
-        let graph = self.builder.build(path)?;
+        let graph = self.builder.build(&roots)?;
         let centrality = Centrality::compute(&graph, self.only_tests);
         let files = centrality.roll_up_by_file(&graph.nodes, &scope);
 
-        let report = Report::build(self, &scope, &graph, &centrality, churn, files);
+        let report = Report::build(self, &roots, &scope, &graph, &centrality, churn, files);
         Ok(render_report(&report, format, || {
             format_markdown(&report, self.top)
         })?)
@@ -360,6 +368,7 @@ struct Report {
 impl Report {
     fn build(
         analyzer: &RiskAnalyzer,
+        roots: &AnalyzeRoots,
         scope: &ChurnScope,
         graph: &CallGraph,
         centrality: &Centrality,
@@ -389,7 +398,7 @@ impl Report {
 
         Self {
             schema_version: SCHEMA_VERSION,
-            root: scope.target().display().to_string(),
+            root: roots.display(),
             repo_root: scope.repo_root().display().to_string(),
             language: graph.language,
             since: analyzer.since.clone(),
@@ -596,6 +605,7 @@ mod tests {
     use super::*;
     use crate::test_support::{run_git, write_file};
     use serde_json::Value;
+    use std::path::Path;
 
     /// A repo where churn and centrality disagree, which is the only
     /// interesting case: `leaf` churns hardest but nothing calls it,

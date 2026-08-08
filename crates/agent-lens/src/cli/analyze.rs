@@ -13,10 +13,10 @@ use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeCohesionArgs, AnalyzeCommand, AnalyzeCommonArgs, AnalyzeComplexityArgs,
-    AnalyzeContextSpanArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHotspotArgs,
-    AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs,
-    AnalyzeSimilarityArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
-    AnalyzeWrapperArgs,
+    AnalyzeContextSpanArgs, AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs,
+    AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs,
+    AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSimilarityArgs, AnalyzeUnreachableArgs,
+    AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -40,14 +40,19 @@ pub(super) fn build_analyze_command(
     target: &Path,
     format: OutputFormat,
 ) -> Result<AnalyzeCommand, ConfigError> {
-    let common = AnalyzeCommonArgs {
+    let path_filter = AnalyzePathArgs {
+        only_tests: profile.only_tests,
+        exclude_tests: profile.exclude_tests,
+        exclude: profile.exclude.clone(),
+    };
+    // A profile names one target path, so both arg shapes are built from
+    // it: the file-walking analyzers take it as a one-root set, the
+    // graph-rooted pair as the single entry they require.
+    let common = AnalyzeCommonArgs::single(target.to_path_buf(), format, path_filter.clone());
+    let root = AnalyzeRootArgs {
         path: target.to_path_buf(),
         format,
-        path_filter: AnalyzePathArgs {
-            only_tests: profile.only_tests,
-            exclude_tests: profile.exclude_tests,
-            exclude: profile.exclude.clone(),
-        },
+        path_filter,
     };
     Ok(match tool {
         config::ToolName::Cohesion => AnalyzeCommand::Cohesion(AnalyzeCohesionArgs {
@@ -59,8 +64,12 @@ pub(super) fn build_analyze_command(
             opts: profile.complexity.clone().unwrap_or_default(),
         }),
         config::ToolName::ContextSpan => AnalyzeCommand::ContextSpan(AnalyzeContextSpanArgs {
-            common,
+            common: root,
             opts: profile.context_span.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Coupling => AnalyzeCommand::Coupling(AnalyzeCouplingArgs {
+            common: root,
+            opts: profile.coupling.clone().unwrap_or_default(),
         }),
         config::ToolName::Delegation => AnalyzeCommand::Delegation(AnalyzeDelegationArgs {
             common,
@@ -116,7 +125,6 @@ pub(super) fn build_analyze_command(
                 })?,
         }),
         // Analyzers with no options beyond the shared path/format args.
-        config::ToolName::Coupling => AnalyzeCommand::Coupling(common),
         config::ToolName::Cycles => AnalyzeCommand::Cycles(common),
         config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
     })
@@ -181,8 +189,13 @@ impl WithAnalyzePathArgs for SimilarityAnalyzer {
 /// shared path filter, run — and differs only in which analyzer and
 /// which constructor. Spelling that out eighteen times made the one
 /// interesting line per analyzer (`with_options` vs `from_options` vs
-/// no options at all) invisible; here the three groups *are* the
-/// structure, and adding an analyzer is a single line in one of them.
+/// no options at all) invisible; here the groups *are* the structure,
+/// and adding an analyzer is a single line in one of them.
+///
+/// `into_parts` is what makes the multi-root and single-root families
+/// share these arms: it yields an `AnalyzeRoots` for the file-walking
+/// analyzers and a `PathBuf` for the graph-rooted pair, and each
+/// analyzer's `analyze` accepts whichever one it declared.
 macro_rules! dispatch_analyze {
     (
         $cmd:expr;
@@ -197,27 +210,27 @@ macro_rules! dispatch_analyze {
         match $cmd {
             $(
                 AnalyzeCommand::$wo_variant(args) => {
-                    let (path, format, path_filter) = args.common.into_parts();
+                    let (target, format, path_filter) = args.common.into_parts();
                     <$wo_analyzer>::new()
                         .with_options(args.opts)
                         .with_analyze_path_args(path_filter)
-                        .analyze(&path, format)?
+                        .analyze(target, format)?
                 }
             )*
             $(
                 AnalyzeCommand::$fo_variant(args) => {
-                    let (path, format, path_filter) = args.common.into_parts();
+                    let (target, format, path_filter) = args.common.into_parts();
                     <$fo_analyzer>::from_options(args.opts)
                         .with_analyze_path_args(path_filter)
-                        .analyze(&path, format)?
+                        .analyze(target, format)?
                 }
             )*
             $(
                 AnalyzeCommand::$no_variant(args) => {
-                    let (path, format, path_filter) = args.into_parts();
+                    let (target, format, path_filter) = args.into_parts();
                     <$no_analyzer>::new()
                         .with_analyze_path_args(path_filter)
-                        .analyze(&path, format)?
+                        .analyze(target, format)?
                 }
             )*
         }
@@ -234,6 +247,7 @@ impl AnalyzeCommand {
             with_options {
                 Cohesion => CohesionAnalyzer,
                 Complexity => ComplexityAnalyzer,
+                Coupling => CouplingAnalyzer,
                 ContextSpan => ContextSpanAnalyzer,
                 Delegation => DelegationAnalyzer,
                 Hotspot => HotspotAnalyzer,
@@ -251,7 +265,6 @@ impl AnalyzeCommand {
                 GraphQuery => GraphQueryAnalyzer,
             }
             no_options {
-                Coupling => CouplingAnalyzer,
                 Cycles => CyclesAnalyzer,
                 FunctionGraph => FunctionGraphAnalyzer,
             }
@@ -389,7 +402,7 @@ fn dispatch(n: i32) -> i32 {
         let AnalyzeCommand::Similarity(args) = cmd else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(args.common.path, PathBuf::from("/repo/web"));
+        assert_eq!(args.common.paths, [PathBuf::from("/repo/web")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert!((args.opts.threshold - 0.7).abs() < f64::EPSILON);
         assert_eq!(args.opts.min_lines, Some(9));
@@ -679,8 +692,8 @@ fn dispatch(n: i32) -> i32 {
         let AnalyzeCommand::Coupling(args) = cmd else {
             panic!("expected analyze coupling");
         };
-        assert_eq!(args.path_filter.exclude, ["gen/**"]);
-        assert!(args.path_filter.exclude_tests);
-        assert!(!args.path_filter.only_tests);
+        assert_eq!(args.common.path_filter.exclude, ["gen/**"]);
+        assert!(args.common.path_filter.exclude_tests);
+        assert!(!args.common.path_filter.only_tests);
     }
 }

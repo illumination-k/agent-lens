@@ -367,15 +367,29 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap the markdown module table to the top N spans.",
             },
         ],
-        ToolName::Wrapper => &[Field {
-            key: "diff-only",
-            ty: "bool",
-            presence: "default: false",
-            desc: "Restrict analysis to functions touched by the working-tree diff.",
+        ToolName::Wrapper => &[
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "default: 20",
+                desc: "Cap the markdown listing to the first N wrappers, in file order.",
+            },
+            Field {
+                key: "diff-only",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Restrict analysis to functions touched by the working-tree diff.",
+            },
+        ],
+        ToolName::Coupling => &[Field {
+            key: "top",
+            ty: "int",
+            presence: "default: 20",
+            desc: "Cap the markdown module table to the top N modules by IFC.",
         }],
         // Analyzers that take no per-tool overrides. Declaring a
-        // `[profile.<name>.coupling]` table is a parse error.
-        ToolName::Coupling | ToolName::Cycles | ToolName::FunctionGraph => return None,
+        // `[profile.<name>.cycles]` table is a parse error.
+        ToolName::Cycles | ToolName::FunctionGraph => return None,
     };
     Some(ToolTable { fields })
 }
@@ -539,7 +553,7 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        CohesionOptions, ComplexityOptions, ContextSpanOptions, DelegationOptions,
+        CohesionOptions, ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
         RiskOptions, SimilarityOptions, UnreachableOptions, UntestedOptions, VisibilityOptions,
         WrapperOptions,
@@ -576,6 +590,7 @@ mod tests {
         assert_tool_parity::<DelegationOptions>(ToolName::Delegation);
         assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
+        assert_tool_parity::<CouplingOptions>(ToolName::Coupling);
         assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);
     }
 
@@ -652,13 +667,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_table_marks_only_coupling_cycles_and_function_graph_as_optionless() {
+    fn tool_table_marks_only_cycles_and_function_graph_as_optionless() {
         for tool in TOOL_ORDER {
             let has_table = tool_table(tool).is_some();
-            let expect_table = !matches!(
-                tool,
-                ToolName::Coupling | ToolName::Cycles | ToolName::FunctionGraph
-            );
+            let expect_table = !matches!(tool, ToolName::Cycles | ToolName::FunctionGraph);
             assert_eq!(has_table, expect_table, "mismatch for {tool:?}");
         }
     }

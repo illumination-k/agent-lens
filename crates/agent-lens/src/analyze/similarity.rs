@@ -19,7 +19,7 @@ use rayon::prelude::*;
 use tracing::debug;
 
 use super::runner::{FilterConfig, delegate_filter_builders, render_report};
-use super::{AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
+use super::{AnalyzeRoots, AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
 
 mod candidates;
 mod corpus;
@@ -582,8 +582,16 @@ impl SimilarityAnalyzer {
         }
     }
 
-    /// Read `path`, analyze it, and produce a report in `format`.
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+    /// Walk `roots`, analyze them, and produce a report in `format`.
+    /// Accepts a single path or several — see [`AnalyzeRoots`]; clusters
+    /// are found across the whole set, which is what a per-root run
+    /// cannot do.
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
         self.validate_score_cuts()?;
         if self.target == SimilarityTarget::Types && self.paired_by == Some(PairKey::Method) {
             return Err(AnalyzerError::TypeTargetPairedByMethod);
@@ -593,7 +601,7 @@ impl SimilarityAnalyzer {
         }
         let started = Instant::now();
         let corpus = collect_corpus(
-            path,
+            &roots,
             &self.filter.path_filter(),
             self.selection,
             self.target,
@@ -601,11 +609,11 @@ impl SimilarityAnalyzer {
         )?;
         let unit_count = corpus.len();
         if let Some(key) = self.paired_by {
-            return self.analyze_paired(path, &corpus, key, format, started);
+            return self.analyze_paired(&roots, &corpus, key, format, started);
         }
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
-            path,
+            &roots,
             self.method.as_str(),
             self.target.as_str(),
             self.cluster_threshold(),
@@ -616,7 +624,7 @@ impl SimilarityAnalyzer {
         );
         debug!(
             target: PROFILE_TARGET,
-            path = %path.display(),
+            path = %roots.display(),
             unit_count,
             target = self.target.as_str(),
             cluster_count = clusters.len(),
@@ -638,7 +646,7 @@ impl SimilarityAnalyzer {
     /// apart, which is the pair most likely to be a missed sync.
     fn analyze_paired(
         &self,
-        path: &Path,
+        roots: &AnalyzeRoots,
         corpus: &[OwnedUnit],
         key: PairKey,
         format: OutputFormat,
@@ -688,7 +696,7 @@ impl SimilarityAnalyzer {
 
         let report = PairedReport::new(
             PairedReportInputs {
-                path,
+                roots,
                 method: self.method.as_str(),
                 target: self.target.as_str(),
                 paired_by: key.as_str(),
@@ -703,7 +711,7 @@ impl SimilarityAnalyzer {
         );
         debug!(
             target: PROFILE_TARGET,
-            path = %path.display(),
+            path = %roots.display(),
             paired_by = key.as_str(),
             unit_count = corpus.len(),
             target = self.target.as_str(),
@@ -2948,6 +2956,64 @@ fn beta(x: i32) -> i32 {
             .collect();
         assert!(files.contains(&"a.rs"));
         assert!(files.contains(&"nested/b.rs"));
+    }
+
+    /// The reason `analyze similarity` had to grow a multi-root
+    /// signature: a duplicate spanning two sibling trees is invisible to
+    /// any number of per-tree runs, because clustering only compares
+    /// units inside one corpus.
+    #[test]
+    fn several_roots_cluster_across_the_whole_set() {
+        const BODY: &str = r#"
+fn %NAME%(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "packages/core/src/lib.rs",
+            &BODY.replace("%NAME%", "alpha"),
+        );
+        write_file(
+            dir.path(),
+            "cli/src/main.rs",
+            &BODY.replace("%NAME%", "beta"),
+        );
+        // A third tree nobody asked about must not join the corpus.
+        write_file(
+            dir.path(),
+            "web/src/lib.rs",
+            &BODY.replace("%NAME%", "gamma"),
+        );
+
+        let roots = vec![dir.path().join("packages"), dir.path().join("cli")];
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .analyze(roots, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["unit_count"], 2, "got {parsed}");
+        assert_eq!(parsed["cluster_count"], 1, "got {parsed}");
+        let files: Vec<&str> = parsed["clusters"][0]["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            ["cli/src/main.rs", "packages/core/src/lib.rs"],
+            "display paths are anchored at the roots' common ancestor",
+        );
+        // The report names every root it was given, so a reader can tell
+        // what the numbers cover.
+        let root = parsed["root"].as_str().unwrap();
+        assert!(root.contains("packages") && root.contains("cli"), "{root}");
     }
 
     #[test]

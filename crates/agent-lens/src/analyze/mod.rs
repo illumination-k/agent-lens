@@ -31,6 +31,7 @@ pub(crate) mod module_label;
 mod options;
 mod path_filter;
 pub mod risk;
+mod roots;
 mod runner;
 pub mod similarity;
 mod source_files;
@@ -79,6 +80,7 @@ pub(crate) use diff::overlaps_any;
 pub use diff::{LineRange, changed_line_ranges};
 pub(crate) use format::format_optional_f64;
 pub use path_filter::{AnalyzePathFilter, CompiledPathFilter, PathFilterError};
+pub use roots::AnalyzeRoots;
 pub use source_files::read_source;
 pub(crate) use source_files::{SourceFile, collect_source_files};
 

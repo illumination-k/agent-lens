@@ -25,14 +25,13 @@
 //! * `schema_version: 1` — initial shape.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde::Serialize;
 
 use super::call_graph::model::{CallGraphEdge, CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 2;
 
@@ -52,9 +51,14 @@ impl FunctionGraphAnalyzer {
         exclude_tests,
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
-        let graph = self.builder.build(path)?;
-        let report = Report::build(path, graph);
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
+        let graph = self.builder.build(&roots)?;
+        let report = Report::build(&roots, graph);
         render_report(&report, format, || format_markdown(&report))
     }
 }
@@ -72,11 +76,11 @@ struct Report {
 }
 
 impl Report {
-    fn build(root: &Path, graph: CallGraph) -> Self {
+    fn build(roots: &AnalyzeRoots, graph: CallGraph) -> Self {
         let summary = SummaryView::new(&graph.edges, graph.module_summary);
         Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             node_count: graph.nodes.len(),
             edge_count: graph.edges.len(),
@@ -147,6 +151,7 @@ mod tests {
     use super::*;
     use crate::test_support::write_file;
     use serde_json::Value;
+    use std::path::Path;
 
     use rstest::rstest;
 

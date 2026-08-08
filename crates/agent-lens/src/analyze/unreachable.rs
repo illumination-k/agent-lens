@@ -79,7 +79,7 @@ use super::format::{
 };
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzerError, OutputFormat};
+use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -219,7 +219,12 @@ impl UnreachableAnalyzer {
         self
     }
 
-    pub fn analyze(&self, path: &Path, format: OutputFormat) -> Result<String, AnalyzerError> {
+    pub fn analyze(
+        &self,
+        roots: impl Into<AnalyzeRoots>,
+        format: OutputFormat,
+    ) -> Result<String, AnalyzerError> {
+        let roots = roots.into();
         // Interface method sets are what keeps a Go method whose calls
         // dispatch through an interface out of the confirmed tier, so
         // this analyzer always pays for their extraction.
@@ -227,10 +232,10 @@ impl UnreachableAnalyzer {
             .builder
             .clone()
             .with_interface_facts(true)
-            .build(path)?;
+            .build(&roots)?;
         let reach = Reachability::compute(&graph);
-        let scan = ReferenceScan::run(&self.builder, path, &graph, &reach.candidates)?;
-        let report = Report::build(path, &graph, &reach, &scan, self.exclude_tests);
+        let scan = ReferenceScan::run(&self.builder, &roots, &graph, &reach.candidates)?;
+        let report = Report::build(&roots, &graph, &reach, &scan, self.exclude_tests);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.tier)
         })
@@ -634,7 +639,7 @@ struct ReferenceScan {
 impl ReferenceScan {
     fn run(
         builder: &CallGraphBuilder,
-        path: &Path,
+        roots: &AnalyzeRoots,
         graph: &CallGraph,
         candidates: &[Candidate],
     ) -> Result<Self, AnalyzerError> {
@@ -663,7 +668,7 @@ impl ReferenceScan {
             .map(|candidate| graph.nodes[candidate.node].name.as_str())
             .collect();
 
-        scan.file_count = builder.visit_source_texts(path, |file, source| {
+        scan.file_count = builder.visit_source_texts(roots, |file, source| {
             let owner_of_line = line_owners(spans_by_file.get(file).map(Vec::as_slice));
             for (offset, line) in source.lines().enumerate() {
                 let owner = owner_of_line.get(offset + 1).copied().flatten();
@@ -720,7 +725,7 @@ fn identifiers(line: &str) -> impl Iterator<Item = &str> {
 
 impl Report {
     fn build(
-        root: &Path,
+        roots: &AnalyzeRoots,
         graph: &CallGraph,
         reach: &Reachability,
         scan: &ReferenceScan,
@@ -755,7 +760,7 @@ impl Report {
 
         Self {
             schema_version: SCHEMA_VERSION,
-            root: root.display().to_string(),
+            root: roots.display(),
             language: graph.language,
             note: NOTE,
             entries: entry_set(reach, exclude_tests),

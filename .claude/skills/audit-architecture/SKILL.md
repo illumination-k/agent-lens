@@ -20,7 +20,7 @@ Four analyzers cover the architecture question:
 
 ```bash
 # Rust crate
-agent-lens analyze coupling crates/agent-lens --format md
+agent-lens analyze coupling crates/agent-lens --format md --top 15
 
 # TS/JS module graph from an entry
 agent-lens analyze coupling app/src/index.ts --format md
@@ -41,7 +41,9 @@ Look for, in order:
 
 ### 2. Vertical shape (layers)
 
-`coupling` needs a crate root, a single TS/JS entry file, or a Go / Python directory; `layers` does not — it derives the module graph from call edges, so it also answers the layering question for trees `coupling` can't take:
+`coupling` prints one row per module, so `--top` (default 20) is what keeps the report readable on a large package; `--format json` always carries every module.
+
+`coupling` needs a crate root, a single TS/JS entry file, or a Go / Python directory — one entry, never several, since two entries are two graphs rather than a wider one. `layers` does not — it derives the module graph from call edges, so it also answers the layering question for trees `coupling` can't take:
 
 ```bash
 agent-lens analyze layers crates/agent-lens/src --exclude-tests --format md

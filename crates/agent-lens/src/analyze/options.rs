@@ -132,6 +132,7 @@ mod tests {
     use crate::analyze::cohesion::{CohesionAnalyzer, CohesionOptions};
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
     use crate::analyze::context_span::{ContextSpanAnalyzer, ContextSpanOptions};
+    use crate::analyze::coupling::{CouplingAnalyzer, CouplingOptions};
     use crate::analyze::delegation::{DelegationAnalyzer, DelegationOptions};
     use crate::analyze::graph_query::{
         GraphDirection, GraphQueryAnalyzer, GraphQueryKind, GraphQueryOptions,
@@ -248,9 +249,14 @@ mod tests {
         |a| a.with_top(Some(3))
     );
     assert_options_reach_the_analyzer!(
+        coupling_options_reach_the_analyzer: CouplingAnalyzer,
+        CouplingOptions { top: Some(3) },
+        |a| a.with_top(Some(3))
+    );
+    assert_options_reach_the_analyzer!(
         wrapper_options_reach_the_analyzer: WrapperAnalyzer,
-        WrapperOptions { diff_only: true },
-        |a| a.with_diff_only(true)
+        WrapperOptions { top: Some(3), diff_only: true },
+        |a| a.with_top(Some(3)).with_diff_only(true)
     );
 
     /// Similarity is hand-written rather than generated, and its `sweep`
