@@ -373,10 +373,6 @@ Metrics per analyzer:
 | `hotspot`      | `file_count`, `score_max`, `commits_max`, `cognitive_max`                                                                                       |
 | `similarity`   | `unit_count`, `cluster_count`, `clustered_unit_count`, `cluster_max_size`                                                                       |
 
-The `*_count` metrics that size the measured surface (`file_count`,
-`function_count`, `unit_count`, `module_count`) are context, not quality — a
-growing codebase moves them without anything getting worse. Of the rest,
-`maintainability_index_min` is the only one that is worse when it _falls_.
 Any analyzer in the profile that is not in the table above is listed under
 `skipped` with a reason rather than silently dropped — the graph analyzers rank
 individual symbols, and what a snapshot of one should be is not settled yet.
@@ -391,8 +387,57 @@ Two properties make the file safe to store and diff:
   scored 0" are different facts. An empty-but-present population still gets its
   totals (`clustered_unit_count: 0` on a clean run), but never a maximum.
 
-Comparison and ratcheting — failing on a regression against a stored snapshot —
-are the next step; today the command produces the artifact.
+#### The ratchet: `baseline compare`
+
+`agent-lens baseline compare <profile> <SNAPSHOT>` re-runs the profile and
+measures it against the stored snapshot. It exits **2** when a gated metric
+moved the wrong way — distinct from the **1** every failure to run exits with,
+so a CI step can tell "the code got worse" from "the tool broke".
+
+```bash
+# Gate a change against the stored snapshot
+agent-lens baseline compare baseline target/agent-lens/baseline.json
+
+# Read the verdict rather than pipe it
+agent-lens baseline compare baseline baseline.json --format md
+
+# Ratchet: write back what improved, keep the bar where it regressed
+agent-lens baseline compare baseline baseline.json --update
+```
+
+Each metric is judged by its own direction, and only two of the three gate:
+
+| Direction         | Metrics                                                                                                                                                                                                                                                        |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| lower is better   | `cyclomatic_max`, `cognitive_max`, `cognitive_p95`, `max_nesting_max`, `lcom4_max`, `split_unit_count`, `cycle_count`, `fan_in_max`, `fan_out_max`, `ifc_max`, `transitive_max`, `transitive_sum`, `cluster_count`, `clustered_unit_count`, `cluster_max_size` |
+| higher is better  | `maintainability_index_min`                                                                                                                                                                                                                                    |
+| context (no gate) | `file_count`, `function_count`, `unit_count`, `module_count`, `edge_count`, `loc_total`, `commits_max`, `score_max`                                                                                                                                            |
+
+The context row is the part that makes the check usable. Surface size
+(`file_count` … `loc_total`) moves with every feature, and gating on it would
+just mean "no new code". Git history (`commits_max`, and the `score_max` built
+on it) only ever accumulates, so a ratchet on either would fail on the next
+commit to the hottest file and keep failing — a check that cannot be satisfied
+by improving the code is not a check. Both are still reported when they move,
+under their own heading, so a reader can see why the codebase grew.
+
+A metric on one side only is coverage, not movement: one the baseline carries
+and this run did not measure is `missing`, the reverse is `new`, and neither
+fails the build. Both snapshots must name the same profile at the same schema
+version; a differing `tool_version` or target is a warning on stderr rather
+than a refusal.
+
+`--update` is the ratchet itself, and it turns one way only:
+
+- a gated metric takes the better of the two values, so re-running with
+  `--update` after a regression cannot launder it into the new bar — and the
+  exit status is unchanged, still 2;
+- context metrics and the header (commit, version, target) follow the fresh
+  run, since nothing gates on them and the truth is more useful than an old
+  number;
+- metrics and whole tools this run did not measure are carried over untouched.
+  Retiring a gate is done with a fresh `baseline create`, not by an analyzer
+  quietly failing to report.
 
 ### Current command surface
 
@@ -405,7 +450,7 @@ The current binary exposes three top-level command trees plus `run`,
 | `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                      |
 | `analyze`    | `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk` |
 | `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                  |
-| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document                                                                                                                               |
+| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document; `compare <profile> <SNAPSHOT> [--update]` — measure a fresh run against one, exit 2 on a regression                          |
 | `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                                            |
 | `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                                       |
 | `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                                             |
@@ -939,9 +984,12 @@ queries, impact, layers, untested, unreachable, visibility).
 New metrics are prioritised by _does this change how an agent decides what to
 do?_ rather than _does it look nice in a dashboard?_
 
-Turning those analyzers into checks is the other half. `baseline create` is the
-first step — a stored metric snapshot — and comparing a run against one, so a
-build fails on a regression rather than on pre-existing debt, is what follows.
+Turning those analyzers into checks is the other half. `baseline create` and
+`baseline compare --update` cover it today: a stored metric snapshot, and a
+ratchet that fails a build on a regression rather than on pre-existing debt.
+What is still open there is which analyzers a snapshot can cover — the graph
+analyzers rank individual symbols, and what a snapshot of one should be is not
+settled.
 
 An MCP server front-end is a likely next surface, but the CLI is the source
 of truth.

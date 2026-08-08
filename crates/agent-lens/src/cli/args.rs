@@ -181,6 +181,24 @@ pub(super) enum BaselineCommand {
     /// snapshots byte-identically, with no wall-clock timestamp to make
     /// a regeneration look like a change.
     Create(BaselineCreateArgs),
+    /// Compare a fresh run against a stored snapshot, and fail on a
+    /// regression.
+    ///
+    /// The profile runs exactly as `baseline create` runs it, and each
+    /// metric is judged by its own direction: extremes and totals are
+    /// worse when they rise, `maintainability_index_min` is worse when
+    /// it falls, and the figures that only size the measured surface
+    /// (file/function/unit/module counts, `loc_total`, `edge_count`) or
+    /// that track git history (`commits_max`, `score_max`) are reported
+    /// when they move but never gate — a growing codebase and an extra
+    /// commit are not regressions.
+    ///
+    /// Exits 0 when nothing gated moved the wrong way and 2 when
+    /// something did, which is distinct from the 1 a failure to run
+    /// exits with. `--update` turns the snapshot into a ratchet:
+    /// improvements are written back, regressions keep the stored value,
+    /// so the bar only ever tightens.
+    Compare(BaselineCompareArgs),
 }
 
 #[derive(Debug, Args)]
@@ -191,6 +209,25 @@ pub(super) struct BaselineCreateArgs {
     /// directory if needed.
     #[arg(long, value_name = "PATH")]
     pub(super) out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct BaselineCompareArgs {
+    #[command(flatten)]
+    pub(super) selector: ProfileSelectorArgs,
+    /// The stored snapshot to compare this run against — the file
+    /// `baseline create --out` wrote. `--update` rewrites this same path.
+    #[arg(value_name = "SNAPSHOT")]
+    pub(super) snapshot: PathBuf,
+    /// Output format. Defaults to JSON, which carries every metric;
+    /// `md` leads with what moved.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    pub(super) format: OutputFormat,
+    /// Tighten the snapshot in place: metrics this run improved are
+    /// written back, metrics it regressed keep their stored value, and
+    /// the exit status is unchanged. The bar only ever moves down.
+    #[arg(long)]
+    pub(super) update: bool,
 }
 
 #[derive(Debug, Subcommand)]

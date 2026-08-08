@@ -1178,6 +1178,220 @@ fn baseline_create_with_unknown_profile_exits_nonzero() {
     assert!(stderr.contains("agent-lens failed"), "got: {stderr}");
 }
 
+/// A function tangled enough to lift every complexity extreme above what
+/// [`BRANCHY_RS`] scores, so swapping the two sources moves the snapshot
+/// in a known direction.
+const TANGLED_RS: &str = "\
+fn branchy(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }
+
+fn tangled(n: i32) -> i32 {
+    let mut total = 0;
+    for i in 0..n {
+        if i % 2 == 0 {
+            for j in 0..i {
+                if j % 3 == 0 {
+                    total += j;
+                } else if j % 5 == 0 {
+                    total -= j;
+                }
+            }
+        }
+    }
+    total
+}
+";
+
+/// A project with one profile and a stored snapshot of `source`, ready
+/// for a `baseline compare` against whatever the test writes next.
+fn project_with_snapshot(source: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", source);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+    let created = agent_lens(
+        &["baseline", "create", "audit", "--out", "baseline.json"],
+        dir.path(),
+        None,
+    );
+    assert!(
+        created.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&created.stderr),
+    );
+    dir
+}
+
+fn stored_metric(dir: &Path, metric: &str) -> serde_json::Value {
+    let document = std::fs::read_to_string(dir.join("baseline.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&document).unwrap();
+    json["tools"][0]["metrics"][metric].clone()
+}
+
+#[test]
+fn baseline_compare_against_an_unchanged_tree_exits_zero() {
+    let dir = project_with_snapshot(BRANCHY_RS);
+
+    let output = agent_lens(
+        &["baseline", "compare", "audit", "baseline.json"],
+        dir.path(),
+        None,
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["summary"]["regressed"], 0);
+    assert!(json["summary"]["held"].as_u64().unwrap() > 0, "got: {json}");
+}
+
+#[test]
+fn baseline_compare_exits_two_when_a_gated_metric_worsens() {
+    let dir = project_with_snapshot(BRANCHY_RS);
+    write_file(dir.path(), "src/lib.rs", TANGLED_RS);
+
+    let output = agent_lens(
+        &["baseline", "compare", "audit", "baseline.json"],
+        dir.path(),
+        None,
+    );
+    // Exit 2, not 1: "the code got worse" has to be distinguishable from
+    // "the tool could not run".
+    assert_eq!(output.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json["summary"]["regressed"].as_u64().unwrap() > 0,
+        "got: {json}",
+    );
+    let cognitive = json["tools"][0]["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|metric| metric["metric"] == "cognitive_max")
+        .unwrap()
+        .clone();
+    assert_eq!(cognitive["verdict"], "regressed");
+    assert_eq!(cognitive["direction"], "lower-is-better");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("metrics regressed against the baseline"),
+        "got: {stderr}",
+    );
+}
+
+/// Growth is not regression: the same edit that adds a function moves
+/// `function_count` and `loc_total`, and neither may fail the check.
+#[test]
+fn baseline_compare_does_not_gate_on_a_growing_surface() {
+    let dir = project_with_snapshot(BRANCHY_RS);
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "fn branchy(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\nfn plain(n: i32) -> i32 { n }\n",
+    );
+
+    let output = agent_lens(
+        &[
+            "baseline",
+            "compare",
+            "audit",
+            "baseline.json",
+            "--format",
+            "md",
+        ],
+        dir.path(),
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("_Nothing regressed against the baseline._"),
+        "got: {stdout}",
+    );
+    assert!(
+        stdout.contains("## Context moved (not gated)"),
+        "got: {stdout}"
+    );
+    assert!(stdout.contains("function_count"), "got: {stdout}");
+}
+
+#[test]
+fn baseline_compare_update_tightens_the_snapshot_on_an_improvement() {
+    let dir = project_with_snapshot(TANGLED_RS);
+    let before = stored_metric(dir.path(), "cognitive_max").as_u64().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+
+    let output = agent_lens(
+        &["baseline", "compare", "audit", "baseline.json", "--update"],
+        dir.path(),
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let after = stored_metric(dir.path(), "cognitive_max").as_u64().unwrap();
+    assert!(after < before, "{after} should be below {before}");
+}
+
+/// The ratchet only turns one way: `--update` over a regression writes
+/// the improvements back but keeps the stricter bar, and still fails.
+#[test]
+fn baseline_compare_update_never_loosens_a_regressed_metric() {
+    let dir = project_with_snapshot(BRANCHY_RS);
+    let before = stored_metric(dir.path(), "cognitive_max");
+    write_file(dir.path(), "src/lib.rs", TANGLED_RS);
+
+    let output = agent_lens(
+        &["baseline", "compare", "audit", "baseline.json", "--update"],
+        dir.path(),
+        None,
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stored_metric(dir.path(), "cognitive_max"), before);
+    // The surface metrics are not gated, so those do follow the run.
+    assert_eq!(stored_metric(dir.path(), "function_count"), 2);
+}
+
+#[test]
+fn baseline_compare_refuses_a_snapshot_of_another_profile() {
+    let dir = project_with_snapshot(BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n\n\
+         [profile.other]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(
+        &["baseline", "compare", "other", "baseline.json"],
+        dir.path(),
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("profile"), "got: {stderr}");
+}
+
+#[test]
+fn baseline_compare_names_a_snapshot_it_cannot_read() {
+    let dir = project_with_snapshot(BRANCHY_RS);
+
+    let output = agent_lens(
+        &["baseline", "compare", "audit", "missing.json"],
+        dir.path(),
+        None,
+    );
+    // A missing snapshot is a broken invocation, not a regression.
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("missing.json"), "got: {stderr}");
+}
+
 #[test]
 fn help_md_emits_markdown_reference() {
     let dir = tempfile::tempdir().unwrap();

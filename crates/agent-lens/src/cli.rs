@@ -42,7 +42,7 @@ pub fn main() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             error!(error = %err, "agent-lens failed");
             ExitCode::from(1)
@@ -60,23 +60,41 @@ fn init_tracing() {
         .try_init();
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+/// Dispatch a parsed command, handing back the process exit status.
+///
+/// Every command but `baseline compare` either does its job or fails, so
+/// they all report success through [`succeeded`]. The ratchet is the one
+/// command with a third answer — it ran, and the code got worse — and it
+/// owns its own exit code so a CI step can tell that from a broken tool.
+fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Hook(HookCommand::SessionStart(sub)) => run_session_start(sub),
-        Command::Hook(HookCommand::PreToolUse(sub)) => run_pre_tool_use(sub),
-        Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub),
-        Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args),
-        Command::CodexHook(CodexHookCommand::SessionStart(sub)) => run_codex_session_start(sub),
-        Command::CodexHook(CodexHookCommand::PreToolUse(sub)) => run_codex_pre_tool_use(sub),
-        Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => run_codex_post_tool_use(sub),
-        Command::CodexHook(CodexHookCommand::Setup(args)) => run_codex_hook_setup(args),
-        Command::Analyze(sub) => run_analyze(sub),
-        Command::Run(args) => run_profile(args),
+        Command::Hook(HookCommand::SessionStart(sub)) => run_session_start(sub).map(succeeded),
+        Command::Hook(HookCommand::PreToolUse(sub)) => run_pre_tool_use(sub).map(succeeded),
+        Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub).map(succeeded),
+        Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args).map(succeeded),
+        Command::CodexHook(CodexHookCommand::SessionStart(sub)) => {
+            run_codex_session_start(sub).map(succeeded)
+        }
+        Command::CodexHook(CodexHookCommand::PreToolUse(sub)) => {
+            run_codex_pre_tool_use(sub).map(succeeded)
+        }
+        Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => {
+            run_codex_post_tool_use(sub).map(succeeded)
+        }
+        Command::CodexHook(CodexHookCommand::Setup(args)) => {
+            run_codex_hook_setup(args).map(succeeded)
+        }
+        Command::Analyze(sub) => run_analyze(sub).map(succeeded),
+        Command::Run(args) => run_profile(args).map(succeeded),
         Command::Baseline(sub) => run_baseline(sub),
-        Command::Skills(sub) => run_skills(sub),
-        Command::Config(sub) => run_config(sub),
-        Command::Help(args) => run_help(args),
+        Command::Skills(sub) => run_skills(sub).map(succeeded),
+        Command::Config(sub) => run_config(sub).map(succeeded),
+        Command::Help(args) => run_help(args).map(succeeded),
     }
+}
+
+fn succeeded((): ()) -> ExitCode {
+    ExitCode::SUCCESS
 }
 
 /// Emit the `agent-lens.toml` schema reference on stdout.

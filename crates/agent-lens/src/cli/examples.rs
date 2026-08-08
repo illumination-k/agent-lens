@@ -267,10 +267,21 @@ similarity; anything else in the profile is listed under `skipped`.
 The document is deterministic — same tree, same commit, same bytes — so it
 is safe to store as a CI artifact and diff.
 
+`compare` re-runs the profile and judges each metric by its own
+direction. Surface-size figures (file/function/unit/module counts,
+`loc_total`, `edge_count`) and git-history figures (`commits_max`,
+`score_max`) are reported when they move but never gate: a bigger
+codebase and an extra commit are not regressions. It exits 2 when
+something gated moved the wrong way, so a CI step can tell that from the
+1 a failure to run exits with. `--update` makes it a ratchet: what
+improved is written back, what regressed keeps its stored value.
+
 Examples:
 
     agent-lens baseline create audit
     agent-lens baseline create audit --out target/agent-lens/baseline.json
+    agent-lens baseline compare audit baseline.json --format md
+    agent-lens baseline compare audit baseline.json --update
 ";
 
 pub const HOOK_SETUP: &str = "\
