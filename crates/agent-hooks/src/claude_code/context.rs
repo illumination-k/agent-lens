@@ -31,41 +31,6 @@ pub enum PermissionMode {
     Other,
 }
 
-/// Output fields shared across every Claude Code hook response.
-///
-/// Each hook-specific output flattens this struct to inherit the common
-/// fields while keeping its own decision / hook-specific payload.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CommonHookOutput {
-    /// Whether Claude Code should continue after the hook runs.
-    #[serde(rename = "continue", default, skip_serializing_if = "Option::is_none")]
-    pub continue_: Option<bool>,
-
-    /// Reason surfaced to the user when `continue_` is `Some(false)`.
-    #[serde(
-        rename = "stopReason",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub stop_reason: Option<String>,
-
-    /// Suppress the hook's stdout from the transcript.
-    #[serde(
-        rename = "suppressOutput",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub suppress_output: Option<bool>,
-
-    /// Message injected back into the conversation as a system message.
-    #[serde(
-        rename = "systemMessage",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub system_message: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,33 +67,5 @@ mod tests {
         });
         let ctx: HookContext = serde_json::from_value(payload).unwrap();
         assert!(ctx.permission_mode.is_none());
-    }
-
-    #[test]
-    fn common_hook_output_default_serializes_to_empty_object() {
-        let v = serde_json::to_value(CommonHookOutput::default()).unwrap();
-        assert_eq!(v, json!({}));
-    }
-
-    #[test]
-    fn common_hook_output_uses_camel_case_keys() {
-        let out = CommonHookOutput {
-            continue_: Some(false),
-            stop_reason: Some("done".into()),
-            suppress_output: Some(true),
-            system_message: Some("note".into()),
-        };
-        let v = serde_json::to_value(&out).unwrap();
-        assert_eq!(
-            v,
-            json!({
-                "continue": false,
-                "stopReason": "done",
-                "suppressOutput": true,
-                "systemMessage": "note",
-            })
-        );
-        let parsed: CommonHookOutput = serde_json::from_value(v).unwrap();
-        assert_eq!(parsed, out);
     }
 }

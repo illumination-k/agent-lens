@@ -27,7 +27,8 @@ mod session_start;
 mod stop;
 mod user_prompt_submit;
 
-pub use context::{CommonHookOutput, HookContext};
+pub use crate::common::{CommonHookOutput, CommonOutput};
+pub use context::HookContext;
 pub use permission_request::{
     PermissionDecision, PermissionRequestHookSpecificOutput, PermissionRequestInput,
     PermissionRequestOutput,
@@ -49,6 +50,15 @@ pub use user_prompt_submit::{
 };
 
 use serde::{Deserialize, Serialize};
+
+crate::common::impl_common_output!(
+    SessionStartOutput,
+    PreToolUseOutput,
+    PostToolUseOutput,
+    PermissionRequestOutput,
+    UserPromptSubmitOutput,
+    StopOutput,
+);
 
 /// A tagged union over every Codex hook input.
 ///

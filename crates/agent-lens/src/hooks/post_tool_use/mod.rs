@@ -6,7 +6,7 @@
 //! adapter (input shape → `EditedSource` list, output string →
 //! `systemMessage`).
 
-use agent_hooks::claude_code::{CommonHookOutput, PostToolUseInput, PostToolUseOutput};
+use agent_hooks::claude_code::{CommonOutput as _, PostToolUseInput, PostToolUseOutput};
 
 use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
 
@@ -23,13 +23,7 @@ impl HookEnvelope for ClaudeCodePostToolUse {
     }
 
     fn wrap_report(report: String) -> Self::Output {
-        PostToolUseOutput {
-            common: CommonHookOutput {
-                system_message: Some(report),
-                ..CommonHookOutput::default()
-            },
-            ..PostToolUseOutput::default()
-        }
+        PostToolUseOutput::with_system_message(report)
     }
 }
 

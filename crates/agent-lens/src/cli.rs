@@ -23,6 +23,7 @@ mod baseline;
 mod examples;
 mod hooks;
 mod profile;
+mod setup;
 
 use analyze::run_analyze;
 use args::{
@@ -31,10 +32,11 @@ use args::{
 };
 use baseline::run_baseline;
 use hooks::{
-    run_codex_hook_setup, run_codex_post_tool_use, run_codex_pre_tool_use, run_codex_session_start,
-    run_hook_setup, run_post_tool_use, run_pre_tool_use, run_session_start,
+    run_codex_post_tool_use, run_codex_pre_tool_use, run_codex_session_start, run_post_tool_use,
+    run_pre_tool_use, run_session_start,
 };
 use profile::run_profile;
+use setup::{run_codex_hook_setup, run_hook_setup};
 
 pub fn main() -> ExitCode {
     init_tracing();

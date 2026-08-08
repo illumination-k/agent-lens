@@ -20,8 +20,7 @@ use agent_lens::analyze::untested::UntestedOptions;
 use agent_lens::analyze::visibility::VisibilityOptions;
 use agent_lens::analyze::wrapper::WrapperOptions;
 use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
-use agent_lens::hooks::codex::setup as codex_setup;
-use agent_lens::hooks::setup::SettingsScope;
+use agent_lens::hooks::setup_engine::SetupScope;
 use agent_lens::skills;
 use clap::{Args, Parser, Subcommand};
 
@@ -218,9 +217,11 @@ pub(super) enum HookCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct SetupArgs {
-    /// Where to install the hooks. `project` is the current directory.
-    #[arg(long, value_enum, default_value_t = SettingsScope::Project)]
-    pub(super) scope: SettingsScope,
+    /// Where to install the hooks: `project` writes
+    /// `<cwd>/.claude/settings.json`, `user` writes
+    /// `$HOME/.claude/settings.json`.
+    #[arg(long, value_enum, default_value_t = SetupScope::Project)]
+    pub(super) scope: SetupScope,
     /// Show the resulting JSON without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
@@ -301,11 +302,12 @@ pub(super) enum CodexHookCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct CodexSetupArgs {
-    /// Where to install the hooks. `project` is the nearest ancestor
-    /// holding a `.git` entry, falling back to the current directory
-    /// outside a git tree.
-    #[arg(long, value_enum, default_value_t = codex_setup::ConfigScope::User)]
-    pub(super) scope: codex_setup::ConfigScope,
+    /// Where to install the hooks: `project` writes
+    /// `<repo-root>/.codex/config.toml` — the nearest ancestor holding a
+    /// `.git` entry, falling back to the current directory outside a git
+    /// tree — and `user` writes `$HOME/.codex/config.toml`.
+    #[arg(long, value_enum, default_value_t = SetupScope::User)]
+    pub(super) scope: SetupScope,
     /// Show the resulting TOML without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
@@ -1085,7 +1087,7 @@ mod tests {
         let Command::Hook(HookCommand::Setup(args)) = cli.command else {
             panic!("expected hook setup");
         };
-        assert!(matches!(args.scope, SettingsScope::Project));
+        assert_eq!(args.scope, SetupScope::Project);
         assert!(!args.dry_run);
     }
 
@@ -1103,7 +1105,7 @@ mod tests {
         let Command::Hook(HookCommand::Setup(args)) = cli.command else {
             panic!("expected hook setup");
         };
-        assert!(matches!(args.scope, SettingsScope::User));
+        assert_eq!(args.scope, SetupScope::User);
         assert!(args.dry_run);
     }
 
@@ -1113,7 +1115,7 @@ mod tests {
         let Command::CodexHook(CodexHookCommand::Setup(args)) = cli.command else {
             panic!("expected codex-hook setup");
         };
-        assert!(matches!(args.scope, codex_setup::ConfigScope::User));
+        assert_eq!(args.scope, SetupScope::User);
         assert!(!args.dry_run);
     }
 

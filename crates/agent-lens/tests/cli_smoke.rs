@@ -632,19 +632,43 @@ fn top_bounds_the_markdown_report(#[case] args: &[&str], #[case] expected: &str)
     assert!(stdout.contains(expected), "got: {stdout}");
 }
 
+/// A failing hook still answers in the agent's own response schema and
+/// exits 0, so the agent is told the lens broke instead of being handed
+/// an empty stdout. The error is logged to stderr as well.
 #[rstest]
-#[case::claude_session_start(&["hook", "session-start", "summary"])]
-#[case::claude_pre_tool_use(&["hook", "pre-tool-use", "complexity"])]
-#[case::claude_post_tool_use(&["hook", "post-tool-use", "similarity"])]
-#[case::codex_session_start(&["codex-hook", "session-start", "summary"])]
-#[case::codex_pre_tool_use(&["codex-hook", "pre-tool-use", "complexity"])]
-#[case::codex_post_tool_use(&["codex-hook", "post-tool-use", "similarity"])]
-fn invalid_hook_payload_exits_nonzero_and_logs_error(#[case] args: &[&str]) {
+#[case::claude_session_start(&["hook", "session-start", "summary"], "session-start")]
+#[case::claude_pre_tool_use(&["hook", "pre-tool-use", "complexity"], "pre-tool-use")]
+#[case::claude_post_tool_use(&["hook", "post-tool-use", "similarity"], "post-tool-use")]
+#[case::codex_session_start(&["codex-hook", "session-start", "summary"], "codex session-start")]
+#[case::codex_pre_tool_use(&["codex-hook", "pre-tool-use", "complexity"], "codex pre-tool-use")]
+#[case::codex_post_tool_use(
+    &["codex-hook", "post-tool-use", "similarity"],
+    "codex post-tool-use",
+)]
+fn invalid_hook_payload_is_reported_in_the_hook_response(
+    #[case] args: &[&str],
+    #[case] event: &str,
+) {
     let dir = tempfile::tempdir().unwrap();
     let output = agent_lens(args, dir.path(), Some("{}"));
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("agent-lens failed"), "got: {stderr}");
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    assert!(stderr.contains("hook failed"), "got: {stderr}");
+
+    let json = stdout_json(&output);
+    // Claude Code's tool-use events carry the report in `systemMessage`;
+    // the SessionStart events and Codex's PostToolUse use
+    // `hookSpecificOutput.additionalContext`.
+    let report = json["systemMessage"]
+        .as_str()
+        .or_else(|| {
+            json.pointer("/hookSpecificOutput/additionalContext")?
+                .as_str()
+        })
+        .unwrap_or_else(|| panic!("no report field in {json}"));
+    assert!(
+        report.contains(&format!("agent-lens {event} hook failed")),
+        "got: {report}",
+    );
 }
 
 #[test]

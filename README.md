@@ -638,8 +638,26 @@ command = "agent-lens codex-hook post-tool-use wrapper"
 | Codex       | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions across the touched files.                                              |
 
 Schemas for the remaining events (`UserPromptSubmit`, `Stop`, `SubagentStop`,
-and Codex's `PermissionRequest`) live in the `agent-hooks` crate, ready for
-new handlers to plug into the same plumbing.
+and Codex's `PermissionRequest`) live in the `agent-hooks` crate with no
+handler wired to them yet. They are kept deliberately: `agent-hooks` models
+each protocol in full, so its tagged input enums round-trip every payload an
+agent can send and a new handler is a domain-logic change rather than a
+schema change.
+
+#### When a hook fails
+
+Hook handlers are advisory — what `agent-lens` has to say about a file is
+context, never a gate on the agent's tool call. So a handler that fails
+still answers in the agent's own response schema: the failure is reported
+through the same field a report would have used (`systemMessage`, or
+`additionalContext` for the events that inject context that way), prefixed
+with `agent-lens <event> hook failed:`, and the process exits 0 so the
+agent parses it. The full error is also logged to stderr.
+
+That covers everything from a malformed payload on stdin to an analyzer
+tripping over a pathological file. The `setup` commands are not hooks and
+keep the ordinary CLI contract: an error is logged and the process exits
+non-zero.
 
 ### Analyzers
 

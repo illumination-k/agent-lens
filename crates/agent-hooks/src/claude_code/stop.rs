@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::context::{CommonHookOutput, HookContext};
+use super::context::HookContext;
+use crate::common::CommonHookOutput;
 
 /// Input payload for the `Stop` hook.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::context::{CommonHookOutput, HookContext};
+use super::context::HookContext;
+use crate::common::CommonHookOutput;
 
 /// Input payload for the `SubagentStop` hook (fires when a Task sub-agent ends).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
