@@ -341,7 +341,7 @@ agent-lens baseline create baseline --out target/agent-lens/baseline.json
 ```json
 {
   "schema_version": 1,
-  "tool_version": "0.2.0",
+  "tool_version": "0.3.0",
   "profile": "baseline",
   "target": "crates/agent-lens",
   "commit": "85488bfd5bd99874e4652ba62741346164c8055c",
