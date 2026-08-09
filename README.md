@@ -271,9 +271,9 @@ agent-lens analyze similarity packages cli web/src --format md --exclude-tests
 
 For a repeatable multi-analyzer pass, declare a named profile in an
 `agent-lens.toml` and run it with `agent-lens run <name>`. A profile bundles a
-target path, shared path filters, an ordered list of analyzers, and optional
-per-tool overrides; `run` executes each analyzer through the same code path as
-`agent-lens analyze` and emits one combined report.
+target path (or several), shared path filters, an ordered list of analyzers, and
+optional per-tool overrides; `run` executes each analyzer through the same code
+path as `agent-lens analyze` and emits one combined report.
 
 ```toml
 # agent-lens.toml — discovered by walking up from the current directory
@@ -297,6 +297,13 @@ top = 20
 [profile.web.complexity]
 min-score = 12
 top = 20
+
+# `path` also takes an array — the config spelling of `analyze <tool> PATH...`.
+# The trees are walked into one corpus, so a clone or a call edge spanning them
+# is visible where a profile naming only one of them could never find it.
+[profile.backend]
+path = ["internal", "cmd"]
+tools = ["similarity", "unreachable"]
 ```
 
 ```bash
@@ -312,9 +319,12 @@ agent-lens run web --format json
 ```
 
 Keys are kebab-case and match the CLI flags. A relative `path` resolves against
-the directory holding `agent-lens.toml`. Unknown keys — a typo like `entrypont`,
-or an option set on the wrong tool — are rejected at parse time rather than
-silently ignored.
+the directory holding `agent-lens.toml`, each entry on its own when it is an
+array. `coupling` and `context-span` grow one module graph from one entry point,
+so a profile listing either of them alongside more than one `path` is rejected
+by name — split them into their own single-path profile. Unknown keys — a typo
+like `entrypont`, or an option set on the wrong tool — are rejected at parse
+time rather than silently ignored.
 
 `agent-lens config schema` prints the full `agent-lens.toml` reference as dense
 Markdown — every `[profile.<name>]` key and per-tool override table, with types,
@@ -499,7 +509,9 @@ finding spanning two trees is only visible in a combined run. Display paths
 — and the base a `/`-containing `--exclude` glob is anchored at — are
 relative to the paths' deepest common ancestor. `coupling` and
 `context-span` grow one module graph out of one entry point, so they keep the
-single-`PATH` signature.
+single-`PATH` signature. A profile's `path` follows the same rule: it takes an
+array as well as a string, and rejects an array of more than one path for those
+two analyzers.
 
 `--top N` bounds the length of a `--format md` report and is accepted by every
 analyzer that can produce a long one; `cycles` is the exception, since a

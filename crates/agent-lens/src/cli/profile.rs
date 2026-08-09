@@ -16,8 +16,8 @@ use super::analyze::build_analyze_command;
 use super::args::{ProfileSelectorArgs, RunArgs};
 use super::write_stdout_line;
 
-/// A named profile, ready to run: the profile itself plus the target
-/// path already resolved against the config's directory.
+/// A named profile, ready to run: the profile itself plus its target
+/// paths already resolved against the config's directory.
 ///
 /// The profile is cloned out of the [`config::Config`] rather than
 /// borrowed from it so callers hold one self-contained value; a profile
@@ -26,14 +26,14 @@ use super::write_stdout_line;
 pub(super) struct ResolvedProfile {
     pub(super) name: String,
     pub(super) profile: config::Profile,
-    pub(super) target: PathBuf,
+    pub(super) targets: Vec<PathBuf>,
 }
 
 impl ResolvedProfile {
     /// Discover (or take) the config, look the profile up, and resolve
-    /// its target path.
+    /// its target paths.
     ///
-    /// The target's existence is checked once here rather than per
+    /// Each target's existence is checked once here rather than per
     /// analyzer: every tool in the profile would otherwise fail the same
     /// way, and only this layer knows the path came from a config and
     /// what it was resolved against.
@@ -50,14 +50,19 @@ impl ResolvedProfile {
         let config = config::load(&config_path)?;
         let profile = config.profile(&selector.profile)?.clone();
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-        let target = profile.resolved_path(config_dir);
-        if !target.exists() {
-            return Err(ConfigError::ProfilePathNotFound {
-                name: selector.profile,
-                path: profile.path,
-                resolved: target,
+        let targets = profile.resolved_paths(config_dir);
+        // Reported one path at a time, naming the entry as the profile
+        // spelled it: with several paths in play, "does not exist" is
+        // useless unless it says which one.
+        for (declared, resolved) in profile.path.paths().iter().zip(&targets) {
+            if !resolved.exists() {
+                return Err(ConfigError::ProfilePathNotFound {
+                    name: selector.profile,
+                    path: declared.clone(),
+                    resolved: resolved.clone(),
+                }
+                .into());
             }
-            .into());
         }
 
         for tool in unused_tool_option_tables(&profile) {
@@ -71,8 +76,17 @@ impl ResolvedProfile {
         Ok(Self {
             name: selector.profile,
             profile,
-            target,
+            targets,
         })
+    }
+
+    /// The path git-backed metadata (a snapshot's commit) is looked up
+    /// from. Every path in one profile is expected to sit in the same
+    /// repository, so the first is as good as any.
+    pub(super) fn git_anchor(&self) -> &Path {
+        self.targets
+            .first()
+            .map_or(Path::new("."), PathBuf::as_path)
     }
 
     /// The profile's tools in listed order, with repeats dropped —
@@ -101,7 +115,7 @@ impl ResolvedProfile {
         tool: config::ToolName,
         format: OutputFormat,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        build_analyze_command(tool, &self.profile, &self.target, format)?.run()
+        build_analyze_command(tool, &self.profile, &self.targets, format)?.run()
     }
 }
 
@@ -221,7 +235,7 @@ mod tests {
         let resolved = ResolvedProfile {
             name: "audit".to_owned(),
             profile,
-            target: PathBuf::from("src"),
+            targets: vec![PathBuf::from("src")],
         };
         assert_eq!(
             resolved.tools(),

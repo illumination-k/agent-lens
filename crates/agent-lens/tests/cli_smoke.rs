@@ -761,6 +761,97 @@ fn run_profile_emits_combined_json_report() {
     assert!(json["results"][0]["report"].is_object(), "got: {json}");
 }
 
+/// The motivating case for a `path` array: the clone spans `internal`
+/// and `cmd`, so a profile that can only name one of the two trees
+/// cannot see it at all.
+#[test]
+fn run_profile_with_several_paths_finds_a_clone_spanning_them() {
+    const BODY: &str = "
+fn %NAME%(x: i32) -> i32 {
+    let a = x + 1;
+    let b = a * 2;
+    let c = b - 3;
+    let d = c + 4;
+    d
+}
+";
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "internal/helper.rs",
+        &BODY.replace("%NAME%", "a"),
+    );
+    write_file(dir.path(), "cmd/main.rs", &BODY.replace("%NAME%", "b"));
+    // Not part of the corpus: a profile naming two trees must walk those
+    // two and no others.
+    write_file(dir.path(), "vendor/dep.rs", &BODY.replace("%NAME%", "c"));
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.backend]\npath = [\"internal\", \"cmd\"]\ntools = [\"similarity\"]\n\n\
+         [profile.backend.similarity]\nthreshold = 0.5\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "backend"], dir.path(), None);
+    let json = stdout_json(&output);
+    let report = &json["results"][0]["report"];
+    assert_eq!(report["unit_count"], 2, "got: {report}");
+    assert_eq!(report["cluster_count"], 1, "got: {report}");
+    let files: Vec<&str> = report["clusters"][0]["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|unit| unit["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        files,
+        ["cmd/main.rs", "internal/helper.rs"],
+        "got: {report}"
+    );
+}
+
+/// `coupling` and `context-span` grow one module graph from one entry
+/// point, so the config rejects a wider corpus for them by name rather
+/// than picking a path and running a report nobody asked for.
+#[rstest]
+#[case::coupling("coupling")]
+#[case::context_span("context-span")]
+fn run_profile_rejects_several_paths_for_a_single_root_tool(#[case] tool: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "internal/lib.rs", BRANCHY_RS);
+    write_file(dir.path(), "cmd/main.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        format!("[profile.backend]\npath = [\"internal\", \"cmd\"]\ntools = [\"{tool}\"]\n"),
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "backend"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(tool), "got: {stderr}");
+    assert!(stderr.contains("single"), "got: {stderr}");
+}
+
+/// A missing path is reported by name, so a reader of a multi-path
+/// profile knows which entry to fix.
+#[test]
+fn run_profile_names_the_missing_path_of_a_multi_path_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "internal/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.backend]\npath = [\"internal\", \"cmd\"]\ntools = [\"similarity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "backend"], dir.path(), None);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cmd"), "got: {stderr}");
+    assert!(!stderr.contains("\"internal\""), "got: {stderr}");
+}
+
 #[test]
 fn run_profile_drives_graph_query_end_to_end() {
     let dir = tempfile::tempdir().unwrap();

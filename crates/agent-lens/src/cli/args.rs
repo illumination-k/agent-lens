@@ -809,20 +809,6 @@ pub(super) struct AnalyzeCommonArgs {
 }
 
 impl AnalyzeCommonArgs {
-    /// Build the args for a single root — the shape a profile entry and
-    /// every internal caller hands over.
-    pub(super) fn single(
-        path: PathBuf,
-        format: OutputFormat,
-        path_filter: AnalyzePathArgs,
-    ) -> Self {
-        Self {
-            paths: vec![path],
-            format,
-            path_filter,
-        }
-    }
-
     pub(super) fn into_parts(self) -> (AnalyzeRoots, OutputFormat, AnalyzePathArgs) {
         (AnalyzeRoots::new(self.paths), self.format, self.path_filter)
     }
