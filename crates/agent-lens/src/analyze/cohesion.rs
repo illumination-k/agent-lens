@@ -71,9 +71,10 @@ impl CohesionAnalyzer {
     /// `[profile.<name>.cohesion]` table are the same type, so this is the
     /// only seam between parsed options and the analyzer.
     pub fn with_options(self, opts: CohesionOptions) -> Self {
+        let diff = opts.diff_scope();
         self.with_top(opts.top)
             .with_min_score(opts.min_score)
-            .with_diff_only(opts.diff_only)
+            .with_diff_scope(diff)
     }
 
     /// Walk `roots`, analyze them, and produce a report in `format`.

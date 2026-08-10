@@ -59,7 +59,9 @@ use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builder
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzeRoots, AnalyzerError, LineRange, OutputFormat, SourceLang, overlaps_any};
+use super::{
+    AnalyzeRoots, AnalyzerError, DiffScope, LineRange, OutputFormat, SourceLang, overlaps_any,
+};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -116,7 +118,7 @@ analyzer_options! {
 pub struct DelegationAnalyzer {
     builder: CallGraphBuilder,
     top: Option<usize>,
-    diff_only: bool,
+    diff: DiffScope,
 }
 
 impl Default for DelegationAnalyzer {
@@ -126,7 +128,7 @@ impl Default for DelegationAnalyzer {
             // analyzer is the one that pays for extracting them.
             builder: CallGraphBuilder::new().with_delegation_facts(true),
             top: None,
-            diff_only: false,
+            diff: DiffScope::Disabled,
         }
     }
 }
@@ -136,7 +138,8 @@ impl DelegationAnalyzer {
     /// `[profile.<name>.delegation]` table are the same type, so this is
     /// the only seam between parsed options and the analyzer.
     pub fn with_options(self, opts: DelegationOptions) -> Self {
-        self.with_top(opts.top).with_diff_only(opts.diff_only)
+        let diff = opts.diff_scope();
+        self.with_top(opts.top).with_diff_scope(diff)
     }
 
     pub fn new() -> Self {
@@ -164,8 +167,15 @@ impl DelegationAnalyzer {
     /// Keep only chains with a hop (or a terminus) on an unstaged
     /// changed line. The module roll-up narrows to the modules those
     /// chains run through; the ratios inside it stay whole-module.
-    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
-        self.diff_only = diff_only;
+    pub fn with_diff_only(self, diff_only: bool) -> Self {
+        self.with_diff_scope(DiffScope::new(diff_only, None))
+    }
+
+    /// Same gate as [`Self::with_diff_only`], against an arbitrary
+    /// diff — a revision range reports the chains a past commit
+    /// touched.
+    pub fn with_diff_scope(mut self, diff: DiffScope) -> Self {
+        self.diff = diff;
         self
     }
 
@@ -177,10 +187,14 @@ impl DelegationAnalyzer {
         let roots = roots.into();
         let graph = self.builder.build(&roots)?;
         let changed = self
-            .diff_only
-            .then(|| self.builder.changed_line_ranges_by_display_path(&roots))
+            .diff
+            .is_enabled()
+            .then(|| {
+                self.builder
+                    .changed_line_ranges_by_display_path(&roots, &self.diff)
+            })
             .transpose()?;
-        let report = Report::build(&roots, &graph, changed.as_ref());
+        let report = Report::build(&roots, &graph, changed.as_ref(), &self.diff);
         render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
@@ -226,9 +240,14 @@ struct Audit {
     facade_exempt_count: usize,
     /// Forwarders exempted by a doc comment saying they are deprecated.
     deprecated_exempt_count: usize,
-    /// Whether the listing was narrowed to unstaged changed lines.
+    /// Whether the listing was narrowed to a diff at all.
     diff_only: bool,
-    /// Chains found before the `--diff-only` filter ran. Equal to
+    /// The revision range the gate read, when it was `--diff-range`
+    /// rather than the working tree. `None` for both the unstaged diff
+    /// and no gate at all — `diff_only` separates those two.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff_range: Option<String>,
+    /// Chains found before the diff filter ran. Equal to
     /// `summary.chain_count` when the filter was off.
     chain_count_before_diff_filter: usize,
 }
@@ -339,6 +358,7 @@ impl Report {
         roots: &AnalyzeRoots,
         graph: &CallGraph,
         changed: Option<&BTreeMap<String, Vec<LineRange>>>,
+        diff: &DiffScope,
     ) -> Self {
         let classified = classify_nodes(graph);
         let walk = walk_chains(graph, &classified.next);
@@ -380,6 +400,10 @@ impl Report {
                 facade_exempt_count: classified.facade_exempt,
                 deprecated_exempt_count: classified.deprecated_exempt,
                 diff_only: changed.is_some(),
+                diff_range: match diff {
+                    DiffScope::Range(range) => Some(range.clone()),
+                    _ => None,
+                },
                 chain_count_before_diff_filter,
             },
             chains,
@@ -907,11 +931,17 @@ fn render_audit(out: &mut String, audit: &Audit) {
         audit.deprecated_exempt_count,
     );
     if audit.diff_only {
+        let (flag, changed) = match &audit.diff_range {
+            Some(range) => (
+                format!("`--diff-range {range}`"),
+                "changed line in that range",
+            ),
+            None => ("`--diff-only`".to_owned(), "unstaged changed line"),
+        };
         let _ = writeln!(
             out,
-            "`--diff-only`: of {} chain(s) found, only those with a hop or terminus on an unstaged \
-             changed line are listed, and the module roll-up is narrowed to the modules they run \
-             through.",
+            "{flag}: of {} chain(s) found, only those with a hop or terminus on an {changed} are \
+             listed, and the module roll-up is narrowed to the modules they run through.",
             audit.chain_count_before_diff_filter,
         );
     }
@@ -2053,6 +2083,95 @@ pub fn extra(id: usize) -> usize { id }
             modules,
             ["crate::api", "crate::service"],
             "the roll-up narrows to the modules the kept chain runs through",
+        );
+    }
+
+    /// The same narrowing, driven by committed history instead of the
+    /// working tree. The chain the *range* touches is the one in
+    /// `other.rs`, while the unstaged edit sits in `lib.rs` — so a gate
+    /// that quietly fell back to `git diff` with no range would list
+    /// the other chain and fail here.
+    #[test]
+    fn diff_range_keeps_the_chains_touching_a_committed_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_source = |param: &str| {
+            format!(
+                "pub mod api {{
+    pub fn save({param}: usize) -> usize {{ crate::service::save({param}) }}
+}}
+pub mod service {{
+    pub fn save(id: usize) -> usize {{ crate::work::run(id) }}
+}}
+pub mod work {{
+    pub fn run(id: usize) -> usize {{ id + 1 }}
+    pub fn extra(id: usize) -> usize {{ id }}
+}}
+"
+            )
+        };
+        let other_source = |param: &str| {
+            format!(
+                "pub fn one({param}: usize) -> usize {{ two({param}) }}
+pub fn two(id: usize) -> usize {{ run(id) }}
+pub fn run(id: usize) -> usize {{ id + 1 }}
+pub fn extra(id: usize) -> usize {{ id }}
+"
+            )
+        };
+        write_file(dir.path(), "src/lib.rs", &lib_source("id"));
+        write_file(dir.path(), "src/other.rs", &other_source("id"));
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        // Committed: the chain in other.rs. Unstaged: the one in lib.rs.
+        write_file(dir.path(), "src/other.rs", &other_source("ident"));
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "rename param"]);
+        write_file(dir.path(), "src/lib.rs", &lib_source("ident"));
+
+        let json = DelegationAnalyzer::new()
+            .with_diff_scope(DiffScope::Range("HEAD~1..HEAD".to_owned()))
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(report["audit"]["diff_only"], true);
+        assert_eq!(report["audit"]["diff_range"], "HEAD~1..HEAD");
+        assert_eq!(report["audit"]["chain_count_before_diff_filter"], 2);
+        assert_eq!(
+            chain_paths(&report),
+            vec![vec![
+                "crate::other::one".to_owned(),
+                "crate::other::two".to_owned(),
+                "crate::other::run".to_owned(),
+            ]],
+            "only the chain the range touched is listed: {report}",
+        );
+    }
+
+    /// Without a range the audit must not claim one, so a consumer can
+    /// tell a working-tree run from a revision-scoped one.
+    #[test]
+    fn diff_only_reports_no_range() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", "pub fn one() -> usize { 0 }\n");
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let json = DelegationAnalyzer::new()
+            .with_diff_only(true)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(report["audit"]["diff_only"], true);
+        assert!(
+            report["audit"].get("diff_range").is_none(),
+            "a working-tree run must not name a range: {report}",
         );
     }
 

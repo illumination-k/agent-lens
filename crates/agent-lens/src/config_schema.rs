@@ -172,6 +172,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 presence: "default: false",
                 desc: "Restrict analysis to functions touched by the working-tree diff.",
             },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Restrict analysis to functions touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
+            },
         ],
         ToolName::Complexity => &[
             Field {
@@ -192,6 +198,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 presence: "default: false",
                 desc: "Restrict analysis to functions touched by the working-tree diff.",
             },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Restrict analysis to functions touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
+            },
         ],
         ToolName::Cohesion => &[
             Field {
@@ -211,6 +223,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "bool",
                 presence: "default: false",
                 desc: "Restrict analysis to units touched by the working-tree diff.",
+            },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Restrict analysis to units touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
             },
         ],
         ToolName::Hotspot => &[
@@ -266,6 +284,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 presence: "optional",
                 desc: "Cap the markdown caller and test lists to the top N rows.",
             },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Seed the query from the given git revision range (`HEAD~1..HEAD`) instead of the working-tree diff. Ignored when function is set.",
+            },
         ],
         ToolName::Layers => &[Field {
             key: "top",
@@ -311,6 +335,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "bool",
                 presence: "default: false",
                 desc: "Keep only chains with a hop or terminus on an unstaged changed line.",
+            },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Keep only chains with a hop or terminus on a line changed in the given git revision range (`HEAD~1..HEAD`). Mutually exclusive with diff-only.",
             },
         ],
         // The only tool whose options table is mandatory when the tool
@@ -379,6 +409,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "bool",
                 presence: "default: false",
                 desc: "Restrict analysis to functions touched by the working-tree diff.",
+            },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Restrict analysis to functions touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
             },
         ],
         ToolName::Coupling => &[Field {

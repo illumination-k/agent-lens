@@ -19,7 +19,7 @@ use rayon::prelude::*;
 use tracing::debug;
 
 use super::runner::{FilterConfig, delegate_filter_builders, render_report};
-use super::{AnalyzeRoots, AnalyzerError, LineRange, OutputFormat, changed_line_ranges};
+use super::{AnalyzeRoots, AnalyzerError, DiffScope, LineRange, OutputFormat, changed_line_ranges};
 
 mod candidates;
 mod corpus;
@@ -266,6 +266,17 @@ pub struct SimilarityOptions {
     /// `git diff -U0`.
     #[arg(long)]
     pub diff_only: bool,
+    /// Restrict the report to units touching lines changed in the given
+    /// git revision range, as `git diff -U0 <range>` (`HEAD~1..HEAD`,
+    /// `main...topic`). Reads committed history instead of the working
+    /// tree.
+    #[arg(
+        long,
+        value_name = "RANGE",
+        conflicts_with = "diff_only",
+        value_parser = super::parse_diff_range,
+    )]
+    pub diff_range: Option<String>,
     /// Similarity threshold in [0.0, 1.0]. Pairs scoring at or above
     /// this value are eligible for clustering, and the same threshold
     /// is the complete-link cut so every pair inside a reported cluster
@@ -343,6 +354,7 @@ impl Default for SimilarityOptions {
         Self {
             top: None,
             diff_only: false,
+            diff_range: None,
             threshold: DEFAULT_THRESHOLD,
             sweep: Vec::new(),
             paired_by: None,
@@ -352,6 +364,22 @@ impl Default for SimilarityOptions {
             method: SimilarityMethod::Tsed,
             doc_overlap: false,
         }
+    }
+}
+
+impl SimilarityOptions {
+    /// The diff gate these options ask for. Hand-written to match what
+    /// `analyzer_options!` generates for the analyzers whose option
+    /// types it does build, so the two spellings stay interchangeable.
+    pub fn diff_scope(&self) -> DiffScope {
+        DiffScope::new(self.diff_only, self.diff_range.clone())
+    }
+
+    /// Whether both diff flags were set. clap rejects the combination
+    /// on the CLI, so this is what a `[profile.<name>.similarity]`
+    /// table is checked against.
+    pub fn has_diff_conflict(&self) -> bool {
+        self.diff_only && self.diff_range.is_some()
     }
 }
 
@@ -421,10 +449,11 @@ impl SimilarityAnalyzer {
     /// `sweep` ladder means "no sweep" — the flag's absence and an empty
     /// TOML array are the same thing.
     pub fn with_options(self, opts: SimilarityOptions) -> Self {
+        let diff = opts.diff_scope();
         let sweep = (!opts.sweep.is_empty()).then_some(opts.sweep);
         self.with_threshold(opts.threshold)
             .with_sweep(sweep)
-            .with_diff_only(opts.diff_only)
+            .with_diff_scope(diff)
             .with_min_lines_opt(opts.min_lines)
             .with_target(opts.target)
             .with_method(opts.method)
@@ -733,7 +762,7 @@ impl SimilarityAnalyzer {
         pairs: &[PairedCandidate],
         changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
     ) -> Vec<PairedCandidate> {
-        if !self.filter.diff_only() {
+        if !self.filter.diff_scope().is_enabled() {
             return pairs.to_vec();
         }
         pairs
@@ -833,11 +862,11 @@ impl SimilarityAnalyzer {
     }
 
     fn changed_ranges_for_run(&self, corpus: &[OwnedUnit]) -> HashMap<PathBuf, Vec<LineRange>> {
-        if !self.filter.diff_only() {
+        if !self.filter.diff_scope().is_enabled() {
             return HashMap::new();
         }
         let diff_started = Instant::now();
-        let changed = collect_changed_ranges(corpus);
+        let changed = collect_changed_ranges(corpus, self.filter.diff_scope());
         debug!(
             target: PROFILE_TARGET,
             file_count = changed.len(),
@@ -853,7 +882,7 @@ impl SimilarityAnalyzer {
         candidates: &'a CandidatePairs,
         changed_by_file: &HashMap<PathBuf, Vec<LineRange>>,
     ) -> (Cow<'a, [(usize, usize)]>, usize) {
-        if !self.filter.diff_only() {
+        if !self.filter.diff_scope().is_enabled() {
             return (Cow::Borrowed(candidates.pairs.as_slice()), 0);
         }
         filter_pairs_touching_changes(corpus, candidates, changed_by_file)
@@ -1385,11 +1414,14 @@ fn trees_match_without_distance(
             .all(|(a, b)| trees_match_without_distance(a, b, compare_values))
 }
 
-fn collect_changed_ranges(corpus: &[OwnedUnit]) -> HashMap<PathBuf, Vec<LineRange>> {
+fn collect_changed_ranges(
+    corpus: &[OwnedUnit],
+    scope: &DiffScope,
+) -> HashMap<PathBuf, Vec<LineRange>> {
     let mut by_file: HashMap<PathBuf, Vec<LineRange>> = HashMap::new();
     for f in corpus {
         if !by_file.contains_key(&f.file) {
-            by_file.insert(f.file.clone(), changed_line_ranges(&f.file));
+            by_file.insert(f.file.clone(), changed_line_ranges(&f.file, scope));
         }
     }
     by_file
@@ -3727,6 +3759,51 @@ impl Counter {
             &analyzer
                 .clone()
                 .with_diff_only(true)
+                .analyze(dir.path(), OutputFormat::Json)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(json["pair_count"], 2);
+        let files: Vec<&str> = json["groups"][0]["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap())
+            .collect();
+        assert!(files.contains(&"wasm.rs"), "{files:?}");
+    }
+
+    /// Same gate against committed history. The edit is committed and
+    /// the working tree left clean, so a gate still reading `git diff`
+    /// with no range would see nothing changed and report every pair.
+    #[test]
+    fn paired_mode_honors_diff_range() {
+        let dir = drift_fixture();
+        write_file(
+            dir.path(),
+            "other.rs",
+            &NAPI_SIBLING.replace("Summary", "Note"),
+        );
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        // Commit the edit rather than leaving it unstaged.
+        write_file(
+            dir.path(),
+            "wasm.rs",
+            &WASM_SIBLING.replace("let year = raw.year;", "let year = raw.year + 1;"),
+        );
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "bump year"]);
+
+        let analyzer = SimilarityAnalyzer::new().with_paired_by(Some(PairKey::Method));
+        let json: serde_json::Value = serde_json::from_str(
+            &analyzer
+                .with_diff_scope(DiffScope::Range("HEAD~1..HEAD".to_owned()))
                 .analyze(dir.path(), OutputFormat::Json)
                 .unwrap(),
         )

@@ -37,7 +37,7 @@ use super::call_graph::model::{CallGraphNode, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders, match_symbol};
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{AnalyzeRoots, AnalyzerError, OutputFormat, overlaps_any};
+use super::{AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, overlaps_any};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -70,16 +70,43 @@ analyzer_options! {
         /// Callers beyond the cap are counted, not listed.
         #[arg(long)]
         pub depth: Option<usize>,
+        /// Seed from the given git revision range instead of the
+        /// working-tree diff, as `git diff -U0 <range>` (`HEAD~1..HEAD`,
+        /// `main...topic`) — the blast radius of a commit that already
+        /// landed. Ignored when `--function` is given.
+        #[arg(
+            long,
+            value_name = "RANGE",
+            value_parser = crate::analyze::parse_diff_range,
+        )]
+        pub diff_range: Option<String>,
     }
 }
 
 /// Analyzer entry point for `analyze impact`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ImpactAnalyzer {
     builder: CallGraphBuilder,
     functions: Vec<String>,
     depth: Option<usize>,
     top: Option<usize>,
+    diff: DiffScope,
+}
+
+/// Unlike the analyzers where a diff gate is opt-in, impact *starts*
+/// from a diff — an unseeded run means "what does my pending work
+/// reach?". So the default scope is the working tree, not
+/// [`DiffScope::Disabled`], which would seed nothing at all.
+impl Default for ImpactAnalyzer {
+    fn default() -> Self {
+        Self {
+            builder: CallGraphBuilder::default(),
+            functions: Vec::new(),
+            depth: None,
+            top: None,
+            diff: DiffScope::WorkingTree,
+        }
+    }
 }
 
 impl ImpactAnalyzer {
@@ -90,6 +117,15 @@ impl ImpactAnalyzer {
         self.with_functions(opts.function)
             .with_depth(opts.depth)
             .with_top(opts.top)
+            .with_diff_scope(DiffScope::new(true, opts.diff_range))
+    }
+
+    /// Which diff seeds the query when no `--function` is given.
+    /// Defaults to the working tree; a range seeds from a commit that
+    /// already landed.
+    pub fn with_diff_scope(mut self, diff: DiffScope) -> Self {
+        self.diff = diff;
+        self
     }
 
     pub fn new() -> Self {
@@ -169,7 +205,9 @@ impl ImpactAnalyzer {
             seeds.dedup();
             return Ok(Seeds::Resolved(seeds));
         }
-        let changed = self.builder.changed_line_ranges_by_display_path(roots)?;
+        let changed = self
+            .builder
+            .changed_line_ranges_by_display_path(roots, &self.diff)?;
         let seeds: Vec<usize> = graph
             .nodes
             .iter()

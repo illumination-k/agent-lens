@@ -1180,6 +1180,70 @@ mod tests {
         assert!(!args.opts.doc_overlap);
     }
 
+    /// Every analyzer carrying both diff flags must reject the pair,
+    /// and must reject a range git would read as an option. The
+    /// spellings come from one macro arm, so a regression would hit all
+    /// of them at once — but the arm is instantiated per analyzer, so
+    /// the check is too.
+    #[rstest]
+    #[case::similarity("similarity")]
+    #[case::complexity("complexity")]
+    #[case::cohesion("cohesion")]
+    #[case::delegation("delegation")]
+    #[case::wrapper("wrapper")]
+    fn diff_only_and_diff_range_conflict(#[case] tool: &str) {
+        let err = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            tool,
+            "src/lib.rs",
+            "--diff-only",
+            "--diff-range",
+            "HEAD~1..HEAD",
+        ])
+        .expect_err("both diff flags must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// Spelled with `=`, an option-shaped range gets past clap's own
+    /// "that looks like a flag" check and reaches the value parser —
+    /// which is the seam that keeps `git diff` from being handed an
+    /// option in place of a revision. Written this way on purpose: the
+    /// space-separated spelling is rejected by clap before the parser
+    /// runs, so it would pass without any validation of ours.
+    #[rstest]
+    #[case::gated_option_shaped("complexity", "--diff-range=--output=/tmp/pwned")]
+    #[case::gated_blank("complexity", "--diff-range= ")]
+    #[case::diff_seeded_option_shaped("impact", "--diff-range=--output=/tmp/pwned")]
+    #[case::diff_seeded_blank("impact", "--diff-range=")]
+    fn option_shaped_diff_range_is_rejected(#[case] tool: &str, #[case] flag: &str) {
+        let err = Cli::try_parse_from(["agent-lens", "analyze", tool, "src/lib.rs", flag])
+            .expect_err("an option-shaped range must not reach git");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn parses_analyze_complexity_with_diff_range() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "complexity",
+            "src/lib.rs",
+            "--diff-range",
+            "HEAD~1..HEAD",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Complexity(args)) = cli.command else {
+            panic!("expected analyze complexity");
+        };
+        assert_eq!(args.opts.diff_range.as_deref(), Some("HEAD~1..HEAD"));
+        assert!(!args.opts.diff_only);
+        assert_eq!(
+            args.opts.diff_scope(),
+            agent_lens::analyze::DiffScope::Range("HEAD~1..HEAD".to_owned()),
+        );
+    }
+
     #[test]
     fn parses_analyze_similarity_doc_overlap() {
         let cli = Cli::try_parse_from([
