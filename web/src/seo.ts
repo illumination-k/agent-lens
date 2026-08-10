@@ -39,8 +39,8 @@ export const PAGES = {
     description:
       "Single-binary Rust CLI that shows coding agents what one open file cannot: duplicate functions, tangled modules, complexity landmines, blast radius.",
   },
-  graph: {
-    path: "/graph",
+  analyze: {
+    path: "/analyze",
     title: "Function graph viewer — agent-lens",
     description:
       "Explore the static call graph agent-lens extracts from a codebase: filter by module and weight nodes by calls, fan-in, complexity, or maintainability.",

@@ -34,8 +34,8 @@ describe("canonicalUrl", () => {
   it.each([
     ["/", `${SITE_URL}/`],
     ["", `${SITE_URL}/`],
-    ["/graph", `${SITE_URL}/graph/`],
-    ["graph/", `${SITE_URL}/graph/`],
+    ["/analyze", `${SITE_URL}/analyze/`],
+    ["analyze/", `${SITE_URL}/analyze/`],
   ])("normalises %s to a trailing-slash absolute URL", (path, expected) => {
     expect(canonicalUrl(path)).toBe(expected);
   });
@@ -84,7 +84,7 @@ describe("pageHead", () => {
   });
 
   it("emits no script tag when a page has no structured data", () => {
-    expect(pageHead(PAGES.graph).scripts).toEqual([]);
+    expect(pageHead(PAGES.analyze).scripts).toEqual([]);
   });
 
   it("serialises structured data as ld+json", () => {
@@ -102,7 +102,7 @@ describe("structured data", () => {
     const blocks = structuredData(PAGES.home, [
       softwareApplicationJsonLd(),
       faqJsonLd(FAQ),
-      breadcrumbJsonLd([PAGES.home, PAGES.graph]),
+      breadcrumbJsonLd([PAGES.home, PAGES.analyze]),
     ]);
     for (const block of blocks) {
       expect(block).toMatchObject({ "@context": "https://schema.org" });
@@ -120,10 +120,10 @@ describe("structured data", () => {
   });
 
   it("numbers a breadcrumb trail from one", () => {
-    expect(breadcrumbJsonLd([PAGES.home, PAGES.graph])).toMatchObject({
+    expect(breadcrumbJsonLd([PAGES.home, PAGES.analyze])).toMatchObject({
       itemListElement: [
         { position: 1, item: canonicalUrl(PAGES.home.path) },
-        { position: 2, item: canonicalUrl(PAGES.graph.path) },
+        { position: 2, item: canonicalUrl(PAGES.analyze.path) },
       ],
     });
   });

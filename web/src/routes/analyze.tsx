@@ -9,9 +9,9 @@ type LoaderData = {
   report: FunctionGraphReport | null;
 };
 
-export const Route = createFileRoute("/graph")({
+export const Route = createFileRoute("/analyze")({
   component: FunctionGraphPage,
-  head: () => pageHead(PAGES.graph, [breadcrumbJsonLd([PAGES.home, PAGES.graph])]),
+  head: () => pageHead(PAGES.analyze, [breadcrumbJsonLd([PAGES.home, PAGES.analyze])]),
   loader: loadGraphReport,
 });
 

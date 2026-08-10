@@ -91,7 +91,7 @@ function SiteHeader() {
             {item.label}
           </a>
         ))}
-        <Link to="/graph">Live demo</Link>
+        <Link to="/analyze">Live demo</Link>
         <a href={REPOSITORY_URL}>GitHub</a>
       </nav>
     </header>
@@ -115,7 +115,7 @@ function Hero() {
         <a className="button primary" href="#install">
           Install it
         </a>
-        <Link className="button" to="/graph">
+        <Link className="button" to="/analyze">
           Open the function graph
         </Link>
         <a className="button ghost" href={REPOSITORY_URL}>
@@ -221,7 +221,7 @@ function ReportSample() {
       <p className="note">
         A real run over this repository's own sources: agent-lens is pointed at itself on every
         change, and findings about its own code count as findings. Every report is also available as
-        JSON — which is what the <Link to="/graph">function graph viewer</Link> on this site
+        JSON — which is what the <Link to="/analyze">function graph viewer</Link> on this site
         renders.
       </p>
     </Band>
@@ -314,7 +314,7 @@ function SiteFooter() {
         <a href={REPOSITORY_URL}>Repository</a>
         <a href={README_URL}>Documentation</a>
         <a href={RELEASES_URL}>Releases</a>
-        <Link to="/graph">Function graph</Link>
+        <Link to="/analyze">Function graph</Link>
       </nav>
     </footer>
   );

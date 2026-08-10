@@ -10,7 +10,7 @@
 
 **Website:** <https://illumination-k.github.io/agent-lens/> — the analyzer
 catalogue in short form, plus a live
-[function-graph viewer](https://illumination-k.github.io/agent-lens/graph/)
+[function-graph viewer](https://illumination-k.github.io/agent-lens/analyze/)
 for `analyze function-graph` JSON.
 
 `agent-lens` is a single-binary Rust CLI that bundles two things coding agents
@@ -860,7 +860,7 @@ crates/
 `web/` sits beside `crates/` as a separate pnpm workspace: the TanStack Start
 site deployed to GitHub Pages, holding the landing page (`src/routes/index.tsx`,
 with its head metadata and structured data in `src/seo.ts`) and the static
-function-graph viewer (`src/routes/graph.tsx`) that renders
+function-graph viewer (`src/routes/analyze.tsx`) that renders
 `analyze function-graph` JSON.
 
 Responsibility split:
