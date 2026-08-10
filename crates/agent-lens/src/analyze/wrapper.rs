@@ -61,7 +61,8 @@ impl WrapperAnalyzer {
     /// `[profile.<name>.wrapper]` table are the same type, so this is the
     /// only seam between parsed options and the analyzer.
     pub fn with_options(self, opts: WrapperOptions) -> Self {
-        self.with_top(opts.top).with_diff_only(opts.diff_only)
+        let diff = opts.diff_scope();
+        self.with_top(opts.top).with_diff_scope(diff)
     }
 
     /// Walk `roots`, analyze them, and produce a report in `format`.

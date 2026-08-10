@@ -111,6 +111,7 @@ Examples:
     agent-lens analyze complexity src/ --format md --top 10
     agent-lens analyze complexity src/cli.rs --min-score 15 --format md
     agent-lens analyze complexity . --diff-only --format md
+    agent-lens analyze complexity . --diff-range HEAD~1..HEAD --format md
 ";
 
 pub const COUPLING: &str = "\
@@ -234,6 +235,7 @@ Examples:
     agent-lens analyze similarity packages cli web/src --format md
     agent-lens analyze similarity src/ --sweep 0.6,0.75,0.85 --format md
     agent-lens analyze similarity . --diff-only --format md
+    agent-lens analyze similarity . --diff-range main...HEAD --format md
     agent-lens analyze similarity src/ --doc-overlap --format md
     agent-lens analyze similarity src/ --method token --min-lines 10
     agent-lens analyze similarity . --paired-by name --format md

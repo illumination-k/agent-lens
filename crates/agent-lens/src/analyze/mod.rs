@@ -77,7 +77,7 @@ pub use wrapper::WrapperAnalyzer;
 
 pub use crate_root::resolve_crate_root;
 pub(crate) use diff::overlaps_any;
-pub use diff::{LineRange, changed_line_ranges};
+pub use diff::{DiffScope, LineRange, changed_line_ranges, parse_diff_range, validate_diff_range};
 pub(crate) use format::format_optional_f64;
 pub use path_filter::{AnalyzePathFilter, CompiledPathFilter, PathFilterError};
 pub use roots::AnalyzeRoots;

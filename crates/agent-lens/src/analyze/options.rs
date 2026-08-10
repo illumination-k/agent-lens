@@ -16,8 +16,9 @@
 //! rejects the combination, and the [`crate::config_schema`] reflector
 //! cannot see through a flattened map either), so [`analyzer_options`]
 //! expands the shared fields — with their documentation — into each struct
-//! that opts in. The shared spellings therefore exist once: `--top` and
-//! `--diff-only` cannot drift apart between analyzers.
+//! that opts in. The shared spellings therefore exist once: `--top`,
+//! `--diff-only`, and `--diff-range` cannot drift apart between
+//! analyzers.
 
 /// Declare an analyzer's options as a single clap-and-serde type.
 ///
@@ -36,7 +37,8 @@
 /// }
 /// ```
 ///
-/// `ranking` expands to `top`, `diff` to `diff_only`. Omit the
+/// `ranking` expands to `top`, `diff` to `diff_only` plus
+/// `diff_range` and the accessors folding them. Omit the
 /// `@shared(...)` line for an analyzer that takes neither.
 ///
 /// The generated type derives `Default`, which `#[serde(default)]` uses to
@@ -58,6 +60,26 @@ macro_rules! analyzer_options {
         $vis struct $name { $($body)* }
     };
 
+    // Internal: the diff-gate accessors, shared by every arm that
+    // includes `diff`. Both flags name the same thing — which lines
+    // count as changed — so they are read through one folded value
+    // rather than by each analyzer pairing them up itself.
+    (@diff_accessors $name:ident) => {
+        impl $name {
+            /// The diff gate these options ask for.
+            pub fn diff_scope(&self) -> $crate::analyze::DiffScope {
+                $crate::analyze::DiffScope::new(self.diff_only, self.diff_range.clone())
+            }
+
+            /// Whether both diff flags were set. clap rejects the
+            /// combination on the CLI, so this is what a
+            /// `[profile.<name>.<tool>]` table is checked against.
+            pub fn has_diff_conflict(&self) -> bool {
+                self.diff_only && self.diff_range.is_some()
+            }
+        }
+    };
+
     (
         $(#[$meta:meta])*
         $vis:vis struct $name:ident { @shared(ranking, diff); $($rest:tt)* }
@@ -74,9 +96,21 @@ macro_rules! analyzer_options {
                 /// lines in `git diff -U0`.
                 #[arg(long)]
                 pub diff_only: bool,
+                /// Restrict the report to units touching lines changed in
+                /// the given git revision range, as `git diff -U0 <range>`
+                /// (`HEAD~1..HEAD`, `main...topic`). Reads committed
+                /// history instead of the working tree.
+                #[arg(
+                    long,
+                    value_name = "RANGE",
+                    conflicts_with = "diff_only",
+                    value_parser = $crate::analyze::parse_diff_range,
+                )]
+                pub diff_range: Option<String>,
                 $($rest)*
             }
         }
+        analyzer_options!(@diff_accessors $name);
     };
 
     (
@@ -108,9 +142,21 @@ macro_rules! analyzer_options {
                 /// lines in `git diff -U0`.
                 #[arg(long)]
                 pub diff_only: bool,
+                /// Restrict the report to units touching lines changed in
+                /// the given git revision range, as `git diff -U0 <range>`
+                /// (`HEAD~1..HEAD`, `main...topic`). Reads committed
+                /// history instead of the working tree.
+                #[arg(
+                    long,
+                    value_name = "RANGE",
+                    conflicts_with = "diff_only",
+                    value_parser = $crate::analyze::parse_diff_range,
+                )]
+                pub diff_range: Option<String>,
                 $($rest)*
             }
         }
+        analyzer_options!(@diff_accessors $name);
     };
 
     (
@@ -129,6 +175,7 @@ pub(crate) use analyzer_options;
 
 #[cfg(test)]
 mod tests {
+    use crate::analyze::DiffScope;
     use crate::analyze::cohesion::{CohesionAnalyzer, CohesionOptions};
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
     use crate::analyze::context_span::{ContextSpanAnalyzer, ContextSpanOptions};
@@ -147,6 +194,9 @@ mod tests {
     use crate::analyze::untested::{UntestedAnalyzer, UntestedOptions};
     use crate::analyze::visibility::{VisibilityAnalyzer, VisibilityOptions};
     use crate::analyze::wrapper::{WrapperAnalyzer, WrapperOptions};
+    use rstest::rstest;
+
+    const RANGE: &str = "HEAD~1..HEAD";
 
     /// `with_options` is the single seam between parsed options and an
     /// analyzer, so a field silently dropped there disables a flag on
@@ -185,12 +235,12 @@ mod tests {
 
     assert_options_reach_the_analyzer!(
         cohesion_options_reach_the_analyzer: CohesionAnalyzer,
-        CohesionOptions { top: Some(3), diff_only: true, min_score: Some(4) },
+        CohesionOptions { top: Some(3), diff_only: true, diff_range: None, min_score: Some(4) },
         |a| a.with_top(Some(3)).with_min_score(Some(4)).with_diff_only(true)
     );
     assert_options_reach_the_analyzer!(
         complexity_options_reach_the_analyzer: ComplexityAnalyzer,
-        ComplexityOptions { top: Some(3), diff_only: true, min_score: Some(4) },
+        ComplexityOptions { top: Some(3), diff_only: true, diff_range: None, min_score: Some(4) },
         |a| a.with_top(Some(3)).with_min_score(Some(4)).with_diff_only(true)
     );
     assert_options_reach_the_analyzer!(
@@ -202,7 +252,7 @@ mod tests {
     );
     assert_options_reach_the_analyzer!(
         delegation_options_reach_the_analyzer: DelegationAnalyzer,
-        DelegationOptions { top: Some(3), diff_only: true },
+        DelegationOptions { top: Some(3), diff_only: true, diff_range: None },
         |a| a.with_top(Some(3)).with_diff_only(true)
     );
     assert_options_reach_the_analyzer!(
@@ -217,7 +267,12 @@ mod tests {
     );
     assert_options_reach_the_analyzer!(
         impact_options_reach_the_analyzer: ImpactAnalyzer,
-        ImpactOptions { top: Some(3), function: vec!["resolve".to_owned()], depth: Some(2) },
+        ImpactOptions {
+            top: Some(3),
+            function: vec!["resolve".to_owned()],
+            depth: Some(2),
+            diff_range: None,
+        },
         |a| a
             .with_functions(vec!["resolve".to_owned()])
             .with_depth(Some(2))
@@ -255,9 +310,79 @@ mod tests {
     );
     assert_options_reach_the_analyzer!(
         wrapper_options_reach_the_analyzer: WrapperAnalyzer,
-        WrapperOptions { top: Some(3), diff_only: true },
+        WrapperOptions { top: Some(3), diff_only: true, diff_range: None },
         |a| a.with_top(Some(3)).with_diff_only(true)
     );
+
+    /// `--diff-range` lands as its own case rather than by setting both
+    /// diff flags on the cases above: a range wins the fold, so a
+    /// combined case would still pass with `diff_only` dropped on the
+    /// floor.
+    macro_rules! assert_diff_range_reaches_the_analyzer {
+        ($name:ident: $analyzer:ty, $opts:expr) => {
+            #[test]
+            fn $name() {
+                let via_options = <$analyzer>::new().with_options($opts);
+                let via_builders =
+                    <$analyzer>::new().with_diff_scope(DiffScope::Range("HEAD~1..HEAD".to_owned()));
+                assert_eq!(
+                    format!("{via_options:?}"),
+                    format!("{via_builders:?}"),
+                    "--diff-range must reach the analyzer as a Range scope",
+                );
+            }
+        };
+    }
+
+    assert_diff_range_reaches_the_analyzer!(
+        cohesion_diff_range_reaches_the_analyzer: CohesionAnalyzer,
+        CohesionOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
+        complexity_diff_range_reaches_the_analyzer: ComplexityAnalyzer,
+        ComplexityOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
+        delegation_diff_range_reaches_the_analyzer: DelegationAnalyzer,
+        DelegationOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
+        impact_diff_range_reaches_the_analyzer: ImpactAnalyzer,
+        ImpactOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
+        wrapper_diff_range_reaches_the_analyzer: WrapperAnalyzer,
+        WrapperOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
+        similarity_diff_range_reaches_the_analyzer: SimilarityAnalyzer,
+        SimilarityOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+
+    /// Setting both flags in a config file is a conflict the CLI
+    /// rejects at parse time; `has_diff_conflict` is what the config
+    /// loader checks instead, so it must agree across the generated and
+    /// hand-written option types.
+    #[rstest]
+    #[case::generated(
+        CohesionOptions { diff_only: true, diff_range: Some(RANGE.to_owned()), ..Default::default() }
+            .has_diff_conflict(),
+        CohesionOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+            .has_diff_conflict(),
+    )]
+    #[case::hand_written(
+        SimilarityOptions { diff_only: true, diff_range: Some(RANGE.to_owned()), ..Default::default() }
+            .has_diff_conflict(),
+        SimilarityOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+            .has_diff_conflict(),
+    )]
+    fn has_diff_conflict_flags_only_the_combination(
+        #[case] both_set: bool,
+        #[case] range_alone: bool,
+    ) {
+        assert!(both_set, "both flags set must read as a conflict");
+        assert!(!range_alone, "a range on its own must not");
+    }
 
     /// Similarity is hand-written rather than generated, and its `sweep`
     /// needs the empty-ladder-means-no-sweep conversion, so it gets the
@@ -267,6 +392,7 @@ mod tests {
         let opts = SimilarityOptions {
             top: Some(3),
             diff_only: true,
+            diff_range: None,
             threshold: 0.6,
             sweep: vec![0.6, 0.8],
             paired_by: None,

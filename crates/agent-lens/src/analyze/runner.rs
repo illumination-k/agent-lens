@@ -14,13 +14,12 @@ use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 
 use super::{
-    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, changed_line_ranges,
-    collect_source_files, overlaps_any,
+    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, SourceFile,
+    changed_line_ranges, collect_source_files, overlaps_any,
 };
 
-/// Filter knobs every per-file analyzer shares: an unstaged-diff gate
-/// plus the path-filter inputs (only-tests / exclude-tests / glob
-/// excludes).
+/// Filter knobs every per-file analyzer shares: a diff gate plus the
+/// path-filter inputs (only-tests / exclude-tests / glob excludes).
 ///
 /// Holds the path-filter state directly rather than wrapping an
 /// [`AnalyzePathFilter`]: the underlying type is a pure value object
@@ -30,15 +29,19 @@ use super::{
 /// on demand from [`Self::path_filter`].
 #[derive(Debug, Default, Clone)]
 pub(super) struct FilterConfig {
-    diff_only: bool,
+    diff: DiffScope,
     only_tests: bool,
     exclude_tests: bool,
     exclude: Vec<String>,
 }
 
 impl FilterConfig {
-    pub fn with_diff_only(mut self, diff_only: bool) -> Self {
-        self.diff_only = diff_only;
+    pub fn with_diff_only(self, diff_only: bool) -> Self {
+        self.with_diff_scope(DiffScope::new(diff_only, None))
+    }
+
+    pub fn with_diff_scope(mut self, diff: DiffScope) -> Self {
+        self.diff = diff;
         self
     }
 
@@ -57,8 +60,8 @@ impl FilterConfig {
         self
     }
 
-    pub fn diff_only(&self) -> bool {
-        self.diff_only
+    pub fn diff_scope(&self) -> &DiffScope {
+        &self.diff
     }
 
     /// Build a fresh [`AnalyzePathFilter`] reflecting the current
@@ -105,19 +108,20 @@ impl FilterConfig {
         })
     }
 
-    /// When `diff_only` is set, retain only items whose `[start, end]`
-    /// line range overlaps an unstaged hunk in `git diff -U0` for
-    /// `path`. No-op otherwise so callers can call this unconditionally.
+    /// When a diff gate is set, retain only items whose `[start, end]`
+    /// line range overlaps a hunk in `git diff -U0` for `path` — the
+    /// unstaged diff, or the configured revision range. No-op otherwise
+    /// so callers can call this unconditionally.
     pub fn retain_changed<T>(
         &self,
         items: &mut Vec<T>,
         path: &Path,
         range: impl Fn(&T) -> (usize, usize),
     ) {
-        if !self.diff_only {
+        if !self.diff.is_enabled() {
             return;
         }
-        let changed = changed_line_ranges(path);
+        let changed = changed_line_ranges(path, &self.diff);
         items.retain(|item| {
             let (s, e) = range(item);
             overlaps_any(s, e, &changed)
@@ -304,14 +308,19 @@ impl<S: PerFileShape, V: Serialize, X: Serialize> Serialize for PerFileReport<'_
     }
 }
 
-/// Generate the four standard filter-builder methods on an analyzer
-/// struct, forwarding to a [`FilterConfig`]-typed field. Keeps each
-/// analyzer's public builder API exactly as it was while removing the
+/// Generate the standard filter-builder methods on an analyzer struct,
+/// forwarding to a [`FilterConfig`]-typed field. Keeps each analyzer's
+/// public builder API exactly as it was while removing the
 /// per-analyzer boilerplate.
 macro_rules! delegate_filter_builders {
     ($field:ident) => {
         pub fn with_diff_only(mut self, diff_only: bool) -> Self {
             self.$field = self.$field.with_diff_only(diff_only);
+            self
+        }
+
+        pub fn with_diff_scope(mut self, diff: $crate::analyze::DiffScope) -> Self {
+            self.$field = self.$field.with_diff_scope(diff);
             self
         }
 
@@ -416,14 +425,59 @@ mod tests {
     }
 
     #[test]
-    fn diff_only_accessor_reflects_builder_state() {
-        // `diff_only()` is read by similarity to short-circuit its
+    fn diff_accessors_reflect_builder_state() {
+        // `diff_scope()` is read by similarity to short-circuit its
         // pair-level diff filter; the other path-filter knobs flow into
         // `path_filter()` and are exercised end-to-end by the analyzer
-        // test suites. Pin `diff_only` directly so the accessor can't
+        // test suites. Pin the diff accessors directly so they can't
         // silently invert.
-        assert!(FilterConfig::default().with_diff_only(true).diff_only());
-        assert!(!FilterConfig::default().diff_only());
+        assert_eq!(
+            FilterConfig::default().with_diff_only(true).diff_scope(),
+            &DiffScope::WorkingTree,
+        );
+        assert_eq!(FilterConfig::default().diff_scope(), &DiffScope::Disabled);
+        assert_eq!(
+            FilterConfig::default().with_diff_only(false).diff_scope(),
+            &DiffScope::Disabled,
+        );
+
+        let ranged =
+            FilterConfig::default().with_diff_scope(DiffScope::Range("HEAD~1..HEAD".to_owned()));
+        assert!(ranged.diff_scope().is_enabled());
+        assert_eq!(
+            ranged.diff_scope(),
+            &DiffScope::Range("HEAD~1..HEAD".to_owned()),
+        );
+    }
+
+    /// The range flows all the way to the git invocation: an item is
+    /// kept because a *committed* hunk touches it, while the unstaged
+    /// edit that `--diff-only` would see falls outside it.
+    #[test]
+    fn retain_changed_reads_the_configured_revision_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        let write = |body: &str| std::fs::write(&file, body).unwrap();
+
+        write("fn alpha() {}\nfn beta() {}\n");
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        run_git(dir.path(), &["add", "lib.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        // Committed: line 1. Unstaged: line 2.
+        write("fn alpha() -> i32 { 1 }\nfn beta() {}\n");
+        run_git(dir.path(), &["add", "lib.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "edit alpha"]);
+        write("fn alpha() -> i32 { 1 }\nfn beta() -> i32 { 2 }\n");
+
+        let cfg =
+            FilterConfig::default().with_diff_scope(DiffScope::Range("HEAD~1..HEAD".to_owned()));
+        let mut items = vec![("alpha", 1, 1), ("beta", 2, 2)];
+        cfg.retain_changed(&mut items, &file, |&(_, s, e)| (s, e));
+        let names: Vec<&str> = items.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(names, vec!["alpha"]);
     }
 
     #[test]
