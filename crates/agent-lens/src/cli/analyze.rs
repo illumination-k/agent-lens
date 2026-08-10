@@ -1,7 +1,7 @@
 //! The `agent-lens analyze` dispatch: mapping parsed CLI (and profile)
 //! options onto the analyzers and running them.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
@@ -37,7 +37,7 @@ pub(super) fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error:
 pub(super) fn build_analyze_command(
     tool: config::ToolName,
     profile: &config::Profile,
-    target: &Path,
+    targets: &[PathBuf],
     format: OutputFormat,
 ) -> Result<AnalyzeCommand, ConfigError> {
     let path_filter = AnalyzePathArgs {
@@ -45,14 +45,27 @@ pub(super) fn build_analyze_command(
         exclude_tests: profile.exclude_tests,
         exclude: profile.exclude.clone(),
     };
-    // A profile names one target path, so both arg shapes are built from
-    // it: the file-walking analyzers take it as a one-root set, the
-    // graph-rooted pair as the single entry they require.
-    let common = AnalyzeCommonArgs::single(target.to_path_buf(), format, path_filter.clone());
-    let root = AnalyzeRootArgs {
-        path: target.to_path_buf(),
+    // A profile's `path` is one target or several, so the file-walking
+    // analyzers take the whole list as their root set.
+    let common = AnalyzeCommonArgs {
+        paths: targets.to_vec(),
         format,
-        path_filter,
+        path_filter: path_filter.clone(),
+    };
+    // The graph-rooted pair takes the single entry it requires, so a
+    // multi-path profile listing one of them is an error rather than a
+    // silently dropped path. [`config::load`] already rejects such
+    // profiles; this is the seam-level guard.
+    let root = || match targets {
+        [only] => Ok(AnalyzeRootArgs {
+            path: only.clone(),
+            format,
+            path_filter: path_filter.clone(),
+        }),
+        many => Err(ConfigError::MultiPathTool {
+            tool: tool.as_str(),
+            count: many.len(),
+        }),
     };
     Ok(match tool {
         config::ToolName::Cohesion => AnalyzeCommand::Cohesion(AnalyzeCohesionArgs {
@@ -64,11 +77,11 @@ pub(super) fn build_analyze_command(
             opts: profile.complexity.clone().unwrap_or_default(),
         }),
         config::ToolName::ContextSpan => AnalyzeCommand::ContextSpan(AnalyzeContextSpanArgs {
-            common: root,
+            common: root()?,
             opts: profile.context_span.clone().unwrap_or_default(),
         }),
         config::ToolName::Coupling => AnalyzeCommand::Coupling(AnalyzeCouplingArgs {
-            common: root,
+            common: root()?,
             opts: profile.coupling.clone().unwrap_or_default(),
         }),
         config::ToolName::Delegation => AnalyzeCommand::Delegation(AnalyzeDelegationArgs {
@@ -274,14 +287,13 @@ impl AnalyzeCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use agent_lens::analyze::{
         DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphQueryKind, PairKey,
         SimilarityMethod, UnreachableTier,
     };
     use agent_lens::test_support::write_file;
     use clap::Parser;
+    use rstest::rstest;
 
     use super::*;
     use crate::cli::args::{Cli, Command};
@@ -386,6 +398,57 @@ fn dispatch(n: i32) -> i32 {
         assert!(!out.contains("`dispatch`"), "got: {out}");
     }
 
+    /// A profile's `path` array reaches the analyzer as its root set, in
+    /// the order it was written — which is the whole point of the array
+    /// form: one corpus, so a cluster spanning two trees is findable.
+    #[test]
+    fn build_analyze_command_hands_a_multi_path_profile_every_root() {
+        let profile: config::Profile =
+            toml::from_str("path = [\"internal\", \"cmd\"]\ntools = [\"similarity\"]\n").unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Similarity,
+            &profile,
+            &[PathBuf::from("/repo/internal"), PathBuf::from("/repo/cmd")],
+            OutputFormat::Json,
+        )
+        .unwrap();
+        let AnalyzeCommand::Similarity(args) = cmd else {
+            panic!("expected analyze similarity");
+        };
+        assert_eq!(
+            args.common.paths,
+            [PathBuf::from("/repo/internal"), PathBuf::from("/repo/cmd")],
+        );
+    }
+
+    /// `config::load` rejects this profile, so reaching the seam means
+    /// something bypassed validation — dropping a path silently would be
+    /// the one outcome worse than the error.
+    #[rstest]
+    #[case::coupling(config::ToolName::Coupling)]
+    #[case::context_span(config::ToolName::ContextSpan)]
+    fn build_analyze_command_rejects_several_paths_for_a_single_root_tool(
+        #[case] tool: config::ToolName,
+    ) {
+        let profile: config::Profile = toml::from_str(&format!(
+            "path = [\"internal\", \"cmd\"]\ntools = [\"{}\"]\n",
+            tool.as_str(),
+        ))
+        .unwrap();
+        let err = build_analyze_command(
+            tool,
+            &profile,
+            &[PathBuf::from("internal"), PathBuf::from("cmd")],
+            OutputFormat::Json,
+        )
+        .unwrap_err();
+        let ConfigError::MultiPathTool { tool: named, count } = err else {
+            panic!("expected MultiPathTool, got: {err:?}");
+        };
+        assert_eq!(named, tool.as_str());
+        assert_eq!(count, 2);
+    }
+
     #[test]
     fn build_analyze_command_maps_similarity_options() {
         let profile: config::Profile = toml::from_str(
@@ -395,7 +458,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Similarity,
             &profile,
-            Path::new("/repo/web"),
+            &[PathBuf::from("/repo/web")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -421,7 +484,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Similarity,
             &profile,
-            Path::new("web"),
+            &[PathBuf::from("web")],
             OutputFormat::Json,
         )
         .unwrap();
@@ -450,7 +513,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Hubs,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -470,7 +533,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Risk,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -490,7 +553,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Layers,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -510,7 +573,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Visibility,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -531,7 +594,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Delegation,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -553,7 +616,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Unreachable,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -573,7 +636,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Untested,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -594,7 +657,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Impact,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -614,7 +677,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Impact,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Json,
         )
         .unwrap();
@@ -636,7 +699,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::GraphQuery,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
@@ -661,7 +724,7 @@ fn dispatch(n: i32) -> i32 {
         let err = build_analyze_command(
             config::ToolName::GraphQuery,
             &profile,
-            Path::new("crates"),
+            &[PathBuf::from("crates")],
             OutputFormat::Json,
         )
         .unwrap_err();
@@ -685,7 +748,7 @@ fn dispatch(n: i32) -> i32 {
         let cmd = build_analyze_command(
             config::ToolName::Coupling,
             &profile,
-            Path::new("web"),
+            &[PathBuf::from("web")],
             OutputFormat::Json,
         )
         .unwrap();

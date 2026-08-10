@@ -68,9 +68,9 @@ struct ToolTable {
 const PROFILE_FIELDS: &[Field] = &[
     Field {
         key: "path",
-        ty: "string (path)",
+        ty: "string (path) or array<string>",
         presence: "required",
-        desc: "Target path handed to every analyzer in `tools`. A relative path is resolved against the directory holding agent-lens.toml.",
+        desc: "Target path handed to every analyzer in `tools`, or an array of them walked into one report (the config spelling of `analyze <tool> PATH...`). A relative path is resolved against the directory holding agent-lens.toml. An array of more than one path is rejected for coupling and context-span, which take a single entry point.",
     },
     Field {
         key: "tools",
@@ -430,8 +430,8 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
     Some(ToolTable { fields })
 }
 
-/// A compact, valid config that exercises a profile, shared filters, and
-/// two per-tool override tables.
+/// A compact, valid config that exercises a profile, shared filters,
+/// two per-tool override tables, and the multi-path `path` form.
 const EXAMPLE: &str = "\
 [profile.web]
 path = \"web/\"
@@ -453,7 +453,13 @@ path = \"crates/\"
 tools = [\"coupling\", \"hotspot\"]
 
 [profile.backend.hotspot]
-since = \"90.days.ago\"";
+since = \"90.days.ago\"
+
+# Two trees walked into one corpus: a clone or a call edge spanning them
+# is invisible to a profile that can only name one of them.
+[profile.services]
+path = [\"internal\", \"cmd\"]
+tools = [\"similarity\", \"unreachable\"]";
 
 /// Render the whole `agent-lens.toml` schema as one Markdown document.
 pub fn render() -> String {
@@ -731,5 +737,12 @@ mod tests {
         let config: crate::config::Config = toml::from_str(EXAMPLE).unwrap();
         assert!(config.profile("web").is_ok());
         assert!(config.profile("backend").is_ok());
+        assert_eq!(
+            config.profile("services").unwrap().path.paths(),
+            [
+                std::path::PathBuf::from("internal"),
+                std::path::PathBuf::from("cmd")
+            ],
+        );
     }
 }

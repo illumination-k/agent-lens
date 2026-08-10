@@ -67,8 +67,8 @@ fn snapshot(resolved: &ResolvedProfile) -> Result<Baseline, Box<dyn std::error::
         schema_version: SCHEMA_VERSION,
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         profile: resolved.name.clone(),
-        target: resolved.profile.path.display().to_string(),
-        commit: head_commit(&resolved.target),
+        target: resolved.profile.path.display(),
+        commit: head_commit(resolved.git_anchor()),
         tools,
         skipped,
     })

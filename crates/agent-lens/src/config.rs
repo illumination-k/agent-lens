@@ -18,6 +18,12 @@
 //! min-lines = 8
 //! ```
 //!
+//! `path` takes one target or several — `path = ["internal", "cmd"]` is
+//! the profile-level spelling of the multi-`PATH` command line, and means
+//! the same thing: the paths are walked into one report, so a clone or a
+//! call edge spanning two of them is visible where per-tree runs cannot
+//! see it.
+//!
 //! Keys are kebab-case because they *are* the CLI flags: each per-tool
 //! table deserializes into the same type that clap parses for that
 //! analyzer's flag group, so the two surfaces cannot drift apart.
@@ -85,56 +91,10 @@ impl Config {
 
     fn validate(&self) -> Result<(), ConfigError> {
         for (name, profile) in &self.profiles {
-            if profile.only_tests && profile.exclude_tests {
+            if let Some(message) = profile.problem(name) {
                 return Err(ConfigError::Invalid {
                     name: name.clone(),
-                    message: "`only-tests` and `exclude-tests` are mutually exclusive".to_owned(),
-                });
-            }
-            // clap rejects `--diff-only --diff-range …` at parse time;
-            // a config file has no such check, so the same combination
-            // is caught here rather than resolved by a silent
-            // precedence rule.
-            let diff_conflicts = [
-                (
-                    "similarity",
-                    profile.similarity.as_ref().map(|o| o.has_diff_conflict()),
-                ),
-                (
-                    "complexity",
-                    profile.complexity.as_ref().map(|o| o.has_diff_conflict()),
-                ),
-                (
-                    "cohesion",
-                    profile.cohesion.as_ref().map(|o| o.has_diff_conflict()),
-                ),
-                (
-                    "delegation",
-                    profile.delegation.as_ref().map(|o| o.has_diff_conflict()),
-                ),
-                (
-                    "wrapper",
-                    profile.wrapper.as_ref().map(|o| o.has_diff_conflict()),
-                ),
-            ];
-            if let Some((tool, _)) = diff_conflicts
-                .iter()
-                .find(|(_, conflict)| conflict.unwrap_or(false))
-            {
-                return Err(ConfigError::Invalid {
-                    name: name.clone(),
-                    message: format!(
-                        "`[profile.{name}.{tool}]` sets both `diff-only` and `diff-range`; they \
-                         name different diffs, so set exactly one",
-                    ),
-                });
-            }
-            if profile.tools.contains(&ToolName::GraphQuery) && profile.graph_query.is_none() {
-                return Err(ConfigError::Invalid {
-                    name: name.clone(),
-                    message: "listing `graph-query` in `tools` requires a \
-                              `[profile.<name>.graph-query]` table declaring `query` and `symbol`"
-                        .to_owned(),
+                    message,
                 });
             }
         }
@@ -146,9 +106,10 @@ impl Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Profile {
-    /// Target path handed to every analyzer in `tools`. A relative path
-    /// is resolved against the directory holding `agent-lens.toml`.
-    pub path: PathBuf,
+    /// Target path, or paths, handed to every analyzer in `tools`. A
+    /// relative path is resolved against the directory holding
+    /// `agent-lens.toml`.
+    pub path: ProfilePaths,
     /// Output format for the combined report. Defaults to JSON.
     pub format: Option<OutputFormat>,
     /// Extra `--exclude` globs. Passed verbatim, so they keep the same
@@ -200,14 +161,149 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Resolve `path` against the directory that holds the config file.
-    /// An absolute `path` is returned unchanged.
-    pub fn resolved_path(&self, config_dir: &Path) -> PathBuf {
-        if self.path.is_absolute() {
-            self.path.clone()
-        } else {
-            config_dir.join(&self.path)
+    /// Resolve every entry of `path` against the directory that holds the
+    /// config file. An absolute entry is kept unchanged.
+    pub fn resolved_paths(&self, config_dir: &Path) -> Vec<PathBuf> {
+        self.path
+            .paths()
+            .iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path.clone()
+                } else {
+                    config_dir.join(path)
+                }
+            })
+            .collect()
+    }
+
+    /// Why this profile cannot be run, if it cannot.
+    ///
+    /// Serde catches the shape of a profile; these are the constraints it
+    /// cannot express — two keys that contradict each other, a tool whose
+    /// required table is missing, and a corpus wider than a listed
+    /// analyzer accepts. Reported as a message so [`Config::validate`]
+    /// can attach the profile's name to the error once, in one place;
+    /// `name` is passed in only for the messages that spell an offending
+    /// table back at the reader.
+    fn problem(&self, name: &str) -> Option<String> {
+        if self.only_tests && self.exclude_tests {
+            return Some("`only-tests` and `exclude-tests` are mutually exclusive".to_owned());
         }
+        // clap rejects `--diff-only --diff-range …` at parse time; a
+        // config file has no such check, so the same combination is
+        // caught here rather than resolved by a silent precedence rule.
+        if let Some(tool) = self.diff_conflict_tool() {
+            return Some(format!(
+                "`[profile.{name}.{tool}]` sets both `diff-only` and `diff-range`; they \
+                 name different diffs, so set exactly one",
+            ));
+        }
+        if self.tools.contains(&ToolName::GraphQuery) && self.graph_query.is_none() {
+            return Some(
+                "listing `graph-query` in `tools` requires a \
+                 `[profile.<name>.graph-query]` table declaring `query` and `symbol`"
+                    .to_owned(),
+            );
+        }
+        if self.path.paths().is_empty() {
+            return Some("`path` must name at least one target".to_owned());
+        }
+        // Caught here rather than at the first analyzer: the profile is
+        // the thing that is wrong, and saying so names the fix (split the
+        // single-root tools into their own profile) instead of reporting
+        // one tool's failure halfway through a run.
+        let single_root = self.single_root_tools();
+        if self.path.paths().len() > 1 && !single_root.is_empty() {
+            return Some(format!(
+                "`path` lists {} paths, but [{}] grow their report from one entry point and \
+                 take a single path; give them their own profile",
+                self.path.paths().len(),
+                single_root.join(", "),
+            ));
+        }
+        None
+    }
+
+    /// The first tool whose options table sets both `diff-only` and
+    /// `diff-range`. Only the diff-capable analyzers have the pair.
+    fn diff_conflict_tool(&self) -> Option<&'static str> {
+        [
+            (
+                "similarity",
+                self.similarity.as_ref().map(|o| o.has_diff_conflict()),
+            ),
+            (
+                "complexity",
+                self.complexity.as_ref().map(|o| o.has_diff_conflict()),
+            ),
+            (
+                "cohesion",
+                self.cohesion.as_ref().map(|o| o.has_diff_conflict()),
+            ),
+            (
+                "delegation",
+                self.delegation.as_ref().map(|o| o.has_diff_conflict()),
+            ),
+            (
+                "wrapper",
+                self.wrapper.as_ref().map(|o| o.has_diff_conflict()),
+            ),
+        ]
+        .into_iter()
+        .find(|(_, conflict)| conflict.unwrap_or(false))
+        .map(|(tool, _)| tool)
+    }
+
+    /// The profile's listed tools that accept only one path, in listed
+    /// order and without repeats.
+    fn single_root_tools(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = Vec::new();
+        for tool in self.tools.iter().filter(|tool| tool.is_single_root()) {
+            if !names.contains(&tool.as_str()) {
+                names.push(tool.as_str());
+            }
+        }
+        names
+    }
+}
+
+/// A profile's `path`: one target, or several walked into one report.
+///
+/// The string form is the common case and stays exactly what it was, so
+/// `path = "web/"` keeps parsing and keeps meaning one root. The array
+/// form is the config-file spelling of the multi-`PATH` command line —
+/// `path = ["internal", "cmd"]` — and exists for the same reason: a
+/// cluster or a call edge spanning two trees is only visible when both
+/// are in one corpus.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ProfilePaths {
+    /// `path = "web/"`
+    One(PathBuf),
+    /// `path = ["internal", "cmd"]`
+    Many(Vec<PathBuf>),
+}
+
+impl ProfilePaths {
+    /// The declared paths, in the order they were written. Empty only for
+    /// an explicitly empty array, which [`Config::validate`] rejects.
+    pub fn paths(&self) -> &[PathBuf] {
+        match self {
+            Self::One(path) => std::slice::from_ref(path),
+            Self::Many(paths) => paths,
+        }
+    }
+
+    /// How the target is named in a baseline snapshot and in errors: the
+    /// single path verbatim, or every path comma-separated — the same
+    /// spelling an analyzer report's `root` field uses.
+    pub fn display(&self) -> String {
+        self.paths()
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -258,6 +354,17 @@ impl ToolName {
             Self::Visibility => "visibility",
             Self::Wrapper => "wrapper",
         }
+    }
+
+    /// Whether this analyzer takes exactly one path.
+    ///
+    /// `coupling` and `context-span` grow a module graph outwards from a
+    /// single entry point — a crate root, a TS/JS entry file, a Go module
+    /// — so two entry points are two graphs rather than a wider one, and
+    /// they kept the single-`PATH` CLI signature when the rest gained
+    /// `PATH...`. A profile's `path` array is bounded by the same rule.
+    pub fn is_single_root(self) -> bool {
+        matches!(self, Self::Coupling | Self::ContextSpan)
     }
 }
 
@@ -320,6 +427,10 @@ pub enum ConfigError {
     },
     #[error("tool `{tool}` needs a `[profile.<name>.{tool}]` options table to run")]
     MissingToolOptions { tool: &'static str },
+    #[error(
+        "tool `{tool}` takes a single path, but the profile's `path` lists {count}; move `{tool}` to a profile with one `path`"
+    )]
+    MultiPathTool { tool: &'static str, count: usize },
 }
 
 #[cfg(test)]
@@ -369,7 +480,7 @@ since = "90.days.ago"
         let config: Config = toml::from_str(FULL).unwrap();
 
         let web = config.profile("web").unwrap();
-        assert_eq!(web.path, PathBuf::from("web/"));
+        assert_eq!(web.path.paths(), [PathBuf::from("web/")]);
         assert_eq!(web.format, Some(OutputFormat::Md));
         assert_eq!(web.exclude, ["tests/**/*.ts"]);
         assert!(web.exclude_tests);
@@ -575,6 +686,8 @@ since = "90.days.ago"
 
     #[rstest]
     #[case::missing_path("[profile.web]\ntools = [\"similarity\"]\n")]
+    #[case::path_is_neither_string_nor_array("[profile.web]\npath = 5\ntools = [\"similarity\"]\n")]
+    #[case::path_array_of_non_strings("[profile.web]\npath = [1, 2]\ntools = [\"similarity\"]\n")]
     #[case::missing_tools("[profile.web]\npath = \"web/\"\n")]
     #[case::unknown_tool_name("[profile.web]\npath = \"web/\"\ntools = [\"lint\"]\n")]
     #[case::graph_query_without_symbol(
@@ -617,24 +730,128 @@ since = "90.days.ago"
     }
 
     #[test]
-    fn resolved_path_joins_relative_against_config_dir() {
+    fn resolved_paths_joins_relative_against_config_dir() {
         let config: Config = toml::from_str(FULL).unwrap();
         let web = config.profile("web").unwrap();
         assert_eq!(
-            web.resolved_path(Path::new("/repo")),
-            PathBuf::from("/repo/web/"),
+            web.resolved_paths(Path::new("/repo")),
+            [PathBuf::from("/repo/web/")],
         );
     }
 
     #[test]
-    fn resolved_path_keeps_absolute_path() {
+    fn resolved_paths_keeps_absolute_path() {
         let config: Config =
             toml::from_str("[profile.x]\npath = \"/abs/target\"\ntools = []\n").unwrap();
         let profile = config.profile("x").unwrap();
         assert_eq!(
-            profile.resolved_path(Path::new("/repo")),
-            PathBuf::from("/abs/target"),
+            profile.resolved_paths(Path::new("/repo")),
+            [PathBuf::from("/abs/target")],
         );
+    }
+
+    /// Each entry of a multi-path profile is resolved on its own, so a
+    /// mix of relative and absolute entries is legal and neither kind
+    /// changes the meaning of the other.
+    #[test]
+    fn resolved_paths_resolves_each_entry_of_an_array_independently() {
+        let config: Config =
+            toml::from_str("[profile.x]\npath = [\"internal\", \"/abs/cmd\"]\ntools = []\n")
+                .unwrap();
+        assert_eq!(
+            config
+                .profile("x")
+                .unwrap()
+                .resolved_paths(Path::new("/repo")),
+            [PathBuf::from("/repo/internal"), PathBuf::from("/abs/cmd")],
+        );
+    }
+
+    /// The array form is what the CLI's `PATH...` looks like in a config,
+    /// and the string form has to keep parsing beside it.
+    #[rstest]
+    #[case::string("path = \"internal\"", &["internal"])]
+    #[case::one_element_array("path = [\"internal\"]", &["internal"])]
+    #[case::several("path = [\"internal\", \"cmd\"]", &["internal", "cmd"])]
+    fn path_accepts_a_string_or_an_array(#[case] path: &str, #[case] expected: &[&str]) {
+        let config: Config = toml::from_str(&format!(
+            "[profile.backend]\n{path}\ntools = [\"similarity\", \"unreachable\"]\n",
+        ))
+        .unwrap();
+        let expected: Vec<PathBuf> = expected.iter().map(PathBuf::from).collect();
+        assert_eq!(config.profile("backend").unwrap().path.paths(), expected);
+    }
+
+    #[rstest]
+    #[case::one("path = \"internal\"", "internal")]
+    #[case::several("path = [\"internal\", \"cmd\"]", "internal, cmd")]
+    fn profile_paths_display_matches_the_analyzer_root_spelling(
+        #[case] path: &str,
+        #[case] expected: &str,
+    ) {
+        let config: Config =
+            toml::from_str(&format!("[profile.backend]\n{path}\ntools = []\n")).unwrap();
+        assert_eq!(config.profile("backend").unwrap().path.display(), expected);
+    }
+
+    /// A one-path profile is what `coupling` and `context-span` need, so
+    /// listing them beside a single-element array is fine — only a wider
+    /// corpus is the mistake.
+    #[rstest]
+    #[case::coupling("coupling")]
+    #[case::context_span("context-span")]
+    fn load_accepts_a_single_element_array_for_a_single_root_tool(#[case] tool: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            &format!("[profile.backend]\npath = [\"internal\"]\ntools = [\"{tool}\"]\n"),
+        );
+        assert!(load(&path).is_ok());
+    }
+
+    #[rstest]
+    #[case::coupling("coupling")]
+    #[case::context_span("context-span")]
+    fn load_rejects_several_paths_for_a_single_root_tool(#[case] tool: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            &format!(
+                "[profile.backend]\npath = [\"internal\", \"cmd\"]\ntools = [\"similarity\", \"{tool}\"]\n",
+            ),
+        );
+        let err = load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains(tool), "offending tool not named: {msg}");
+        // The tool that *is* happy with two paths must not be blamed.
+        assert!(!msg.contains("similarity"), "got: {msg}");
+    }
+
+    #[test]
+    fn load_rejects_an_empty_path_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            "[profile.backend]\npath = []\ntools = [\"similarity\"]\n",
+        );
+        let err = load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }), "got: {err:?}");
+    }
+
+    #[rstest]
+    #[case::coupling(ToolName::Coupling, true)]
+    #[case::context_span(ToolName::ContextSpan, true)]
+    #[case::similarity(ToolName::Similarity, false)]
+    #[case::cycles(ToolName::Cycles, false)]
+    fn is_single_root_marks_only_the_graph_rooted_pair(
+        #[case] tool: ToolName,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(tool.is_single_root(), expected);
     }
 
     #[test]
