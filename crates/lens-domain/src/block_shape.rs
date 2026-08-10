@@ -40,6 +40,26 @@ const BLOCK_ROOT_LABEL: &str = "Block";
 /// ordinary statements is well past it.
 pub const MIN_WINDOW_TREE_NODES: usize = 8;
 
+/// Fewest comparison-tree nodes a window must carry per source line.
+///
+/// [`MIN_WINDOW_TREE_NODES`] is an absolute floor, so it only bites on
+/// short windows — but the mismatch it guards against gets *worse* as a
+/// window grows. Every adapter leaves a nested function behind as a
+/// single leaf (it is emitted as its own unit, so descending into it
+/// would double-count), which makes a run of
+/// `const handler = (): void => { ... }` declarations lower to three
+/// nodes per statement however long the bodies are. Thirty source lines
+/// of that is a ten-node tree, and every other declaration run in the
+/// repo lowers to the same ten nodes and scores 1.0 against it.
+///
+/// Requiring the tree to grow with the span is what separates those from
+/// real code: ordinary statements carry several nodes per line, so the
+/// floor is far below the density of anything this target exists to
+/// find, while a window whose source is mostly text the comparison never
+/// sees — a declaration run, a multi-line string or template literal, a
+/// macro body the adapter collapses — falls under it.
+pub const MIN_WINDOW_NODES_PER_LINE: f64 = 1.5;
+
 /// Largest statement run a single window covers.
 ///
 /// Windows are enumerated per start index, so the unit count is bounded
@@ -79,7 +99,7 @@ pub struct StatementSeq {
 }
 
 /// Windowing knobs for [`block_windows`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockWindowOptions {
     /// Drop windows spanning fewer source lines than this. The same cut
     /// `--min-lines` applies to functions and types.
@@ -90,6 +110,9 @@ pub struct BlockWindowOptions {
     /// Drop windows whose comparison tree has fewer nodes than this; see
     /// [`MIN_WINDOW_TREE_NODES`].
     pub min_nodes: usize,
+    /// Drop windows carrying fewer tree nodes per source line than this;
+    /// see [`MIN_WINDOW_NODES_PER_LINE`]. Zero disables the check.
+    pub min_nodes_per_line: f64,
 }
 
 impl Default for BlockWindowOptions {
@@ -98,6 +121,7 @@ impl Default for BlockWindowOptions {
             min_lines: 1,
             max_statements: DEFAULT_MAX_WINDOW_STATEMENTS,
             min_nodes: MIN_WINDOW_TREE_NODES,
+            min_nodes_per_line: MIN_WINDOW_NODES_PER_LINE,
         }
     }
 }
@@ -193,7 +217,7 @@ fn window_shape(
         .map(|stmt| stmt.tree.clone())
         .collect();
     let tree = TreeNode::with_children(BLOCK_ROOT_LABEL, "", children);
-    if tree.subtree_size() < opts.min_nodes {
+    if !window_carries_enough_tree(tree.subtree_size(), span.line_count(), opts) {
         return None;
     }
     Some(BlockShape {
@@ -203,6 +227,18 @@ fn window_shape(
         span,
         tree,
     })
+}
+
+/// Whether a window's comparison tree is substantial enough — and
+/// representative enough of its source — to be worth scoring.
+///
+/// Two cuts, both guarding the same failure: a window whose tree says
+/// less than its source does matches every other such window at 1.0.
+/// [`BlockWindowOptions::min_nodes`] is the absolute floor;
+/// [`BlockWindowOptions::min_nodes_per_line`] scales it with the span so
+/// a long window cannot clear it on a handful of nodes.
+fn window_carries_enough_tree(nodes: usize, line_count: usize, opts: BlockWindowOptions) -> bool {
+    nodes >= opts.min_nodes && nodes as f64 >= opts.min_nodes_per_line * line_count as f64
 }
 
 #[cfg(test)]
@@ -247,6 +283,7 @@ mod tests {
                 min_lines: 1,
                 max_statements: 2,
                 min_nodes: 0,
+                min_nodes_per_line: 0.0,
             },
         );
 
@@ -269,6 +306,7 @@ mod tests {
                 min_lines: 3,
                 max_statements: 8,
                 min_nodes: 0,
+                min_nodes_per_line: 0.0,
             },
         );
 
@@ -300,6 +338,7 @@ mod tests {
                 min_lines: 1,
                 max_statements: 8,
                 min_nodes: 0,
+                min_nodes_per_line: 0.0,
             },
         );
 
@@ -318,6 +357,7 @@ mod tests {
             &[seq(statements)],
             BlockWindowOptions {
                 min_nodes: 0,
+                min_nodes_per_line: 0.0,
                 ..BlockWindowOptions::default()
             },
         );
@@ -356,10 +396,81 @@ mod tests {
             min_lines: 1,
             max_statements: 8,
             min_nodes: MIN_WINDOW_TREE_NODES,
+            min_nodes_per_line: 0.0,
         };
 
         assert!(block_windows(&[leafy], opts).is_empty());
         assert_eq!(block_windows(&[real], opts).len(), 1);
+    }
+
+    /// The node floor is absolute, so a long window clears it on a
+    /// handful of nodes: three `const f = () => { ... }` declarations
+    /// lower to three nodes each however long their bodies run, and the
+    /// resulting ten-node tree matches every other declaration run.
+    /// Requiring nodes to grow with the span is what cuts those; the
+    /// same span filled with real statements has to survive.
+    #[rstest]
+    #[case::declaration_run(3, 0)]
+    #[case::ordinary_statements(30, 1)]
+    fn density_floor_drops_windows_whose_tree_does_not_grow_with_the_span(
+        #[case] nodes_per_statement: usize,
+        #[case] expected: usize,
+    ) {
+        // Three statements over eighteen source lines, differing only in
+        // how much tree each one lowers to.
+        let statements = (0..3)
+            .map(|i| StatementUnit {
+                start_line: 1 + i * 6,
+                end_line: 6 + i * 6,
+                tree: TreeNode::with_children(
+                    "Let",
+                    "",
+                    (0..nodes_per_statement - 1)
+                        .map(|_| TreeNode::leaf("Node"))
+                        .collect(),
+                ),
+            })
+            .collect();
+        let windows = block_windows(
+            &[seq(statements)],
+            BlockWindowOptions {
+                min_lines: 6,
+                max_statements: 3,
+                min_nodes: MIN_WINDOW_TREE_NODES,
+                min_nodes_per_line: MIN_WINDOW_NODES_PER_LINE,
+            },
+        );
+
+        assert_eq!(
+            windows
+                .iter()
+                .filter(|w| w.span
+                    == SourceSpan {
+                        start_line: 1,
+                        end_line: 18
+                    })
+                .count(),
+            expected,
+        );
+    }
+
+    /// The density floor is a second cut, not a replacement: a window
+    /// dense enough to clear it still has to carry
+    /// [`MIN_WINDOW_TREE_NODES`] overall, or a two-line window of four
+    /// nodes would pass.
+    #[test]
+    fn density_floor_does_not_override_the_absolute_node_floor() {
+        let dense_but_tiny = seq(vec![StatementUnit {
+            start_line: 1,
+            end_line: 1,
+            tree: TreeNode::with_children(
+                "Let",
+                "",
+                vec![TreeNode::leaf("Pat"), TreeNode::leaf("Lit")],
+            ),
+        }]);
+
+        assert!(block_windows(&[dense_but_tiny], BlockWindowOptions::default()).is_empty());
     }
 
     #[test]
@@ -371,6 +482,7 @@ mod tests {
                 min_lines: 2,
                 max_statements: 8,
                 min_nodes: 0,
+                min_nodes_per_line: 0.0,
             },
         );
 
@@ -398,6 +510,7 @@ mod tests {
             &seqs,
             BlockWindowOptions {
                 min_nodes: 0,
+                min_nodes_per_line: 0.0,
                 ..BlockWindowOptions::default()
             },
         );
@@ -447,7 +560,12 @@ mod tests {
         ) {
             let windows = block_windows(
                 std::slice::from_ref(&s),
-                BlockWindowOptions { min_lines, max_statements, min_nodes: 0 },
+                BlockWindowOptions {
+                    min_lines,
+                    max_statements,
+                    min_nodes: 0,
+                    min_nodes_per_line: 0.0,
+                },
             );
             let starts: HashSet<usize> = s.statements.iter().map(|st| st.start_line).collect();
             let ends: HashSet<usize> = s.statements.iter().map(|st| st.end_line).collect();
@@ -469,7 +587,12 @@ mod tests {
         ) {
             let windows = block_windows(
                 std::slice::from_ref(&s),
-                BlockWindowOptions { min_lines: 1, max_statements, min_nodes: 0 },
+                BlockWindowOptions {
+                    min_lines: 1,
+                    max_statements,
+                    min_nodes: 0,
+                    min_nodes_per_line: 0.0,
+                },
             );
             prop_assert!(windows.len() <= s.statements.len() * max_statements);
         }

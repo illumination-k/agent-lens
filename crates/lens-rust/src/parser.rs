@@ -942,12 +942,17 @@ fn type_param_bound_tree(bound: &syn::TypeParamBound) -> TreeNode {
 fn pat_tree(pat: &syn::Pat) -> TreeNode {
     match pat {
         syn::Pat::Const(_) => TreeNode::leaf("PatConst"),
+        // The bound name rides along as the node's `value`, so it only
+        // reaches value-aware comparison — `similarity --target blocks`,
+        // where a statement run's identifiers are the only thing telling
+        // a pasted fragment from the language's own idiom (issue #441).
         syn::Pat::Ident(ident) => {
-            if ident.mutability.is_some() {
-                TreeNode::leaf("PatIdentMut")
+            let label = if ident.mutability.is_some() {
+                "PatIdentMut"
             } else {
-                TreeNode::leaf("PatIdent")
-            }
+                "PatIdent"
+            };
+            TreeNode::new(label, ident.ident.to_string())
         }
         syn::Pat::Lit(lit) => TreeNode::leaf(lit_label(&lit.lit)),
         syn::Pat::Macro(mac) => {

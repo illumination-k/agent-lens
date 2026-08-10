@@ -118,9 +118,27 @@ fn try_stmt(t: &TryStatement) -> TreeNode {
 fn var_decl_node(v: &VariableDeclaration) -> TreeNode {
     let mut n = TreeNode::new("VarDecl", v.kind.as_str());
     for d in &v.declarations {
-        n.push_child(node_with("Declarator", d.init.as_ref().map(expr_tree)));
+        let mut declarator = TreeNode::new("Declarator", binding_name(&d.id));
+        if let Some(init) = &d.init {
+            declarator.push_child(expr_tree(init));
+        }
+        n.push_child(declarator);
     }
     n
+}
+
+/// The name a declarator binds, or `""` for a destructuring pattern.
+///
+/// Carried as the node's `value`, so it only reaches value-aware
+/// comparison. Without it a `const` whose initializer lowers to a leaf —
+/// every arrow function does, since nested functions are their own
+/// comparison unit — has no distinguishing content at all, and a run of
+/// such declarations matches every other run in the repo (issue #441).
+fn binding_name<'a>(id: &'a BindingPattern<'a>) -> &'a str {
+    match id {
+        BindingPattern::BindingIdentifier(ident) => ident.name.as_str(),
+        _ => "",
+    }
 }
 
 fn for_init_tree(init: &ForStatementInit) -> TreeNode {
@@ -344,7 +362,13 @@ fn object_expr(o: &ObjectExpression) -> TreeNode {
     node_with(
         "Object",
         o.properties.iter().map(|prop| match prop {
-            ObjectPropertyKind::ObjectProperty(_) => TreeNode::leaf("Property"),
+            // The key rides along as `value`, so it only reaches
+            // value-aware comparison. Without it every object literal of
+            // the same arity is the same tree, and a returned record is
+            // pure filler in a `--target blocks` window (issue #441).
+            ObjectPropertyKind::ObjectProperty(p) => {
+                TreeNode::new("Property", p.key.static_name().unwrap_or_default())
+            }
             ObjectPropertyKind::SpreadProperty(s) => node_with("Spread", [expr_tree(&s.argument)]),
         }),
     )
@@ -357,5 +381,73 @@ fn argument_tree(arg: &Argument) -> TreeNode {
     match arg.as_expression() {
         Some(expr) => expr_tree(expr),
         None => TreeNode::leaf("Arg"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Dialect, statements::extract_statement_seqs};
+    use lens_domain::TreeNode;
+    use rstest::rstest;
+
+    /// Lower `stmt` as it appears inside a function body — statement
+    /// lists are only collected there, and the enclosing function's own
+    /// list is emitted first.
+    fn first_statement_tree(stmt: &str) -> TreeNode {
+        extract_statement_seqs(
+            &format!("function f(opts: O) {{\n  {stmt}\n}}\n"),
+            Dialect::Ts,
+        )
+        .expect("parses")
+        .remove(0)
+        .statements
+        .remove(0)
+        .tree
+    }
+
+    /// Collect every `value` in the tree, so a test can assert on the
+    /// content the lowering carries without pinning the node layout.
+    fn values(node: &TreeNode) -> Vec<&str> {
+        let mut out = vec![node.value.as_str()];
+        for child in &node.children {
+            out.extend(values(child));
+        }
+        out
+    }
+
+    /// An arrow function is one leaf — it is emitted as its own
+    /// comparison unit, so descending into it would double-count — which
+    /// leaves the declared name as the only thing separating one
+    /// `const f = () => {…}` from another (issue #441).
+    #[rstest]
+    #[case::arrow("const onCopy = (m: M): void => { copy(m); };", "onCopy")]
+    #[case::call("const parsed = JSON.parse(raw);", "parsed")]
+    // A destructuring pattern binds several names; the declarator itself
+    // names none of them, and the pattern is not lowered.
+    #[case::destructuring("const { a, b } = opts;", "")]
+    fn a_declarator_carries_the_name_it_binds(#[case] src: &str, #[case] expected: &str) {
+        let tree = first_statement_tree(src);
+        let declarator = &tree.children[0];
+
+        assert_eq!(declarator.label, "Declarator");
+        assert_eq!(declarator.value, expected);
+    }
+
+    /// Two records of the same arity lower to the same shape, so without
+    /// the keys a returned object is pure filler: `{ a, b, c }` and
+    /// `{ x, y, z }` would be indistinguishable trees.
+    #[test]
+    fn object_properties_carry_their_keys() {
+        let tree = first_statement_tree("const out = { alpha, beta: 2, [dyn]: 3 };");
+
+        assert_eq!(
+            values(&tree)
+                .into_iter()
+                .filter(|v| !v.is_empty())
+                .collect::<Vec<_>>(),
+            // `const` from the declaration, the bound name, then the two
+            // statically-known keys; the computed key resolves to none.
+            vec!["const", "out", "alpha", "beta"],
+        );
     }
 }

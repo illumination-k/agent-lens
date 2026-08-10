@@ -60,12 +60,19 @@ pub const DEFAULT_MIN_LINES: usize = 5;
 /// score meaningfully.
 pub const DEFAULT_TYPE_MIN_LINES: usize = 3;
 
-/// Default minimum line count for `--target blocks`. The boilerplate
-/// this target exists to find — a mapped error tail, a URL-assembly
-/// preamble — runs three to six lines; the function default of 5 would
-/// drop the short end of that range, while 1-2 lines is single
-/// statements whose trees are too small to score meaningfully.
-pub const DEFAULT_BLOCK_MIN_LINES: usize = 3;
+/// Default minimum line count for `--target blocks`.
+///
+/// Held at the same 5 lines as functions, and for the same reason read
+/// from the other end. A window of three or four lines is a guard clause
+/// and at most one statement beside it, and every language writes its
+/// guard clause the same way everywhere it appears: at a floor of 3 the
+/// top of a Go report is nothing but `if err != nil { return nil, err }`
+/// (issue #441). That is a real repetition, but not one anybody can
+/// extract a helper for, and it crowds out the findings that are. The
+/// boilerplate this target exists to find — a mapped error tail, a
+/// URL-assembly preamble — clears five lines; `--min-lines` is there for
+/// a deliberate hunt below it.
+pub const DEFAULT_BLOCK_MIN_LINES: usize = 5;
 
 /// Default floor for `--paired-by`. A name-matched pair scoring below
 /// this shares a name and essentially nothing else, which in practice
@@ -78,6 +85,11 @@ pub const DEFAULT_BLOCK_MIN_LINES: usize = 3;
 pub const DEFAULT_DRIFT_FLOOR: f64 = 0.3;
 
 const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
+/// Rename cost used for `--target blocks`. Full unit cost, against the
+/// discounted default the other targets keep — see
+/// [`SimilarityAnalyzer::tsed_options`] for why blocks charge a
+/// mismatched identifier as a substitution rather than a cheap rename.
+const BLOCK_RENAME_COST: f64 = 1.0;
 const BODY_SIMILARITY_WEIGHT: f64 = 0.8;
 const SIGNATURE_SIMILARITY_WEIGHT: f64 = 0.2;
 /// Hard cap for pairs scored by `analyze similarity`.
@@ -315,7 +327,7 @@ pub struct SimilarityOptions {
     /// Minimum source line count for a unit to be considered. Units
     /// shorter than this are dropped before pairwise comparison; keeps
     /// trivial getters / one-liners out of the report. Defaults per
-    /// target: 5 for `functions`, 3 for `types`.
+    /// target: 5 for `functions` and `blocks`, 3 for `types`.
     #[arg(long)]
     pub min_lines: Option<usize>,
     /// Comparison unit. `functions` (default) compares function bodies.
@@ -804,7 +816,7 @@ impl SimilarityAnalyzer {
             min_lines,
             &profiles,
             candidate_threshold,
-            &self.opts,
+            &self.tsed_options(),
             self.method,
             self.allow_lsh(),
         );
@@ -888,6 +900,32 @@ impl SimilarityAnalyzer {
         filter_pairs_touching_changes(corpus, candidates, changed_by_file)
     }
 
+    /// Comparison costs for this run.
+    ///
+    /// Functions and types compare label shapes and discount a rename,
+    /// because a reimplementation that renamed everything is exactly
+    /// what they exist to catch. Blocks cannot afford either default: a
+    /// statement window is small enough that its skeleton is the
+    /// language's, not the author's — `if err != nil { return nil, err }`,
+    /// allocate-loop-append-return, a run of arrow-function declarations —
+    /// so structure-only scoring clusters every occurrence of an idiom
+    /// and buries the real findings under it (issue #441). What still
+    /// separates a copy-paste from an idiom at that size is the content:
+    /// a fragment that was pasted brought its identifiers, calls and
+    /// literals with it, while two instances of an idiom share nothing
+    /// but the skeleton. So blocks compare values, and charge a full
+    /// substitution for a mismatched one rather than the discounted
+    /// rename — a clone with a couple of renamed variables still clears
+    /// the threshold, one that shares only the shape does not.
+    fn tsed_options(&self) -> TSEDOptions {
+        let mut opts = self.opts.clone();
+        if self.target == SimilarityTarget::Blocks {
+            opts.apted.compare_values = true;
+            opts.apted.rename_cost = BLOCK_RENAME_COST;
+        }
+        opts
+    }
+
     /// Score `pairs` with the configured [`SimilarityMethod`]. TSED reads
     /// the prebuilt tree `profiles`; the token method builds its own
     /// flattened token profiles, which `profiles` does not carry.
@@ -899,12 +937,13 @@ impl SimilarityAnalyzer {
         threshold: f64,
     ) -> ScoreStats {
         let weights = self.target.weights();
+        let opts = self.tsed_options();
         match self.method {
             SimilarityMethod::Tsed => {
-                score_candidate_pairs(corpus, profiles, pairs, threshold, &self.opts, weights)
+                score_candidate_pairs(corpus, profiles, pairs, threshold, &opts, weights)
             }
             SimilarityMethod::Token => {
-                let token_profiles = build_token_profiles(corpus, self.opts.apted.compare_values);
+                let token_profiles = build_token_profiles(corpus, opts.apted.compare_values);
                 score_token_candidate_pairs(corpus, &token_profiles, pairs, threshold, weights)
             }
         }
@@ -3935,12 +3974,12 @@ impl Counter {
         write_file(
             dir.path(),
             "a.rs",
-            "fn fetch_article(id: u64) -> String {\n    let client = build_client();\n    let url = format!(\"{}/article/{}\", base_url(), id);\n    let request = client.get(&url);\n    let response = request.send();\n    response.text()\n}\n",
+            "fn fetch_article(id: u64) -> String {\n    let client = build_client();\n    let url = format!(\"{}/article/{}\", base_url(), id);\n    let request = client.get(&url);\n    let request = request.header(\"accept\", \"application/json\");\n    let response = request.send();\n    response.text()\n}\n",
         );
         write_file(
             dir.path(),
             "b.rs",
-            "fn fetch_author(name: &str, retries: u32) -> Vec<String> {\n    let mut collected = Vec::new();\n    for _ in 0..retries {\n        collected.push(name.to_owned());\n    }\n    let client = build_client();\n    let url = format!(\"{}/author/{}\", base_url(), name);\n    let request = client.get(&url);\n    let response = request.send();\n    collected.push(response.text());\n    collected\n}\n",
+            "fn fetch_author(name: &str, retries: u32) -> Vec<String> {\n    let mut collected = Vec::new();\n    for _ in 0..retries {\n        collected.push(name.to_owned());\n    }\n    let client = build_client();\n    let url = format!(\"{}/author/{}\", base_url(), name);\n    let request = client.get(&url);\n    let request = request.header(\"accept\", \"application/json\");\n    let response = request.send();\n    collected.push(response.text());\n    collected\n}\n",
         );
 
         let functions = SimilarityAnalyzer::new()
@@ -3984,6 +4023,73 @@ impl Counter {
         );
     }
 
+    /// Runs of arrow-function declarations are how idiomatic TS/React
+    /// writes handlers and closures, and every adapter lowers a nested
+    /// function to one leaf, so three such declarations lower to the
+    /// same ten nodes whatever their bodies say. Left alone they form
+    /// one enormous cluster of unrelated code that buries the real
+    /// findings (issue #441): three unrelated files here, no cluster.
+    #[test]
+    fn blocks_target_does_not_cluster_declaration_runs_by_their_skeleton() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "store.ts",
+            "export function createStore<T>(opts: Opts<T>) {\n  const snapshot = (): T => {\n    if (!loaded) {\n      current = opts.read();\n      loaded = true;\n    }\n    return current;\n  };\n  const emit = (): void => {\n    for (const listener of listeners) listener();\n  };\n  const onStorage = (event: StorageEvent): void => {\n    if (event.key !== opts.key) return;\n    current = opts.read();\n    emit();\n  };\n  return { snapshot, emit, onStorage };\n}\n",
+        );
+        write_file(
+            dir.path(),
+            "MessageList.tsx",
+            "export function MessageList(props: Props) {\n  const onStartEdit = (message: Message): void => {\n    setEditingId(message.id);\n    setEditText(messageText(message));\n  };\n  const submitEdit = (message: Message): void => {\n    setEditingId(null);\n    submitEditAction(message, editText);\n  };\n  const onCopy = (message: Message): void => {\n    void navigator.clipboard?.writeText(messageText(message));\n    setCopiedId(message.id);\n  };\n  return null;\n}\n",
+        );
+        write_file(
+            dir.path(),
+            "panel.ts",
+            "export function usePanel() {\n  const toggle = (): void => {\n    setOpen((prev) => !prev);\n  };\n  const close = (): void => {\n    setOpen(false);\n  };\n  const reset = (name: string, value: number): void => {\n    setName(name);\n    setValue(value);\n    setOpen(false);\n  };\n  return { toggle, close, reset };\n}\n",
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cluster_count"], 0, "got {parsed}");
+    }
+
+    /// The Go half of the same failure (issue #441): allocate a slice,
+    /// range over the input, bail on the error, append, return. Every Go
+    /// codebase writes that, so structure alone clusters functions that
+    /// have nothing to do with each other. What separates a pasted
+    /// fragment from a shared idiom at this size is the content, so the
+    /// verbatim copy still has to be reported.
+    #[rstest]
+    #[case::shared_idiom(
+        "func ListDocs(recs []rec) ([]*Document, error) {\n\tout := make([]*Document, 0, len(recs))\n\tfor _, rec := range recs {\n\t\td, err := rec.rehydrate()\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tout = append(out, d)\n\t}\n\treturn out, nil\n}\n\nfunc BuildRoutes(specs []spec) ([]Route, error) {\n\troutes := make([]Route, 0, len(specs))\n\tfor _, sp := range specs {\n\t\tr, err := compileRoute(sp)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\troutes = append(routes, r)\n\t}\n\treturn routes, nil\n}\n",
+        0
+    )]
+    #[case::pasted_fragment(
+        "func LoadUser(id string) (*User, error) {\n\traw, err := store.Get(ctx, id)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"load %q: %w\", id, err)\n\t}\n\tvar dto userDTO\n\tif err := json.Unmarshal(raw, &dto); err != nil {\n\t\treturn nil, fmt.Errorf(\"decode %q: %w\", id, err)\n\t}\n\tdto.Name = strings.TrimSpace(dto.Name)\n\treturn dto.toUser(), nil\n}\n\nfunc LoadAccount(id string) (*Account, error) {\n\traw, err := store.Get(ctx, id)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"load %q: %w\", id, err)\n\t}\n\tvar dto userDTO\n\tif err := json.Unmarshal(raw, &dto); err != nil {\n\t\treturn nil, fmt.Errorf(\"decode %q: %w\", id, err)\n\t}\n\tdto.Name = strings.TrimSpace(dto.Name)\n\treturn dto.toAccount(), nil\n}\n",
+        1
+    )]
+    fn blocks_target_separates_a_shared_idiom_from_a_pasted_fragment(
+        #[case] source: &str,
+        #[case] expected_clusters: u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "store.go",
+            &format!("package store\n\n{source}"),
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Blocks)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cluster_count"], expected_clusters, "got {parsed}");
+    }
+
     /// Sliding windows overlap by construction. Without the overlap
     /// filter a single function reports itself as a cluster of its own
     /// sub-windows, which would drown every real finding.
@@ -3993,7 +4099,7 @@ impl Counter {
         write_file(
             dir.path(),
             "a.rs",
-            "fn only(id: u64) -> String {\n    let client = build_client();\n    let url = format!(\"{}/article/{}\", base_url(), id);\n    let request = client.get(&url);\n    let response = request.send();\n    response.text()\n}\n",
+            "fn only(id: u64) -> String {\n    let client = build_client();\n    let url = format!(\"{}/article/{}\", base_url(), id);\n    let request = client.get(&url);\n    let request = request.header(\"accept\", \"application/json\");\n    let response = request.send();\n    response.text()\n}\n",
         );
 
         let json = SimilarityAnalyzer::new()
@@ -4017,7 +4123,7 @@ impl Counter {
         write_file(
             dir.path(),
             "tests/helper.rs",
-            "fn build_one() {\n    let client = build_client();\n    let url = base_url();\n    let request = client.get(&url);\n    drop(request);\n}\n\nfn build_two(extra: u8) {\n    let n = extra;\n    let client = build_client();\n    let url = base_url();\n    let request = client.get(&url);\n    drop((request, n));\n}\n",
+            "fn build_one() {\n    let client = build_client();\n    let url = base_url();\n    let request = client.get(&url);\n    let response = request.send();\n    let body = response.text();\n    drop(body);\n}\n\nfn build_two(extra: u8) {\n    let n = extra;\n    let client = build_client();\n    let url = base_url();\n    let request = client.get(&url);\n    let response = request.send();\n    let body = response.text();\n    drop((body, n));\n}\n",
         );
 
         let json = SimilarityAnalyzer::new()
@@ -4096,7 +4202,7 @@ impl Counter {
         write_file(
             dir.path(),
             "a.rs",
-            "fn prod() {\n    let a = 1;\n    let b = 2;\n    drop((a, b));\n}\n\n#[test]\nfn t() {\n    let a = 1;\n    let b = 2;\n    drop((a, b));\n}\n",
+            "fn prod() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    drop((a, b, c, d));\n}\n\n#[test]\nfn t() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    drop((a, b, c, d));\n}\n",
         );
 
         let all = SimilarityAnalyzer::new()
