@@ -1014,4 +1014,4 @@ of truth.
 
 ## License
 
-MIT. See [`Cargo.toml`](./Cargo.toml).
+MIT. See [`LICENSE`](./LICENSE).
