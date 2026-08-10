@@ -1,0 +1,8 @@
+# The site is served from a GitHub Pages project path, so a crawler that only
+# fetches https://illumination-k.github.io/robots.txt never sees this file. It
+# is kept anyway: it is correct the moment the site moves to its own domain,
+# and the sitemap line below is what gets submitted either way.
+User-agent: *
+Allow: /
+
+Sitemap: https://illumination-k.github.io/agent-lens/sitemap.xml

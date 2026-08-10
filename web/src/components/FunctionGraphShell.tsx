@@ -1,3 +1,5 @@
+import { Link } from "@tanstack/react-router";
+
 import {
   edgeRows,
   scoreNode,
@@ -63,7 +65,9 @@ function Sidebar({ initialView, report }: FunctionGraphShellProps) {
     <aside className="sidebar" aria-label="Graph controls">
       <div className="brand">
         <div>
-          <p className="eyebrow">agent-lens</p>
+          <p className="eyebrow">
+            <Link to="/">agent-lens</Link>
+          </p>
           <h1>Function graph</h1>
         </div>
         <span id="load-state" className="status">
