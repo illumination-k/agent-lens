@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import "../landing.css";
 import {
@@ -11,6 +11,7 @@ import {
   LANGUAGES,
   PILLARS,
   SAMPLE_REPORT,
+  STATS,
   TAGLINE,
 } from "../content";
 import { README_URL, RELEASES_URL, REPOSITORY_URL } from "../seo";
@@ -60,17 +61,20 @@ function Band({
   children,
   id,
   intro,
+  kicker,
   title,
 }: {
   children: ReactNode;
   id: string;
   intro?: ReactNode;
+  kicker: string;
   title: string;
 }) {
   const titleId = `${id}-title`;
   return (
     <section className="band" id={id} aria-labelledby={titleId}>
       <div className="section-head">
+        <p className="kicker">{kicker}</p>
         <h2 id={titleId}>{title}</h2>
         {intro !== undefined && <p>{intro}</p>}
       </div>
@@ -101,7 +105,7 @@ function SiteHeader() {
 function Hero() {
   return (
     <section className="hero" id="top" aria-labelledby="hero-title">
-      <p className="eyebrow">Rust CLI · MIT · pre-alpha</p>
+      <p className="kicker">Rust CLI · MIT · pre-alpha</p>
       <h1 id="hero-title">{TAGLINE}</h1>
       <p className="lede">
         <strong>agent-lens</strong> is a single-binary code analysis CLI for coding agents. It
@@ -122,6 +126,14 @@ function Hero() {
           Read the source
         </a>
       </div>
+      <dl className="stats-strip">
+        {STATS.map((stat) => (
+          <div key={stat.label}>
+            <dt>{stat.label}</dt>
+            <dd>{stat.value}</dd>
+          </div>
+        ))}
+      </dl>
     </section>
   );
 }
@@ -130,6 +142,7 @@ function BlindSpotSection() {
   return (
     <Band
       id="why"
+      kicker="The problem"
       title="Agents decide on partial context"
       intro="An agent reads the file it is editing. What it does not read is the rest of the repository — so it forks a function that already exists, grows the module that is already a bottleneck, and refactors the one function nobody should touch without a plan."
     >
@@ -153,10 +166,11 @@ function PillarSection() {
   return (
     <Band
       id="features"
+      kicker="What is inside"
       title="Three surfaces, one binary"
       intro="No service, no account, no telemetry — a static binary and a config file."
     >
-      <div className="cards">
+      <div className="bento">
         {PILLARS.map((pillar) => (
           <article className="card" key={pillar.title}>
             <h3>{pillar.title}</h3>
@@ -173,6 +187,7 @@ function AnalyzerSection() {
   return (
     <Band
       id="analyzers"
+      kicker="The catalogue"
       title="Eighteen analyzers"
       intro={
         <>
@@ -207,6 +222,7 @@ function ReportSample() {
   return (
     <Band
       id="output"
+      kicker="The output"
       title="Output an agent can act on"
       intro={
         <>
@@ -215,9 +231,17 @@ function ReportSample() {
         </>
       }
     >
-      <pre className="sample">
-        <code>{SAMPLE_REPORT}</code>
-      </pre>
+      <div className="terminal">
+        <div className="terminal-bar" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+          <strong>agent-lens</strong>
+        </div>
+        <pre className="sample">
+          <code>{SAMPLE_REPORT}</code>
+        </pre>
+      </div>
       <p className="note">
         A real run over this repository's own sources: agent-lens is pointed at itself on every
         change, and findings about its own code count as findings. Every report is also available as
@@ -232,6 +256,7 @@ function LanguageSection() {
   return (
     <Band
       id="languages"
+      kicker="Coverage"
       title="Languages"
       intro="A language-neutral core plus per-language adapters: the metrics are shared, so a new language is one adapter crate rather than a reimplementation."
     >
@@ -268,6 +293,7 @@ function InstallSection() {
   return (
     <Band
       id="install"
+      kicker="Get started"
       title="Install"
       intro="Pick one. The install script verifies the release SHA-256 and fails closed if it cannot."
     >
@@ -291,7 +317,7 @@ function InstallSection() {
 
 function FaqSection() {
   return (
-    <Band id="faq" title="Questions">
+    <Band id="faq" kicker="FAQ" title="Questions">
       <div className="faq">
         {FAQ.map((entry) => (
           <details key={entry.question}>
@@ -320,10 +346,28 @@ function SiteFooter() {
   );
 }
 
+/**
+ * A copy-to-clipboard command line.
+ *
+ * The `$` prompt is a CSS pseudo-element rather than part of the text, so
+ * neither the button nor a manual selection carries it into the shell.
+ */
 function Snippet({ command, label }: { command: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  function copy() {
+    void navigator.clipboard?.writeText(command).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    });
+  }
+
   return (
-    <pre className="snippet" aria-label={label}>
+    <div className="snippet" role="group" aria-label={label}>
       <code>{command}</code>
-    </pre>
+      <button className="copy" type="button" onClick={copy}>
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
   );
 }

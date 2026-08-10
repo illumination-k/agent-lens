@@ -37,6 +37,19 @@ export const SAMPLE_REPORT = `$ agent-lens analyze similarity crates/lens-rust/s
   - cohesion.rs:\`is_self_expr\` (L218-226)
   - complexity.rs:\`is_rust_keyword\` (L194-235)`;
 
+export type Stat = {
+  label: string;
+  value: string;
+};
+
+/** The hero strip. Four numbers a reader can check against the repository. */
+export const STATS: readonly Stat[] = [
+  { label: "Analyzers", value: "18" },
+  { label: "Languages", value: "4" },
+  { label: "Hook handlers", value: "5" },
+  { label: "Telemetry", value: "0" },
+];
+
 export type Pillar = {
   title: string;
   body: string;
