@@ -91,6 +91,44 @@ impl Config {
                     message: "`only-tests` and `exclude-tests` are mutually exclusive".to_owned(),
                 });
             }
+            // clap rejects `--diff-only --diff-range …` at parse time;
+            // a config file has no such check, so the same combination
+            // is caught here rather than resolved by a silent
+            // precedence rule.
+            let diff_conflicts = [
+                (
+                    "similarity",
+                    profile.similarity.as_ref().map(|o| o.has_diff_conflict()),
+                ),
+                (
+                    "complexity",
+                    profile.complexity.as_ref().map(|o| o.has_diff_conflict()),
+                ),
+                (
+                    "cohesion",
+                    profile.cohesion.as_ref().map(|o| o.has_diff_conflict()),
+                ),
+                (
+                    "delegation",
+                    profile.delegation.as_ref().map(|o| o.has_diff_conflict()),
+                ),
+                (
+                    "wrapper",
+                    profile.wrapper.as_ref().map(|o| o.has_diff_conflict()),
+                ),
+            ];
+            if let Some((tool, _)) = diff_conflicts
+                .iter()
+                .find(|(_, conflict)| conflict.unwrap_or(false))
+            {
+                return Err(ConfigError::Invalid {
+                    name: name.clone(),
+                    message: format!(
+                        "`[profile.{name}.{tool}]` sets both `diff-only` and `diff-range`; they \
+                         name different diffs, so set exactly one",
+                    ),
+                });
+            }
             if profile.tools.contains(&ToolName::GraphQuery) && profile.graph_query.is_none() {
                 return Err(ConfigError::Invalid {
                     name: name.clone(),
@@ -490,6 +528,49 @@ since = "90.days.ago"
         let err = load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { .. }), "got: {err:?}");
         assert!(err.to_string().contains("graph-query"), "got: {err}");
+    }
+
+    /// The CLI cannot express this combination — clap rejects it — so
+    /// a config file is the only way to reach it, and it must fail
+    /// rather than pick a winner behind the user's back.
+    #[rstest]
+    #[case::similarity("similarity")]
+    #[case::complexity("complexity")]
+    #[case::cohesion("cohesion")]
+    #[case::delegation("delegation")]
+    #[case::wrapper("wrapper")]
+    fn load_rejects_both_diff_flags_on_one_tool(#[case] tool: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            &format!(
+                "[profile.changes]\npath = \"src/\"\ntools = [\"{tool}\"]\n\n\
+                 [profile.changes.{tool}]\ndiff-only = true\ndiff-range = \"HEAD~1..HEAD\"\n",
+            ),
+        );
+        let err = load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }), "got: {err:?}");
+        assert!(err.to_string().contains(tool), "got: {err}");
+    }
+
+    /// Either flag on its own is fine, including on a tool whose gate
+    /// the other cases exercise — the rejection above must be about the
+    /// pair, not about `diff-range` existing.
+    #[rstest]
+    #[case::range_alone("diff-range = \"HEAD~1..HEAD\"")]
+    #[case::diff_only_alone("diff-only = true")]
+    fn load_accepts_either_diff_flag_alone(#[case] setting: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            &format!(
+                "[profile.changes]\npath = \"src/\"\ntools = [\"complexity\"]\n\n\
+                 [profile.changes.complexity]\n{setting}\n",
+            ),
+        );
+        load(&path).expect("one diff flag must load cleanly");
     }
 
     #[rstest]

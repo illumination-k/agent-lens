@@ -24,7 +24,7 @@ use lens_rust::CallIndexOptions;
 
 use super::cargo_meta::CrateNameCache;
 use super::{
-    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, LineRange, SourceFile, SourceLang,
+    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, LineRange, SourceFile, SourceLang,
     changed_line_ranges, collect_source_files, read_source,
 };
 use model::{
@@ -231,19 +231,20 @@ impl CallGraphBuilder {
         }
     }
 
-    /// Unstaged changed line ranges (`git diff -U0`) for every source
-    /// file the graph would scan, keyed by the display path used in
-    /// [`CallGraphNode::file`]. Files with no unstaged changes are
-    /// absent. Uses the same collection filter as [`Self::build`] so
-    /// diff-seeded analyzers see exactly the graph's file set.
+    /// Changed line ranges (`git diff -U0`) under `scope` for every
+    /// source file the graph would scan, keyed by the display path used
+    /// in [`CallGraphNode::file`]. Files with no changes are absent.
+    /// Uses the same collection filter as [`Self::build`] so diff-seeded
+    /// analyzers see exactly the graph's file set.
     pub(crate) fn changed_line_ranges_by_display_path(
         &self,
         roots: &AnalyzeRoots,
+        scope: &DiffScope,
     ) -> Result<BTreeMap<String, Vec<LineRange>>, AnalyzerError> {
         let filter = self.collection_filter().compile(roots.base())?;
         let mut out = BTreeMap::new();
         for source_file in collect_source_files(roots, &filter)? {
-            let ranges = changed_line_ranges(&source_file.path);
+            let ranges = changed_line_ranges(&source_file.path, scope);
             if !ranges.is_empty() {
                 out.insert(source_file.display_path, ranges);
             }
