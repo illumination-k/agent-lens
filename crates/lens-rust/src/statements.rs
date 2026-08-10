@@ -152,6 +152,26 @@ fn handler(x: i32) -> i32 {
         assert_eq!(collected[0].function_name, expected);
     }
 
+    /// `--target blocks` is the one comparison that turns value
+    /// matching on, because a statement run's identifiers are what
+    /// separate a pasted fragment from the language's own idiom (issue
+    /// #441). A `let` pattern that dropped its bound name left the
+    /// statement with no such content at all.
+    #[rstest]
+    #[case::plain("fn f() {\n    let parsed = decode(raw);\n}\n", "PatIdent", "parsed")]
+    #[case::mutable("fn f() {\n    let mut acc = Vec::new();\n}\n", "PatIdentMut", "acc")]
+    fn a_let_pattern_carries_the_name_it_binds(
+        #[case] src: &str,
+        #[case] label: &str,
+        #[case] expected: &str,
+    ) {
+        let collected = seqs(src);
+        let pat = &collected[0].statements[0].tree.children[0];
+
+        assert_eq!(pat.label, label);
+        assert_eq!(pat.value, expected);
+    }
+
     #[test]
     fn test_functions_are_flagged_so_callers_can_filter_them() {
         let collected = seqs("#[test]\nfn t() {\n    let a = 1;\n}\n");

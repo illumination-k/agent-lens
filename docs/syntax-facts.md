@@ -112,13 +112,26 @@ over each list, minting one window per contiguous run of up to
 
 - spans fewer than `min_lines` source lines (the `--min-lines` cut), or
 - lowers to fewer than `MIN_WINDOW_TREE_NODES` (8) tree nodes, or
+- lowers to fewer than `MIN_WINDOW_NODES_PER_LINE` (1.5) tree nodes per source
+  line, or
 - repeats a source span already emitted for that file.
 
-The node floor matters because line count is a poor size proxy here: a Rust
+Both node floors matter because line count is a poor size proxy here: a Rust
 `matches!` body lowers to one `MacroStmt` leaf however many lines it spans, and
-two such windows would score a perfect 1.0 against each other. Capping the run
-length keeps the unit count linear in the statement count
+two such windows would score a perfect 1.0 against each other. The absolute
+floor catches those when they are short; the per-line floor catches them when
+they are long, which is the shape a run of `const f = () => { … }` declarations
+takes — every adapter emits a nested function as its own unit and leaves a leaf
+behind, so thirty source lines of declarations is a ten-node tree. Capping the
+run length keeps the unit count linear in the statement count
 (`statements × max_statements`) rather than quadratic.
+
+Blocks are also the one target scored with value-aware comparison, at full
+rename cost. A statement window is small enough that its skeleton belongs to
+the language rather than the author — `if err != nil { return nil, err }`,
+allocate-loop-append-return — so structure alone clusters every occurrence of
+an idiom. What separates a pasted fragment from a shared idiom at that size is
+the identifiers, calls and literals it brought with it, so those have to count.
 
 `into_function_shape()` lowers a window into the `FunctionShape` corpus
 currency, with the window tree as the body and no signature — blocks have
