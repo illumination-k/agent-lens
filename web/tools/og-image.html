@@ -1,0 +1,111 @@
+<!doctype html>
+<!--
+  Source for `public/og-image.png`, the 1200x630 card social previews and
+  search result cards render. Not part of the Vite build: it lives outside
+  `src` and `public` on purpose, and the PNG next to it is what ships.
+
+  Regenerate after editing:
+
+    chromium --headless --disable-gpu --hide-scrollbars \
+      --window-size=1200,630 --screenshot=public/og-image.png tools/og-image.html
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>agent-lens open graph card</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 26px;
+        width: 1200px;
+        height: 630px;
+        margin: 0;
+        padding: 72px 80px;
+        background:
+          radial-gradient(900px 420px at 8% -12%, rgba(45, 212, 191, 0.22), transparent 70%),
+          #0b1622;
+        color: #e6edf2;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-synthesis: none;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .mark {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        color: #6ee7d7;
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+
+      .mark svg {
+        width: 44px;
+        height: 44px;
+      }
+
+      h1 {
+        max-width: 22ch;
+        margin: 0;
+        color: #ffffff;
+        font-size: 62px;
+        font-weight: 750;
+        line-height: 1.05;
+        letter-spacing: -0.025em;
+      }
+
+      p {
+        max-width: 60ch;
+        margin: 0;
+        color: #a9bac4;
+        font-size: 25px;
+        line-height: 1.4;
+      }
+
+      .strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 6px;
+      }
+
+      .strip span {
+        border: 1px solid rgba(110, 231, 215, 0.35);
+        border-radius: 999px;
+        padding: 8px 16px;
+        color: #9fe8dd;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 19px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="mark">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+        <circle cx="28" cy="28" r="15" fill="none" stroke="#2dd4bf" stroke-width="5" />
+        <circle cx="28" cy="28" r="5.5" fill="#2dd4bf" />
+        <path d="M39.5 39.5 52 52" stroke="#6ee7d7" stroke-width="6" stroke-linecap="round" />
+      </svg>
+      agent-lens
+    </div>
+    <h1>A sharper view of your codebase, tuned for the agent about to edit it.</h1>
+    <p>
+      Single-binary Rust CLI. Eighteen analyzers for duplication, complexity, coupling, and
+      call-graph blast radius — as JSON or Markdown built for a context window.
+    </p>
+    <div class="strip">
+      <span>Rust</span>
+      <span>TypeScript</span>
+      <span>Python</span>
+      <span>Go</span>
+      <span>Claude Code &amp; Codex hooks</span>
+    </div>
+  </body>
+</html>
