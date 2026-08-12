@@ -23,7 +23,8 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 18] = [
+const TOOL_ORDER: [ToolName; 19] = [
+    ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
@@ -76,7 +77,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, similarity, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -257,6 +258,32 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "int",
                 presence: "optional",
                 desc: "Cap the markdown table to the top N riskiest files.",
+            },
+        ],
+        ToolName::Search => &[
+            Field {
+                key: "query",
+                ty: "string",
+                presence: "required",
+                desc: "What to search for. Tokenized like the corpus, so `parse_diff_range`, `parseDiffRange` and `parse diff range` are one query.",
+            },
+            Field {
+                key: "limit",
+                ty: "int",
+                presence: "default: 20",
+                desc: "Cap the result list. Unlike top, this caps JSON too — a ranked list is the output, not a view of it.",
+            },
+            Field {
+                key: "fuzzy",
+                ty: "\"off\", \"missing\", or \"always\"",
+                presence: "default: missing",
+                desc: "When to expand a query term to nearby vocabulary by character-trigram overlap. `missing` expands only terms the corpus never spells; `always` also expands terms that already matched.",
+            },
+            Field {
+                key: "rank",
+                ty: "\"bm25\" or \"graph\"",
+                presence: "default: bm25",
+                desc: "Ranking signal. `graph` scales relevance by a call-graph importance prior (1 + ln(1 + fan_in)), re-ordering the top candidates so load-bearing matches lead.",
             },
         ],
         ToolName::Hubs => &[Field {
@@ -597,8 +624,8 @@ mod tests {
     use crate::config::{
         CohesionOptions, ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        RiskOptions, SimilarityOptions, UnreachableOptions, UntestedOptions, VisibilityOptions,
-        WrapperOptions,
+        RiskOptions, SearchOptions, SimilarityOptions, UnreachableOptions, UntestedOptions,
+        VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -618,6 +645,7 @@ mod tests {
 
     #[test]
     fn schema_keys_match_struct_fields() {
+        assert_tool_parity::<SearchOptions>(ToolName::Search);
         assert_tool_parity::<SimilarityOptions>(ToolName::Similarity);
         assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);

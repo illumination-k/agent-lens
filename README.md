@@ -218,6 +218,35 @@ agent-lens analyze similarity crates --format md --target types
 # those, because the enclosing functions differ; the repeated fragment does
 agent-lens analyze similarity crates --format md --target blocks
 
+# Search: rank *functions* by relevance to a query, not lines by literal match.
+# Every hit carries its span, the line inside it that matched best, and the
+# per-term reason it ranked, so a broad query costs a bounded ranked list
+# instead of an unranked wall of matches
+agent-lens analyze search crates/ --query 'diff range gate' --format md
+
+# Identifier spelling is not part of the query: `_`, camelCase and spaces
+# all tokenize the same way, and the joined form is indexed too — so an
+# exact identifier is a single high-signal term
+agent-lens analyze search . --query parseDiffRange --limit 5 --format md
+
+# A term the corpus never spells is expanded to nearby vocabulary by
+# character-trigram overlap: half-remembered identifiers, typos, and
+# substrings of a token a script without word boundaries produced
+agent-lens analyze search . --query changed_line_rangs --format md
+
+# Scale relevance by call-graph importance (`1 + ln(1 + fan_in)`) so the
+# load-bearing match leads. This is the question grep cannot express
+agent-lens analyze search . --query 'render report' --rank graph --format md
+```
+
+`search` is for the question `grep` cannot take: _"where does this codebase do
+X"_, when the identifier is not known. When it **is** known, `grep` is still the
+better tool — it is exact, needs no parse, and its output is smaller. The trade
+also has a shape worth knowing: relevance is scored per term, so a rare word
+that is irrelevant to the question ("decide", "handle") pulls the ranking
+towards itself. Two to four content words beat a full sentence.
+
+```bash
 # All analyzers accept path filters: focus tests, drop tests, or exclude globs
 agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
 agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
@@ -459,16 +488,16 @@ than a refusal.
 The current binary exposes three top-level command trees plus `run`,
 `baseline`, `skills`, `config`, and `help`:
 
-| Command tree | Commands                                                                                                                                                                                                                       |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                      |
-| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                      |
-| `analyze`    | `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                  |
-| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document; `compare <profile> <SNAPSHOT> [--update]` — measure a fresh run against one, exit 2 on a regression                          |
-| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                                            |
-| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                                       |
-| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                                             |
+| Command tree | Commands                                                                                                                                                                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                |
+| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                |
+| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                            |
+| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document; `compare <profile> <SNAPSHOT> [--update]` — measure a fresh run against one, exit 2 on a regression                                    |
+| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                                                      |
+| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                                                 |
+| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                                                       |
 
 `agent-lens --help` opens with a question-to-analyzer routing table
 ("what breaks if I change this?" → `analyze impact`) plus the output
@@ -527,6 +556,7 @@ Analyzer-specific options today:
 
 | Analyzer         | Extra options                                                                                                                                                                                                                                                        |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search`         | `--query TEXT` (required), `--limit N`, `--fuzzy off\|missing\|always`, `--rank bm25\|graph`                                                                                                                                                                         |
 | `similarity`     | `--target functions\|types\|blocks`, `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--doc-overlap`, `--diff-only`, `--diff-range RANGE`, `--top N` |
 | `complexity`     | `--diff-only`, `--diff-range RANGE`, `--top N`, `--min-score N`                                                                                                                                                                                                      |
 | `cohesion`       | `--diff-only`, `--diff-range RANGE`, `--top N`, `--min-score N`                                                                                                                                                                                                      |
@@ -752,6 +782,7 @@ non-zero.
 
 | Subcommand       | What it surfaces                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Languages                 |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `search`         | Functions ranked by BM25F relevance to a query, over five separately weighted fields (name, file path, signature, doc comment, body) — so a definition _named_ after the query outranks one that merely mentions it. Queries tokenize the way identifiers are written (`_`, camelCase, and the joined form all index as one term), and a term the corpus never spells is expanded to nearby vocabulary by character-trigram overlap, covering misspellings and substrings of a token a script without word boundaries produced. Each hit carries its span, the best-matching line inside it, and the per-term per-field breakdown behind its score. `--rank graph` scales relevance by a call-graph importance prior (`1 + ln(1 + fan_in)`), re-ordering the top candidates so load-bearing matches lead. The index is built per run and never persisted, so a result is never stale.                                        | Rust, TS / JS, Python, Go |
 | `similarity`     | Near-duplicate pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance, folded into complete-link clusters. `--target` picks the unit: `functions` (default), `types` (definitions compared on their member shape — struct / enum / interface / alias), or `blocks` (statement runs _inside_ function bodies, the copy-paste whole-definition comparison cannot see). Blocks are scored value-aware: at that size the skeleton belongs to the language, not the author, so a shared idiom (`if err != nil { return nil, err }`, a run of arrow-function declarations) is separated from a pasted fragment by the identifiers, calls, and literals it carries. Two implementations of the _same_ trait method are scored on the body alone, since a shared trait dictates the signature by construction — so trait-impl boilerplate stops being inflated past its honest body similarity. | Rust, TS / JS, Python, Go |
 | `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, … A Go method wrapper matching an in-scope interface method (name + arity) is annotated as such, since it cannot simply be deleted — embedding the inner value is the idiomatic fix.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Rust, TS / JS, Python, Go |
 | `delegation`     | Chains of functions that only forward (`api::save -> service::save -> repo::save -> db::insert`), with per-hop `file:line`, the terminus that does the work as the headline, and a per-module roll-up of delegator ratio and target concentration (lasagna layers). Generalizes `wrapper` from one hop to many; forwarders that log, lock, or validate are deliberately not counted, and hops the language put there (trait-impl methods — `Deref`, `From`, `Display` forwarding to an inner value) are marked so they can be weighed lower.                                                                                                                                                                                                                                                                                                                                                                                 | Rust, TS / JS, Python, Go |

@@ -14,6 +14,7 @@ use agent_lens::analyze::hubs::HubsOptions;
 use agent_lens::analyze::impact::ImpactOptions;
 use agent_lens::analyze::layers::LayersOptions;
 use agent_lens::analyze::risk::RiskOptions;
+use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
 use agent_lens::analyze::unreachable::UnreachableOptions;
 use agent_lens::analyze::untested::UntestedOptions;
@@ -675,6 +676,33 @@ pub(super) enum AnalyzeCommand {
     /// default; `--format md` caps the table at `--top` (default 20).
     #[command(after_long_help = examples::RISK)]
     Risk(AnalyzeRiskArgs),
+    /// Rank functions by how well they match a query.
+    ///
+    /// The retrieval unit is the function, not the line: every hit is a
+    /// definition with its span, the line inside it that matched best,
+    /// and a per-term breakdown of why it ranked — so a broad query
+    /// costs a bounded, ranked result list instead of an unranked wall
+    /// of line matches. Each function is indexed as five separately
+    /// weighted fields (name, file path, signature, doc comment, body)
+    /// and scored with BM25F, so a function *named* after the query
+    /// outranks one that merely mentions it. Queries are tokenized the
+    /// way identifiers are written, splitting on `_` and camelCase and
+    /// also indexing the joined form, so `parse_diff_range`,
+    /// `parseDiffRange` and `parse diff range` are one query. A term
+    /// the corpus never spells is expanded to nearby vocabulary by
+    /// character-trigram overlap (`--fuzzy`, default `missing`), which
+    /// covers misspellings and — because a script without word
+    /// boundaries tokenizes to one long term — substrings of a longer
+    /// token; an expanded term is always worth less than a literal one.
+    /// `--rank graph` scales relevance by a call-graph importance prior
+    /// (`1 + ln(1 + fan_in)`), re-ordering the top candidates so
+    /// load-bearing matches lead. The index is built per run and never
+    /// persisted, so results are never stale. The parser is chosen from
+    /// each file extension (Rust, TypeScript/JavaScript, Python, or
+    /// Go); other extensions are ignored silently. JSON is the default;
+    /// `--format md` emits a compact ranked listing.
+    #[command(after_long_help = examples::SEARCH)]
+    Search(AnalyzeSearchArgs),
     /// Report clusters of near-duplicate functions.
     ///
     /// Accepts source files or directories, and more than one of
@@ -931,6 +959,14 @@ pub(super) struct AnalyzeRiskArgs {
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(super) opts: RiskOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeSearchArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: SearchOptions,
 }
 
 #[derive(Debug, Clone, Args)]

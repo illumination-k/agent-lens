@@ -33,6 +33,7 @@ mod path_filter;
 pub mod risk;
 mod roots;
 mod runner;
+pub mod search;
 pub mod similarity;
 mod source_files;
 pub mod unreachable;
@@ -60,6 +61,7 @@ pub use hubs::HubsAnalyzer;
 pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
 pub use layers::LayersAnalyzer;
 pub use risk::{RiskAnalyzer, RiskError};
+pub use search::{DEFAULT_SEARCH_LIMIT, FuzzyMode, RankMode, SearchAnalyzer};
 
 /// Backward-compatible alias for the unified [`CrateAnalyzerError`].
 pub type CouplingAnalyzerError = CrateAnalyzerError;
@@ -231,6 +233,11 @@ pub enum AnalyzerError {
     PathFilter(#[from] PathFilterError),
     #[error("invalid graph query: {message}")]
     InvalidQuery { message: String },
+    /// A query with no alphanumeric run tokenizes to nothing and can
+    /// never match. Reporting zero hits would read as "the corpus has
+    /// nothing like this", which is a different — and wrong — answer.
+    #[error("search query {query:?} contains no searchable term")]
+    EmptySearchQuery { query: String },
 }
 
 /// Errors raised by analyzers that walk a Rust crate from a `.rs` root

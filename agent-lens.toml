@@ -8,9 +8,9 @@
 # Run them all against a freshly built binary with `mise run selftest`,
 # or one at a time with `agent-lens run <profile>`.
 #
-# `graph-query` and `impact` appear in no profile on purpose: both need a
-# symbol to start from, which is a per-question argument rather than a
-# project setting.
+# `graph-query`, `impact` and `search` appear in no profile on purpose:
+# each needs a symbol or a query to start from, which is a per-question
+# argument rather than a project setting.
 
 # The self-audit: every analyzer that works from a single crate root,
 # pointed at the crate where the analyzers, hooks, and CLI all live.
