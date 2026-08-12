@@ -672,6 +672,77 @@ mod tests {
         SearchIndex::build(documents, IndexOptions::default())
     }
 
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}",
+        );
+    }
+
+    /// Pin the whole BM25F chain on a corpus small enough to compute by
+    /// hand. Ordering assertions elsewhere survive most arithmetic
+    /// perturbations of these formulas; this is the test that does not.
+    ///
+    /// Two documents, `name` the only populated field. For the query
+    /// `alpha`, present in one of them:
+    ///
+    ///   idf = ln(1 + (2 - 1 + 0.5) / (1 + 0.5))          = ln 2
+    ///   ~tf = 5.0 × 1 / (1 - 0 + 0 × len/avg)            = 5.0
+    ///   score = 1.0 × idf × ~tf / (k1 + ~tf)             = ln 2 × 5/6.2
+    #[test]
+    fn a_name_only_score_matches_the_bm25f_formula() {
+        let documents = vec![doc("alpha", ""), doc("beta", "")];
+        let hits = index(&documents).search("alpha", 10);
+        assert_eq!(hits.len(), 1);
+        let expected = 2.0f64.ln() * 5.0 / (1.2 + 5.0);
+        assert_close(hits[0].score, expected);
+        assert_close(hits[0].terms[0].score, expected);
+    }
+
+    /// The name field sets `b = 0`, so the case above cannot see the
+    /// length-normalisation term at all. The body field sets `b = 0.75`,
+    /// which makes the same term worth less in a longer body:
+    ///
+    ///   avg body length = (1 + 3) / 2                    = 2
+    ///   idf = ln(1 + (2 - 2 + 0.5) / (2 + 0.5))          = ln 1.2
+    ///   short: ~tf = 1 / (1 - 0.75 + 0.75 × 1/2)         = 1.6
+    ///   long:  ~tf = 1 / (1 - 0.75 + 0.75 × 3/2)         = 8/11
+    #[test]
+    fn a_longer_field_dilutes_the_same_term() {
+        let documents = vec![doc("", "alpha"), doc("", "alpha beta gamma")];
+        let hits = index(&documents).search("alpha", 10);
+        let idf = 1.2f64.ln();
+        assert_eq!(hits[0].document, 0, "hits: {hits:?}");
+        assert_close(hits[0].score, idf * 1.6 / (1.2 + 1.6));
+        let long = 1.0 / (1.0 - 0.75 + 0.75 * 3.0 / 2.0);
+        assert_close(hits[1].score, idf * long / (1.2 + long));
+    }
+
+    /// Containment is a threshold, so it has to be pinned at the
+    /// threshold. Against the four trigrams of `abcdef`, the candidates
+    /// carry 4/4, 3/4 and 2/4 of them — so a 0.75 cut must admit
+    /// exactly the first two.
+    #[test]
+    fn containment_admits_a_candidate_exactly_at_the_cut() {
+        let documents = vec![doc("abcdefg", ""), doc("abcdezz", ""), doc("abcdxy", "")];
+        let index = SearchIndex::build(
+            &documents,
+            IndexOptions {
+                fuzzy: Some(FuzzyOptions {
+                    min_containment: 0.75,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let hits = index.search("abcdef", 10);
+        assert_eq!(
+            hits.iter().map(|h| h.document).collect::<Vec<_>>(),
+            [0, 1],
+            "2/4 containment is below the cut, 3/4 is exactly at it: {hits:?}",
+        );
+    }
+
     #[rstest]
     #[case("load_user_id", vec!["loaduserid", "load", "user", "id"])]
     #[case("loadUserId", vec!["loaduserid", "load", "user", "id"])]
@@ -726,7 +797,13 @@ mod tests {
             body: "fn resolve_symbol() {}".to_owned(),
             ..Default::default()
         }];
-        let hits = index(&documents).search("resolve", 10);
+        let index = index(&documents);
+        assert_eq!(index.document_count(), 1);
+        // `resolvesymbol`, `resolve`, `symbol`, `a`, `fn` — the joined
+        // form plus its parts, counted once across every field.
+        assert_eq!(index.term_count(), 5);
+
+        let hits = index.search("resolve", 10);
         let term = hits[0]
             .terms
             .iter()

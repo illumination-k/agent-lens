@@ -259,11 +259,15 @@ impl SearchAnalyzer {
             },
         );
         let limit = self.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
-        let pool = match self.rank {
-            RankMode::Bm25 => limit,
-            RankMode::Graph => limit.saturating_mul(GRAPH_POOL_FACTOR),
+        // In `graph` mode the prior re-orders, so the pool scored has
+        // to be wider than the window reported — and the report says
+        // how wide, because that width is exactly what bounds the
+        // mode's reach.
+        let candidate_pool = match self.rank {
+            RankMode::Bm25 => None,
+            RankMode::Graph => Some(limit.saturating_mul(GRAPH_POOL_FACTOR)),
         };
-        let hits = index.search(&self.query, pool);
+        let hits = index.search(&self.query, candidate_pool.unwrap_or(limit));
         let ranked = self.rank_hits(&roots, &corpus, hits, limit)?;
 
         let report = Report {
@@ -277,6 +281,7 @@ impl SearchAnalyzer {
             indexed_function_count: index.document_count(),
             indexed_term_count: index.term_count(),
             limit,
+            candidate_pool,
             hit_count: ranked.len(),
             hits: ranked.iter().map(|r| HitView::build(&corpus, r)).collect(),
         };
@@ -516,6 +521,10 @@ struct Report {
     indexed_function_count: usize,
     indexed_term_count: usize,
     limit: usize,
+    /// How many relevance candidates the ranking mode considered.
+    /// Absent in `bm25` mode, where that is the limit by construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_pool: Option<usize>,
     hit_count: usize,
     hits: Vec<HitView>,
 }
@@ -638,11 +647,10 @@ fn format_markdown(report: &Report) -> String {
         report.indexed_term_count,
         report.query_terms.join(" "),
     );
-    if report.rank == RankMode::Graph.as_str() {
+    if let Some(candidate_pool) = report.candidate_pool {
         let _ = writeln!(
             out,
-            "- graph rank re-orders the top {} relevance candidates; a hub below that cut is not surfaced",
-            report.limit * GRAPH_POOL_FACTOR,
+            "- graph rank re-orders the top {candidate_pool} relevance candidates; a hub below that cut is not surfaced",
         );
     }
     if report.hits.is_empty() {
@@ -769,6 +777,49 @@ mod tests {
         assert_eq!(names(&report)[0], "parse_diff_range", "{report:#}");
     }
 
+    /// The snippet is the *best-matching* line, not the first one — a
+    /// hit whose evidence is buried mid-body has to point at the
+    /// evidence, or the reader has to open the file anyway. Ties go to
+    /// the earliest line.
+    #[test]
+    fn the_snippet_points_into_the_body_not_at_the_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn alpha() -> usize {\n    let a = 1;\n    let sentinel = 2;\n    a + sentinel\n}\n",
+        );
+        let report = json(dir.path(), SearchAnalyzer::new("sentinel"));
+        let hit = &report["hits"][0];
+        assert_eq!(hit["start_line"], 1);
+        assert_eq!(hit["snippet"]["line"], 3, "{report:#}");
+        assert_eq!(hit["snippet"]["text"], "let sentinel = 2;");
+    }
+
+    /// A parameter's name and type reach the index through the
+    /// signature field, which no other field would carry: the query
+    /// term here appears in the declaration only.
+    #[test]
+    fn a_signature_match_is_reported_as_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn alpha(needle_param: usize) -> usize {\n    let a = 1;\n    a\n}\n",
+        );
+        let report = json(dir.path(), SearchAnalyzer::new("needle_param"));
+        let fields = report["hits"][0]["matched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["term"] == "needleparam")
+            .expect("the joined parameter name must be indexed")["fields"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(fields.contains(&Value::from("signature")), "{report:#}");
+    }
+
     /// The hit quotes the line inside the definition that matched, not
     /// the definition's first line by default — that is what makes a
     /// result actionable without opening the file.
@@ -829,6 +880,43 @@ mod tests {
             "{production:#}",
         );
         assert!(names(&production).iter().any(|n| n == "parse_diff_range"));
+    }
+
+    /// The mode is named in the report, and `always` actually changes
+    /// what is scored: a term the corpus *does* spell gains expansions
+    /// that `missing` withholds.
+    #[rstest]
+    #[case(FuzzyMode::Off, "off")]
+    #[case(FuzzyMode::Missing, "missing")]
+    #[case(FuzzyMode::Always, "always")]
+    fn the_fuzzy_mode_is_named_in_the_report(#[case] mode: FuzzyMode, #[case] expected: &str) {
+        let dir = fixture();
+        let report = json(
+            dir.path(),
+            SearchAnalyzer::new("diff range").with_fuzzy(mode),
+        );
+        assert_eq!(report["fuzzy"], expected);
+    }
+
+    #[test]
+    fn always_expands_a_term_the_corpus_already_spells() {
+        let dir = fixture();
+        let expansions = |mode: FuzzyMode| {
+            let report = json(dir.path(), SearchAnalyzer::new("range").with_fuzzy(mode));
+            report["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|hit| hit["matched"].as_array().unwrap())
+                .filter(|m| !m["similarity"].is_null())
+                .count()
+        };
+        assert_eq!(
+            expansions(FuzzyMode::Missing),
+            0,
+            "`range` is in the corpus"
+        );
+        assert!(expansions(FuzzyMode::Always) > 0);
     }
 
     #[test]
@@ -927,11 +1015,33 @@ pub fn gamma() -> String {
         assert_eq!(names(&graph)[0], "render_report", "{graph:#}");
         assert_eq!(graph["hits"][0]["fan_in"], 3);
         // The relevance component survives alongside the ranked score,
-        // so the promotion is visible rather than implied.
-        assert!(
-            graph["hits"][0]["relevance"].as_f64().unwrap()
-                < graph["hits"][0]["score"].as_f64().unwrap(),
+        // so the promotion is visible rather than implied — and the
+        // score is relevance *scaled* by the prior, not offset by it.
+        let hit = &graph["hits"][0];
+        let (relevance, score) = (
+            hit["relevance"].as_f64().unwrap(),
+            hit["score"].as_f64().unwrap(),
         );
+        assert!(relevance < score);
+        let prior = importance_prior(3);
+        // Both figures are rounded to three decimals for the report, so
+        // the equality holds to within one rounding step on each side.
+        assert!(
+            (score - relevance * prior).abs() <= 0.0005 * prior + 0.0005,
+            "score {score} must be relevance {relevance} scaled by {prior}: {graph:#}",
+        );
+        assert_eq!(graph["candidate_pool"], 100);
+    }
+
+    /// `bm25` mode never builds the graph, so it reports neither a
+    /// fan-in nor a candidate pool — the absence is the honest signal
+    /// that no importance evidence was gathered.
+    #[test]
+    fn relevance_mode_reports_no_graph_evidence() {
+        let dir = fixture();
+        let report = json(dir.path(), SearchAnalyzer::new("parse_diff_range"));
+        assert!(report.get("candidate_pool").is_none(), "{report:#}");
+        assert!(report["hits"][0]["fan_in"].is_null());
     }
 
     /// Every adapter feeds the same index, so a query crosses language
