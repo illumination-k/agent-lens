@@ -562,13 +562,16 @@ impl SearchIndex {
             if tf == 0 {
                 continue;
             }
+            // No zero-average guard: `tf > 0` means this document had a
+            // token in the field, so the field's corpus total — and
+            // therefore its average — cannot be zero. A guard here would
+            // be a branch no input reaches.
             let avg = self.avg_field_length[slot];
             let b = self.options.bm25.field_b[slot];
-            let norm = if avg > 0.0 {
-                1.0 - b + b * f64::from(lengths[slot]) / avg
-            } else {
-                1.0
-            };
+            let norm = 1.0 - b + b * f64::from(lengths[slot]) / avg;
+            // `b` is a public knob, so a caller can put it outside
+            // `[0, 1]` and drive the normalisation to zero or below.
+            // That one is reachable.
             if norm <= 0.0 {
                 continue;
             }
@@ -716,6 +719,40 @@ mod tests {
         assert_close(hits[0].score, idf * 1.6 / (1.2 + 1.6));
         let long = 1.0 / (1.0 - 0.75 + 0.75 * 3.0 / 2.0);
         assert_close(hits[1].score, idf * long / (1.2 + long));
+    }
+
+    /// Every other formula case uses a term appearing once, where the
+    /// field weight multiplying the count is indistinguishable from it
+    /// dividing one. Two occurrences separate them — and outrank one:
+    ///
+    ///   avg body length = (2 + 2) / 2                    = 2
+    ///   idf = ln(1 + (2 - 2 + 0.5) / (2 + 0.5))          = ln 1.2
+    ///   norm = 1 - 0.75 + 0.75 × 2/2                     = 1
+    ///   twice: ~tf = 1.0 × 2 / 1                         = 2
+    ///   once:  ~tf = 1.0 × 1 / 1                         = 1
+    #[test]
+    fn a_repeated_term_in_one_field_outranks_a_single_occurrence() {
+        let documents = vec![doc("", "alpha alpha"), doc("", "alpha beta")];
+        let hits = index(&documents).search("alpha", 10);
+        let idf = 1.2f64.ln();
+        assert_eq!(hits[0].document, 0, "hits: {hits:?}");
+        assert_close(hits[0].score, idf * 2.0 / (1.2 + 2.0));
+        assert_close(hits[1].score, idf * 1.0 / (1.2 + 1.0));
+    }
+
+    /// A field nothing in the corpus populates has a zero average, and
+    /// must simply contribute nothing — not a division by zero that
+    /// poisons the whole score.
+    #[test]
+    fn a_field_no_document_populates_never_reaches_the_normalisation() {
+        let documents = vec![doc("alpha", ""), doc("beta", "")];
+        let hits = index(&documents).search("alpha", 10);
+        assert!(hits[0].score.is_finite(), "hits: {hits:?}");
+        assert_eq!(
+            hits[0].terms[0].fields,
+            [SearchField::Name],
+            "the empty fields must not appear as evidence",
+        );
     }
 
     /// Containment is a threshold, so it has to be pinned at the
