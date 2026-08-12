@@ -280,6 +280,12 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "When to expand a query term to nearby vocabulary by character-trigram overlap. `missing` expands only terms the corpus never spells; `always` also expands terms that already matched.",
             },
             Field {
+                key: "explain",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Attach the per-term scoring breakdown to every hit. Off by default: ranking has already happened, so the numbers behind it are for auditing an ordering, not for acting on a result.",
+            },
+            Field {
                 key: "rank",
                 ty: "\"bm25\" or \"graph\"",
                 presence: "default: bm25",

@@ -5,9 +5,15 @@
 //! does this string occur", leaves the caller to rebuild the enclosing
 //! definitions, and returns its matches unranked — so a two-hundred-hit
 //! query costs an agent its context window rather than answering the
-//! question. Here every hit is a definition with a span, a relevance
-//! score, the line inside it that matched best, and a per-term
-//! breakdown of *why* it ranked.
+//! question. Here every hit is a definition with a span, a score, the
+//! line inside it that matched best, and the fields the query matched
+//! in — which is the part that says whether the hit is the definition
+//! being asked about or merely a mention of it.
+//!
+//! What a hit does *not* carry by default is the arithmetic behind its
+//! rank. Ranking has already happened, and a consumer that is not going
+//! to re-rank pays for those numbers without using them; `--explain`
+//! restores the per-term breakdown for auditing a suspicious ordering.
 //!
 //! Scoring lives in [`lens_domain::search`]; this module is the corpus
 //! projection and the report. Each function becomes a five-field
@@ -41,7 +47,8 @@ use std::fmt::Write as _;
 
 use lens_domain::FunctionDef;
 use lens_domain::search::{
-    Bm25Options, FuzzyOptions, IndexOptions, SearchDocument, SearchHit, SearchIndex, tokenize,
+    Bm25Options, FuzzyOptions, IndexOptions, SearchDocument, SearchField, SearchHit, SearchIndex,
+    TermScore, tokenize,
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -70,8 +77,8 @@ pub const GRAPH_POOL_FACTOR: usize = 5;
 /// agent's context.
 const SNIPPET_MAX_CHARS: usize = 160;
 
-/// Per-hit term breakdown entries rendered in markdown. JSON carries
-/// them all.
+/// Per-hit term breakdown entries rendered in markdown under
+/// `--explain`. JSON carries all of them.
 const MD_TERM_LIMIT: usize = 5;
 
 /// When a query term is expanded to nearby vocabulary via character
@@ -162,6 +169,12 @@ pub struct SearchOptions {
     /// bm25).
     #[arg(long, value_enum)]
     pub rank: Option<RankMode>,
+    /// Add the per-term scoring breakdown to every hit. Off by default:
+    /// ranking has already happened, so the numbers behind it are for
+    /// auditing a suspicious ordering, not for acting on a result.
+    #[arg(long)]
+    #[serde(default)]
+    pub explain: bool,
 }
 
 /// Analyzer entry point for `analyze search`.
@@ -179,6 +192,7 @@ pub struct SearchAnalyzer {
     limit: Option<usize>,
     fuzzy: FuzzyMode,
     rank: RankMode,
+    explain: bool,
 }
 
 impl SearchAnalyzer {
@@ -190,6 +204,7 @@ impl SearchAnalyzer {
             limit: None,
             fuzzy: FuzzyMode::default(),
             rank: RankMode::default(),
+            explain: false,
         }
     }
 
@@ -200,6 +215,7 @@ impl SearchAnalyzer {
             .with_limit(opts.limit)
             .with_fuzzy(opts.fuzzy.unwrap_or_default())
             .with_rank(opts.rank.unwrap_or_default())
+            .with_explain(opts.explain)
     }
 
     pub fn with_limit(mut self, limit: Option<usize>) -> Self {
@@ -214,6 +230,12 @@ impl SearchAnalyzer {
 
     pub fn with_rank(mut self, rank: RankMode) -> Self {
         self.rank = rank;
+        self
+    }
+
+    /// Attach the per-term scoring breakdown to every hit.
+    pub fn with_explain(mut self, explain: bool) -> Self {
+        self.explain = explain;
         self
     }
 
@@ -283,7 +305,10 @@ impl SearchAnalyzer {
             limit,
             candidate_pool,
             hit_count: ranked.len(),
-            hits: ranked.iter().map(|r| HitView::build(&corpus, r)).collect(),
+            hits: ranked
+                .iter()
+                .map(|r| HitView::build(&corpus, r, self.rank, self.explain))
+                .collect(),
         };
         render_report(&report, format, || format_markdown(&report))
     }
@@ -536,16 +561,30 @@ struct HitView {
     start_line: usize,
     end_line: usize,
     is_test: bool,
-    /// Final ranking score — equal to `relevance` unless the graph rank
-    /// mode scaled it.
+    /// Final ranking score.
     score: f64,
-    /// Textual BM25F relevance on its own.
-    relevance: f64,
+    /// Union of the fields any query term matched in, in field order.
+    /// This is the one part of the scoring evidence that changes what a
+    /// reader does: a hit carrying `name` is the definition being asked
+    /// about, one carrying only `body` is a mention of it.
+    fields: Vec<&'static str>,
+    /// Set when some of the evidence came from n-gram expansion rather
+    /// than a literal match, so a result list built entirely out of
+    /// near-misses cannot read as a list of real ones.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    expanded: bool,
+    /// Textual relevance before the importance prior. Emitted only in
+    /// `graph` mode, where it differs from `score`; in `bm25` mode the
+    /// two are the same number by construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relevance: Option<f64>,
     /// Distinct resolved callers, when the graph rank mode ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     fan_in: Option<usize>,
     snippet: Snippet,
-    matched: Vec<MatchView>,
+    /// Per-term scoring breakdown, under `--explain` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched: Option<Vec<MatchView>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -574,9 +613,15 @@ fn round(value: f64) -> f64 {
 }
 
 impl HitView {
-    fn build(corpus: &Corpus, ranked: &RankedHit) -> Self {
+    fn build(corpus: &Corpus, ranked: &RankedHit, rank: RankMode, explain: bool) -> Self {
         let hit = &ranked.hit;
         let record = &corpus.records[hit.document];
+        let fields: BTreeSet<SearchField> = hit
+            .terms
+            .iter()
+            .flat_map(|term| term.fields.iter())
+            .copied()
+            .collect();
         Self {
             file: record.file.clone(),
             name: record.name.clone(),
@@ -584,20 +629,29 @@ impl HitView {
             end_line: record.end_line,
             is_test: record.is_test,
             score: round(ranked.score),
-            relevance: round(hit.score),
+            fields: SearchField::ALL
+                .into_iter()
+                .filter(|field| fields.contains(field))
+                .map(SearchField::as_str)
+                .collect(),
+            expanded: hit.terms.iter().any(TermScore::is_expansion),
+            // The prior is what makes the two differ, so the raw
+            // relevance is evidence only where a prior was applied.
+            relevance: (rank == RankMode::Graph).then(|| round(hit.score)),
             fan_in: ranked.fan_in,
             snippet: best_snippet(record, &matched_terms(hit)),
-            matched: hit
-                .terms
-                .iter()
-                .map(|term| MatchView {
-                    query_term: term.query_term.clone(),
-                    term: term.matched_term.clone(),
-                    similarity: term.is_expansion().then(|| round(term.similarity)),
-                    score: round(term.score),
-                    fields: term.fields.iter().map(|field| field.as_str()).collect(),
-                })
-                .collect(),
+            matched: explain.then(|| {
+                hit.terms
+                    .iter()
+                    .map(|term| MatchView {
+                        query_term: term.query_term.clone(),
+                        term: term.matched_term.clone(),
+                        similarity: term.is_expansion().then(|| round(term.similarity)),
+                        score: round(term.score),
+                        fields: term.fields.iter().map(|field| field.as_str()).collect(),
+                    })
+                    .collect()
+            }),
         }
     }
 }
@@ -661,7 +715,7 @@ fn format_markdown(report: &Report) -> String {
     for (rank, hit) in report.hits.iter().enumerate() {
         let _ = writeln!(
             out,
-            "{}. {}:{}-{} {}{} score={}{}",
+            "{}. {}:{}-{} {}{} score={} {}{}{}",
             rank + 1,
             hit.file,
             hit.start_line,
@@ -669,14 +723,19 @@ fn format_markdown(report: &Report) -> String {
             hit.name,
             if hit.is_test { " [test]" } else { "" },
             hit.score,
-            match hit.fan_in {
-                Some(fan_in) => format!(" relevance={} fan-in={fan_in}", hit.relevance),
-                None => String::new(),
+            hit.fields.join(","),
+            if hit.expanded { " ~expanded" } else { "" },
+            match (hit.relevance, hit.fan_in) {
+                (Some(relevance), Some(fan_in)) =>
+                    format!(" relevance={relevance} fan-in={fan_in}"),
+                _ => String::new(),
             },
         );
         let _ = writeln!(out, "   L{}: {}", hit.snippet.line, hit.snippet.text);
-        let terms: Vec<String> = hit
-            .matched
+        let Some(matched) = &hit.matched else {
+            continue;
+        };
+        let terms: Vec<String> = matched
             .iter()
             .take(MD_TERM_LIMIT)
             .map(|m| {
@@ -808,15 +867,7 @@ mod tests {
             "pub fn alpha(needle_param: usize) -> usize {\n    let a = 1;\n    a\n}\n",
         );
         let report = json(dir.path(), SearchAnalyzer::new("needle_param"));
-        let fields = report["hits"][0]["matched"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["term"] == "needleparam")
-            .expect("the joined parameter name must be indexed")["fields"]
-            .as_array()
-            .unwrap()
-            .clone();
+        let fields = report["hits"][0]["fields"].as_array().unwrap().clone();
         assert!(fields.contains(&Value::from("signature")), "{report:#}");
     }
 
@@ -837,17 +888,47 @@ mod tests {
         assert!(hit["end_line"].as_u64().unwrap() >= 3);
     }
 
-    /// Every hit says why it ranked, per term and per field. Without
-    /// that a ranked list is just an ordering the reader has to trust.
+    /// A hit says where the query matched, because that is what tells
+    /// the reader whether it is the definition or a mention of one. It
+    /// does not say what each term contributed — ranking has already
+    /// happened, and a reader who is not re-ranking pays for those
+    /// numbers without using them.
     #[test]
-    fn a_hit_reports_the_terms_and_fields_behind_its_score() {
+    fn a_hit_reports_where_the_query_matched_but_not_the_arithmetic() {
         let dir = fixture();
         let report = json(dir.path(), SearchAnalyzer::new("parse_diff_range"));
-        let matched = report["hits"][0]["matched"].as_array().unwrap();
-        let joined = matched
+        let hit = &report["hits"][0];
+        assert_eq!(
+            hit["fields"],
+            serde_json::json!(["name", "signature", "doc", "body"])
+        );
+        assert!(hit.get("matched").is_none(), "{report:#}");
+        assert!(hit.get("expanded").is_none(), "a literal match: {report:#}");
+        assert!(
+            hit.get("relevance").is_none(),
+            "in bm25 mode relevance is the score: {report:#}",
+        );
+    }
+
+    /// `--explain` restores the breakdown for auditing an ordering, and
+    /// is the only thing that changes: the ranking is identical.
+    #[test]
+    fn explain_adds_the_breakdown_without_changing_the_ranking() {
+        let dir = fixture();
+        let terse = json(dir.path(), SearchAnalyzer::new("parse_diff_range"));
+        let explained = json(
+            dir.path(),
+            SearchAnalyzer::new("parse_diff_range").with_explain(true),
+        );
+        assert_eq!(names(&terse), names(&explained));
+
+        let joined = explained["hits"][0]["matched"]
+            .as_array()
+            .unwrap()
             .iter()
             .find(|m| m["term"] == "parsediffrange")
-            .expect("the joined identifier term must be reported");
+            .expect("the joined identifier term must be reported")
+            .clone();
         assert_eq!(joined["query_term"], "parsediffrange");
         assert!(
             joined["similarity"].is_null(),
@@ -859,6 +940,16 @@ mod tests {
                 .unwrap()
                 .contains(&Value::from("name")),
         );
+    }
+
+    /// A hit resting on n-gram expansion is marked as such, so a result
+    /// list built entirely out of near-misses cannot be read as a list
+    /// of real ones.
+    #[test]
+    fn a_hit_built_on_expansion_is_flagged_without_explain() {
+        let dir = fixture();
+        let report = json(dir.path(), SearchAnalyzer::new("parse_diff_rnge"));
+        assert_eq!(report["hits"][0]["expanded"], true, "{report:#}");
     }
 
     #[test]
@@ -907,8 +998,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .flat_map(|hit| hit["matched"].as_array().unwrap())
-                .filter(|m| !m["similarity"].is_null())
+                .filter(|hit| hit["expanded"] == true)
                 .count()
         };
         assert_eq!(
@@ -937,7 +1027,10 @@ mod tests {
     #[test]
     fn a_misspelled_query_reaches_the_definition_and_says_so() {
         let dir = fixture();
-        let report = json(dir.path(), SearchAnalyzer::new("parse_diff_rnge"));
+        let report = json(
+            dir.path(),
+            SearchAnalyzer::new("parse_diff_rnge").with_explain(true),
+        );
         assert_eq!(names(&report)[0], "parse_diff_range", "{report:#}");
         let expanded = report["hits"][0]["matched"]
             .as_array()
@@ -954,7 +1047,9 @@ mod tests {
         // literal.
         let strict = json(
             dir.path(),
-            SearchAnalyzer::new("parse_diff_rnge").with_fuzzy(FuzzyMode::Off),
+            SearchAnalyzer::new("parse_diff_rnge")
+                .with_fuzzy(FuzzyMode::Off)
+                .with_explain(true),
         );
         assert_eq!(names(&strict)[0], "parse_diff_range", "{strict:#}");
         assert!(
@@ -964,6 +1059,10 @@ mod tests {
                 .iter()
                 .all(|m| m["similarity"].is_null()),
             "{strict:#}",
+        );
+        assert!(
+            strict["hits"][0].get("expanded").is_none(),
+            "nothing was expanded: {strict:#}",
         );
         assert!(
             strict["hits"][0]["score"].as_f64().unwrap()
@@ -1089,13 +1188,39 @@ pub fn gamma() -> String {
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert!(md.starts_with("# Search: parse_diff_range"), "{md}");
-        assert!(md.contains("src/lib.rs:3-5 parse_diff_range"), "{md}");
+        assert!(
+            md.contains("src/lib.rs:3-5 parse_diff_range score=")
+                && md.contains("name,signature,doc,body"),
+            "{md}",
+        );
         assert!(md.contains("   L3: pub fn parse_diff_range"), "{md}");
-        assert!(md.contains("parsediffrange[name,body]="), "{md}");
+        // The header's `query terms:` line stays; what must be absent
+        // is the per-hit breakdown, which is indented.
+        assert!(
+            !md.contains("   terms:"),
+            "the breakdown belongs to --explain: {md}",
+        );
         assert!(
             !md.contains("graph rank re-orders"),
             "the graph caveat belongs to the graph mode only: {md}",
         );
+
+        // `--explain` is additive: one extra line per hit, nothing else.
+        let explained = SearchAnalyzer::new("parse_diff_range")
+            .with_explain(true)
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(explained.contains("   terms: "), "{explained}");
+        assert!(
+            explained.contains("parsediffrange[name,body]="),
+            "{explained}"
+        );
+        let hit_lines = md
+            .lines()
+            .filter(|line| line.starts_with(|ch: char| ch.is_ascii_digit()))
+            .count();
+        assert_eq!(hit_lines, 3, "the fixture has three hits: {md}");
+        assert_eq!(explained.lines().count(), md.lines().count() + hit_lines);
     }
 
     #[test]
