@@ -59,6 +59,7 @@ pub use crate::analyze::hubs::HubsOptions;
 pub use crate::analyze::impact::ImpactOptions;
 pub use crate::analyze::layers::LayersOptions;
 pub use crate::analyze::risk::RiskOptions;
+pub use crate::analyze::search::SearchOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
 pub use crate::analyze::unreachable::UnreachableOptions;
 pub use crate::analyze::untested::UntestedOptions;
@@ -126,6 +127,8 @@ pub struct Profile {
     pub tools: Vec<ToolName>,
     /// Per-tool overrides. `None` means the table is absent and the
     /// analyzer runs with its CLI defaults.
+    #[serde(default)]
+    pub search: Option<SearchOptions>,
     #[serde(default)]
     pub similarity: Option<SimilarityOptions>,
     #[serde(default)]
@@ -324,6 +327,7 @@ pub enum ToolName {
     Impact,
     Layers,
     Risk,
+    Search,
     Similarity,
     Unreachable,
     Untested,
@@ -348,6 +352,7 @@ impl ToolName {
             Self::Impact => "impact",
             Self::Layers => "layers",
             Self::Risk => "risk",
+            Self::Search => "search",
             Self::Similarity => "similarity",
             Self::Unreachable => "unreachable",
             Self::Untested => "untested",

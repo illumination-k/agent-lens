@@ -40,6 +40,10 @@
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
+//! * [`search`] — BM25F retrieval over function-level documents, with a
+//!   character n-gram fallback for query terms the corpus never spells.
+//!   Built per run from the corpus the caller already parsed, so there is
+//!   no index to invalidate.
 //! * [`risk`] — the churn × blast-radius sibling of [`hotspot`]: the
 //!   same churn table joined with per-file call-graph centrality by
 //!   rank product, for "how carefully should I treat this edit?".
@@ -72,6 +76,7 @@ pub mod lsh;
 pub mod method_names;
 pub mod naming;
 pub mod risk;
+pub mod search;
 pub mod syntax;
 pub mod tree;
 pub mod tsed;
@@ -106,6 +111,10 @@ pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use method_names::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
 pub use naming::{identifier_tokens, path_segments, qualify, qualify_module, starts_uppercase};
 pub use risk::{FileCentrality, RiskEntry, compute_risk};
+pub use search::{
+    Bm25Options, FuzzyOptions, IndexOptions, SearchDocument, SearchField, SearchHit, SearchIndex,
+    TermScore,
+};
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, InterfaceMethodShape, InterfaceShape,
     LexicalResolutionStatus, OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind,

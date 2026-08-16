@@ -223,7 +223,12 @@ impl CallGraphBuilder {
     /// the path-level test filter is disabled here so non-test files
     /// containing test functions are still scanned, and the test
     /// restriction is applied per function instead.
-    fn collection_filter(&self) -> AnalyzePathFilter {
+    ///
+    /// Exposed to the crate so an analyzer that walks the corpus itself
+    /// *and* consumes the graph — `search` — can scan exactly the file
+    /// set the graph will see, instead of maintaining a second filter
+    /// that can drift from this one.
+    pub(crate) fn collection_filter(&self) -> AnalyzePathFilter {
         if self.only_tests {
             self.path_filter.clone().with_only_tests(false)
         } else {

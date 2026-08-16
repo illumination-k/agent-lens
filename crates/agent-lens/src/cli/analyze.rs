@@ -7,7 +7,8 @@ use agent_lens::analyze::{
     CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
     DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
     HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
-    SimilarityAnalyzer, UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    SearchAnalyzer, SimilarityAnalyzer, UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer,
+    WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -15,8 +16,8 @@ use super::args::{
     AnalyzeCohesionArgs, AnalyzeCommand, AnalyzeCommonArgs, AnalyzeComplexityArgs,
     AnalyzeContextSpanArgs, AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs,
     AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs,
-    AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSimilarityArgs, AnalyzeUnreachableArgs,
-    AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
+    AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -128,6 +129,15 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.wrapper.clone().unwrap_or_default(),
         }),
+        config::ToolName::Search => AnalyzeCommand::Search(AnalyzeSearchArgs {
+            common,
+            opts: profile
+                .search
+                .clone()
+                .ok_or(ConfigError::MissingToolOptions {
+                    tool: config::ToolName::Search.as_str(),
+                })?,
+        }),
         config::ToolName::GraphQuery => AnalyzeCommand::GraphQuery(AnalyzeGraphQueryArgs {
             common,
             opts: profile
@@ -159,6 +169,22 @@ macro_rules! impl_with_analyze_path_args {
             }
         )+
     };
+    // The corpus-building family: the same args, plus a function-level
+    // [`FunctionSelection`] derived from them.
+    (with_function_selection: $($analyzer:ty),+ $(,)?) => {
+        $(
+            impl WithAnalyzePathArgs for $analyzer {
+                fn with_analyze_path_args(self, args: AnalyzePathArgs) -> Self {
+                    let selection =
+                        FunctionSelection::from_args(args.only_tests, args.exclude_tests);
+                    self.with_only_tests(args.only_tests)
+                        .with_exclude_tests(args.exclude_tests)
+                        .with_exclude_patterns(args.exclude)
+                        .with_function_selection(selection)
+                }
+            }
+        )+
+    };
 }
 
 impl_with_analyze_path_args!(
@@ -181,20 +207,13 @@ impl_with_analyze_path_args!(
     WrapperAnalyzer,
 );
 
-// Similarity needs the same `(only_tests, exclude_tests)` args at two
-// granularities: the path-level filter (skip whole files) plus a
-// function-level [`FunctionSelection`] (drop `#[test]` fns inside
-// non-test files). Wire both from the same args here so the analyzer
-// itself never has to read the bools back out of the path filter.
-impl WithAnalyzePathArgs for SimilarityAnalyzer {
-    fn with_analyze_path_args(self, args: AnalyzePathArgs) -> Self {
-        let selection = FunctionSelection::from_args(args.only_tests, args.exclude_tests);
-        self.with_only_tests(args.only_tests)
-            .with_exclude_tests(args.exclude_tests)
-            .with_exclude_patterns(args.exclude)
-            .with_function_selection(selection)
-    }
-}
+// Similarity and search both need the same `(only_tests,
+// exclude_tests)` args at two granularities: the path-level filter
+// (skip whole files) plus a function-level [`FunctionSelection`] (drop
+// `#[test]` fns inside non-test files). Wire both from the same args
+// here so neither analyzer has to read the bools back out of the path
+// filter.
+impl_with_analyze_path_args!(with_function_selection: SearchAnalyzer, SimilarityAnalyzer);
 
 /// Dispatch an [`AnalyzeCommand`] variant onto its analyzer.
 ///
@@ -276,6 +295,7 @@ impl AnalyzeCommand {
             }
             from_options {
                 GraphQuery => GraphQueryAnalyzer,
+                Search => SearchAnalyzer,
             }
             no_options {
                 Cycles => CyclesAnalyzer,

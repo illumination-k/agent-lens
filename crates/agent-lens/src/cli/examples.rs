@@ -22,6 +22,7 @@ Pick an analyzer by question:
     where should I refactor first?        analyze hotspot
     how carefully should I edit this?     analyze risk
     is this function too complex?         analyze complexity
+    where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
     is this body just a forwarder?        analyze wrapper
     how many hops before real work?       analyze delegation
@@ -226,6 +227,17 @@ Examples:
     agent-lens analyze risk . --format md --top 15
     agent-lens analyze risk . --since 90.days.ago --format md
     agent-lens analyze risk crates/ --exclude-tests --format md
+";
+
+pub const SEARCH: &str = "\
+Examples:
+
+    agent-lens analyze search crates/ --query 'diff range gate' --format md
+    agent-lens analyze search . --query parse_diff_range --limit 5 --format md
+    agent-lens analyze search . --query 'retry backoff' --rank graph --format md
+    agent-lens analyze search . --query changed_line_rangs --format md
+    agent-lens analyze search . --query retry --fuzzy always --format md
+    agent-lens analyze search . --query hunk --fuzzy off --exclude-tests
 ";
 
 pub const SIMILARITY: &str = "\
