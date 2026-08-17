@@ -838,6 +838,21 @@ mod tests {
         assert!(md.contains("+2 more pair(s) not shown"), "got {md}");
     }
 
+    /// A report that fit under the cap must not carry an overflow line:
+    /// "+0 more" reads as truncation that never happened, and a caveat
+    /// that does not apply costs context without saying anything.
+    #[test]
+    fn markdown_says_nothing_about_overflow_when_nothing_was_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        init_coupled_history(dir.path());
+        let md = CoChangeAnalyzer::new()
+            .with_top(Some(20))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("| src/api.rs | tests/api.rs |"), "got {md}");
+        assert!(!md.contains("more pair(s) not shown"), "got {md}");
+    }
+
     #[rstest]
     #[case::no_commits_at_all("2099-01-01", "_No commits matched._")]
     #[case::nothing_met_the_thresholds("2000-01-01", "_No pair met the thresholds._")]

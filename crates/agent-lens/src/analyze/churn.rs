@@ -206,9 +206,10 @@ impl ChurnScope {
     /// Whether the working tree is a shallow clone, in which case any
     /// history-based metric is reading a truncated log.
     ///
-    /// Folds every failure to `false`: this only decides whether a
-    /// caveat is logged, and a git too old for
-    /// `--is-shallow-repository` should not fail an analysis over it.
+    /// A git that cannot answer — one too old for
+    /// `--is-shallow-repository`, or none on `PATH` — reads as "not
+    /// shallow". This only decides whether a caveat is raised, and a
+    /// missing diagnostic should not fail an analysis over it.
     pub(crate) fn is_shallow(&self) -> bool {
         let output = Command::new("git")
             .arg("-C")
@@ -216,21 +217,14 @@ impl ChurnScope {
             .arg("rev-parse")
             .arg("--is-shallow-repository")
             .output();
-        match output {
-            Ok(output) => {
-                if !output.status.success() {
-                    debug!(
-                        stderr = %String::from_utf8_lossy(&output.stderr).trim_end(),
-                        "could not determine whether the repository is shallow",
-                    );
-                }
-                shallow_from_output(&output)
-            }
+        let answered = match &output {
+            Ok(output) => shallow_from_output(output),
             Err(source) => {
-                debug!(%source, "could not determine whether the repository is shallow");
-                false
+                debug!(%source, "could not run git to check for a shallow repository");
+                None
             }
-        }
+        };
+        answered.unwrap_or(false)
     }
 
     /// One `git log` pass over this scope, parsed into commits.
@@ -298,14 +292,23 @@ impl ChurnScope {
     }
 }
 
-/// Read `git rev-parse --is-shallow-repository`'s answer.
+/// Read `git rev-parse --is-shallow-repository`'s answer, or `None` when
+/// the command did not answer.
 ///
-/// A non-zero exit means the question was never answered — a git too old
-/// for the flag, say — and is folded to "not shallow" rather than trusting
-/// whatever happened to land on stdout, so the truncated-history caveat is
-/// never raised on a run that could not check for one.
-fn shallow_from_output(output: &Output) -> bool {
-    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+/// A non-zero exit means the question was never asked successfully — a git
+/// too old for the flag, say — so its stdout must not be read as an
+/// answer. Keeping that distinct from a definite "not shallow" is what
+/// stops the truncated-history caveat being raised, or suppressed, on the
+/// strength of output nothing produced.
+fn shallow_from_output(output: &Output) -> Option<bool> {
+    if !output.status.success() {
+        debug!(
+            stderr = %String::from_utf8_lossy(&output.stderr).trim_end(),
+            "git could not say whether the repository is shallow",
+        );
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
 /// Prefix `git log --pretty=format:` writes before each commit's date.
@@ -573,14 +576,14 @@ mod tests {
     /// answer either.
     #[cfg(unix)]
     #[rstest]
-    #[case::answered_yes(0, "true\n", true)]
-    #[case::answered_no(0, "false\n", false)]
-    #[case::failed_but_printed_yes(1 << 8, "true\n", false)]
-    #[case::failed_and_printed_nothing(1 << 8, "", false)]
+    #[case::answered_yes(0, "true\n", Some(true))]
+    #[case::answered_no(0, "false\n", Some(false))]
+    #[case::failed_but_printed_yes(1 << 8, "true\n", None)]
+    #[case::failed_and_printed_nothing(1 << 8, "", None)]
     fn shallow_is_read_only_from_a_successful_rev_parse(
         #[case] raw_status: i32,
         #[case] stdout: &str,
-        #[case] expected: bool,
+        #[case] expected: Option<bool>,
     ) {
         use std::os::unix::process::ExitStatusExt as _;
         let output = Output {

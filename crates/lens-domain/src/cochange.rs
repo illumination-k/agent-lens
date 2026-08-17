@@ -417,6 +417,49 @@ mod tests {
         );
     }
 
+    /// `max_commit_files` drops commits with *more* files than the cap, so
+    /// a commit sitting exactly on it still counts. An off-by-one here
+    /// silently redefines the documented flag and quietly shrinks the
+    /// commit population every confidence figure is drawn from.
+    #[test]
+    fn a_commit_exactly_at_the_size_cap_is_counted() {
+        let commits = vec![commit("2026-05-01", &["a", "b", "c"])];
+        let report = compute_cochange(
+            &commits,
+            CoChangeThresholds {
+                max_commit_files: 3,
+                ..open()
+            },
+        );
+        assert_eq!(report.commit_count, 1, "got {report:?}");
+        assert_eq!(report.skipped_commit_count, 0, "got {report:?}");
+        assert_eq!(report.pairs.len(), 3, "got {report:?}");
+    }
+
+    /// `min_confidence` is a minimum, so a pair sitting exactly on it is
+    /// reported rather than dropped.
+    #[test]
+    fn a_pair_exactly_at_the_confidence_floor_is_kept() {
+        // Each file changes twice and they overlap once, so both
+        // conditionals are exactly 0.5.
+        let commits = vec![
+            commit("2026-05-03", &["a", "b"]),
+            commit("2026-05-02", &["a"]),
+            commit("2026-05-01", &["b"]),
+        ];
+        let report = compute_cochange(
+            &commits,
+            CoChangeThresholds {
+                min_support: 1,
+                min_confidence: 0.5,
+                max_commit_files: 50,
+            },
+        );
+        let pair = find(&report, "a", "b");
+        assert!((pair.confidence_a_to_b - 0.5).abs() < 1e-9, "{pair:?}");
+        assert!((pair.confidence_b_to_a - 0.5).abs() < 1e-9, "{pair:?}");
+    }
+
     #[test]
     fn thresholds_filter_but_the_candidate_count_still_reports_what_was_there() {
         let commits = vec![
