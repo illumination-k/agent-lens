@@ -76,6 +76,15 @@ pub enum CoChangeError {
     /// The provided path is not inside any git working tree.
     #[error("{path:?} is not inside a git working tree")]
     NotInGitRepo { path: PathBuf },
+    /// A confidence is a probability, so a cut outside `[0.0, 1.0]` can
+    /// never be met. Left unchecked it produces an empty report, which
+    /// reads as "this history carries no coupling" — the opposite of what
+    /// happened. Fail instead of answering a question that was not asked,
+    /// the same way `similarity` rejects an unreachable threshold.
+    #[error(
+        "--min-confidence must be within [0.0, 1.0]; got {value} — no pair's confidence can reach it"
+    )]
+    MinConfidenceOutOfRange { value: f64 },
     #[error("failed to serialize report: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
@@ -223,6 +232,10 @@ impl CoChangeAnalyzer {
         roots: impl Into<AnalyzeRoots>,
         format: OutputFormat,
     ) -> Result<String, CoChangeError> {
+        let confidence = self.thresholds.min_confidence;
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(CoChangeError::MinConfidenceOutOfRange { value: confidence });
+        }
         let roots = roots.into();
         let scope = ChurnScope::resolve(&roots)?;
         let filter = self.path_filter.compile(scope.repo_root())?;
@@ -900,6 +913,40 @@ mod tests {
         assert!(matches!(err, CoChangeError::Io { .. }), "{err:?}");
     }
 
+    /// An unreachable cut would produce an empty report, which reads as
+    /// "no coupling here" — a different answer from "you asked for
+    /// something impossible". The check runs before git does, so it holds
+    /// outside a working tree too.
+    #[rstest]
+    #[case::above_one(1.5)]
+    #[case::negative(-0.1)]
+    fn an_unreachable_min_confidence_is_rejected(#[case] value: f64) {
+        let dir = tempfile::tempdir().unwrap();
+        init_coupled_history(dir.path());
+        let err = CoChangeAnalyzer::new()
+            .with_min_confidence(value)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap_err();
+        let CoChangeError::MinConfidenceOutOfRange { value: reported } = err else {
+            panic!("expected MinConfidenceOutOfRange, got {err:?}");
+        };
+        assert!((reported - value).abs() < f64::EPSILON);
+    }
+
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::one(1.0)]
+    fn the_confidence_bounds_themselves_are_accepted(#[case] value: f64) {
+        let dir = tempfile::tempdir().unwrap();
+        init_coupled_history(dir.path());
+        assert!(
+            CoChangeAnalyzer::new()
+                .with_min_confidence(value)
+                .analyze(dir.path(), OutputFormat::Json)
+                .is_ok(),
+        );
+    }
+
     #[test]
     fn an_invalid_exclude_glob_surfaces_a_path_filter_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -926,6 +973,10 @@ mod tests {
     #[case::not_in_git_repo(
         CoChangeError::NotInGitRepo { path: PathBuf::from("/tmp/lonely") },
         &["/tmp/lonely", "not inside a git working tree"],
+    )]
+    #[case::min_confidence_out_of_range(
+        CoChangeError::MinConfidenceOutOfRange { value: 1.5 },
+        &["--min-confidence", "1.5", "[0.0, 1.0]"],
     )]
     fn error_display_carries_the_diagnostic(#[case] err: CoChangeError, #[case] needles: &[&str]) {
         let msg = err.to_string();
