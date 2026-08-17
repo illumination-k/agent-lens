@@ -22,6 +22,7 @@ Pick an analyzer by question:
     where should I refactor first?        analyze hotspot
     how carefully should I edit this?     analyze risk
     what else will I have to edit?        analyze co-change
+    what couples these without saying so? analyze hidden-coupling
     is this function too complex?         analyze complexity
     where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
@@ -241,6 +242,20 @@ Examples:
     agent-lens analyze co-change . --since 180.days.ago --format md
     agent-lens analyze co-change . --min-support 5 --min-confidence 0.7
     agent-lens analyze co-change . --max-commit-files 20 --format md
+";
+
+pub const HIDDEN_COUPLING: &str = "\
+The differential needs both halves in scope: the history is scoped by the same
+pathspec as the file sets, and the static graph is grown from the paths given.
+Point it at the widest path you care about, and prefer a repo with full history
+— a shallow clone hides the evidence the suspect bucket is looking for.
+
+Examples:
+
+    agent-lens analyze hidden-coupling . --format md --top 15
+    agent-lens analyze hidden-coupling . --since 180.days.ago --format md
+    agent-lens analyze hidden-coupling . --min-support 5 --min-confidence 0.7
+    agent-lens analyze hidden-coupling crates --exclude-tests --format md
 ";
 
 pub const SEARCH: &str = "\

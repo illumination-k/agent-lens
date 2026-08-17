@@ -703,6 +703,42 @@ pub(super) enum AnalyzeCommand {
     /// default; `--format md` caps the table at `--top` (default 20).
     #[command(name = "co-change", after_long_help = examples::CO_CHANGE)]
     CoChange(AnalyzeCoChangeArgs),
+    /// Report where history and the code disagree: pairs that co-change
+    /// with nothing declaring the dependency, and declared dependencies
+    /// the window never exercised.
+    ///
+    /// The differential between `co-change` and the static graphs, and
+    /// the one thing neither view can say alone. `hidden_coupling` is
+    /// the high-value bucket: two files keep changing together and no
+    /// file-level dependency runs between them either way, so something
+    /// undeclared holds them together — a shared literal, a
+    /// serialization format, a duplicated constant, a generated file
+    /// with no regeneration step. Find that contract and make it
+    /// explicit, or delete it. `suspect_dependencies` is the weaker
+    /// half and ranks below it: a declared dependency whose endpoints
+    /// both moved inside the window but never moved together. Over one
+    /// window a stable, correct dependency looks exactly like a dead
+    /// one, so a row is a question about whether the edge still carries
+    /// weight, never a verdict. The two buckets are never merged into
+    /// one score. The static side is the file-level projection of the
+    /// module graph (`use` / `import` edges) plus resolved call edges —
+    /// no new extractor — which makes it a lower bound: an unresolved
+    /// call site is an edge nobody can see, so "no static path" is an
+    /// upper bound on "undeclared" and the report cites per-module
+    /// resolution confidence. Two classifications are kept out of both
+    /// buckets and reported separately, because both have no static
+    /// edge by construction: pairs with a test-like path on either side
+    /// (a test co-changes with its subject by definition) and pairs
+    /// where no language backend reads one side (`.md`, `.toml`,
+    /// workflow YAML, fixtures — no static view rather than no
+    /// dependency, and a doc that always moves with a source file is
+    /// still a real contract). History flags (`--since`,
+    /// `--min-support`, `--min-confidence`, `--max-commit-files`) mean
+    /// exactly what they mean for `co-change`. `path` must be inside a
+    /// git working tree. JSON is the default; `--format md` caps each
+    /// bucket at `--top` (default 20).
+    #[command(name = "hidden-coupling", after_long_help = examples::HIDDEN_COUPLING)]
+    HiddenCoupling(AnalyzeHiddenCouplingArgs),
     /// Rank functions by how well they match a query.
     ///
     /// The retrieval unit is the function, not the line: every hit is a
@@ -990,6 +1026,17 @@ pub(super) struct AnalyzeRiskArgs {
 
 #[derive(Debug, Clone, Args)]
 pub(super) struct AnalyzeCoChangeArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: CoChangeOptions,
+}
+
+/// `hidden-coupling` scopes the same history window with the same
+/// thresholds as `co-change`, so it flattens that analyzer's option
+/// group rather than declaring a byte-identical second one.
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeHiddenCouplingArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]

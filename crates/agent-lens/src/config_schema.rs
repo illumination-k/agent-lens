@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 20] = [
+const TOOL_ORDER: [ToolName; 21] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -31,6 +31,7 @@ const TOOL_ORDER: [ToolName; 20] = [
     ToolName::Hotspot,
     ToolName::Risk,
     ToolName::CoChange,
+    ToolName::HiddenCoupling,
     ToolName::Hubs,
     ToolName::Impact,
     ToolName::Layers,
@@ -78,7 +79,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -291,6 +292,38 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "int",
                 presence: "optional",
                 desc: "Cap the markdown table to the top N pairs.",
+            },
+        ],
+        ToolName::HiddenCoupling => &[
+            Field {
+                key: "since",
+                ty: "string",
+                presence: "optional",
+                desc: "Git window for the history half, e.g. \"180.days.ago\". The static graph reflects the current source either way.",
+            },
+            Field {
+                key: "min-support",
+                ty: "int",
+                presence: "default: 3",
+                desc: "Co-change count a pair must clear to count as co-changing, and the count a declared dependency (and each of its endpoints) must fall under to count as suspect.",
+            },
+            Field {
+                key: "min-confidence",
+                ty: "float",
+                presence: "default: 0.5",
+                desc: "Minimum for a pair's stronger confidence direction before it is measured against the static graph.",
+            },
+            Field {
+                key: "max-commit-files",
+                ty: "int",
+                presence: "default: 50",
+                desc: "Drop commits touching more files than this, as tangled or squashed. Also the cost bound, since pair counting is quadratic in a commit's file count.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap each markdown bucket to the top N rows.",
             },
         ],
         ToolName::Search => &[
@@ -689,6 +722,10 @@ mod tests {
         assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<CoChangeOptions>(ToolName::CoChange);
+        // Both analyzers scope the same history window with the same
+        // thresholds, so they share one options type — and the schema
+        // has to keep describing that one type under both names.
+        assert_tool_parity::<CoChangeOptions>(ToolName::HiddenCoupling);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
         assert_tool_parity::<RiskOptions>(ToolName::Risk);
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);

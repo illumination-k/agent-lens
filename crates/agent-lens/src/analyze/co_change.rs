@@ -278,7 +278,12 @@ impl CoChangeAnalyzer {
 /// partner that was deleted three months ago, and history is full of
 /// them. Each distinct path is decided once, so the `stat` cost is per
 /// file rather than per mention.
-fn retain_reportable_paths(
+///
+/// Shared with [`super::hidden_coupling`], which subtracts the static
+/// graph from exactly this history: the two analyzers have to agree on
+/// which commits and which paths are in play, or a pair reported as
+/// co-changing by one is invisible to the other.
+pub(super) fn retain_reportable_paths(
     commits: &mut [CommitFiles],
     filter: &CompiledPathFilter,
     repo_root: &Path,

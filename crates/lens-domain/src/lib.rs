@@ -98,8 +98,9 @@ pub use block_shape::{
     block_windows,
 };
 pub use cochange::{
-    CoChangePair, CoChangeReport, CoChangeThresholds, CommitFiles, DEFAULT_MAX_COMMIT_FILES,
-    DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SUPPORT, compute_cochange,
+    CoChangeCounts, CoChangePair, CoChangeReport, CoChangeThresholds, CoChangeTotals, CommitFiles,
+    DEFAULT_MAX_COMMIT_FILES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SUPPORT, PairSupport,
+    compute_cochange, rank_cochange_pairs, tally_cochange,
 };
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,

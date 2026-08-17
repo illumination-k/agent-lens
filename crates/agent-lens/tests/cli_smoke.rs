@@ -1573,11 +1573,84 @@ fn analyze_co_change_pairs_files_from_a_git_history() {
     assert!(json.get("shallow_clone").is_none(), "got {json}");
 }
 
+/// `analyze hidden-coupling` joins two views the binary assembles from
+/// different halves of the crate — a git history read and the language
+/// backends' graphs — so the wiring is only really exercised end to end
+/// here: a path space that drifted between them, or a missing subcommand
+/// registration, would land the pair in the wrong bucket or in none.
+#[test]
+fn analyze_hidden_coupling_separates_the_undeclared_pair_from_the_declared_one() {
+    let dir = tempfile::tempdir().unwrap();
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "pub mod a;\npub mod b;\npub mod c;\npub mod d;\n",
+    );
+    for i in 0..4 {
+        // `a` imports from `b`, and they move together: expected, so
+        // neither bucket may claim them.
+        write_file(
+            dir.path(),
+            "src/a.rs",
+            &format!("use crate::b::work;\npub fn run() -> u8 {{ work() + {i} }}\n"),
+        );
+        write_file(
+            dir.path(),
+            "src/b.rs",
+            &format!("pub fn work() -> u8 {{ {i} }}\n"),
+        );
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(
+            dir.path(),
+            &["commit", "-q", "-m", &format!("declared {i}")],
+        );
+
+        // `c` and `d` move together in their own commits with nothing
+        // between them: hidden.
+        write_file(
+            dir.path(),
+            "src/c.rs",
+            &format!("pub fn c() -> u8 {{ {i} }}\n"),
+        );
+        write_file(
+            dir.path(),
+            "src/d.rs",
+            &format!("pub fn d() -> u8 {{ {i} }}\n"),
+        );
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-q", "-m", &format!("hidden {i}")]);
+    }
+
+    let json = stdout_json(&agent_lens(
+        &["analyze", "hidden-coupling", "."],
+        dir.path(),
+        None,
+    ));
+    let hidden = json["hidden_coupling"].as_array().unwrap();
+    assert_eq!(hidden.len(), 1, "got {json}");
+    assert_eq!(hidden[0]["a"], "src/c.rs", "got {json}");
+    assert_eq!(hidden[0]["b"], "src/d.rs", "got {json}");
+    assert_eq!(hidden[0]["static"]["relation"], "no_path", "got {json}");
+    assert_eq!(hidden[0]["cochanges"], 4, "got {json}");
+    assert!(
+        json["suspect_dependencies"].as_array().unwrap().is_empty(),
+        "the declared pair co-changes, so it is expected: {json}",
+    );
+    assert!(
+        json["static_view"]["file_count"].as_u64().unwrap() >= 5,
+        "got {json}"
+    );
+}
+
 #[rstest]
 #[case::index("## Command index")]
 #[case::index_row("| `agent-lens analyze hotspot` |")]
 #[case::risk_index_row("| `agent-lens analyze risk` |")]
 #[case::co_change_index_row("| `agent-lens analyze co-change` |")]
+#[case::hidden_coupling_index_row("| `agent-lens analyze hidden-coupling` |")]
 #[case::routing("Pick an analyzer by question:")]
 #[case::conventions("Reports go to stdout")]
 #[case::root_example("    agent-lens help --md")]

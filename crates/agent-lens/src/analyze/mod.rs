@@ -23,6 +23,7 @@ mod export_lang;
 mod format;
 pub mod function_graph;
 pub mod graph_query;
+pub mod hidden_coupling;
 pub mod hotspot;
 pub mod hubs;
 pub mod impact;
@@ -37,6 +38,7 @@ mod runner;
 pub mod search;
 pub mod similarity;
 mod source_files;
+mod static_file_graph;
 pub mod unreachable;
 pub mod untested;
 pub mod visibility;
@@ -58,6 +60,7 @@ pub use graph_query::{
     DEFAULT_GRAPH_QUERY_DEPTH, DEFAULT_GRAPH_QUERY_LIMIT, GraphDirection, GraphQueryAnalyzer,
     GraphQueryKind,
 };
+pub use hidden_coupling::{HiddenCouplingAnalyzer, HiddenCouplingError};
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use hubs::HubsAnalyzer;
 pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
