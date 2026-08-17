@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use lens_domain::{CommitFiles, FileChurn};
 use tracing::debug;
@@ -217,15 +217,14 @@ impl ChurnScope {
             .arg("--is-shallow-repository")
             .output();
         match output {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).trim() == "true"
-            }
             Ok(output) => {
-                debug!(
-                    stderr = %String::from_utf8_lossy(&output.stderr).trim_end(),
-                    "could not determine whether the repository is shallow",
-                );
-                false
+                if !output.status.success() {
+                    debug!(
+                        stderr = %String::from_utf8_lossy(&output.stderr).trim_end(),
+                        "could not determine whether the repository is shallow",
+                    );
+                }
+                shallow_from_output(&output)
             }
             Err(source) => {
                 debug!(%source, "could not determine whether the repository is shallow");
@@ -297,6 +296,16 @@ impl ChurnScope {
             None => display_path,
         }
     }
+}
+
+/// Read `git rev-parse --is-shallow-repository`'s answer.
+///
+/// A non-zero exit means the question was never answered — a git too old
+/// for the flag, say — and is folded to "not shallow" rather than trusting
+/// whatever happened to land on stdout, so the truncated-history caveat is
+/// never raised on a run that could not check for one.
+fn shallow_from_output(output: &Output) -> bool {
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
 /// Prefix `git log --pretty=format:` writes before each commit's date.
@@ -557,6 +566,29 @@ mod tests {
         let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
         let commits = scope.collect_commits(None).unwrap();
         assert_eq!(commits[0].files, ["crates/app/src/other.rs"]);
+    }
+
+    /// The exit status is not a formality: a `rev-parse` that failed has
+    /// not answered the question, so its stdout must not be read as an
+    /// answer either.
+    #[cfg(unix)]
+    #[rstest]
+    #[case::answered_yes(0, "true\n", true)]
+    #[case::answered_no(0, "false\n", false)]
+    #[case::failed_but_printed_yes(1 << 8, "true\n", false)]
+    #[case::failed_and_printed_nothing(1 << 8, "", false)]
+    fn shallow_is_read_only_from_a_successful_rev_parse(
+        #[case] raw_status: i32,
+        #[case] stdout: &str,
+        #[case] expected: bool,
+    ) {
+        use std::os::unix::process::ExitStatusExt as _;
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(raw_status),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        };
+        assert_eq!(shallow_from_output(&output), expected);
     }
 
     #[test]
