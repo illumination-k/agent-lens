@@ -1532,10 +1532,52 @@ fn analyze_risk_ranks_a_git_tracked_crate() {
     assert_eq!(core["rank_product"], 1, "got {json}");
 }
 
+/// `analyze co-change` reads history and nothing else, so the binary is
+/// the only place its wiring can be checked end to end: a missing
+/// subcommand registration, a broken rename map, or a path space that
+/// drifted from `hotspot`'s would each show up as a missing or
+/// misspelled pair here.
+#[test]
+fn analyze_co_change_pairs_files_from_a_git_history() {
+    let dir = tempfile::tempdir().unwrap();
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    for i in 0..4 {
+        write_file(
+            dir.path(),
+            "src/api.rs",
+            &format!("pub fn api() -> u8 {{ {i} }}\n"),
+        );
+        // A non-source partner: the coupling no AST-based analyzer here
+        // can see, and the reason this analyzer has no language matrix.
+        write_file(dir.path(), "api.toml", &format!("version = {i}\n"));
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-q", "-m", &format!("bump {i}")]);
+    }
+    write_file(dir.path(), "src/lone.rs", "pub fn lone() {}\n");
+    run_git(dir.path(), &["add", "-A"]);
+    run_git(dir.path(), &["commit", "-q", "-m", "lone"]);
+
+    let json = stdout_json(&agent_lens(
+        &["analyze", "co-change", "."],
+        dir.path(),
+        None,
+    ));
+    let pairs = json["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 1, "got {json}");
+    assert_eq!(pairs[0]["a"], "api.toml", "got {json}");
+    assert_eq!(pairs[0]["b"], "src/api.rs", "got {json}");
+    assert_eq!(pairs[0]["cochanges"], 4, "got {json}");
+    assert_eq!(json["commit_count"], 5, "got {json}");
+    assert!(json.get("shallow_clone").is_none(), "got {json}");
+}
+
 #[rstest]
 #[case::index("## Command index")]
 #[case::index_row("| `agent-lens analyze hotspot` |")]
 #[case::risk_index_row("| `agent-lens analyze risk` |")]
+#[case::co_change_index_row("| `agent-lens analyze co-change` |")]
 #[case::routing("Pick an analyzer by question:")]
 #[case::conventions("Reports go to stdout")]
 #[case::root_example("    agent-lens help --md")]

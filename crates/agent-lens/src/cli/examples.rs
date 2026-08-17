@@ -21,6 +21,7 @@ Pick an analyzer by question:
 
     where should I refactor first?        analyze hotspot
     how carefully should I edit this?     analyze risk
+    what else will I have to edit?        analyze co-change
     is this function too complex?         analyze complexity
     where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
@@ -227,6 +228,19 @@ Examples:
     agent-lens analyze risk . --format md --top 15
     agent-lens analyze risk . --since 90.days.ago --format md
     agent-lens analyze risk crates/ --exclude-tests --format md
+";
+
+pub const CO_CHANGE: &str = "\
+Point it at the widest path you care about: a pathspec scopes the file sets
+as well as the commits, so `src/` ↔ `docs/` pairs only show up in a run
+covering both.
+
+Examples:
+
+    agent-lens analyze co-change . --format md --top 15
+    agent-lens analyze co-change . --since 180.days.ago --format md
+    agent-lens analyze co-change . --min-support 5 --min-confidence 0.7
+    agent-lens analyze co-change . --max-commit-files 20 --format md
 ";
 
 pub const SEARCH: &str = "\

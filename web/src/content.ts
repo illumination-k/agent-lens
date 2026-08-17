@@ -65,7 +65,7 @@ export const PILLARS: readonly Pillar[] = [
   },
   {
     title: "Analyzers",
-    body: "Eighteen on-demand analyses of code shape — duplication, complexity, coupling, call-graph structure, change risk. JSON on stdout by default, compact Markdown with --format md, both sized to drop straight into a prompt.",
+    body: "Twenty on-demand analyses of code shape — duplication, complexity, coupling, call-graph structure, change risk. JSON on stdout by default, compact Markdown with --format md, both sized to drop straight into a prompt.",
     command: "agent-lens analyze similarity src --format md",
   },
   {
@@ -214,6 +214,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
         name: "risk",
         summary:
           "The rank product of churn and call-graph centrality, so hot and load-bearing outranks hot but leaf.",
+      },
+      {
+        name: "co-change",
+        summary:
+          "File pairs git history says change together, with the confidence in each direction and the lift that separates a pattern from two merely busy files (any file type).",
       },
     ],
   },

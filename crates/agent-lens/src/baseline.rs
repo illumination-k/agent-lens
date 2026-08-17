@@ -130,7 +130,8 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         ToolName::ContextSpan => Some(context_span_metrics),
         ToolName::Hotspot => Some(hotspot_metrics),
         ToolName::Similarity => Some(similarity_metrics),
-        ToolName::Cycles
+        ToolName::CoChange
+        | ToolName::Cycles
         | ToolName::Delegation
         | ToolName::FunctionGraph
         | ToolName::GraphQuery
@@ -577,6 +578,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case(ToolName::CoChange)]
     #[case(ToolName::Cycles)]
     #[case(ToolName::Delegation)]
     #[case(ToolName::FunctionGraph)]

@@ -40,6 +40,11 @@
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
+//! * [`cochange`] — temporal (logical) coupling: which files change in
+//!   the same commit, how reliably in each direction, and whether the
+//!   pairing beats what two files that busy would do by chance. The CLI
+//!   supplies per-commit file sets; the association-rule arithmetic
+//!   (support / confidence / lift) lives here.
 //! * [`search`] — BM25F retrieval over function-level documents, with a
 //!   character n-gram fallback for query terms the corpus never spells.
 //!   Built per run from the corpus the caller already parsed, so there is
@@ -65,6 +70,7 @@
 
 pub mod apted;
 pub mod block_shape;
+pub mod cochange;
 pub mod cohesion;
 pub mod complexity;
 pub mod context_span;
@@ -90,6 +96,10 @@ pub use apted::{
 pub use block_shape::{
     BlockShape, BlockWindowOptions, DEFAULT_MAX_WINDOW_STATEMENTS, StatementSeq, StatementUnit,
     block_windows,
+};
+pub use cochange::{
+    CoChangePair, CoChangeReport, CoChangeThresholds, CommitFiles, DEFAULT_MAX_COMMIT_FILES,
+    DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SUPPORT, compute_cochange,
 };
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
