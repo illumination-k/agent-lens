@@ -173,11 +173,42 @@ struct PairAcc {
 /// from the same commit population, which is what
 /// [`CoChangeReport::commit_count`] reports.
 pub fn compute_cochange(commits: &[CommitFiles], thresholds: CoChangeThresholds) -> CoChangeReport {
-    let mut per_file: BTreeMap<&str, u32> = BTreeMap::new();
-    let mut pairs: BTreeMap<(&str, &str), PairAcc> = BTreeMap::new();
-    let mut counted = 0usize;
-    let mut skipped = 0usize;
+    let tally = tally_commits(commits, thresholds.max_commit_files);
+    CoChangeReport {
+        commit_count: tally.counted,
+        skipped_commit_count: tally.skipped,
+        file_count: tally.per_file.len(),
+        candidate_pair_count: tally.pairs.len(),
+        pairs: rank_pairs(tally, thresholds),
+    }
+}
 
+/// What one pass over the commit stream observed, borrowed from it.
+#[derive(Debug)]
+struct Tally<'a> {
+    /// Commits touching each file, over the counted population only.
+    per_file: BTreeMap<&'a str, u32>,
+    /// Co-change accumulator per pair, keyed with `a < b`.
+    pairs: BTreeMap<(&'a str, &'a str), PairAcc>,
+    /// Commits that contributed.
+    counted: usize,
+    /// Commits dropped by the size cap.
+    skipped: usize,
+}
+
+/// Count files and co-occurring pairs across the commit stream.
+///
+/// A commit with no files and a commit over `max_commit_files` are both
+/// passed over entirely, so neither shows up in `per_file`: that is what
+/// keeps every figure a row later reports drawn from one commit
+/// population.
+fn tally_commits(commits: &[CommitFiles], max_commit_files: usize) -> Tally<'_> {
+    let mut tally = Tally {
+        per_file: BTreeMap::new(),
+        pairs: BTreeMap::new(),
+        counted: 0,
+        skipped: 0,
+    };
     for commit in commits {
         let mut files: Vec<&str> = commit.files.iter().map(String::as_str).collect();
         files.sort_unstable();
@@ -185,22 +216,24 @@ pub fn compute_cochange(commits: &[CommitFiles], thresholds: CoChangeThresholds)
         if files.is_empty() {
             continue;
         }
-        if files.len() > thresholds.max_commit_files {
-            skipped += 1;
+        if files.len() > max_commit_files {
+            tally.skipped += 1;
             continue;
         }
-        let commits_ago = counted;
-        counted += 1;
+        let commits_ago = tally.counted;
+        tally.counted += 1;
 
         for file in &files {
-            *per_file.entry(file).or_insert(0) += 1;
+            *tally.per_file.entry(file).or_insert(0) += 1;
         }
-        // `files` is sorted, so the inner loop only ever visits pairs
-        // with `a < b` and each pair has exactly one key.
+        // `files` is sorted, so this only ever visits pairs with `a < b`
+        // and each pair has exactly one key.
         for (i, a) in files.iter().enumerate() {
             for b in files.iter().skip(i + 1) {
-                let acc = pairs.entry((a, b)).or_insert_with(|| PairAcc {
+                let acc = tally.pairs.entry((a, b)).or_insert_with(|| PairAcc {
                     cochanges: 0,
+                    // First sighting in a newest-first walk, so this is
+                    // the pair's most recent co-change.
                     last_date: commit.date.clone(),
                     last_commits_ago: commits_ago,
                 });
@@ -208,8 +241,17 @@ pub fn compute_cochange(commits: &[CommitFiles], thresholds: CoChangeThresholds)
             }
         }
     }
+    tally
+}
 
-    let candidate_pair_count = pairs.len();
+/// Score the tallied pairs and rank them, strongest first.
+fn rank_pairs(tally: Tally<'_>, thresholds: CoChangeThresholds) -> Vec<CoChangePair> {
+    let Tally {
+        per_file,
+        pairs,
+        counted,
+        ..
+    } = tally;
     let population = counted as f64;
     let mut out: Vec<CoChangePair> = pairs
         .into_iter()
@@ -250,14 +292,7 @@ pub fn compute_cochange(commits: &[CommitFiles], thresholds: CoChangeThresholds)
             .then_with(|| x.a.cmp(&y.a))
             .then_with(|| x.b.cmp(&y.b))
     });
-
-    CoChangeReport {
-        commit_count: counted,
-        skipped_commit_count: skipped,
-        file_count: per_file.len(),
-        candidate_pair_count,
-        pairs: out,
-    }
+    out
 }
 
 #[cfg(test)]
