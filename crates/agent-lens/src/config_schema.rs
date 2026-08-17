@@ -23,13 +23,14 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 19] = [
+const TOOL_ORDER: [ToolName; 20] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
     ToolName::Cohesion,
     ToolName::Hotspot,
     ToolName::Risk,
+    ToolName::CoChange,
     ToolName::Hubs,
     ToolName::Impact,
     ToolName::Layers,
@@ -77,7 +78,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: cohesion, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -258,6 +259,38 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "int",
                 presence: "optional",
                 desc: "Cap the markdown table to the top N riskiest files.",
+            },
+        ],
+        ToolName::CoChange => &[
+            Field {
+                key: "since",
+                ty: "string",
+                presence: "optional",
+                desc: "Git window for the history read, e.g. \"180.days.ago\". Every count, confidence and lift figure is computed inside it.",
+            },
+            Field {
+                key: "min-support",
+                ty: "int",
+                presence: "default: 3",
+                desc: "Minimum co-change count for a pair to be reported. Below this a pair is coincidence rather than a pattern.",
+            },
+            Field {
+                key: "min-confidence",
+                ty: "float",
+                presence: "default: 0.5",
+                desc: "Minimum for a pair's stronger confidence direction. The gate reads the stronger one so asymmetric pairs survive.",
+            },
+            Field {
+                key: "max-commit-files",
+                ty: "int",
+                presence: "default: 50",
+                desc: "Drop commits touching more files than this, as tangled or squashed. Also the cost bound, since pair counting is quadratic in a commit's file count.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown table to the top N pairs.",
             },
         ],
         ToolName::Search => &[
@@ -628,10 +661,10 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        CohesionOptions, ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
-        GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        RiskOptions, SearchOptions, SimilarityOptions, UnreachableOptions, UntestedOptions,
-        VisibilityOptions, WrapperOptions,
+        CoChangeOptions, CohesionOptions, ComplexityOptions, ContextSpanOptions, CouplingOptions,
+        DelegationOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
+        LayersOptions, Profile, RiskOptions, SearchOptions, SimilarityOptions, UnreachableOptions,
+        UntestedOptions, VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -655,6 +688,7 @@ mod tests {
         assert_tool_parity::<SimilarityOptions>(ToolName::Similarity);
         assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
+        assert_tool_parity::<CoChangeOptions>(ToolName::CoChange);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
         assert_tool_parity::<RiskOptions>(ToolName::Risk);
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);

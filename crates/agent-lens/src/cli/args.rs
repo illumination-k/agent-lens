@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use agent_lens::analyze::co_change::CoChangeOptions;
 use agent_lens::analyze::cohesion::CohesionOptions;
 use agent_lens::analyze::complexity::ComplexityOptions;
 use agent_lens::analyze::context_span::ContextSpanOptions;
@@ -676,6 +677,32 @@ pub(super) enum AnalyzeCommand {
     /// default; `--format md` caps the table at `--top` (default 20).
     #[command(after_long_help = examples::RISK)]
     Risk(AnalyzeRiskArgs),
+    /// Report file pairs that git history says change together, so an
+    /// agent knows what else an edit will pull in.
+    ///
+    /// Reads `git log` and nothing else, so unlike every other analyzer
+    /// here it has no language matrix: `.toml`, `.md`, workflow YAML and
+    /// fixtures are covered, which is coupling the AST-based analyzers
+    /// cannot see by construction. Each pair is described as an
+    /// association rule over the commits in the window (`--since`):
+    /// `cochanges` is how many commits touched both, and the two
+    /// `confidence` figures are the conditionals in each direction —
+    /// the edge is symmetric but the conditional is not, so both are
+    /// reported. `lift` guards the metric's usual false positive, a pair
+    /// that only looks coupled because both files are hot; at lift near
+    /// 1 the co-occurrence is what independence would predict. Ranking
+    /// is `support × max(confidence)`, and `last_cochange` dates the
+    /// pattern so a dead one is visibly dead. Renames are followed, so a
+    /// rename mid-history does not split a pair's evidence in two.
+    /// Commits touching more than `--max-commit-files` files are dropped
+    /// whole as tangled, and how often that fired is reported. This is
+    /// correlation, never causation: a pair changed together, and
+    /// nothing here says why or which way a dependency runs. `path` must
+    /// be inside a git working tree, and a shallow clone is warned about
+    /// on stderr rather than reported as "no coupling". JSON is the
+    /// default; `--format md` caps the table at `--top` (default 20).
+    #[command(name = "co-change", after_long_help = examples::CO_CHANGE)]
+    CoChange(AnalyzeCoChangeArgs),
     /// Rank functions by how well they match a query.
     ///
     /// The retrieval unit is the function, not the line: every hit is a
@@ -959,6 +986,14 @@ pub(super) struct AnalyzeRiskArgs {
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(super) opts: RiskOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeCoChangeArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: CoChangeOptions,
 }
 
 #[derive(Debug, Clone, Args)]

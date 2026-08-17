@@ -48,6 +48,7 @@ use crate::analyze::OutputFormat;
 /// them — the keys here cannot drift from the flags they mirror because
 /// they are the flags. They are re-exported so the config surface still
 /// reads as one module.
+pub use crate::analyze::co_change::CoChangeOptions;
 pub use crate::analyze::cohesion::CohesionOptions;
 pub use crate::analyze::complexity::ComplexityOptions;
 pub use crate::analyze::context_span::ContextSpanOptions;
@@ -139,6 +140,8 @@ pub struct Profile {
     pub hotspot: Option<HotspotOptions>,
     #[serde(default)]
     pub risk: Option<RiskOptions>,
+    #[serde(default)]
+    pub co_change: Option<CoChangeOptions>,
     #[serde(default)]
     pub hubs: Option<HubsOptions>,
     #[serde(default)]
@@ -314,6 +317,7 @@ impl ProfilePaths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolName {
+    CoChange,
     Cohesion,
     Complexity,
     Coupling,
@@ -339,6 +343,7 @@ impl ToolName {
     /// Stable lowercase spelling, matching the `analyze` subcommand name.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::CoChange => "co-change",
             Self::Cohesion => "cohesion",
             Self::Complexity => "complexity",
             Self::Coupling => "coupling",

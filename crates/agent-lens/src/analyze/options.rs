@@ -176,6 +176,7 @@ pub(crate) use analyzer_options;
 #[cfg(test)]
 mod tests {
     use crate::analyze::DiffScope;
+    use crate::analyze::co_change::{CoChangeAnalyzer, CoChangeOptions};
     use crate::analyze::cohesion::{CohesionAnalyzer, CohesionOptions};
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
     use crate::analyze::context_span::{ContextSpanAnalyzer, ContextSpanOptions};
@@ -233,6 +234,22 @@ mod tests {
         };
     }
 
+    assert_options_reach_the_analyzer!(
+        co_change_options_reach_the_analyzer: CoChangeAnalyzer,
+        CoChangeOptions {
+            top: Some(3),
+            since: Some("90.days.ago".to_owned()),
+            min_support: 5,
+            min_confidence: 0.7,
+            max_commit_files: 20,
+        },
+        |a| a
+            .with_top(Some(3))
+            .with_since_opt(Some("90.days.ago".to_owned()))
+            .with_min_support(5)
+            .with_min_confidence(0.7)
+            .with_max_commit_files(20)
+    );
     assert_options_reach_the_analyzer!(
         cohesion_options_reach_the_analyzer: CohesionAnalyzer,
         CohesionOptions { top: Some(3), diff_only: true, diff_range: None, min_score: Some(4) },

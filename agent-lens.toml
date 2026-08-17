@@ -266,3 +266,33 @@ tools = [
   "hotspot",
   "similarity",
 ]
+
+# History rather than source: which files git says change together.
+#
+# `co-change` is the one analyzer with no language matrix — it reads
+# `git log` and nothing else — so this profile points at the repo root
+# with no path filters. Narrowing the path narrows the *file sets* too,
+# and the findings worth having here are the cross-tree ones: the
+# `analyze/mod.rs` -> `config.rs` -> `config_schema.rs` -> `README.md`
+# chain that adding one analyzer flag has to touch, which no static
+# analyzer in this repo can see.
+#
+# Kept out of `self` because that profile is a source audit of one crate:
+# its `exclude-tests` would hide the `src/x.rs` <-> `tests/x.rs` pairs
+# that are the most reliable signal history carries, and its single-crate
+# path would hide everything crossing into `README.md` or `Cargo.lock`.
+#
+# Needs real history. A shallow clone (CI's default checkout) reports a
+# truncated log and says so on stderr.
+[profile.history]
+path = "."
+format = "md"
+tools = ["co-change"]
+
+[profile.history.co-change]
+top = 25
+# Well above the default 3. At 3 this repo reports 672 pairs, most of them
+# a `Cargo.lock` bump paired with whichever crate manifest moved with it;
+# at 8 the survivors are patterns rather than coincidences.
+min-support = 8
+min-confidence = 0.6
