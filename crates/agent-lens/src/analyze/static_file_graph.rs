@@ -193,13 +193,7 @@ impl StaticFileGraph {
     pub(crate) fn direct_edges(&self) -> Vec<DirectEdge<'_>> {
         let mut folded: BTreeMap<(usize, usize), (Direction, EdgeSource)> = BTreeMap::new();
         for (&(from, to), &source) in &self.sources {
-            let forward = from < to;
-            let key = if forward { (from, to) } else { (to, from) };
-            let direction = if forward {
-                Direction::AToB
-            } else {
-                Direction::BToA
-            };
+            let (key, direction) = unordered(from, to);
             folded
                 .entry(key)
                 .and_modify(|entry| {
@@ -243,6 +237,23 @@ impl StaticFileGraph {
             }
         }
         None
+    }
+}
+
+/// A directed edge's unordered key, plus which way it runs.
+///
+/// Split out and excluded from cargo-mutants (`.cargo/mutants.toml`):
+/// self-edges are dropped at insertion, so `from == to` cannot reach
+/// here and `<` and `<=` are observationally identical. Keeping it a
+/// named function of its own means the rest of
+/// [`StaticFileGraph::direct_edges`] — the fold that merges provenance
+/// and promotes a reciprocal pair to [`Direction::Both`] — stays under
+/// mutation testing.
+fn unordered(from: usize, to: usize) -> ((usize, usize), Direction) {
+    if from < to {
+        ((from, to), Direction::AToB)
+    } else {
+        ((to, from), Direction::BToA)
     }
 }
 

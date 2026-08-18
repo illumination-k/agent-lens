@@ -1186,6 +1186,203 @@ mod tests {
         );
     }
 
+    /// `--only-tests` has to reach the history the same way
+    /// `--exclude-tests` does, or the two halves disagree about which
+    /// files exist: only the one test-like path in the fixture survives,
+    /// and one file pairs with nothing.
+    #[test]
+    fn only_tests_narrows_the_history_to_the_test_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let report = json(
+            &HiddenCouplingAnalyzer::new().with_only_tests(true),
+            dir.path(),
+        );
+        assert_eq!(report["history"]["file_count"], 1, "got {report}");
+        for bucket in ["hidden_coupling", "test_pairs", "no_static_view"] {
+            assert!(pairs(&report, bucket).is_empty(), "got {report}");
+        }
+    }
+
+    /// The bucket is ordered by how undeclared a pair is, then by
+    /// co-change strength — not the other way round. A pair with no
+    /// static path at all outranks a better-supported one that at least
+    /// relates through an intermediate, because that is the one with an
+    /// undeclared contract behind it.
+    #[test]
+    fn a_pair_with_no_path_outranks_a_stronger_transitive_one() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod alone_a;\npub mod alone_b;\npub mod chain_head;\n\
+             pub mod chain_mid;\npub mod chain_tail;\n",
+        );
+        let write = |path: &str, revision: usize| {
+            let uses = match path {
+                "src/chain_head.rs" => "use crate::chain_mid::mid;\n",
+                "src/chain_mid.rs" => "use crate::chain_tail::tail;\n",
+                _ => "",
+            };
+            let name = path.trim_start_matches("src/").trim_end_matches(".rs");
+            write_file(
+                dir.path(),
+                path,
+                &format!("{uses}pub fn {name}() -> u8 {{ {revision} }}\n"),
+            );
+        };
+        for path in [
+            "src/alone_a.rs",
+            "src/alone_b.rs",
+            "src/chain_head.rs",
+            "src/chain_mid.rs",
+            "src/chain_tail.rs",
+        ] {
+            write(path, 0);
+        }
+        commit(dir.path(), "initial");
+        // The chain pair moves more often, so co-change strength alone
+        // would rank it first.
+        for revision in 1..=6 {
+            write("src/chain_head.rs", revision);
+            write("src/chain_tail.rs", revision);
+            commit(dir.path(), "chain");
+        }
+        for revision in 1..=3 {
+            write("src/alone_a.rs", revision);
+            write("src/alone_b.rs", revision);
+            commit(dir.path(), "alone");
+        }
+
+        let report = json(&HiddenCouplingAnalyzer::new(), dir.path());
+        let hidden = report["hidden_coupling"].as_array().unwrap();
+        assert_eq!(hidden.len(), 2, "got {report}");
+        assert_eq!(hidden[0]["a"], "src/alone_a.rs", "got {report}");
+        assert_eq!(hidden[0]["static"]["relation"], "no_path");
+        assert_eq!(hidden[1]["a"], "src/chain_head.rs", "got {report}");
+        assert_eq!(hidden[1]["static"]["relation"], "transitive");
+        assert!(
+            hidden[1]["score"].as_f64().unwrap() > hidden[0]["score"].as_f64().unwrap(),
+            "the transitive row must be the better-supported one: {report}",
+        );
+    }
+
+    /// A test file that declares a dependency on its subject and rarely
+    /// moves with it is not a suspect dependency — a test is coupled to
+    /// its subject by construction, and the same split that keeps such a
+    /// pair out of `hidden_coupling` has to keep it out of here.
+    #[test]
+    fn a_test_files_declared_dependency_is_never_suspect() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(dir.path(), "src/lib.rs", "pub mod b;\npub mod b_test;\n");
+        let write = |path: &str, revision: usize| {
+            let body = if path == "src/b_test.rs" {
+                format!("use crate::b::work;\npub fn t() -> u8 {{ work() + {revision} }}\n")
+            } else {
+                format!("pub fn work() -> u8 {{ {revision} }}\n")
+            };
+            write_file(dir.path(), path, &body);
+        };
+        write("src/b.rs", 0);
+        write("src/b_test.rs", 0);
+        commit(dir.path(), "initial");
+        for revision in 1..=4 {
+            write("src/b.rs", revision);
+            commit(dir.path(), "subject");
+            write("src/b_test.rs", revision);
+            commit(dir.path(), "test");
+        }
+
+        let report = json(&HiddenCouplingAnalyzer::new(), dir.path());
+        assert!(
+            report["static_view"]["edge_count"].as_u64().unwrap() > 0,
+            "the fixture must declare the edge being filtered: {report}",
+        );
+        assert!(
+            pairs(&report, "suspect_dependencies").is_empty(),
+            "got {report}",
+        );
+    }
+
+    /// `--min-support` is a minimum on both endpoints: a file that moved
+    /// exactly that often has cleared it, and one that moved less has
+    /// not. Getting either boundary wrong silently redefines the flag,
+    /// and both directions matter because the two endpoints are checked
+    /// separately.
+    #[test]
+    fn the_suspect_bucket_reads_min_support_as_a_minimum_on_each_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod aeq;\npub mod zbig;\npub mod abig;\npub mod zeq;\n\
+             pub mod alo;\npub mod zhi;\n",
+        );
+        // Each `a*` file depends on its `z*` partner, so every pair is a
+        // declared edge; only their commit counts differ.
+        let targets = [
+            ("src/aeq.rs", "zbig"),
+            ("src/abig.rs", "zeq"),
+            ("src/alo.rs", "zhi"),
+        ];
+        let write = |path: &str, revision: usize| {
+            let name = path.trim_start_matches("src/").trim_end_matches(".rs");
+            let body = match targets.iter().find(|(p, _)| *p == path) {
+                Some((_, target)) => format!(
+                    "use crate::{target}::{target};\npub fn {name}() -> u8 {{ {target}() + {revision} }}\n",
+                ),
+                None => format!("pub fn {name}() -> u8 {{ {revision} }}\n"),
+            };
+            write_file(dir.path(), path, &body);
+        };
+        let files = [
+            "src/aeq.rs",
+            "src/zbig.rs",
+            "src/abig.rs",
+            "src/zeq.rs",
+            "src/alo.rs",
+            "src/zhi.rs",
+        ];
+        for path in files {
+            write(path, 0);
+        }
+        // One commit each, so every pair sits at one co-change — below
+        // the default support bar, which is what makes them candidates.
+        commit(dir.path(), "initial");
+        // Commit counts after this: aeq 3 (exactly the bar), zeq 3,
+        // alo 2 (under it), and every `big`/`hi` partner 6.
+        let extra = [
+            ("src/aeq.rs", 2),
+            ("src/zeq.rs", 2),
+            ("src/alo.rs", 1),
+            ("src/zbig.rs", 5),
+            ("src/abig.rs", 5),
+            ("src/zhi.rs", 5),
+        ];
+        for (path, count) in extra {
+            for revision in 1..=count {
+                write(path, revision);
+                commit(dir.path(), path);
+            }
+        }
+
+        let report = json(&HiddenCouplingAnalyzer::new(), dir.path());
+        assert_eq!(
+            pairs(&report, "suspect_dependencies"),
+            ["src/abig.rs src/zeq.rs", "src/aeq.rs src/zbig.rs"],
+            "a file exactly at the bar has cleared it; one under it has not: {report}",
+        );
+    }
+
     /// An `--exclude` glob has to reach both halves: a file dropped from
     /// the history but kept in the static view would still be counted as
     /// a declared dependency nothing exercises.
@@ -1220,6 +1417,17 @@ mod tests {
         assert_eq!(report["static_view"]["file_count"], 12, "got {report}");
         assert!(report["static_view"]["edge_count"].as_u64().unwrap() >= 4);
         assert_eq!(report["static_view"]["module_graph"]["roots"], 1);
+        // `a -> b`, `f -> g`, `h -> mid`, `mid -> i`: the four calls
+        // the fixture makes, all of them resolvable, so nothing is
+        // left over to weaken a `no_path` verdict.
+        assert_eq!(
+            report["static_view"]["resolved_call_edge_count"], 4,
+            "got {report}"
+        );
+        assert_eq!(
+            report["static_view"]["unresolved_call_site_count"], 0,
+            "got {report}"
+        );
         assert_eq!(report["schema_version"], SCHEMA_VERSION);
     }
 
@@ -1260,9 +1468,11 @@ mod tests {
     #[case::hidden_verdict("| no path |")]
     #[case::transitive_verdict("| 2 hops |")]
     #[case::suspect("## Suspect dependencies (1 edge(s)")]
-    #[case::suspect_row("| src/a.rs | src/b.rs | call+import |")]
+    #[case::suspect_row("| src/a.rs | src/b.rs | call+import | a→b |")]
     #[case::tests("## Test pairs (1 pair(s)")]
+    #[case::test_row("| src/a.rs | tests/a_test.rs |")]
     #[case::outside("## Outside the static view (1 pair(s)")]
+    #[case::outside_row("| notes.md | src/e.rs |")]
     fn markdown_keeps_every_bucket_distinct(#[case] needle: &str) {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
