@@ -623,7 +623,10 @@ const BINARY_FILE_LINES: u64 = 1;
 enum Field<'a> {
     /// A commit header — the date — with the first record glued to it by
     /// a newline, unless the commit carried no diff at all.
-    Header { date: &'a str, first: Option<&'a str> },
+    Header {
+        date: &'a str,
+        first: Option<&'a str>,
+    },
     /// One `ADDED\tDELETED\tPATH` record.
     Record(&'a str),
     /// The empty field that closes a commit's record list.

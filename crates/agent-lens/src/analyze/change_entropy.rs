@@ -64,6 +64,7 @@ use tracing::warn;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
+use super::format::format_optional_f64;
 use super::options::analyzer_options;
 use super::{
     AnalyzePathFilter, AnalyzeRoots, DiffScope, OutputFormat, PathFilterError, parse_diff_range,
@@ -125,6 +126,14 @@ pub enum Period {
     Week,
     /// Calendar month, keyed `YYYY-MM`.
     Month,
+}
+
+impl Period {
+    /// How the period is named in prose and in tables. Delegates to the
+    /// domain spelling so the flag and the report cannot drift.
+    fn as_str(self) -> &'static str {
+        lens_domain::Period::from(self).as_str()
+    }
 }
 
 impl From<Period> for lens_domain::Period {
@@ -670,11 +679,9 @@ struct ReferenceView {
 
 const DEFAULT_TOP: usize = 20;
 
-/// `None` renders as `-`: a figure a report does not have must not be
-/// spelled `0.00`, which is a figure.
-fn optional(value: Option<f64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |value| format!("{value:.2}"))
-}
+/// Decimals every entropy figure is rendered to. Two: a scatter figure
+/// is a prior read against a median, not a measurement to three places.
+const ENTROPY_PRECISION: usize = 2;
 
 fn format_scope(out: &mut String, scope: &ScopeView<'_>) {
     let _ = writeln!(out, "\n{}", scope.note);
@@ -716,9 +723,9 @@ fn format_history(view: &HistoryView<'_>, top: Option<usize>) -> String {
         view.thin_period_count,
         view.scope.thresholds.min_commits_per_period,
         view.file_count,
-        optional(view.commit_entropy.median),
-        optional(view.commit_entropy.p75),
-        optional(view.commit_entropy.p90),
+        format_optional_f64(view.commit_entropy.median, ENTROPY_PRECISION),
+        format_optional_f64(view.commit_entropy.p75, ENTROPY_PRECISION),
+        format_optional_f64(view.commit_entropy.p90, ENTROPY_PRECISION),
         view.commit_entropy.commit_count,
     );
 
@@ -788,6 +795,14 @@ fn format_history(view: &HistoryView<'_>, top: Option<usize>) -> String {
             period.changed_lines,
         );
     }
+    let overflow = view.periods.len().saturating_sub(limit);
+    if overflow > 0 {
+        let _ = writeln!(
+            &mut out,
+            "\n+{overflow} more {}(s) not shown (raise `--top`; JSON carries every row).",
+            view.scope.period.as_str(),
+        );
+    }
     out
 }
 
@@ -814,11 +829,11 @@ fn format_verdict(view: &VerdictView<'_>, top: Option<usize>) -> String {
         pending.modules_spanned,
         pending.changed_lines,
         pending.entropy,
-        optional(view.reference.distribution.median),
-        optional(view.reference.distribution.p90),
+        format_optional_f64(view.reference.distribution.median, ENTROPY_PRECISION),
+        format_optional_f64(view.reference.distribution.p90, ENTROPY_PRECISION),
         view.reference
             .percentile
-            .map_or_else(|| "-".to_owned(), |p| format!("p{p:.0}")),
+            .map_or_else(|| "n/a".to_owned(), |p| format!("p{p:.0}")),
     );
     let _ = writeln!(
         &mut out,
@@ -856,12 +871,6 @@ fn format_verdict(view: &VerdictView<'_>, top: Option<usize>) -> String {
         );
     }
     out
-}
-
-impl Period {
-    fn as_str(self) -> &'static str {
-        lens_domain::Period::from(self).as_str()
-    }
 }
 
 #[cfg(test)]
