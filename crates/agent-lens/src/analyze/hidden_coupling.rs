@@ -54,8 +54,8 @@ use tracing::warn;
 
 use super::call_graph::model::{ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder};
-use super::churn::ChurnScope;
-use super::co_change::{CoChangeOptions, retain_reportable_paths};
+use super::churn::{ChurnScope, ReportablePaths};
+use super::co_change::CoChangeOptions;
 use super::error_from::impl_from_churn_error;
 use super::format::render_module_confidence;
 use super::runner::render_report;
@@ -255,7 +255,13 @@ impl HiddenCouplingAnalyzer {
         }
 
         let mut commits = scope.collect_commits(self.since.as_deref())?;
-        retain_reportable_paths(&mut commits, &filter, scope.repo_root());
+        // The same gate `co-change` applies, through the same shared
+        // decision cache: a pair one analyzer reports and the other
+        // cannot see would make this differential meaningless.
+        let mut reportable = ReportablePaths::new(&filter, scope.repo_root());
+        for commit in &mut commits {
+            commit.files.retain(|file| reportable.keeps(file));
+        }
         let counts = tally_cochange(&commits, self.thresholds.max_commit_files);
         let cochanging = rank_cochange_pairs(&counts, self.thresholds);
 

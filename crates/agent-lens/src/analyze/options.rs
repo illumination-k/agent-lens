@@ -176,6 +176,7 @@ pub(crate) use analyzer_options;
 #[cfg(test)]
 mod tests {
     use crate::analyze::DiffScope;
+    use crate::analyze::change_entropy::{ChangeEntropyAnalyzer, ChangeEntropyOptions, Period};
     use crate::analyze::co_change::{CoChangeAnalyzer, CoChangeOptions};
     use crate::analyze::cohesion::{CohesionAnalyzer, CohesionOptions};
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
@@ -268,6 +269,25 @@ mod tests {
             .with_since_opt(Some("90.days.ago".to_owned()))
             .with_min_support(5)
             .with_min_confidence(0.7)
+            .with_max_commit_files(20)
+    );
+    assert_options_reach_the_analyzer!(
+        change_entropy_options_reach_the_analyzer: ChangeEntropyAnalyzer,
+        ChangeEntropyOptions {
+            top: Some(3),
+            since: Some("90.days.ago".to_owned()),
+            period: Period::Month,
+            diff_only: true,
+            diff_range: None,
+            min_commits: 5,
+            max_commit_files: 20,
+        },
+        |a| a
+            .with_top(Some(3))
+            .with_since_opt(Some("90.days.ago".to_owned()))
+            .with_period(Period::Month)
+            .with_diff_only(true)
+            .with_min_commits(5)
             .with_max_commit_files(20)
     );
     assert_options_reach_the_analyzer!(
@@ -372,6 +392,10 @@ mod tests {
     }
 
     assert_diff_range_reaches_the_analyzer!(
+        change_entropy_diff_range_reaches_the_analyzer: ChangeEntropyAnalyzer,
+        ChangeEntropyOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
         cohesion_diff_range_reaches_the_analyzer: CohesionAnalyzer,
         CohesionOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
     );
@@ -411,6 +435,12 @@ mod tests {
         SimilarityOptions { diff_only: true, diff_range: Some(RANGE.to_owned()), ..Default::default() }
             .has_diff_conflict(),
         SimilarityOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+            .has_diff_conflict(),
+    )]
+    #[case::shared_accessors(
+        ChangeEntropyOptions { diff_only: true, diff_range: Some(RANGE.to_owned()), ..Default::default() }
+            .has_diff_conflict(),
+        ChangeEntropyOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
             .has_diff_conflict(),
     )]
     fn has_diff_conflict_flags_only_the_combination(

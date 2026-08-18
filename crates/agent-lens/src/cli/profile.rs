@@ -154,6 +154,10 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.risk.is_some(), config::ToolName::Risk),
         (profile.co_change.is_some(), config::ToolName::CoChange),
         (
+            profile.change_entropy.is_some(),
+            config::ToolName::ChangeEntropy,
+        ),
+        (
             profile.hidden_coupling.is_some(),
             config::ToolName::HiddenCoupling,
         ),
