@@ -1205,6 +1205,71 @@ mod tests {
         assert!(out.contains("| 2026-08 |"), "got {out}");
     }
 
+    /// The two empty reports mean different things — no history in the
+    /// window at all, versus history every period floor rejected — so
+    /// they must not say the same thing.
+    #[rstest]
+    #[case::window_matched_nothing(
+        ChangeEntropyAnalyzer::new().with_since("2099-01-01"),
+        "_No commits matched._",
+    )]
+    #[case::window_matched_nothing_via_option(
+        ChangeEntropyAnalyzer::new().with_since_opt(Some("2099-01-01".to_owned())),
+        "_No commits matched._",
+    )]
+    #[case::every_period_was_too_thin(
+        ChangeEntropyAnalyzer::new().with_min_commits(99),
+        "_No period met `--min-commits`._",
+    )]
+    fn an_empty_report_says_which_kind_of_empty_it_is(
+        #[case] analyzer: ChangeEntropyAnalyzer,
+        #[case] expected: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        init_history(dir.path());
+        let out = analyzer.analyze(dir.path(), OutputFormat::Md).unwrap();
+        assert!(out.contains(expected), "got {out}");
+    }
+
+    /// `--top` is a rendering cap, not a filter, so what it hid has to be
+    /// visible — and an uncapped report must not carry the line at all,
+    /// which is what stops "+0 more" from ever being printed.
+    #[test]
+    fn top_caps_the_markdown_tables_and_names_what_it_hid() {
+        let dir = tempfile::tempdir().unwrap();
+        init_history(dir.path());
+        let capped = analyzer()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(capped.contains("+3 more file(s) not shown"), "got {capped}");
+        assert!(capped.contains("+1 more week(s) not shown"), "got {capped}");
+
+        let full = analyzer().analyze(dir.path(), OutputFormat::Md).unwrap();
+        assert!(!full.contains("not shown"), "got {full}");
+    }
+
+    #[test]
+    fn the_verdict_file_table_is_capped_the_same_way() {
+        let dir = tempfile::tempdir().unwrap();
+        init_history(dir.path());
+        write_file(dir.path(), "src/a.rs", &body(20));
+        write_file(dir.path(), "src/b.rs", &body(20));
+
+        let capped = analyzer()
+            .with_diff_only(true)
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(capped.contains("+1 more file(s) not shown"), "got {capped}");
+
+        let full = analyzer()
+            .with_diff_only(true)
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(!full.contains("not shown"), "got {full}");
+    }
+
     #[test]
     fn a_path_outside_a_git_tree_is_reported_as_such() {
         let dir = tempfile::tempdir().unwrap();

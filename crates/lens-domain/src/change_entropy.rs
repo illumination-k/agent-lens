@@ -908,9 +908,58 @@ mod tests {
         let distribution = EntropyDistribution::new(vec![0.4, 0.0, 0.8, 0.2, 1.0]);
         assert_eq!(distribution.sample_count(), 5);
         assert!((distribution.median().unwrap_or(-1.0) - 0.4).abs() < 1e-12);
+        assert!((distribution.quantile(0.75).unwrap_or(-1.0) - 0.8).abs() < 1e-12);
+        assert!((distribution.quantile(0.9).unwrap_or(-1.0) - 1.0).abs() < 1e-12);
         assert!((distribution.percentile_rank(0.4).unwrap_or(-1.0) - 60.0).abs() < 1e-12);
         assert!((distribution.percentile_rank(1.0).unwrap_or(-1.0) - 100.0).abs() < 1e-12);
         assert!(distribution.percentile_rank(-0.1).unwrap_or(-1.0).abs() < 1e-12);
+    }
+
+    /// A quantile outside `[0, 1]` is a caller's arithmetic slip, not a
+    /// reason to index past the end of the sample.
+    #[rstest]
+    #[case(-1.0, 0.0)]
+    #[case(0.0, 0.0)]
+    #[case(1.0, 1.0)]
+    #[case(2.5, 1.0)]
+    fn a_quantile_outside_the_unit_range_clamps(#[case] q: f64, #[case] expected: f64) {
+        let distribution = EntropyDistribution::new(vec![0.0, 0.5, 1.0]);
+        assert_eq!(distribution.quantile(q), Some(expected));
+    }
+
+    /// Two files that accumulated the same scatter still have to come
+    /// back in one order, or two runs over one history disagree about
+    /// what to read first.
+    #[test]
+    fn files_tied_on_history_complexity_rank_by_lines_then_path() {
+        // `zzz` and `aaa` split both periods evenly, so their
+        // history complexity and their changed lines are identical to
+        // the bit: only the path is left to break the tie.
+        let commits = vec![
+            commit("2026-08-24", &[("aaa", 25), ("zzz", 25)]),
+            commit("2026-08-17", &[("aaa", 5), ("zzz", 5)]),
+        ];
+        let report = compute_change_entropy(&commits, Period::Week, open());
+        let ranked: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(ranked, vec!["aaa", "zzz"], "got {report:?}");
+    }
+
+    /// A file's periods lead with the one that put the number there, so
+    /// a caller taking the first few takes the ones that explain it.
+    #[test]
+    fn a_files_periods_lead_with_its_largest_contribution() {
+        let commits = vec![
+            commit("2026-08-24", &[("a", 1), ("b", 99)]),
+            commit("2026-08-17", &[("a", 50), ("b", 50)]),
+        ];
+        let report = compute_change_entropy(&commits, Period::Week, open());
+        let a = find(&report, "a");
+        assert_eq!(a.periods.len(), 2, "{a:?}");
+        assert_eq!(a.periods[0].period, "2026-W34", "{a:?}");
+        assert!(
+            a.periods[0].contribution > a.periods[1].contribution,
+            "{a:?}",
+        );
     }
 
     /// An empty sample has no median and no percentile: inventing one
