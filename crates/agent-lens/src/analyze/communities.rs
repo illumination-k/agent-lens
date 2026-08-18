@@ -464,7 +464,10 @@ struct ModularityView {
     /// are the detected ones.
     gap: f64,
     /// `declared / detected`, omitted when the graph has no community
-    /// structure to compare against.
+    /// structure to compare against. Above `1.0` when the declared
+    /// grouping beats the one the search found, which greedy
+    /// agglomeration allows — it finds a good partition, not the
+    /// optimal one.
     #[serde(skip_serializing_if = "Option::is_none")]
     declared_quality: Option<f64>,
 }
@@ -969,6 +972,41 @@ mod tests {
             .unwrap();
         assert!(md.contains("scores below zero"), "got {md}");
         assert!(!md.contains("scores -"), "got {md}");
+    }
+
+    /// A cluster split evenly between two declared modules is owned by
+    /// neither, which is the spanning listing's whole subject — so the
+    /// section has to appear, with the breakdown that argues for it.
+    #[test]
+    fn markdown_reports_a_cluster_no_declared_module_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "pub mod x;\npub mod y;\n");
+        write_file(dir.path(), "x/mod.rs", "pub mod one;\n");
+        write_file(dir.path(), "x/one.rs", "pub struct X;\npub fn x() {}\n");
+        write_file(dir.path(), "y/mod.rs", "pub mod one;\n");
+        write_file(
+            dir.path(),
+            "y/one.rs",
+            "use crate::x::one::X;\npub fn y(_x: X) { crate::x::one::x(); }\n",
+        );
+
+        let json = report(&lib, CommunitiesAnalyzer::new());
+        assert_eq!(
+            json["spanning"].as_array().map(Vec::len),
+            Some(1),
+            "got {json:#}"
+        );
+        assert_eq!(
+            json["spanning"][0]["declared_group_count"], 2,
+            "got {json:#}"
+        );
+
+        let md = CommunitiesAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("## Spanning communities"), "got {md}");
+        assert!(md.contains("declared module(s)"), "got {md}");
+        assert!(md.contains("crate::x (1)"), "got {md}");
     }
 
     /// A tree with no cross-module reference has no boundary to

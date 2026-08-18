@@ -196,9 +196,12 @@ pub struct CommunityReport {
     /// exactly the ones the dependencies form.
     pub modularity_gap: f64,
     /// `declared / detected`, when the detected partition scored above
-    /// zero. `1.0` means the declared architecture is as good a
-    /// partition as any this graph supports; `None` means the graph has
-    /// no community structure to compare against.
+    /// zero. `1.0` means the declared architecture scores exactly what
+    /// the search found, and `None` that the graph has no community
+    /// structure to compare against. The ratio can exceed `1.0`: greedy
+    /// agglomeration finds a good partition, not the optimal one, so a
+    /// declared grouping is occasionally the better of the two — which
+    /// is the strongest possible "the boundaries are right" answer.
     pub declared_quality: Option<f64>,
     /// Communities at least `min_community` members large, canonical
     /// order.
@@ -648,9 +651,7 @@ fn node_table(nodes: &[CommunityNode]) -> (Vec<String>, Vec<String>, Vec<usize>)
     let mut declared: BTreeMap<&str, &str> = BTreeMap::new();
     for node in nodes {
         let entry = declared.entry(&node.id).or_insert(&node.declared);
-        if node.declared.as_str() < *entry {
-            *entry = &node.declared;
-        }
+        *entry = (*entry).min(node.declared.as_str());
     }
     let group_names: Vec<String> = declared
         .values()
@@ -886,28 +887,34 @@ mod tests {
 
     /// The misfiled gate is strict: equal weight either way is not
     /// evidence for a move, so the tie stays home.
+    ///
+    /// `a1` sits in a community `b` dominates and carries 3 units to
+    /// each side, so only the strictness of the comparison keeps it off
+    /// the listing.
     #[test]
     fn a_member_pulled_equally_both_ways_is_not_reported() {
         let nodes = vec![
             CommunityNode::new("a1", "a"),
+            CommunityNode::new("a2", "a"),
             CommunityNode::new("b1", "b"),
             CommunityNode::new("b2", "b"),
             CommunityNode::new("b3", "b"),
         ];
-        // a1 has 2 units into `b` and 2 into its own `a` — a tie, so no
-        // row, even though its community is dominated by `b`.
-        let nodes = nodes
-            .into_iter()
-            .chain([CommunityNode::new("a2", "a")])
-            .collect::<Vec<_>>();
         let edges = vec![
-            CommunityEdge::new("a1", "a2", 2),
-            CommunityEdge::new("a1", "b1", 2),
+            CommunityEdge::new("a1", "a2", 3),
+            CommunityEdge::new("a1", "b1", 3),
+            CommunityEdge::new("a2", "b2", 5),
             CommunityEdge::new("b1", "b2", 3),
             CommunityEdge::new("b2", "b3", 3),
             CommunityEdge::new("b1", "b3", 3),
         ];
         let report = detect_communities(&nodes, &edges, 1);
+        let community = report
+            .communities
+            .iter()
+            .find(|c| c.members.contains(&"a1".to_owned()))
+            .unwrap_or_else(|| panic!("no a1 community in {report:?}"));
+        assert_eq!(community.dominant_declared, "b", "got {report:?}");
         assert!(
             report.misfiled.iter().all(|m| m.node != "a1"),
             "a tie is not evidence: {report:?}",
@@ -1009,6 +1016,35 @@ mod tests {
             .find(|c| c.members.contains(&"b1".to_owned()))
             .unwrap_or_else(|| panic!("no b1 community in {report:?}"));
         assert_eq!(holding_b.members, ["b1", "b2"], "got {report:?}");
+    }
+
+    /// Ties are resolved to the *first* candidate pair, not the last.
+    /// On a ring of unit edges every merge is worth the same at every
+    /// step, so which end of the tie the scan keeps decides the whole
+    /// partition — the case that separates a total rule from a merely
+    /// deterministic one.
+    #[test]
+    fn a_tied_merge_resolves_to_the_first_candidate_pair() {
+        let nodes: Vec<CommunityNode> = (0..5)
+            .map(|i| CommunityNode::new(format!("n{i}"), "g"))
+            .collect();
+        let edges: Vec<CommunityEdge> = (0..5)
+            .map(|i| CommunityEdge::new(format!("n{i}"), format!("n{}", (i + 1) % 5), 1))
+            .collect();
+        let report = detect_communities(&nodes, &edges, 1);
+        let partition: Vec<&[String]> = report
+            .communities
+            .iter()
+            .map(|c| c.members.as_slice())
+            .collect();
+        assert_eq!(
+            partition,
+            vec![
+                ["n0".to_owned(), "n1".to_owned(), "n4".to_owned()].as_slice(),
+                ["n2".to_owned(), "n3".to_owned()].as_slice(),
+            ],
+            "got {report:?}",
+        );
     }
 
     /// A parent that is both a node and the group its children are
