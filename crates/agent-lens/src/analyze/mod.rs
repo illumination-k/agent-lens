@@ -1,13 +1,14 @@
 //! On-demand analyzers that emit LLM-friendly context.
 //!
 //! Each submodule is one analyzer (cohesion, complexity, coupling,
-//! similarity, wrapper, hotspot, risk, co-change, …) and is wired to a clap subcommand so
-//! typos surface at parse time. Output is always written to stdout as JSON
+//! similarity, wrapper, hotspot, risk, co-change, change-entropy, …) and
+//! is wired to a clap subcommand so typos surface at parse time. Output is always written to stdout as JSON
 //! by default; analyzers can opt in to a `--format md` mode for a more
 //! compact human-readable summary.
 
 pub(crate) mod call_graph;
 mod cargo_meta;
+pub mod change_entropy;
 mod churn;
 pub mod co_change;
 pub mod cohesion;
@@ -46,6 +47,7 @@ use std::path::{Path, PathBuf};
 
 use lens_domain::LanguageParser;
 
+pub use change_entropy::{ChangeEntropyAnalyzer, ChangeEntropyError, Period};
 pub use co_change::{CoChangeAnalyzer, CoChangeError};
 pub use cohesion::CohesionAnalyzer;
 pub use complexity::ComplexityAnalyzer;

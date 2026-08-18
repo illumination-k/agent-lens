@@ -40,6 +40,11 @@
 //! * [`hotspot`] — `commits × cognitive_max` scoring per file. Adapters
 //!   feed in per-file complexity rollups and a churn table; this module
 //!   merges them into a ranked list.
+//! * [`change_entropy`] — Hassan-style change scatter: how spread out
+//!   change activity was in each period, and how much of that scatter
+//!   accumulates onto each file as history complexity. Also measures a
+//!   single pending change against the distribution of commits it is
+//!   about to join.
 //! * [`cochange`] — temporal (logical) coupling: which files change in
 //!   the same commit, how reliably in each direction, and whether the
 //!   pairing beats what two files that busy would do by chance. The CLI
@@ -70,6 +75,7 @@
 
 pub mod apted;
 pub mod block_shape;
+pub mod change_entropy;
 pub mod cochange;
 pub mod cohesion;
 pub mod complexity;
@@ -96,6 +102,11 @@ pub use apted::{
 pub use block_shape::{
     BlockShape, BlockWindowOptions, DEFAULT_MAX_WINDOW_STATEMENTS, StatementSeq, StatementUnit,
     block_windows,
+};
+pub use change_entropy::{
+    ChangeEntropyReport, ChangeEntropyThresholds, CommitChanges, DEFAULT_MIN_COMMITS_PER_PERIOD,
+    EntropyDistribution, FileChange, FileEntropy, FilePeriodContribution, Period, PeriodEntropy,
+    Scatter, compute_change_entropy, module_of,
 };
 pub use cochange::{
     CoChangePair, CoChangeReport, CoChangeThresholds, CommitFiles, DEFAULT_MAX_COMMIT_FILES,

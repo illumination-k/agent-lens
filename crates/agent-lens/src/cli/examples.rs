@@ -22,6 +22,7 @@ Pick an analyzer by question:
     where should I refactor first?        analyze hotspot
     how carefully should I edit this?     analyze risk
     what else will I have to edit?        analyze co-change
+    did this edit end up scattered?       analyze change-entropy
     is this function too complex?         analyze complexity
     where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
@@ -241,6 +242,24 @@ Examples:
     agent-lens analyze co-change . --since 180.days.ago --format md
     agent-lens analyze co-change . --min-support 5 --min-confidence 0.7
     agent-lens analyze co-change . --max-commit-files 20 --format md
+";
+
+pub const CHANGE_ENTROPY: &str = "\
+Point it at the widest path you care about: a pathspec scopes the change sets
+too, so a run over one directory measures only the part of each change that
+landed in it.
+
+Before a commit, reach for --diff-only: it reads the pending change instead of
+the history and says where its scatter sits among the commits this repository
+actually makes.
+
+Examples:
+
+    agent-lens analyze change-entropy . --diff-only --format md
+    agent-lens analyze change-entropy . --format md --top 15
+    agent-lens analyze change-entropy . --since 180.days.ago --period month
+    agent-lens analyze change-entropy . --diff-range HEAD~1..HEAD --format md
+    agent-lens analyze change-entropy . --min-commits 5 --max-commit-files 20
 ";
 
 pub const SEARCH: &str = "\

@@ -4,21 +4,21 @@
 use std::path::PathBuf;
 
 use agent_lens::analyze::{
-    CoChangeAnalyzer, CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
-    CyclesAnalyzer, DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection,
-    GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
-    OutputFormat, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer, UnreachableAnalyzer,
-    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, ComplexityAnalyzer,
+    ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer,
+    ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
+    UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
-    AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand, AnalyzeCommonArgs,
-    AnalyzeComplexityArgs, AnalyzeContextSpanArgs, AnalyzeCouplingArgs, AnalyzeDelegationArgs,
-    AnalyzeGraphQueryArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
-    AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs,
-    AnalyzeSimilarityArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
-    AnalyzeWrapperArgs,
+    AnalyzeChangeEntropyArgs, AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand,
+    AnalyzeCommonArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs, AnalyzeCouplingArgs,
+    AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs,
+    AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs,
+    AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs,
+    AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -70,6 +70,12 @@ pub(super) fn build_analyze_command(
         }),
     };
     Ok(match tool {
+        config::ToolName::ChangeEntropy => {
+            AnalyzeCommand::ChangeEntropy(AnalyzeChangeEntropyArgs {
+                common,
+                opts: profile.change_entropy.clone().unwrap_or_default(),
+            })
+        }
         config::ToolName::CoChange => AnalyzeCommand::CoChange(AnalyzeCoChangeArgs {
             common,
             opts: profile.co_change.clone().unwrap_or_default(),
@@ -193,6 +199,7 @@ macro_rules! impl_with_analyze_path_args {
 }
 
 impl_with_analyze_path_args!(
+    ChangeEntropyAnalyzer,
     CoChangeAnalyzer,
     CohesionAnalyzer,
     ComplexityAnalyzer,
@@ -283,6 +290,7 @@ impl AnalyzeCommand {
         Ok(dispatch_analyze! {
             self;
             with_options {
+                ChangeEntropy => ChangeEntropyAnalyzer,
                 CoChange => CoChangeAnalyzer,
                 Cohesion => CohesionAnalyzer,
                 Complexity => ComplexityAnalyzer,
