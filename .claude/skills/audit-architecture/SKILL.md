@@ -1,15 +1,16 @@
 ---
 name: audit-architecture
-description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, layering and level inversions, instability, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `layers`, `context-span`, and `cohesion`. `coupling`, `layers`, `context-span`, and `cohesion` all work on Rust, TypeScript / JavaScript, Python, and Go.
+description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, layering and level inversions, instability, whether the declared module boundaries match the clustering the dependencies form, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `layers`, `communities`, `context-span`, and `cohesion`, all of which work on Rust, TypeScript / JavaScript, Python, and Go.
 ---
 
 # Audit module structure with agent-lens
 
-Four analyzers cover the architecture question:
+Five analyzers cover the architecture question:
 
 - `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), Go modules (package-granular), and Python package trees (file-granular, in-tree imports only).
 - `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, Python, and Go. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
 - `layers` — inferred Lakos levelization of the call graph: a level per function and per module, the entry-point set, the module cycles that make levelization impossible (with the concrete call sites), and downward calls skipping a level. Needs no crate root or entry file — it walks any directory of Rust, TS/JS, Python, or Go.
+- `communities` — the clusters the dependency graph forms, scored against the module boundaries the repository declares. Newman modularity `Q` for both partitions over one graph, plus the members filed in one module but wired into another. Same entry-point rule as `coupling`.
 - `cohesion` — per-`impl` (Rust) / per-class (TS, Python, Go) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
 
 ## Workflow
@@ -58,7 +59,26 @@ Read it in this order:
 
 Nothing here is an error by itself: callbacks, dependency injection, and trait-object dispatch all produce the same shapes, and the call facts cannot tell them apart. Rows marked `name-fallback` had their target guessed by last segment — discount those first.
 
-### 3. Module read-cost (context span)
+### 3. Are the boundaries in the right place (communities)
+
+`coupling` and `layers` both take the declared module boundaries as given: one says which modules lean on each other, the other whether the direction is sane. `communities` is the question underneath both — whether the boundary belongs there at all:
+
+```bash
+agent-lens analyze communities crates/agent-lens --format md --top 15
+
+# Directories rather than files, for "is this subtree under the right parent?"
+agent-lens analyze communities crates/agent-lens --granularity module --format md
+```
+
+Read it top-down and stop early when you can:
+
+1. **The two `Q` values.** A declared score close to the detected one means the declared boundaries already are the clustering — the architecture matches reality, and everything below is noise. A wide gap is what makes the listings worth reading.
+2. **Misfiled members.** Each row is a move candidate with its evidence: edge weight to the module its community is named after, against edge weight to the module it is filed under. Rank order is that gap, so the top row is the best-evidenced move, not the biggest cluster.
+3. **Spanning communities.** A cluster no declared module owns a majority of is a feature smeared across modules — the case for a new module rather than a move.
+
+Two things to discount before acting. Only resolved references become edges, so a module whose imports the extractor cannot resolve looks under-connected to its own neighbours — check the file before believing a row with `→declared 0`. And modularity has a resolution limit: a small genuine cluster can be absorbed into a larger neighbour, which is why every community reports its size.
+
+### 4. Module read-cost (context span)
 
 Pair `coupling` with `context-span` to estimate how much of the crate an agent must hold in context to safely change a given module:
 
@@ -87,7 +107,7 @@ agent-lens analyze context-span app \
 
 A module with a large `files` count is expensive to onboard onto. If a hub from step 1 also has a wide span, splitting the hub gives an outsized win (smaller change, smaller blast radius).
 
-### 4. Per-`impl` / per-class cohesion
+### 5. Per-`impl` / per-class cohesion
 
 For the worst-offending modules from steps 1-2 — and any `impl` block or class the user is about to extend — run `cohesion`:
 
@@ -105,18 +125,20 @@ agent-lens analyze cohesion <path> --diff-only --format md
 
 …catches the case "I just added a method that uses none of the fields the others use".
 
-### 5. Cross-reference
+### 6. Cross-reference
 
 The analyzers tell different stories that often line up:
 
-| Coupling signal                  | Cohesion signal              | Diagnosis                                                                                   |
-| -------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------- |
-| Module has high Fan-Out          | LCOM4 = 1 across its `impl`s | God object — split by responsibility, not by struct.                                        |
-| Module has high Fan-In           | One `impl` has LCOM4 ≥ 2     | The hub leaks an internal split — fix cohesion first, then re-measure coupling.             |
-| Cycle between A and B            | —                            | Move the shared abstraction into a third module both depend on.                             |
-| Instability ≈ 1 on a leaf module | —                            | Fine. Leaves are supposed to be unstable.                                                   |
-| Instability ≈ 0 with high churn  | —                            | Stable hub that keeps changing. Either it's miscategorised or the hub abstraction is wrong. |
-| `layers` wide member span        | One `impl` has LCOM4 ≥ 2     | The module holds two layers _and_ two responsibilities — split along the level boundary.    |
+| Coupling signal                  | Cohesion signal              | Diagnosis                                                                                                  |
+| -------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Module has high Fan-Out          | LCOM4 = 1 across its `impl`s | God object — split by responsibility, not by struct.                                                       |
+| Module has high Fan-In           | One `impl` has LCOM4 ≥ 2     | The hub leaks an internal split — fix cohesion first, then re-measure coupling.                            |
+| Cycle between A and B            | —                            | Move the shared abstraction into a third module both depend on.                                            |
+| Instability ≈ 1 on a leaf module | —                            | Fine. Leaves are supposed to be unstable.                                                                  |
+| Instability ≈ 0 with high churn  | —                            | Stable hub that keeps changing. Either it's miscategorised or the hub abstraction is wrong.                |
+| `layers` wide member span        | One `impl` has LCOM4 ≥ 2     | The module holds two layers _and_ two responsibilities — split along the level boundary.                   |
+| `communities` misfiled member    | —                            | The file's dependencies put it in another module; move it, or find the abstraction that would let it stay. |
+| `communities` spanning community | —                            | No declared module owns the cluster. A new module, not a move.                                             |
 
 ## Reading the JSON when `--format md` isn't enough
 
@@ -133,6 +155,10 @@ agent-lens analyze coupling crates/agent-lens \
 
 # Impls with LCOM4 >= 2
 agent-lens analyze cohesion <path> | jq '.files[].units[] | select(.lcom4 >= 2)'
+
+# Move candidates with at least 5x more weight outside their module than inside
+agent-lens analyze communities crates/agent-lens \
+  | jq '.misfiled[] | select(.weight_to_suggested >= 5 * (.weight_to_declared + 1))'
 ```
 
 ## Don't reach for it when

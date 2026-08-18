@@ -157,6 +157,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             profile.change_entropy.is_some(),
             config::ToolName::ChangeEntropy,
         ),
+        (profile.communities.is_some(), config::ToolName::Communities),
         (
             profile.hidden_coupling.is_some(),
             config::ToolName::HiddenCoupling,

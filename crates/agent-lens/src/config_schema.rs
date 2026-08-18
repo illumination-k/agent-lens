@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 22] = [
+const TOOL_ORDER: [ToolName; 23] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -44,6 +44,7 @@ const TOOL_ORDER: [ToolName; 22] = [
     ToolName::ContextSpan,
     ToolName::Wrapper,
     ToolName::Coupling,
+    ToolName::Communities,
     ToolName::FunctionGraph,
     ToolName::Cycles,
 ];
@@ -74,13 +75,13 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "path",
         ty: "string (path) or array<string>",
         presence: "required",
-        desc: "Target path handed to every analyzer in `tools`, or an array of them walked into one report (the config spelling of `analyze <tool> PATH...`). A relative path is resolved against the directory holding agent-lens.toml. An array of more than one path is rejected for coupling and context-span, which take a single entry point.",
+        desc: "Target path handed to every analyzer in `tools`, or an array of them walked into one report (the config spelling of `analyze <tool> PATH...`). A relative path is resolved against the directory holding agent-lens.toml. An array of more than one path is rejected for coupling, context-span and communities, which take a single entry point.",
     },
     Field {
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -261,6 +262,26 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "int",
                 presence: "optional",
                 desc: "Cap the markdown table to the top N riskiest files.",
+            },
+        ],
+        ToolName::Communities => &[
+            Field {
+                key: "granularity",
+                ty: "\"file\" or \"module\"",
+                presence: "default: file",
+                desc: "What a community member is: one module-graph node (file), or the containing module those nodes collapse into (module).",
+            },
+            Field {
+                key: "min-community",
+                ty: "int",
+                presence: "default: 2",
+                desc: "Smallest community that gets reported. The partition, and therefore both modularity figures, is unaffected.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap each markdown listing to the top N rows.",
             },
         ],
         ToolName::CoChange => &[
@@ -739,10 +760,11 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        ChangeEntropyOptions, CoChangeOptions, CohesionOptions, ComplexityOptions,
-        ContextSpanOptions, CouplingOptions, DelegationOptions, GraphQueryOptions, HotspotOptions,
-        HubsOptions, ImpactOptions, LayersOptions, Profile, RiskOptions, SearchOptions,
-        SimilarityOptions, UnreachableOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
+        ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
+        ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
+        GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
+        RiskOptions, SearchOptions, SimilarityOptions, UnreachableOptions, UntestedOptions,
+        VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -768,6 +790,7 @@ mod tests {
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<CoChangeOptions>(ToolName::CoChange);
         assert_tool_parity::<ChangeEntropyOptions>(ToolName::ChangeEntropy);
+        assert_tool_parity::<CommunitiesOptions>(ToolName::Communities);
         // `hidden-coupling` scopes the same history window with the same
         // thresholds as `co-change`, so they share one options type —
         // and the schema has to keep describing that one type under both

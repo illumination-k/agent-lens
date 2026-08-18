@@ -138,6 +138,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
           "Module-level Fan-In, Fan-Out, Henry-Kafura IFC, Martin's Instability, per-pair shared symbols, and the cycles.",
       },
       {
+        name: "communities",
+        summary:
+          "The clusters the dependencies form against the module boundaries declared, with the files filed in one module but wired into another.",
+      },
+      {
         name: "context-span",
         summary:
           "The transitive dependency closure per module — how many files an agent must read before it can reason about one.",

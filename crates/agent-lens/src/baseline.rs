@@ -132,6 +132,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         ToolName::Similarity => Some(similarity_metrics),
         ToolName::ChangeEntropy
         | ToolName::CoChange
+        | ToolName::Communities
         | ToolName::Cycles
         | ToolName::Delegation
         | ToolName::FunctionGraph
@@ -581,6 +582,7 @@ mod tests {
 
     #[rstest]
     #[case(ToolName::CoChange)]
+    #[case(ToolName::Communities)]
     #[case(ToolName::Cycles)]
     #[case(ToolName::Delegation)]
     #[case(ToolName::FunctionGraph)]

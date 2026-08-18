@@ -19,6 +19,7 @@ macro_rules! routing {
         "\
 Pick an analyzer by question:
 
+    is this file in the right module?     analyze communities
     where should I refactor first?        analyze hotspot
     how carefully should I edit this?     analyze risk
     what else will I have to edit?        analyze co-change
@@ -261,6 +262,18 @@ Examples:
     agent-lens analyze change-entropy . --since 180.days.ago --period month
     agent-lens analyze change-entropy . --diff-range HEAD~1..HEAD --format md
     agent-lens analyze change-entropy . --min-commits 5 --max-commit-files 20
+";
+
+pub const COMMUNITIES: &str = "\
+Read the two modularity scores first: a declared score close to the detected
+one means the directory structure already is the clustering, and the misfiled
+rows below it are noise. A wide gap is what makes them worth reading.
+
+Examples:
+
+    agent-lens analyze communities crates/agent-lens --format md
+    agent-lens analyze communities crates/agent-lens --granularity module --format md
+    agent-lens analyze communities src/index.ts --min-community 3 --top 10
 ";
 
 pub const HIDDEN_COUPLING: &str = "\

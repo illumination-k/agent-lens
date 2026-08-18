@@ -35,6 +35,7 @@ tools = [
   "wrapper",
   "delegation",
   "coupling",
+  "communities",
   "context-span",
   "cycles",
   "layers",
@@ -68,6 +69,12 @@ min-lines = 8
 top = 15
 
 [profile.self.coupling]
+top = 15
+
+# Reads the same module graph as `coupling`, one question further on:
+# `coupling` says which modules lean on each other, this says whether the
+# module each file is filed under is the one its dependencies put it in.
+[profile.self.communities]
 top = 15
 
 [profile.self.wrapper]

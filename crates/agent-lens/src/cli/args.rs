@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use agent_lens::analyze::change_entropy::ChangeEntropyOptions;
 use agent_lens::analyze::co_change::CoChangeOptions;
 use agent_lens::analyze::cohesion::CohesionOptions;
+use agent_lens::analyze::communities::CommunitiesOptions;
 use agent_lens::analyze::complexity::ComplexityOptions;
 use agent_lens::analyze::context_span::ContextSpanOptions;
 use agent_lens::analyze::coupling::CouplingOptions;
@@ -457,6 +458,38 @@ pub(super) enum AnalyzeCommand {
     /// are never truncated.
     #[command(after_long_help = examples::COUPLING)]
     Coupling(AnalyzeCouplingArgs),
+    /// Compare the module clusters the dependencies form against the
+    /// module boundaries the repository declares.
+    ///
+    /// `layers` answers whether the dependency *direction* is sane; this
+    /// answers whether the *grouping* is. The headline is a pair of
+    /// modularity scores over one graph: `Q` for the partition detected
+    /// from the edges, and `Q` for the declared partition — each member
+    /// grouped by the module it is filed under. A declared score close to
+    /// the detected one means the directory structure already is the
+    /// clustering. Two listings carry the gap: *misfiled members*, a
+    /// member whose community is dominated by another declared module and
+    /// which has more edge weight to that module than to its own, and
+    /// *spanning communities*, a cluster spread over several declared
+    /// modules with none of them owning a majority — a feature that never
+    /// got a home. Ranking is by how lopsided a member's in/out edge
+    /// counts are, never by community size.
+    ///
+    /// `--granularity file` (default) makes one module-graph node one
+    /// member, so a finding names a file; `--granularity module`
+    /// collapses files into their containing module first, so a finding
+    /// names a directory. The partition is deterministic: greedy
+    /// modularity agglomeration over a canonically ordered graph, with
+    /// merge ties broken by node id, so the same tree always produces the
+    /// same report. Modularity has a resolution limit — a small genuine
+    /// cluster can be absorbed into a larger neighbour, which is why
+    /// every community reports its size — and on a small or densely
+    /// connected tree everything lands in one community, which is said
+    /// outright rather than split into noise. `path` is a single entry
+    /// point, the same one `coupling` takes. JSON is the default;
+    /// `--format md` caps each listing at `--top` (default 20).
+    #[command(after_long_help = examples::COMMUNITIES)]
+    Communities(AnalyzeCommunitiesArgs),
     /// Report function-level call cycles: groups of 2+ functions that
     /// call each other, directly or transitively, with advisory
     /// cheapest-cut suggestions for breaking each group.
@@ -998,6 +1031,14 @@ pub(super) struct AnalyzeCouplingArgs {
     pub(super) common: AnalyzeRootArgs,
     #[command(flatten)]
     pub(super) opts: CouplingOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeCommunitiesArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeRootArgs,
+    #[command(flatten)]
+    pub(super) opts: CommunitiesOptions,
 }
 
 #[derive(Debug, Clone, Args)]
