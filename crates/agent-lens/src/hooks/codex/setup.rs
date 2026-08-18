@@ -200,11 +200,12 @@ fn event_entries<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    use crate::hooks::setup_engine;
+    use crate::hooks::setup_engine::{self, conformance};
 
     fn plan(path: PathBuf) -> Result<setup_engine::SetupPlan<String>, SetupError> {
         setup_engine::plan::<CodexConfig>(path)
@@ -216,6 +217,41 @@ mod tests {
 
     fn parse(text: &str) -> DocumentMut {
         text.parse().unwrap()
+    }
+
+    /// The engine contract, run against the TOML format. Bodies live in
+    /// [`conformance`] so Claude Code's `settings.json` is held to the
+    /// same ones.
+    #[rstest]
+    #[case::missing_file_installs_everything(
+        conformance::plan_for_missing_file_installs_every_command::<CodexConfig>
+    )]
+    #[case::apply_creates_parent_dir(
+        conformance::apply_creates_parent_dir_and_writes_file::<CodexConfig>
+    )]
+    #[case::rerun_is_idempotent(conformance::rerunning_setup_is_idempotent::<CodexConfig>)]
+    #[case::empty_file_is_missing(conformance::empty_file_is_treated_as_missing::<CodexConfig>)]
+    #[case::directory_in_place_of_file(
+        conformance::directory_in_place_of_file_surfaces_io_error::<CodexConfig>
+    )]
+    #[case::project_scope_path(conformance::resolve_path_project_joins_relative::<CodexConfig>)]
+    fn engine_contract(#[case] assertion: fn()) {
+        assertion();
+    }
+
+    #[test]
+    fn invalid_toml_is_reported() {
+        conformance::unparsable_file_is_reported::<CodexConfig>("this = is = not = toml");
+    }
+
+    #[rstest]
+    #[case::hooks_is_not_a_table("hooks = \"nope\"\n", "hooks")]
+    #[case::event_is_not_an_array_of_tables(
+        "[hooks]\nPostToolUse = \"oops\"\n",
+        "hooks.PostToolUse"
+    )]
+    fn unexpected_shape_is_reported(#[case] contents: &str, #[case] field: &str) {
+        conformance::unexpected_shape_is_reported::<CodexConfig>(contents, field);
     }
 
     #[test]
@@ -259,32 +295,6 @@ mod tests {
                 assert_eq!(handler["command"].as_str().unwrap(), *expected);
             }
         }
-    }
-
-    #[test]
-    fn apply_creates_parent_dir_and_writes_file() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".codex/config.toml");
-
-        let plan = plan(path.clone()).unwrap();
-        apply(&plan).unwrap();
-
-        assert!(path.exists());
-        assert_eq!(fs::read_to_string(&path).unwrap(), plan.after);
-    }
-
-    #[test]
-    fn rerunning_setup_is_idempotent() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".codex/config.toml");
-
-        let first = plan(path.clone()).unwrap();
-        apply(&first).unwrap();
-
-        let second = plan(path.clone()).unwrap();
-        assert!(!second.changed(), "second plan should be a no-op");
-        assert!(second.added_commands.is_empty());
-        assert_eq!(second.before.as_deref(), Some(second.after.as_str()));
     }
 
     #[test]
@@ -335,14 +345,14 @@ command = \"echo done\"
         );
     }
 
-    #[test]
-    fn skips_command_already_installed_under_other_matcher() {
-        // Pre-installs every handler the setup writes — under a
-        // non-canonical matcher in each block — so the only queued
-        // command is the post-tool-use wrapper.
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        let existing = "\
+    /// What the merge queues against a file that already carries some
+    /// of the handlers. The bodies are shared with the Claude Code
+    /// setup, so only the TOML spelling of each situation lives here.
+    #[rstest]
+    // Every handler already installed, each under a non-canonical
+    // matcher, except the post-tool-use wrapper.
+    #[case::installed_under_other_matcher(
+        "\
 [[hooks.SessionStart]]
 matcher = \"^startup$\"
 
@@ -367,22 +377,13 @@ matcher = \"\"
 [[hooks.PostToolUse.hooks]]
 type = \"command\"
 command = \"agent-lens codex-hook post-tool-use similarity\"
-";
-        fs::write(&path, existing).unwrap();
-
-        let plan = plan(path).unwrap();
-        assert_eq!(
-            plan.added_commands,
-            vec!["agent-lens codex-hook post-tool-use wrapper".to_string()],
-            "only the wrapper handler should be queued for install",
-        );
-    }
-
-    #[test]
-    fn tolerates_existing_command_with_trailing_args() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        let existing = "\
+",
+        &["agent-lens codex-hook post-tool-use wrapper"]
+    )]
+    // User-added flags on an installed command must not trigger a
+    // reinstall of the bare form.
+    #[case::trailing_args(
+        "\
 [[hooks.SessionStart]]
 matcher = \"^(startup|resume)$\"
 
@@ -411,103 +412,23 @@ command = \"agent-lens codex-hook post-tool-use similarity --threshold 0.9\"
 [[hooks.PostToolUse.hooks]]
 type = \"command\"
 command = \"agent-lens codex-hook post-tool-use wrapper\"
-";
-        fs::write(&path, existing).unwrap();
-
-        let plan = plan(path).unwrap();
-        assert!(
-            plan.added_commands.is_empty(),
-            "trailing args should not trigger reinstall, got {:?}",
-            plan.added_commands,
-        );
-        assert!(!plan.changed());
-    }
-
-    #[test]
-    fn handler_without_command_field_is_ignored() {
-        // A `type = "prompt"` or `type = "agent"` handler has no
-        // `command` field; we should skip it instead of erroring out.
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        let existing = "\
+",
+        &[]
+    )]
+    // A `type = "prompt"` or `type = "agent"` handler has no `command`
+    // field; it is skipped rather than erroring out, so every command is
+    // still missing.
+    #[case::handler_without_command_field(
+        "\
 [[hooks.PostToolUse]]
 matcher = \"^apply_patch$\"
 
 [[hooks.PostToolUse.hooks]]
 type = \"prompt\"
-";
-        fs::write(&path, existing).unwrap();
-
-        let plan = plan(path).unwrap();
-        // SessionStart and PreToolUse are still missing entirely, plus
-        // both PostToolUse commands need installing because the only
-        // existing handler has no `command` field.
-        assert_eq!(
-            plan.added_commands.len(),
-            SESSION_START_COMMANDS.len()
-                + PRE_TOOL_USE_COMMANDS.len()
-                + POST_TOOL_USE_COMMANDS.len(),
-        );
-    }
-
-    #[test]
-    fn empty_file_is_treated_as_missing() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "   \n").unwrap();
-
-        let plan = plan(path).unwrap();
-        assert!(plan.before.is_none());
-        assert!(plan.changed());
-    }
-
-    #[test]
-    fn invalid_toml_is_reported() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "this = is = not = toml").unwrap();
-
-        let err = plan(path).unwrap_err();
-        assert!(
-            matches!(err, SetupError::Parse { format, .. } if format == "TOML"),
-            "expected a TOML parse error, got {err:?}",
-        );
-    }
-
-    #[test]
-    fn unexpected_shape_for_hooks_field_is_reported() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "hooks = \"nope\"\n").unwrap();
-
-        let err = plan(path).unwrap_err();
-        assert!(
-            matches!(err, SetupError::UnexpectedShape { ref field, .. } if field == "hooks"),
-            "expected UnexpectedShape at hooks, got {err:?}",
-        );
-    }
-
-    #[test]
-    fn unexpected_shape_for_post_tool_use_is_reported() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "[hooks]\nPostToolUse = \"oops\"\n").unwrap();
-
-        let err = plan(path).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SetupError::UnexpectedShape { ref field, .. } if field == "hooks.PostToolUse"
-            ),
-            "expected UnexpectedShape at hooks.PostToolUse, got {err:?}",
-        );
-    }
-
-    #[test]
-    fn resolve_path_project_joins_relative() {
-        let root = Path::new("/tmp/proj");
-        let p = setup_engine::resolve_path::<CodexConfig>(setup_engine::SetupScope::Project, root)
-            .unwrap();
-        assert_eq!(p, root.join(".codex/config.toml"));
+",
+        &conformance::all_commands::<CodexConfig>()
+    )]
+    fn queues_exactly(#[case] existing: &str, #[case] expected: &[&str]) {
+        conformance::queues_exactly::<CodexConfig>(existing, expected);
     }
 }

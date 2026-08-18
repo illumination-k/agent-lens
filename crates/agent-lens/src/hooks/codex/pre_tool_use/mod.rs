@@ -86,24 +86,14 @@ fn parse_pre_edit_paths(command: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::write_file;
+    use crate::test_support::{codex_hook_context, write_file};
     use agent_hooks::Hook;
-    use agent_hooks::codex::HookContext;
     use serde_json::json;
     use std::path::PathBuf;
 
-    fn ctx(cwd: PathBuf) -> HookContext {
-        HookContext {
-            session_id: "sess".into(),
-            transcript_path: Some(PathBuf::from("/tmp/t.jsonl")),
-            cwd,
-            model: "gpt-5".into(),
-        }
-    }
-
     fn input(cwd: PathBuf, tool_name: &str, command: &str) -> PreToolUseInput {
         PreToolUseInput {
-            context: ctx(cwd),
+            context: codex_hook_context(&cwd),
             turn_id: "turn-1".into(),
             tool_name: tool_name.into(),
             tool_use_id: "call-1".into(),

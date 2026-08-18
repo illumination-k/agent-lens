@@ -353,6 +353,190 @@ fn args_prefix_matches(existing_args: &str, wanted_args: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
+/// The format-agnostic half of every [`ConfigFormat`] test suite.
+///
+/// [`plan`] and [`apply`] promise things no format implementation gets
+/// to choose: a missing file plans every command, applying creates the
+/// parent directory, re-running is a no-op, a blank file reads as
+/// absent, a directory in the file's place is an IO error rather than
+/// "no config yet", and a malformed document is reported instead of
+/// clobbered. Those are properties of the engine, so they belong to the
+/// engine, and each format supplies only the text that spells them.
+///
+/// They used to be written out once per format. Nothing declared a
+/// dependency between the two copies, so nothing kept them in step, and
+/// they had already drifted: only Claude Code's suite pinned the
+/// directory-as-file case, and only Codex's pinned a handler entry with
+/// no `command` field. Both formats now run both.
+#[cfg(test)]
+pub(crate) mod conformance {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    use super::{ConfigFormat, SetupError, SetupScope, apply, plan, resolve_path};
+
+    /// Every command the format's events would install, in the order
+    /// [`plan`] queues them.
+    pub(crate) fn all_commands<F: ConfigFormat>() -> Vec<&'static str> {
+        F::EVENTS
+            .iter()
+            .flat_map(|block| block.commands.iter().copied())
+            .collect()
+    }
+
+    /// A scratch config file at the path the format actually resolves
+    /// to, so the parent-directory handling is exercised for real. The
+    /// `TempDir` is returned alongside because dropping it deletes the
+    /// tree.
+    fn scratch<F: ConfigFormat>() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(F::RELATIVE_PATH);
+        (dir, path)
+    }
+
+    /// A config file whose text is `contents`, at the format's own path.
+    fn scratch_with<F: ConfigFormat>(contents: &str) -> (TempDir, PathBuf) {
+        let (dir, path) = scratch::<F>();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    /// The error [`plan`] fails with. Spelled out rather than
+    /// `unwrap_err`, whose `Debug` bound would force every
+    /// [`ConfigFormat::Payload`] to implement it just for these
+    /// assertions.
+    fn plan_err<F: ConfigFormat>(path: PathBuf) -> SetupError {
+        match plan::<F>(path) {
+            Ok(plan) => panic!(
+                "expected planning {:?} to fail, got {} queued command(s)",
+                plan.path,
+                plan.added_commands.len(),
+            ),
+            Err(err) => err,
+        }
+    }
+
+    /// A file that does not exist yet plans in every handler command.
+    pub(crate) fn plan_for_missing_file_installs_every_command<F: ConfigFormat>() {
+        let (_dir, path) = scratch::<F>();
+
+        let plan = plan::<F>(path).unwrap();
+        assert!(plan.before.is_none(), "no file means no `before` payload");
+        assert!(plan.changed());
+        assert_eq!(plan.added_commands, all_commands::<F>());
+    }
+
+    /// Applying a plan creates the parent directory and writes exactly
+    /// what the format renders for the planned document.
+    pub(crate) fn apply_creates_parent_dir_and_writes_file<F: ConfigFormat>() {
+        let (_dir, path) = scratch::<F>();
+
+        let plan = plan::<F>(path.clone()).unwrap();
+        apply::<F>(&plan).unwrap();
+
+        assert!(path.exists(), "apply must create {:?}", path.parent());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            F::render(&path, &plan.after).unwrap(),
+        );
+    }
+
+    /// Planning against a file this setup already wrote changes nothing.
+    pub(crate) fn rerunning_setup_is_idempotent<F: ConfigFormat>() {
+        let (_dir, path) = scratch::<F>();
+
+        let first = plan::<F>(path.clone()).unwrap();
+        apply::<F>(&first).unwrap();
+
+        let second = plan::<F>(path).unwrap();
+        assert!(!second.changed(), "second plan should be a no-op");
+        assert!(second.added_commands.is_empty());
+        assert!(
+            second.before.as_ref() == Some(&second.after),
+            "an unchanged plan must round-trip its payload",
+        );
+    }
+
+    /// A file that exists but holds only whitespace reads as absent
+    /// rather than as an empty document to merge into.
+    pub(crate) fn empty_file_is_treated_as_missing<F: ConfigFormat>() {
+        let (_dir, path) = scratch_with::<F>("   \n");
+
+        let plan = plan::<F>(path).unwrap();
+        assert!(plan.before.is_none());
+        assert!(plan.changed());
+    }
+
+    /// A document the format cannot parse is reported, naming the
+    /// format, instead of being overwritten.
+    pub(crate) fn unparsable_file_is_reported<F: ConfigFormat>(contents: &str) {
+        let (_dir, path) = scratch_with::<F>(contents);
+
+        let err = plan_err::<F>(path);
+        assert!(
+            matches!(err, SetupError::Parse { format, .. } if format == F::FORMAT),
+            "expected a {} parse error, got {err:?}",
+            F::FORMAT,
+        );
+    }
+
+    /// A field along the `hooks.<event>` path whose type the merge
+    /// cannot navigate is reported against that field.
+    pub(crate) fn unexpected_shape_is_reported<F: ConfigFormat>(contents: &str, field: &str) {
+        let (_dir, path) = scratch_with::<F>(contents);
+
+        let err = plan_err::<F>(path);
+        assert!(
+            matches!(&err, SetupError::UnexpectedShape { field: got, .. } if got == field),
+            "expected UnexpectedShape at {field}, got {err:?}",
+        );
+    }
+
+    /// A directory where the config file should be is an IO error. The
+    /// `NotFound` guard in the read must not swallow every other
+    /// `ErrorKind` as "no config yet" and then write over the path.
+    pub(crate) fn directory_in_place_of_file_surfaces_io_error<F: ConfigFormat>() {
+        let (_dir, path) = scratch::<F>();
+        fs::create_dir_all(&path).unwrap();
+
+        let err = plan_err::<F>(path);
+        assert!(
+            matches!(err, SetupError::Io { .. }),
+            "expected Io error for directory-as-file, got {err:?}",
+        );
+    }
+
+    /// Project scope resolves under the caller's root, at the format's
+    /// own relative path.
+    pub(crate) fn resolve_path_project_joins_relative<F: ConfigFormat>() {
+        let root = Path::new("/tmp/proj");
+        assert_eq!(
+            resolve_path::<F>(SetupScope::Project, root).unwrap(),
+            root.join(F::RELATIVE_PATH),
+        );
+    }
+
+    /// Planning against `existing` queues exactly `expected` and nothing
+    /// else — the assertion behind "already installed under a different
+    /// matcher", "installed with a user-added flag", and "installed as a
+    /// handler the merge cannot read a command out of".
+    pub(crate) fn queues_exactly<F: ConfigFormat>(existing: &str, expected: &[&str]) {
+        let (_dir, path) = scratch_with::<F>(existing);
+
+        let plan = plan::<F>(path).unwrap();
+        let queued: Vec<&str> = plan.added_commands.iter().map(String::as_str).collect();
+        assert_eq!(queued, expected);
+        assert_eq!(
+            plan.changed(),
+            !expected.is_empty(),
+            "the document must move exactly when something was queued",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

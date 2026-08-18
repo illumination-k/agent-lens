@@ -224,3 +224,70 @@ impl<E: SessionStartEnvelope> Hook for SummaryHook<E> {
         }
     }
 }
+
+/// The engine-agnostic half of every [`SessionStartEnvelope`] test suite.
+///
+/// [`SummaryHook`] decides both things a session-start adapter is
+/// answerable for — stay silent when neither summary section has signal,
+/// and inject the rendered body otherwise — so the assertions belong to
+/// the runner, not to each envelope. The envelope supplies only its own
+/// input value.
+///
+/// Both agents inject through the same wire fields
+/// (`hookSpecificOutput.additionalContext`), so these check the
+/// serialized envelope rather than the concrete output type. That is the
+/// shape the agent actually reads, and it needs no bound the trait does
+/// not already carry.
+#[cfg(test)]
+pub(crate) mod session_start_conformance {
+    use std::path::Path;
+
+    use agent_hooks::Hook as _;
+    use serde_json::Value;
+
+    use super::{SessionStartEnvelope, SummaryHook};
+
+    /// Run the summary hook for `cwd` and return its serialized output.
+    fn run<E: SessionStartEnvelope>(cwd: &Path, input: impl FnOnce(&Path) -> E::Input) -> Value {
+        let out = SummaryHook::<E>::new().handle(input(cwd)).unwrap();
+        serde_json::to_value(&out).unwrap()
+    }
+
+    /// A cwd that is neither a git working tree nor a recognised module
+    /// root produces no signal, and the hook must then emit the default
+    /// no-op response rather than an empty summary.
+    pub(crate) fn stays_silent_without_repo_or_crate<E, F>(input: F)
+    where
+        E: SessionStartEnvelope,
+        F: FnOnce(&Path) -> E::Input,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            run::<E>(dir.path(), input),
+            serde_json::to_value(E::Output::default()).unwrap(),
+        );
+    }
+
+    /// A cwd with both halves available is injected as
+    /// `hookSpecificOutput.additionalContext`, carrying the hotspot and
+    /// coupling sections [`render_summary`] renders.
+    pub(crate) fn injects_summary_via_additional_context<E, F>(input: F)
+    where
+        E: SessionStartEnvelope,
+        F: FnOnce(&Path) -> E::Input,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        crate::test_support::init_repo_with_crate_for_session_summary(dir.path());
+
+        let out = run::<E>(dir.path(), input);
+        let extra = &out["hookSpecificOutput"];
+        assert_eq!(extra["hookEventName"], "SessionStart", "got {out}");
+        let body = extra["additionalContext"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected additionalContext, got {out}"));
+
+        assert!(body.starts_with("# agent-lens session-start"), "got {body}");
+        assert!(body.contains("## Hotspots"), "want hotspot: {body}");
+        assert!(body.contains("## Coupling"), "want coupling: {body}");
+    }
+}
