@@ -178,6 +178,7 @@ mod tests {
     use crate::analyze::DiffScope;
     use crate::analyze::co_change::{CoChangeAnalyzer, CoChangeOptions};
     use crate::analyze::cohesion::{CohesionAnalyzer, CohesionOptions};
+    use crate::analyze::communities::{CommunitiesAnalyzer, CommunitiesOptions, Granularity};
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
     use crate::analyze::context_span::{ContextSpanAnalyzer, ContextSpanOptions};
     use crate::analyze::coupling::{CouplingAnalyzer, CouplingOptions};
@@ -249,6 +250,18 @@ mod tests {
             .with_min_support(5)
             .with_min_confidence(0.7)
             .with_max_commit_files(20)
+    );
+    assert_options_reach_the_analyzer!(
+        communities_options_reach_the_analyzer: CommunitiesAnalyzer,
+        CommunitiesOptions {
+            top: Some(3),
+            granularity: Granularity::Module,
+            min_community: 4,
+        },
+        |a| a
+            .with_top(Some(3))
+            .with_granularity(Granularity::Module)
+            .with_min_community(4)
     );
     assert_options_reach_the_analyzer!(
         cohesion_options_reach_the_analyzer: CohesionAnalyzer,

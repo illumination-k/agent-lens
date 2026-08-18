@@ -153,6 +153,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.hotspot.is_some(), config::ToolName::Hotspot),
         (profile.risk.is_some(), config::ToolName::Risk),
         (profile.co_change.is_some(), config::ToolName::CoChange),
+        (profile.communities.is_some(), config::ToolName::Communities),
         (profile.hubs.is_some(), config::ToolName::Hubs),
         (profile.impact.is_some(), config::ToolName::Impact),
         (profile.layers.is_some(), config::ToolName::Layers),

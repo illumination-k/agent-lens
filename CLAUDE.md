@@ -14,7 +14,7 @@ Unlike ordinary linting, its output is tuned to be useful when placed in an LLM 
 The project bundles three related surfaces:
 
 - Hook handlers that integrate with coding-agent workflows and surface focused context at useful moments.
-- On-demand analyzers that report codebase shape: duplication (functions, type definitions, and statement blocks), wrappers, delegation chains, cohesion, complexity, coupling, context span, hotspots, change risk, and call-graph structure (hubs, cycles, queries, impact, layers, untested, unreachable, visibility).
+- On-demand analyzers that report codebase shape: duplication (functions, type definitions, and statement blocks), wrappers, delegation chains, cohesion, complexity, coupling, module communities versus declared boundaries, context span, hotspots, change risk, and call-graph structure (hubs, cycles, queries, impact, layers, untested, unreachable, visibility).
 - A profile runner (`agent-lens run <profile>`) and metric snapshots (`agent-lens baseline create <profile>`) over an `agent-lens.toml`, plus `agent-lens skills install` for the bundled Claude Code skills.
 
 `agent-lens help --md` prints the whole command surface as one Markdown document and `agent-lens config schema` prints the `agent-lens.toml` reference. Both are generated from the code, so read them rather than trusting a doc when the two disagree.

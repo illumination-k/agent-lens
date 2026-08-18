@@ -50,6 +50,7 @@ use crate::analyze::OutputFormat;
 /// reads as one module.
 pub use crate::analyze::co_change::CoChangeOptions;
 pub use crate::analyze::cohesion::CohesionOptions;
+pub use crate::analyze::communities::CommunitiesOptions;
 pub use crate::analyze::complexity::ComplexityOptions;
 pub use crate::analyze::context_span::ContextSpanOptions;
 pub use crate::analyze::coupling::CouplingOptions;
@@ -142,6 +143,8 @@ pub struct Profile {
     pub risk: Option<RiskOptions>,
     #[serde(default)]
     pub co_change: Option<CoChangeOptions>,
+    #[serde(default)]
+    pub communities: Option<CommunitiesOptions>,
     #[serde(default)]
     pub hubs: Option<HubsOptions>,
     #[serde(default)]
@@ -319,6 +322,7 @@ impl ProfilePaths {
 pub enum ToolName {
     CoChange,
     Cohesion,
+    Communities,
     Complexity,
     Coupling,
     ContextSpan,
@@ -345,6 +349,7 @@ impl ToolName {
         match self {
             Self::CoChange => "co-change",
             Self::Cohesion => "cohesion",
+            Self::Communities => "communities",
             Self::Complexity => "complexity",
             Self::Coupling => "coupling",
             Self::ContextSpan => "context-span",
@@ -368,13 +373,14 @@ impl ToolName {
 
     /// Whether this analyzer takes exactly one path.
     ///
-    /// `coupling` and `context-span` grow a module graph outwards from a
-    /// single entry point — a crate root, a TS/JS entry file, a Go module
-    /// — so two entry points are two graphs rather than a wider one, and
-    /// they kept the single-`PATH` CLI signature when the rest gained
-    /// `PATH...`. A profile's `path` array is bounded by the same rule.
+    /// `coupling`, `context-span` and `communities` grow a module graph
+    /// outwards from a single entry point — a crate root, a TS/JS entry
+    /// file, a Go module — so two entry points are two graphs rather than
+    /// a wider one, and they kept the single-`PATH` CLI signature when the
+    /// rest gained `PATH...`. A profile's `path` array is bounded by the
+    /// same rule.
     pub fn is_single_root(self) -> bool {
-        matches!(self, Self::Coupling | Self::ContextSpan)
+        matches!(self, Self::Coupling | Self::ContextSpan | Self::Communities)
     }
 }
 

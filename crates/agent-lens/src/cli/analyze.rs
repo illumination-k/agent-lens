@@ -4,21 +4,21 @@
 use std::path::PathBuf;
 
 use agent_lens::analyze::{
-    CoChangeAnalyzer, CohesionAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer,
-    CyclesAnalyzer, DelegationAnalyzer, FunctionGraphAnalyzer, FunctionSelection,
-    GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
-    OutputFormat, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer, UnreachableAnalyzer,
-    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer, ComplexityAnalyzer,
+    ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer,
+    ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
+    UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand, AnalyzeCommonArgs,
-    AnalyzeComplexityArgs, AnalyzeContextSpanArgs, AnalyzeCouplingArgs, AnalyzeDelegationArgs,
-    AnalyzeGraphQueryArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
-    AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs,
-    AnalyzeSimilarityArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
-    AnalyzeWrapperArgs,
+    AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs, AnalyzeCouplingArgs,
+    AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs,
+    AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs,
+    AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs,
+    AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -73,6 +73,10 @@ pub(super) fn build_analyze_command(
         config::ToolName::CoChange => AnalyzeCommand::CoChange(AnalyzeCoChangeArgs {
             common,
             opts: profile.co_change.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Communities => AnalyzeCommand::Communities(AnalyzeCommunitiesArgs {
+            common: root()?,
+            opts: profile.communities.clone().unwrap_or_default(),
         }),
         config::ToolName::Cohesion => AnalyzeCommand::Cohesion(AnalyzeCohesionArgs {
             common,
@@ -195,6 +199,7 @@ macro_rules! impl_with_analyze_path_args {
 impl_with_analyze_path_args!(
     CoChangeAnalyzer,
     CohesionAnalyzer,
+    CommunitiesAnalyzer,
     ComplexityAnalyzer,
     CouplingAnalyzer,
     CyclesAnalyzer,
@@ -285,6 +290,7 @@ impl AnalyzeCommand {
             with_options {
                 CoChange => CoChangeAnalyzer,
                 Cohesion => CohesionAnalyzer,
+                Communities => CommunitiesAnalyzer,
                 Complexity => ComplexityAnalyzer,
                 Coupling => CouplingAnalyzer,
                 ContextSpan => ContextSpanAnalyzer,

@@ -1,7 +1,7 @@
 //! On-demand analyzers that emit LLM-friendly context.
 //!
 //! Each submodule is one analyzer (cohesion, complexity, coupling,
-//! similarity, wrapper, hotspot, risk, co-change, …) and is wired to a clap subcommand so
+//! communities, similarity, wrapper, hotspot, risk, co-change, …) and is wired to a clap subcommand so
 //! typos surface at parse time. Output is always written to stdout as JSON
 //! by default; analyzers can opt in to a `--format md` mode for a more
 //! compact human-readable summary.
@@ -11,6 +11,7 @@ mod cargo_meta;
 mod churn;
 pub mod co_change;
 pub mod cohesion;
+pub mod communities;
 pub mod complexity;
 pub mod context_span;
 pub mod coupling;
@@ -48,6 +49,7 @@ use lens_domain::LanguageParser;
 
 pub use co_change::{CoChangeAnalyzer, CoChangeError};
 pub use cohesion::CohesionAnalyzer;
+pub use communities::{CommunitiesAnalyzer, Granularity};
 pub use complexity::ComplexityAnalyzer;
 pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;

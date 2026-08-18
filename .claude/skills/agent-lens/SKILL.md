@@ -17,6 +17,7 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | Which classes/`impl` blocks are doing too many things?  | `cohesion`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which functions are landmines to edit?                  | `complexity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | Which modules are Fan-In bottlenecks or cyclic?         | `coupling`       | Rust crate / TS/JS entry / Go or Python directory |
+| Is this file filed under the right module?              | `communities`    | Rust crate / TS/JS entry / Go or Python directory |
 | Which functions call each other in a cycle?             | `cycles`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
 | How many files must I read to understand a module?      | `context-span`   | Rust crate / TS/JS entry / Python / Go            |
 | Who calls this function? What does it call?             | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
@@ -33,11 +34,11 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 | How carefully should I treat this edit?                 | `risk`           | git-tracked file or directory                     |
 | What else will history make me edit alongside this?     | `co-change`      | git-tracked directory (any file type)             |
 
-`similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` and `unreachable` judge Rust and Go only — TypeScript and Python carry no extracted export status, and both say how many functions they skipped for that reason (`unreachable` treats them as entry points, so nothing they call is reported). `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot`, `risk` and `co-change` require a git working tree. `co-change` has no language matrix at all — it reads `git log` and never parses a file, so it is the only analyzer that sees `.toml`, `.md`, workflow YAML and fixtures.
+`similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` and `unreachable` judge Rust and Go only — TypeScript and Python carry no extracted export status, and both say how many functions they skipped for that reason (`unreachable` treats them as entry points, so nothing they call is reported). `coupling` and `communities` work on Rust crates, TS/JS module graphs, Go modules, and Python package trees; both grow one module graph from one entry point. Read `communities` top-down: if its declared modularity is close to its detected one, the declared boundaries already are the clustering and the misfiled rows below it are noise. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot`, `risk` and `co-change` require a git working tree. `co-change` has no language matrix at all — it reads `git log` and never parses a file, so it is the only analyzer that sees `.toml`, `.md`, workflow YAML and fixtures.
 
 ## Several paths in one run
 
-Every analyzer except `coupling` and `context-span` takes more than one PATH, and walks them all into a single report:
+Every analyzer except `coupling`, `context-span` and `communities` takes more than one PATH, and walks them all into a single report:
 
 ```bash
 agent-lens analyze similarity packages cli web/src --format md --exclude-tests
@@ -45,7 +46,7 @@ agent-lens analyze similarity packages cli web/src --format md --exclude-tests
 
 Reach for this in a monorepo, where the trees you care about are siblings and their only common ancestor is the repo root (which drags in `node_modules`, generated output, and everything else). It is not the same as running the analyzer once per tree: `similarity` clusters across the whole corpus and the call-graph analyzers resolve edges across it, so a duplicate or a call spanning two trees is only visible in one combined run. Display paths are written relative to the paths' deepest common ancestor, so each file keeps the tree it came from in its name.
 
-`coupling` and `context-span` grow one module graph out of one entry point, so they keep the single-PATH signature. Use `--entry-glob` for `context-span` when a TS/JS framework has many entries; for `coupling`, pick a representative entry.
+`coupling`, `context-span` and `communities` grow one module graph out of one entry point, so they keep the single-PATH signature. Use `--entry-glob` for `context-span` when a TS/JS framework has many entries; for `coupling`, pick a representative entry.
 
 ## Output format
 
@@ -75,6 +76,9 @@ agent-lens analyze similarity crates/lens-py crates/lens-golang --format md
 
 # Crate-wide structure, bounded to the 15 most-coupled modules
 agent-lens analyze coupling crates/agent-lens --format md --top 15
+
+# Do the declared module boundaries match the clustering the dependencies form?
+agent-lens analyze communities crates/agent-lens --format md --top 15
 
 # Crate-wide structure (Rust crate)
 agent-lens analyze coupling crates/agent-lens --format md

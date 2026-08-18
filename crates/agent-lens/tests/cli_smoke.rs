@@ -816,6 +816,7 @@ fn %NAME%(x: i32) -> i32 {
 #[rstest]
 #[case::coupling("coupling")]
 #[case::context_span("context-span")]
+#[case::communities("communities")]
 fn run_profile_rejects_several_paths_for_a_single_root_tool(#[case] tool: &str) {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "internal/lib.rs", BRANCHY_RS);
@@ -1573,11 +1574,63 @@ fn analyze_co_change_pairs_files_from_a_git_history() {
     assert!(json.get("shallow_clone").is_none(), "got {json}");
 }
 
+/// `analyze communities` compares the detected clustering against the
+/// declared one, so the binary is where its wiring can be checked end to
+/// end: a missing subcommand registration, a declared partition that
+/// drifted from the module tree, or a member fold that stopped folding
+/// would each show up as a missing or wrongly-attributed row here.
+#[test]
+fn analyze_communities_names_a_module_wired_into_a_neighbour() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", "pub mod a;\npub mod b;\n");
+    write_file(dir.path(), "src/a/mod.rs", "pub mod one;\npub mod stray;\n");
+    write_file(
+        dir.path(),
+        "src/a/one.rs",
+        "pub struct One;\npub fn one() {}\n",
+    );
+    write_file(dir.path(), "src/b/mod.rs", "pub mod p;\npub mod q;\n");
+    write_file(dir.path(), "src/b/p.rs", "pub struct P;\npub fn p() {}\n");
+    write_file(
+        dir.path(),
+        "src/b/q.rs",
+        "use crate::b::p::P;\npub fn q(_p: P) { crate::b::p::p(); }\n",
+    );
+    // Filed under `a`, wired entirely into `b`.
+    write_file(
+        dir.path(),
+        "src/a/stray.rs",
+        "use crate::b::p::P;\nuse crate::b::q::q;\npub fn stray(p: P) { q(p); crate::b::p::p(); }\n",
+    );
+
+    let json = stdout_json(&agent_lens(
+        &["analyze", "communities", "src/lib.rs"],
+        dir.path(),
+        None,
+    ));
+    let misfiled = json["misfiled"].as_array().unwrap();
+    let stray = misfiled
+        .iter()
+        .find(|m| m["member"] == "crate::a::stray")
+        .unwrap_or_else(|| panic!("no stray row in {json}"));
+    assert_eq!(stray["declared"], "crate::a", "got {json}");
+    assert_eq!(stray["suggested"], "crate::b", "got {json}");
+    assert!(
+        json["modularity"]["detected"].as_f64().unwrap()
+            >= json["modularity"]["declared"].as_f64().unwrap(),
+        "got {json}",
+    );
+    // Inline `mod tests` blocks would inflate the member count; this
+    // fixture has none, so the two counts agree.
+    assert_eq!(json["node_count"], json["module_count"], "got {json}");
+}
+
 #[rstest]
 #[case::index("## Command index")]
 #[case::index_row("| `agent-lens analyze hotspot` |")]
 #[case::risk_index_row("| `agent-lens analyze risk` |")]
 #[case::co_change_index_row("| `agent-lens analyze co-change` |")]
+#[case::communities_index_row("| `agent-lens analyze communities` |")]
 #[case::routing("Pick an analyzer by question:")]
 #[case::conventions("Reports go to stdout")]
 #[case::root_example("    agent-lens help --md")]

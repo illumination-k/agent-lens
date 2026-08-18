@@ -131,6 +131,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         ToolName::Hotspot => Some(hotspot_metrics),
         ToolName::Similarity => Some(similarity_metrics),
         ToolName::CoChange
+        | ToolName::Communities
         | ToolName::Cycles
         | ToolName::Delegation
         | ToolName::FunctionGraph
@@ -579,6 +580,7 @@ mod tests {
 
     #[rstest]
     #[case(ToolName::CoChange)]
+    #[case(ToolName::Communities)]
     #[case(ToolName::Cycles)]
     #[case(ToolName::Delegation)]
     #[case(ToolName::FunctionGraph)]
