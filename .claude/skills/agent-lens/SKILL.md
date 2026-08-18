@@ -9,33 +9,34 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 
 ## Pick the analyzer
 
-| Question                                                | Subcommand       | Path argument                                     |
-| ------------------------------------------------------- | ---------------- | ------------------------------------------------- |
-| Are there near-duplicate functions?                     | `similarity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Are there forwarding-only functions worth inlining?     | `wrapper`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| How many hops of forwarding before the real work?       | `delegation`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which classes/`impl` blocks are doing too many things?  | `cohesion`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which functions are landmines to edit?                  | `complexity`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which modules are Fan-In bottlenecks or cyclic?         | `coupling`       | Rust crate / TS/JS entry / Go or Python directory |
-| Which functions call each other in a cycle?             | `cycles`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| How many files must I read to understand a module?      | `context-span`   | Rust crate / TS/JS entry / Python / Go            |
-| Who calls this function? What does it call?             | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Is there a call chain from A to B?                      | `graph-query`    | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| I need the whole call graph as data                     | `function-graph` | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which functions are hubs I should read/handle first?    | `hubs`           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| What could my current edit break? Which tests cover it? | `impact`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Where does this new function belong vertically?         | `layers`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Is it OK for this module to call that one?              | `layers`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which code has no test path guarding it?                | `untested`       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Can anything still reach this code? Is it dead?         | `unreachable`    | `.rs` / `.go` file or dir                         |
-| Is this `pub` wider than its callers need?              | `visibility`     | `.rs` / `.go` file or dir                         |
-| Where do churn and complexity collide?                  | `hotspot`        | git-tracked file or directory                     |
-| How carefully should I treat this edit?                 | `risk`           | git-tracked file or directory                     |
-| What else will history make me edit alongside this?     | `co-change`      | git-tracked directory (any file type)             |
-| Was change around this file scattered or focused?       | `change-entropy` | git-tracked directory (any file type)             |
-| Is my pending edit scattered enough to split up?        | `change-entropy` | git-tracked directory, with `--diff-only`         |
+| Question                                                | Subcommand        | Path argument                                     |
+| ------------------------------------------------------- | ----------------- | ------------------------------------------------- |
+| Are there near-duplicate functions?                     | `similarity`      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Are there forwarding-only functions worth inlining?     | `wrapper`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| How many hops of forwarding before the real work?       | `delegation`      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which classes/`impl` blocks are doing too many things?  | `cohesion`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which functions are landmines to edit?                  | `complexity`      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which modules are Fan-In bottlenecks or cyclic?         | `coupling`        | Rust crate / TS/JS entry / Go or Python directory |
+| Which functions call each other in a cycle?             | `cycles`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| How many files must I read to understand a module?      | `context-span`    | Rust crate / TS/JS entry / Python / Go            |
+| Who calls this function? What does it call?             | `graph-query`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is there a call chain from A to B?                      | `graph-query`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| I need the whole call graph as data                     | `function-graph`  | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which functions are hubs I should read/handle first?    | `hubs`            | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| What could my current edit break? Which tests cover it? | `impact`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Where does this new function belong vertically?         | `layers`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is it OK for this module to call that one?              | `layers`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which code has no test path guarding it?                | `untested`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Can anything still reach this code? Is it dead?         | `unreachable`     | `.rs` / `.go` file or dir                         |
+| Is this `pub` wider than its callers need?              | `visibility`      | `.rs` / `.go` file or dir                         |
+| Where do churn and complexity collide?                  | `hotspot`         | git-tracked file or directory                     |
+| How carefully should I treat this edit?                 | `risk`            | git-tracked file or directory                     |
+| What else will history make me edit alongside this?     | `co-change`       | git-tracked directory (any file type)             |
+| Was change around this file scattered or focused?       | `change-entropy`  | git-tracked directory (any file type)             |
+| What couples these files without the code saying so?    | `hidden-coupling` | git-tracked directory (any file type)             |
+| Is my pending edit scattered enough to split up?        | `change-entropy`  | git-tracked directory, with `--diff-only`         |
 
-`similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` and `unreachable` judge Rust and Go only — TypeScript and Python carry no extracted export status, and both say how many functions they skipped for that reason (`unreachable` treats them as entry points, so nothing they call is reported). `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot`, `risk`, `co-change` and `change-entropy` require a git working tree. `co-change` and `change-entropy` have no language matrix at all — both read `git log` and never parse a file, so they are the only analyzers that see `.toml`, `.md`, workflow YAML and fixtures.
+`similarity` / `wrapper` / `delegation` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go. `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility` and `unreachable` judge Rust and Go only — TypeScript and Python carry no extracted export status, and both say how many functions they skipped for that reason (`unreachable` treats them as entry points, so nothing they call is reported). `coupling` works on Rust crates, TS/JS module graphs, Go modules, and Python package trees. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot`, `risk`, `co-change`, `change-entropy` and `hidden-coupling` require a git working tree. `hidden-coupling` is the only analyzer that reads both halves: its history side is language-agnostic like `co-change`, and its static side is the same Rust / TS / JS / Python / Go graphs `coupling` and the call-graph analyzers build. `co-change` and `change-entropy` have no language matrix at all — both read `git log` and never parse a file, so they are the only analyzers that see `.toml`, `.md`, workflow YAML and fixtures.
 
 ## Several paths in one run
 
@@ -146,6 +147,11 @@ agent-lens analyze risk crates --since=180.days.ago --top 10 --format md
 # widest path you care about — a pathspec scopes the file sets, not just the
 # commits, so cross-tree pairs need a run covering both trees
 agent-lens analyze co-change . --min-support 5 --top 15 --format md
+
+# Which of those pairs has nothing in the code declaring the dependency, and
+# which declared dependency has the window never exercised? Two buckets, never
+# merged — they license different actions
+agent-lens analyze hidden-coupling . --min-support 5 --top 15 --format md
 ```
 
 ## Reading the output
@@ -169,6 +175,7 @@ agent-lens analyze co-change . --min-support 5 --top 15 --format md
 - **hotspot**: rows are sorted by `commits × cognitive_max`. The top of the list is where bugs concentrate; refactor budget is best spent there first.
 - **risk**: the blast-radius sibling of `hotspot`, and the one place in the tool where **lower is riskier** — `rank_product = churn_rank × centrality_rank`, so rank 1 on both axes gives 1. It answers "how carefully should I treat this edit?", not "what should I fix": a top row means read the callers and run the listed tests first. `churn_rank` and `centrality_rank` show which axis drove the row; a file high on churn but low on centrality is hot-but-leaf and safe to move fast on. `hottest_function` names the member whose PageRank carried the file, and `vfi_max` is how many functions transitively call it. Centrality follows resolved edges only, so modules listed under resolution confidence are ranked lower than they deserve.
 - **co-change**: each row is a file pair with `cochanges` (commits touching both), the confidence in **both** directions, and `lift`. Read the two confidences as the closest thing to a direction: `config.rs -> config_schema.rs` at 0.82 and back at 0.86 means neither moves without the other, while 0.22 / 0.93 means one file drags the other along but not the reverse — that is the row that tells an agent what it forgot. Check `lift` before believing a row: near 1 the pair co-occurs exactly as often as two files that busy would by chance, however high its support, and the usual culprit is `Cargo.lock` or another repo-wide file. `last_cochange` dates the pattern, so a strong pair last seen 200 commits ago describes a coupling that has already been broken. It is correlation only — nothing says why two files move together — so a pair with no visible reason to be coupled is a design question, not a fact. Renames are followed; commits over `--max-commit-files` are dropped whole and counted in `skipped_commit_count`, which is where a squash-merge repo's missing history went. A shallow clone warns on stderr: fix it with `git fetch --unshallow` rather than reading the thin report.
+- **hidden-coupling**: the differential, read as two separate lists. `hidden_coupling` is the one to act on: those files keep changing together and nothing in the code relates them, so look for the implicit contract — a duplicated constant, a literal both sides spell, a serialization format, a generated file with no regeneration step — and make it explicit or delete it. The `static` field says how undeclared the pair is: `no path` means nothing relates them at all, `N hops` means they only relate through N intermediate files, which is weaker. `suspect_dependencies` is the second list and is deliberately weaker: a declared edge whose two files both moved in the window but never moved together. Over one window a stable, correct dependency looks exactly like a dead one, so treat a row as a question ("is this edge still load-bearing?"), never a verdict. Two more buckets exist so they cannot be misread as findings: `test_pairs` (a test moves with its subject by construction) and `no_static_view` (no language backend reads one side — a `.md`, a manifest, workflow YAML; still a real contract, just not a missing dependency). Read the resolution-confidence section before trusting a `no path` row: unresolved call sites are edges nobody can see, so the hidden bucket is an upper bound.
 
 ## Don't reach for it when
 

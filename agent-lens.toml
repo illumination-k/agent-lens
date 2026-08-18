@@ -309,7 +309,7 @@ tools = [
 [profile.history]
 path = "."
 format = "md"
-tools = ["co-change", "change-entropy"]
+tools = ["co-change", "change-entropy", "hidden-coupling"]
 
 [profile.history.co-change]
 top = 25
@@ -327,3 +327,18 @@ min-confidence = 0.6
 # `web/`, `README.md` and the lockfiles at once.
 [profile.history.change-entropy]
 top = 20
+
+# The same window, subtracted from the static graph. Run alongside
+# `co-change` rather than instead of it: the pairs this one drops as
+# "declared and co-changing" are the ones `co-change` exists to report,
+# and reading the two together is what separates "history says so and the
+# code agrees" from "history says so and nothing in the code does".
+#
+# Thresholds match `co-change`'s so the two reports describe the same
+# pairs. `min-support = 8` doubles as the suspect bucket's bar: a
+# declared edge is only questioned when both its files moved at least
+# that often and still never moved together.
+[profile.history.hidden-coupling]
+top = 20
+min-support = 8
+min-confidence = 0.6

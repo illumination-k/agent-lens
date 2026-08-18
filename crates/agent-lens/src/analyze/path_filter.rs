@@ -84,8 +84,18 @@ impl CompiledPathFilter {
     }
 
     pub(crate) fn is_test_path(&self, path: &Path) -> bool {
-        let rel = super::relative_display_path(path, &self.base);
-        self.root_is_test || path_looks_like_test(&rel)
+        self.is_test_relative(&super::relative_display_path(path, &self.base))
+    }
+
+    /// Whether an already-relative path looks like a test, under the
+    /// same rules [`Self::includes_relative`] gates on.
+    ///
+    /// The analyzers that work in git's repo-relative path space never
+    /// hold a `Path` to ask about, and re-deriving "is this a test?"
+    /// from the file-name conventions would put a second, driftable copy
+    /// of that judgement next to this one.
+    pub(crate) fn is_test_relative(&self, rel: &str) -> bool {
+        self.root_is_test || path_looks_like_test(rel)
     }
 
     pub fn includes_relative(&self, rel: &str) -> bool {

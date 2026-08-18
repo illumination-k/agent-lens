@@ -156,12 +156,94 @@ pub struct CoChangeReport {
 }
 
 /// Accumulator for one pair while walking commits newest-first.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PairAcc {
     cochanges: u32,
     /// Set once, on the first (therefore most recent) sighting.
     last_date: String,
     last_commits_ago: usize,
+}
+
+/// What the commit stream contains, before any threshold is applied:
+/// the commit population, each file's commit count inside it, and the
+/// raw support of every pair that ever moved together.
+///
+/// [`compute_cochange`] folds this straight into a ranked report and
+/// keeps nothing a caller can query afterwards. The differential
+/// analyzers need the opposite direction — *given* a pair the code
+/// declares, how much history is behind it? — and there the pairs below
+/// `min_support` are the interesting ones, which a ranked report has
+/// dropped by construction.
+#[derive(Debug, Clone, Default)]
+pub struct CoChangeCounts {
+    /// Commits touching each file, over the counted population only.
+    per_file: BTreeMap<String, u32>,
+    /// Co-change accumulator per pair, keyed with `a < b`.
+    pairs: BTreeMap<(String, String), PairAcc>,
+    /// Commits that contributed.
+    counted: usize,
+    /// Commits dropped by the size cap.
+    skipped: usize,
+}
+
+/// How big the counted window was.
+///
+/// The four figures are one fact — the commit population every other
+/// number in a report is drawn from — so they are read together rather
+/// than one accessor at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoChangeTotals {
+    /// Commits that contributed: in the window, touching at least one
+    /// file, and within the commit-size cap.
+    pub commit_count: usize,
+    /// Commits dropped by [`CoChangeThresholds::max_commit_files`].
+    pub skipped_commit_count: usize,
+    /// Distinct files seen across the counted commits.
+    pub file_count: usize,
+    /// Pairs that co-changed at least once, before the thresholds.
+    pub candidate_pair_count: usize,
+}
+
+impl CoChangeCounts {
+    pub fn totals(&self) -> CoChangeTotals {
+        CoChangeTotals {
+            commit_count: self.counted,
+            skipped_commit_count: self.skipped,
+            file_count: self.per_file.len(),
+            candidate_pair_count: self.pairs.len(),
+        }
+    }
+
+    /// How many counted commits touched `file`. `0` for a file the
+    /// window never saw — which is why a caller reasoning about "this
+    /// pair never co-changed" has to check both sides moved at all.
+    pub fn commits_for(&self, file: &str) -> u32 {
+        self.per_file.get(file).copied().unwrap_or(0)
+    }
+
+    /// Raw support for a pair in either spelling, or `None` when the two
+    /// never moved together inside the window.
+    pub fn support(&self, a: &str, b: &str) -> Option<PairSupport<'_>> {
+        let key = if a <= b {
+            (a.to_owned(), b.to_owned())
+        } else {
+            (b.to_owned(), a.to_owned())
+        };
+        self.pairs.get(&key).map(|acc| PairSupport {
+            cochanges: acc.cochanges,
+            last_cochange: acc.last_date.as_str(),
+            last_cochange_commits_ago: acc.last_commits_ago,
+        })
+    }
+}
+
+/// One pair's unfiltered history: how often it moved together, and when
+/// it last did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairSupport<'a> {
+    pub cochanges: u32,
+    pub last_cochange: &'a str,
+    pub last_cochange_commits_ago: usize,
 }
 
 /// Fold per-commit file sets into ranked co-change pairs.
@@ -173,13 +255,36 @@ struct PairAcc {
 /// from the same commit population, which is what
 /// [`CoChangeReport::commit_count`] reports.
 pub fn compute_cochange(commits: &[CommitFiles], thresholds: CoChangeThresholds) -> CoChangeReport {
-    let tally = tally_commits(commits, thresholds.max_commit_files);
+    let counts = tally_cochange(commits, thresholds.max_commit_files);
+    let totals = counts.totals();
     CoChangeReport {
-        commit_count: tally.counted,
-        skipped_commit_count: tally.skipped,
-        file_count: tally.per_file.len(),
-        candidate_pair_count: tally.pairs.len(),
-        pairs: rank_pairs(tally, thresholds),
+        commit_count: totals.commit_count,
+        skipped_commit_count: totals.skipped_commit_count,
+        file_count: totals.file_count,
+        candidate_pair_count: totals.candidate_pair_count,
+        pairs: rank_cochange_pairs(&counts, thresholds),
+    }
+}
+
+/// Count files and co-occurring pairs across the commit stream, keeping
+/// the counts a caller can query rather than only the ranking they
+/// support. This is the first half of [`compute_cochange`], and the two
+/// see exactly the same commit population.
+pub fn tally_cochange(commits: &[CommitFiles], max_commit_files: usize) -> CoChangeCounts {
+    let tally = tally_commits(commits, max_commit_files);
+    CoChangeCounts {
+        per_file: tally
+            .per_file
+            .into_iter()
+            .map(|(file, commits)| (file.to_owned(), commits))
+            .collect(),
+        pairs: tally
+            .pairs
+            .into_iter()
+            .map(|((a, b), acc)| ((a.to_owned(), b.to_owned()), acc))
+            .collect(),
+        counted: tally.counted,
+        skipped: tally.skipped,
     }
 }
 
@@ -245,23 +350,21 @@ fn tally_commits(commits: &[CommitFiles], max_commit_files: usize) -> Tally<'_> 
 }
 
 /// Score the tallied pairs and rank them, strongest first.
-fn rank_pairs(tally: Tally<'_>, thresholds: CoChangeThresholds) -> Vec<CoChangePair> {
-    let Tally {
-        per_file,
-        pairs,
-        counted,
-        ..
-    } = tally;
-    let population = counted as f64;
-    let mut out: Vec<CoChangePair> = pairs
-        .into_iter()
+pub fn rank_cochange_pairs(
+    counts: &CoChangeCounts,
+    thresholds: CoChangeThresholds,
+) -> Vec<CoChangePair> {
+    let population = counts.counted as f64;
+    let mut out: Vec<CoChangePair> = counts
+        .pairs
+        .iter()
         .filter(|(_, acc)| acc.cochanges >= thresholds.min_support)
         .filter_map(|((a, b), acc)| {
             // A pair only exists because some commit touched both, so
             // both per-file counts are at least `cochanges >= 1` and
             // neither denominator can be zero.
-            let commits_a = *per_file.get(a)?;
-            let commits_b = *per_file.get(b)?;
+            let commits_a = *counts.per_file.get(a)?;
+            let commits_b = *counts.per_file.get(b)?;
             let cochanges = f64::from(acc.cochanges);
             let confidence_a_to_b = cochanges / f64::from(commits_a);
             let confidence_b_to_a = cochanges / f64::from(commits_b);
@@ -270,8 +373,8 @@ fn rank_pairs(tally: Tally<'_>, thresholds: CoChangeThresholds) -> Vec<CoChangeP
                 return None;
             }
             Some(CoChangePair {
-                a: (*a).to_owned(),
-                b: (*b).to_owned(),
+                a: a.clone(),
+                b: b.clone(),
                 cochanges: acc.cochanges,
                 commits_a,
                 commits_b,
@@ -279,7 +382,7 @@ fn rank_pairs(tally: Tally<'_>, thresholds: CoChangeThresholds) -> Vec<CoChangeP
                 confidence_b_to_a,
                 lift: (cochanges * population) / (f64::from(commits_a) * f64::from(commits_b)),
                 score: cochanges * strongest,
-                last_cochange: acc.last_date,
+                last_cochange: acc.last_date.clone(),
                 last_cochange_commits_ago: acc.last_commits_ago,
             })
         })
@@ -579,5 +682,73 @@ mod tests {
         let report = compute_cochange(&[commit("2026-05-01", &[])], open());
         assert_eq!(report.commit_count, 0);
         assert_eq!(report.skipped_commit_count, 0);
+    }
+
+    /// The counts a differential caller reads must describe the same
+    /// commit population the ranked report was drawn from, or a "never
+    /// co-changed" verdict is measured against a different history than
+    /// the co-change rows next to it.
+    #[test]
+    fn the_tally_and_the_ranked_report_agree_on_the_population() {
+        let commits = vec![
+            commit("2026-05-04", &["a", "b", "c", "d"]),
+            commit("2026-05-03", &["a", "b"]),
+            commit("2026-05-02", &["a"]),
+            commit("2026-05-01", &["c"]),
+        ];
+        let thresholds = CoChangeThresholds {
+            max_commit_files: 3,
+            ..open()
+        };
+        let counts = tally_cochange(&commits, thresholds.max_commit_files);
+        let report = compute_cochange(&commits, thresholds);
+        assert_eq!(
+            counts.totals(),
+            CoChangeTotals {
+                commit_count: report.commit_count,
+                skipped_commit_count: report.skipped_commit_count,
+                file_count: report.file_count,
+                candidate_pair_count: report.candidate_pair_count,
+            },
+        );
+        assert_eq!(rank_cochange_pairs(&counts, thresholds), report.pairs);
+    }
+
+    #[test]
+    fn per_file_counts_answer_for_files_the_window_never_saw() {
+        let counts = tally_cochange(
+            &[
+                commit("2026-05-02", &["a", "b"]),
+                commit("2026-05-01", &["a"]),
+            ],
+            50,
+        );
+        assert_eq!(counts.commits_for("a"), 2);
+        assert_eq!(counts.commits_for("b"), 1);
+        assert_eq!(counts.commits_for("never-touched"), 0);
+    }
+
+    /// The support lookup is what a declared dependency is checked
+    /// against, and a caller holding a static edge has no reason to
+    /// spell it in the pair's canonical order — so both spellings must
+    /// answer, and a pair that never moved together must answer `None`
+    /// rather than zero-valued support.
+    #[rstest]
+    #[case::canonical_order("a", "b")]
+    #[case::reversed("b", "a")]
+    fn pair_support_reads_in_either_spelling(#[case] first: &str, #[case] second: &str) {
+        let counts = tally_cochange(
+            &[
+                commit("2026-05-03", &["a", "b"]),
+                commit("2026-05-02", &["a", "b"]),
+                commit("2026-05-01", &["c"]),
+            ],
+            50,
+        );
+        let support = counts.support(first, second).expect("the pair co-changed");
+        assert_eq!(support.cochanges, 2);
+        assert_eq!(support.last_cochange, "2026-05-03");
+        assert_eq!(support.last_cochange_commits_ago, 0);
+        assert!(counts.support("a", "c").is_none());
     }
 }
