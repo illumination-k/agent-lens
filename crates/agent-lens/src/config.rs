@@ -144,6 +144,11 @@ pub struct Profile {
     pub risk: Option<RiskOptions>,
     #[serde(default)]
     pub co_change: Option<CoChangeOptions>,
+    /// `hidden-coupling` scopes the same history window with the same
+    /// thresholds as `co-change`, so it shares that analyzer's option
+    /// type rather than declaring a byte-identical second one.
+    #[serde(default)]
+    pub hidden_coupling: Option<CoChangeOptions>,
     #[serde(default)]
     pub change_entropy: Option<ChangeEntropyOptions>,
     #[serde(default)]
@@ -338,6 +343,7 @@ pub enum ToolName {
     Delegation,
     FunctionGraph,
     GraphQuery,
+    HiddenCoupling,
     Hotspot,
     Hubs,
     Impact,
@@ -366,6 +372,7 @@ impl ToolName {
             Self::Delegation => "delegation",
             Self::FunctionGraph => "function-graph",
             Self::GraphQuery => "graph-query",
+            Self::HiddenCoupling => "hidden-coupling",
             Self::Hotspot => "hotspot",
             Self::Hubs => "hubs",
             Self::Impact => "impact",

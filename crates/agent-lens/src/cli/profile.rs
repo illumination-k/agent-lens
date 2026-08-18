@@ -158,6 +158,10 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             config::ToolName::ChangeEntropy,
         ),
         (profile.communities.is_some(), config::ToolName::Communities),
+        (
+            profile.hidden_coupling.is_some(),
+            config::ToolName::HiddenCoupling,
+        ),
         (profile.hubs.is_some(), config::ToolName::Hubs),
         (profile.impact.is_some(), config::ToolName::Impact),
         (profile.layers.is_some(), config::ToolName::Layers),

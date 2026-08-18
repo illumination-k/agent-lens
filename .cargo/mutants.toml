@@ -48,4 +48,8 @@ exclude_re = [
   # JSON, and serde_json ignores the hint, so an off-by-one produces
   # byte-identical output.
   "PerFileReport.*::field_count",
+  # static_file_graph: self-edges are dropped when the graph is built, so
+  # `from == to` cannot reach the unordered-key helper and `<` / `<=`
+  # produce the same key and the same direction.
+  "unordered",
 ]

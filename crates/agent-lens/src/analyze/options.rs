@@ -187,6 +187,7 @@ mod tests {
     use crate::analyze::graph_query::{
         GraphDirection, GraphQueryAnalyzer, GraphQueryKind, GraphQueryOptions,
     };
+    use crate::analyze::hidden_coupling::HiddenCouplingAnalyzer;
     use crate::analyze::hotspot::{HotspotAnalyzer, HotspotOptions};
     use crate::analyze::hubs::{HubsAnalyzer, HubsOptions};
     use crate::analyze::impact::{ImpactAnalyzer, ImpactOptions};
@@ -238,6 +239,25 @@ mod tests {
 
     assert_options_reach_the_analyzer!(
         co_change_options_reach_the_analyzer: CoChangeAnalyzer,
+        CoChangeOptions {
+            top: Some(3),
+            since: Some("90.days.ago".to_owned()),
+            min_support: 5,
+            min_confidence: 0.7,
+            max_commit_files: 20,
+        },
+        |a| a
+            .with_top(Some(3))
+            .with_since_opt(Some("90.days.ago".to_owned()))
+            .with_min_support(5)
+            .with_min_confidence(0.7)
+            .with_max_commit_files(20)
+    );
+    // `hidden-coupling` shares `CoChangeOptions`, so the same table has
+    // to land on both analyzers — a knob wired to one and dropped by the
+    // other is the failure this catches.
+    assert_options_reach_the_analyzer!(
+        hidden_coupling_options_reach_the_analyzer: HiddenCouplingAnalyzer,
         CoChangeOptions {
             top: Some(3),
             since: Some("90.days.ago".to_owned()),

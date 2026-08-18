@@ -137,6 +137,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Delegation
         | ToolName::FunctionGraph
         | ToolName::GraphQuery
+        | ToolName::HiddenCoupling
         | ToolName::Hubs
         | ToolName::Impact
         | ToolName::Layers

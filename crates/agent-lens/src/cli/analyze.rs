@@ -6,19 +6,20 @@ use std::path::PathBuf;
 use agent_lens::analyze::{
     ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer,
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
-    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HotspotAnalyzer, HubsAnalyzer,
-    ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
-    UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HiddenCouplingAnalyzer,
+    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
+    SearchAnalyzer, SimilarityAnalyzer, UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer,
+    WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeChangeEntropyArgs, AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand,
     AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
-    AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHotspotArgs,
-    AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs, AnalyzeRiskArgs,
-    AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeUnreachableArgs,
-    AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHiddenCouplingArgs,
+    AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs,
+    AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
+    AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -104,6 +105,12 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.delegation.clone().unwrap_or_default(),
         }),
+        config::ToolName::HiddenCoupling => {
+            AnalyzeCommand::HiddenCoupling(AnalyzeHiddenCouplingArgs {
+                common,
+                opts: profile.hidden_coupling.clone().unwrap_or_default(),
+            })
+        }
         config::ToolName::Hotspot => AnalyzeCommand::Hotspot(AnalyzeHotspotArgs {
             common,
             opts: profile.hotspot.clone().unwrap_or_default(),
@@ -214,6 +221,7 @@ impl_with_analyze_path_args!(
     FunctionGraphAnalyzer,
     GraphQueryAnalyzer,
     ContextSpanAnalyzer,
+    HiddenCouplingAnalyzer,
     HotspotAnalyzer,
     HubsAnalyzer,
     ImpactAnalyzer,
@@ -303,6 +311,7 @@ impl AnalyzeCommand {
                 Coupling => CouplingAnalyzer,
                 ContextSpan => ContextSpanAnalyzer,
                 Delegation => DelegationAnalyzer,
+                HiddenCoupling => HiddenCouplingAnalyzer,
                 Hotspot => HotspotAnalyzer,
                 Hubs => HubsAnalyzer,
                 Impact => ImpactAnalyzer,

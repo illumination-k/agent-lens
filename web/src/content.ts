@@ -225,6 +225,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
         summary:
           "File pairs git history says change together, with the confidence in each direction and the lift that separates a pattern from two merely busy files (any file type).",
       },
+      {
+        name: "hidden-coupling",
+        summary:
+          "The differential: pairs that co-change with no declared dependency between them, and declared dependencies the window never exercised, kept as two separate buckets.",
+      },
     ],
   },
 ];
