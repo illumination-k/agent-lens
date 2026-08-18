@@ -335,9 +335,18 @@ impl Graph {
 
     /// Greedy modularity agglomeration, run to the point where no merge
     /// improves `Q`.
+    ///
+    /// Every merge retires one community, so `n` nodes admit at most
+    /// `n - 1` of them. The bound is what keeps a merge that fails to
+    /// make progress — one the loop would otherwise re-propose forever —
+    /// from hanging the analyzer instead of producing a wrong answer a
+    /// test can see.
     fn agglomerate(&self) -> Partition {
         let mut state = Agglomerator::new(self);
-        while let Some((x, y)) = state.best_merge() {
+        for _ in 1..self.ids.len().max(1) {
+            let Some((x, y)) = state.best_merge() else {
+                break;
+            };
             state.merge(x, y);
         }
         state.finish(self.ids.len())
@@ -566,7 +575,7 @@ impl Agglomerator {
                 best = Some(((x, y), gain));
             }
         }
-        best.filter(|&(_, gain)| gain > MERGE_EPSILON)
+        best.filter(|&(_, gain)| improves(gain))
             .map(|(pair, _)| pair)
     }
 
@@ -615,6 +624,16 @@ impl Agglomerator {
 
 fn ordered(a: usize, b: usize) -> (usize, usize) {
     (a.min(b), a.max(b))
+}
+
+/// Whether a candidate merge is worth taking.
+///
+/// Read through a named predicate rather than inline so the boundary is
+/// something a test can hand a value: a gain *of exactly*
+/// [`MERGE_EPSILON`] is noise and must not drive a merge, and inside the
+/// loop that case is unreachable from any graph a test could build.
+fn improves(gain: f64) -> bool {
+    gain > MERGE_EPSILON
 }
 
 /// Canonicalise the node population: sorted ids, the sorted table of
@@ -769,6 +788,227 @@ mod tests {
             report.misfiled.iter().all(|m| m.node != "b1"),
             "b1 is wired to its own group: {report:?}",
         );
+    }
+
+    /// `Q` is the number every other figure in the report is read
+    /// against, so the arithmetic is pinned to a hand-computed value
+    /// rather than to an inequality. The barbell carries 7 units of
+    /// weight; each triangle holds 3 of them internally and its members'
+    /// degrees sum to 7, so each contributes `3/7 - (7/14)^2`.
+    #[test]
+    fn modularity_matches_the_hand_computed_newman_score() {
+        let (nodes, edges) = barbell();
+        let report = detect_communities(&nodes, &edges, DEFAULT_MIN_COMMUNITY);
+        let m = 7.0_f64;
+        let per_triangle = 3.0 / m - (7.0 / (2.0 * m)).powi(2);
+        let expected = 2.0 * per_triangle;
+        assert!(
+            (report.detected_modularity - expected).abs() < 1e-12,
+            "detected {} != {expected}",
+            report.detected_modularity,
+        );
+        // The declared partition is the same one here, so it must score
+        // identically through the same function.
+        assert!(
+            (report.declared_modularity - expected).abs() < 1e-12,
+            "declared {} != {expected}",
+            report.declared_modularity,
+        );
+    }
+
+    /// The declared breakdown is the evidence behind `dominant_declared`,
+    /// so it has to carry the counts rather than just the winner.
+    #[test]
+    fn a_community_reports_which_declared_groups_it_is_made_of() {
+        let nodes = vec![
+            CommunityNode::new("x1", "one"),
+            CommunityNode::new("x2", "one"),
+            CommunityNode::new("y1", "two"),
+        ];
+        let edges = vec![
+            CommunityEdge::new("x1", "x2", 4),
+            CommunityEdge::new("x2", "y1", 4),
+            CommunityEdge::new("x1", "y1", 4),
+        ];
+        let report = detect_communities(&nodes, &edges, DEFAULT_MIN_COMMUNITY);
+        assert_eq!(
+            report.communities[0].breakdown,
+            vec![
+                DeclaredShare {
+                    declared: "one".to_owned(),
+                    members: 2
+                },
+                DeclaredShare {
+                    declared: "two".to_owned(),
+                    members: 1
+                },
+            ],
+            "got {report:?}",
+        );
+        assert_eq!(report.communities[0].dominant_declared, "one");
+    }
+
+    /// Spanning is "no declared group owns a majority of this cluster".
+    /// A cluster one group holds two of three members of is owned, and
+    /// reporting it would turn every ordinary module that reaches into a
+    /// neighbour into a finding.
+    #[test]
+    fn a_cluster_one_group_holds_a_majority_of_is_not_spanning() {
+        let nodes = vec![
+            CommunityNode::new("x1", "one"),
+            CommunityNode::new("x2", "one"),
+            CommunityNode::new("y1", "two"),
+        ];
+        let edges = vec![
+            CommunityEdge::new("x1", "x2", 4),
+            CommunityEdge::new("x2", "y1", 4),
+            CommunityEdge::new("x1", "y1", 4),
+        ];
+        let report = detect_communities(&nodes, &edges, DEFAULT_MIN_COMMUNITY);
+        assert_eq!(report.communities.len(), 1, "got {report:?}");
+        assert!(report.spanning.is_empty(), "got {report:?}");
+    }
+
+    /// The other side of the same boundary: a two-member cluster split
+    /// one-and-one is owned by neither group.
+    #[test]
+    fn a_cluster_split_evenly_between_two_groups_is_spanning() {
+        let nodes = vec![
+            CommunityNode::new("x1", "one"),
+            CommunityNode::new("y1", "two"),
+        ];
+        let edges = vec![CommunityEdge::new("x1", "y1", 4)];
+        let report = detect_communities(&nodes, &edges, DEFAULT_MIN_COMMUNITY);
+        assert_eq!(report.spanning.len(), 1, "got {report:?}");
+        assert_eq!(report.spanning[0].size, 2);
+        assert_eq!(report.spanning[0].declared_group_count, 2);
+    }
+
+    /// The misfiled gate is strict: equal weight either way is not
+    /// evidence for a move, so the tie stays home.
+    #[test]
+    fn a_member_pulled_equally_both_ways_is_not_reported() {
+        let nodes = vec![
+            CommunityNode::new("a1", "a"),
+            CommunityNode::new("b1", "b"),
+            CommunityNode::new("b2", "b"),
+            CommunityNode::new("b3", "b"),
+        ];
+        // a1 has 2 units into `b` and 2 into its own `a` — a tie, so no
+        // row, even though its community is dominated by `b`.
+        let nodes = nodes
+            .into_iter()
+            .chain([CommunityNode::new("a2", "a")])
+            .collect::<Vec<_>>();
+        let edges = vec![
+            CommunityEdge::new("a1", "a2", 2),
+            CommunityEdge::new("a1", "b1", 2),
+            CommunityEdge::new("b1", "b2", 3),
+            CommunityEdge::new("b2", "b3", 3),
+            CommunityEdge::new("b1", "b3", 3),
+        ];
+        let report = detect_communities(&nodes, &edges, 1);
+        assert!(
+            report.misfiled.iter().all(|m| m.node != "a1"),
+            "a tie is not evidence: {report:?}",
+        );
+    }
+
+    /// `evidence` is the *difference* between the two weights and the
+    /// ranking key, so it is pinned on a member that keeps real weight
+    /// at home — where a sum and a difference disagree.
+    #[test]
+    fn evidence_is_the_gap_between_the_two_weights() {
+        // `z` sorts last, so it is the higher-indexed endpoint of every
+        // edge it has: both halves of the per-node weight tally have to
+        // accumulate for its counts to come out right.
+        let nodes = vec![
+            CommunityNode::new("a1", "a"),
+            CommunityNode::new("b1", "b"),
+            CommunityNode::new("b2", "b"),
+            CommunityNode::new("b3", "b"),
+            CommunityNode::new("z", "a"),
+        ];
+        let edges = vec![
+            CommunityEdge::new("a1", "z", 2),
+            CommunityEdge::new("z", "b1", 6),
+            CommunityEdge::new("z", "b2", 6),
+            CommunityEdge::new("b1", "b2", 4),
+            CommunityEdge::new("b2", "b3", 4),
+            CommunityEdge::new("b1", "b3", 4),
+        ];
+        let report = detect_communities(&nodes, &edges, DEFAULT_MIN_COMMUNITY);
+        let row = report
+            .misfiled
+            .iter()
+            .find(|m| m.node == "z")
+            .unwrap_or_else(|| panic!("no z row in {report:?}"));
+        assert_eq!(row.weight_to_suggested, 12, "got {report:?}");
+        assert_eq!(row.weight_to_declared, 2, "got {report:?}");
+        assert_eq!(row.evidence, 10, "got {report:?}");
+    }
+
+    /// An id listed twice keeps the smaller declared group. "First wins"
+    /// would make the answer depend on arrival order, which is exactly
+    /// what the rest of this module exists to rule out.
+    #[test]
+    fn a_repeated_node_keeps_the_smaller_declared_group() {
+        let edges = vec![CommunityEdge::new("n", "other", 1)];
+        let later_wins = vec![
+            CommunityNode::new("n", "zeta"),
+            CommunityNode::new("n", "alpha"),
+            CommunityNode::new("other", "alpha"),
+        ];
+        let earlier_wins = vec![
+            CommunityNode::new("n", "alpha"),
+            CommunityNode::new("n", "zeta"),
+            CommunityNode::new("other", "alpha"),
+        ];
+        for nodes in [later_wins, earlier_wins] {
+            let report = detect_communities(&nodes, &edges, DEFAULT_MIN_COMMUNITY);
+            assert_eq!(report.declared_group_count, 1, "got {report:?}");
+            assert_eq!(
+                report.communities[0].dominant_declared, "alpha",
+                "got {report:?}",
+            );
+        }
+    }
+
+    /// A gain of exactly the tolerance is noise, not an improvement.
+    /// Inside the loop this boundary is unreachable from any graph a
+    /// test could build, which is why the predicate is named.
+    #[rstest]
+    #[case(MERGE_EPSILON, false)]
+    #[case(0.0, false)]
+    #[case(-1.0, false)]
+    #[case(MERGE_EPSILON * 2.0, true)]
+    #[case(0.25, true)]
+    fn only_a_gain_above_the_tolerance_drives_a_merge(#[case] gain: f64, #[case] expected: bool) {
+        assert_eq!(improves(gain), expected);
+    }
+
+    /// The greedy pass must take the *best* merge available, not the
+    /// first one it is offered. `{a1,a2}` is the lexicographically first
+    /// candidate pair and the worst merge on this graph; the heavy
+    /// `{b1,b2}` edge is the one that belongs in a community.
+    #[test]
+    fn the_best_merge_wins_over_the_first_candidate() {
+        let nodes = ["a1", "a2", "b1", "b2"]
+            .into_iter()
+            .map(|id| CommunityNode::new(id, "g"))
+            .collect::<Vec<_>>();
+        let edges = vec![
+            CommunityEdge::new("a1", "a2", 1),
+            CommunityEdge::new("a2", "b1", 1),
+            CommunityEdge::new("b1", "b2", 40),
+        ];
+        let report = detect_communities(&nodes, &edges, 1);
+        let holding_b = report
+            .communities
+            .iter()
+            .find(|c| c.members.contains(&"b1".to_owned()))
+            .unwrap_or_else(|| panic!("no b1 community in {report:?}"));
+        assert_eq!(holding_b.members, ["b1", "b2"], "got {report:?}");
     }
 
     /// A parent that is both a node and the group its children are

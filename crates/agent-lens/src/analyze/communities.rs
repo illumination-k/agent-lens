@@ -316,13 +316,13 @@ struct Membership {
 
 impl Membership {
     fn new(graph: &ModuleGraph, granularity: Granularity) -> Self {
-        // Depth first, then spelling: the shallowest module in a file is
-        // the one the file is named after, and every other module in it
-        // is nested inside that one.
+        // The smallest path in a file is the one the file is named
+        // after: every other module in it is nested inside that one, so
+        // the file's own path is their prefix and sorts ahead of them.
         let mut primary: BTreeMap<&Path, &ModulePath> = BTreeMap::new();
         for module in &graph.modules {
             let owner = primary.entry(module.file.as_path()).or_insert(&module.path);
-            if depth(&module.path) < depth(owner) {
+            if module.path < **owner {
                 *owner = &module.path;
             }
         }
@@ -380,11 +380,6 @@ impl Membership {
         }
         path.parent().unwrap_or_else(|| path.clone())
     }
-}
-
-/// Number of `::`-separated segments in a module path.
-fn depth(path: &ModulePath) -> usize {
-    path.as_str().matches("::").count()
 }
 
 #[derive(Debug, Serialize)]
@@ -1026,6 +1021,273 @@ mod tests {
             json["misfiled"].as_array().unwrap().is_empty(),
             "got {json:#}"
         );
+    }
+
+    /// Every builder has to reach the analyzer. `with_options` is
+    /// checked against the equivalent chain elsewhere, which cannot see
+    /// a builder that quietly drops its argument — both sides would drop
+    /// it — so each one is pinned to an observable effect here.
+    #[test]
+    fn with_top_bounds_the_markdown_listings() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let capped = CommunitiesAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        let uncapped = CommunitiesAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(capped.contains("not shown"), "got {capped}");
+        assert!(capped.contains("top 1"), "got {capped}");
+        assert!(!uncapped.contains("not shown"), "got {uncapped}");
+    }
+
+    #[rstest]
+    #[case::exclude_tests(true, false)]
+    #[case::only_tests(false, true)]
+    fn the_test_filters_reach_the_member_set(
+        #[case] exclude_tests: bool,
+        #[case] only_tests: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "pub mod a;\npub mod tests;\n");
+        write_file(dir.path(), "a.rs", "pub struct A;\n");
+        write_file(
+            dir.path(),
+            "tests.rs",
+            "use crate::a::A;\npub fn t(_a: A) {}\n",
+        );
+
+        let json = report(
+            &lib,
+            CommunitiesAnalyzer::new()
+                .with_exclude_tests(exclude_tests)
+                .with_only_tests(only_tests),
+        );
+        let unfiltered = report(&lib, CommunitiesAnalyzer::new());
+        assert!(
+            json["module_count"].as_u64() < unfiltered["module_count"].as_u64(),
+            "filter did not reach the walk: {json:#} vs {unfiltered:#}",
+        );
+    }
+
+    /// An excluded module has to leave the *edges* as well as the node
+    /// list, and both endpoints have to be checked.
+    ///
+    /// At file granularity a half-excluded edge is harmless — its
+    /// surviving endpoint names no member, so the detector drops it
+    /// anyway. At module granularity it is not: an excluded file's
+    /// module path still resolves to its containing module, so keeping
+    /// the edge would credit the parent with weight from a file the
+    /// caller asked to leave out.
+    #[test]
+    fn excluding_a_module_drops_the_edges_that_touch_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let module = || CommunitiesAnalyzer::new().with_granularity(Granularity::Module);
+        let full = report(&lib, module());
+        let filtered = report(
+            &lib,
+            module().with_exclude_patterns(vec!["b/p.rs".to_owned()]),
+        );
+        assert!(
+            filtered["total_weight"].as_u64().unwrap() < full["total_weight"].as_u64().unwrap(),
+            "weight from an excluded file leaked into its parent: {filtered:#} vs {full:#}",
+        );
+    }
+
+    /// Rust puts `#[cfg(test)] mod tests` in the same file as the module
+    /// it tests. Those are not separately filed anywhere, so they fold
+    /// into the file — which is what keeps a module from looking like
+    /// the container of its own test module.
+    #[test]
+    fn modules_sharing_a_file_fold_into_one_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "pub mod a;\npub mod b;\n");
+        write_file(dir.path(), "a.rs", "pub struct A;\n");
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::a::A;\npub fn b(_a: A) {}\n\n#[cfg(test)]\nmod tests {\n    use crate::a::A;\n    #[test]\n    fn t() { let _ = A; }\n}\n",
+        );
+
+        let json = report(&lib, CommunitiesAnalyzer::new());
+        assert!(
+            json["module_count"].as_u64() > json["node_count"].as_u64(),
+            "the inline test module should have folded: {json:#}",
+        );
+        let members: BTreeSet<&str> = json["communities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["members"].as_array().unwrap())
+            .filter_map(|m| m.as_str())
+            .collect();
+        assert!(members.contains("crate::b"), "got {json:#}");
+        assert!(!members.contains("crate::b::tests"), "got {json:#}");
+        // The fold is also why `crate::b` is filed in `crate` rather
+        // than in itself.
+        assert!(
+            json["misfiled"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["declared"] != "crate::b"),
+            "got {json:#}",
+        );
+    }
+
+    /// Each community carries the declared groups it is made of, not
+    /// just the winner: that breakdown is the evidence a reader weighs
+    /// the dominant name against.
+    #[test]
+    fn a_community_carries_its_declared_breakdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let json = report(&lib, CommunitiesAnalyzer::new());
+        let mixed = json["communities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["declared_group_count"].as_u64().unwrap() >= 2)
+            .unwrap_or_else(|| panic!("no mixed community in {json:#}"));
+        let breakdown = mixed["breakdown"].as_array().unwrap();
+        assert!(!breakdown.is_empty(), "got {json:#}");
+        assert_eq!(
+            breakdown[0]["declared"], mixed["dominant_declared"],
+            "the breakdown leads with the dominant group: {json:#}",
+        );
+        let counted: u64 = breakdown
+            .iter()
+            .map(|s| s["members"].as_u64().unwrap())
+            .sum();
+        assert_eq!(counted, mixed["size"].as_u64().unwrap(), "got {json:#}");
+    }
+
+    /// The markdown carries the whole report, and each line below is a
+    /// fact a reader acts on: how many members folded, how many cluster
+    /// with nothing, which members a community holds, and how many rows
+    /// the cap hid.
+    #[test]
+    fn markdown_reports_the_fold_the_isolates_and_the_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            "pub mod a;\npub mod b;\npub mod lonely;\n",
+        );
+        write_file(dir.path(), "a.rs", "pub struct A;\n");
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::a::A;\npub fn b(_a: A) {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+        );
+        write_file(dir.path(), "lonely.rs", "pub fn lonely() {}\n");
+
+        let md = CommunitiesAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("module(s) folded into"), "got {md}");
+        assert!(md.contains("no resolved reference"), "got {md}");
+        assert!(md.contains("## Communities"), "got {md}");
+        assert!(md.contains("crate::a"), "got {md}");
+    }
+
+    /// Two sections only exist when there is something to put in them,
+    /// and the overflow line only when the cap actually hid a row —
+    /// "+0 more" reads as truncation that never happened.
+    #[test]
+    fn markdown_omits_what_the_report_does_not_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            "pub mod a;\npub mod b;\nuse crate::a::A;\npub fn top(x: A) { crate::b::b(x); }\n",
+        );
+        write_file(dir.path(), "a.rs", "pub struct A;\npub fn a() {}\n");
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::a::A;\npub fn b(_a: A) { crate::a::a(); }\n",
+        );
+
+        let md = CommunitiesAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(!md.contains("not shown"), "nothing was capped: {md}");
+        assert!(!md.contains("folded into"), "nothing folded: {md}");
+        assert!(
+            !md.contains("no resolved reference"),
+            "every member is connected: {md}",
+        );
+        // One community holding the whole graph is the honest answer at
+        // this size, and the report says so instead of splitting noise.
+        assert!(
+            md.contains("One community holds the whole graph"),
+            "got {md}"
+        );
+        assert!(!md.contains("## Spanning communities"), "got {md}");
+    }
+
+    /// A community that outgrows the inline member list summarises the
+    /// rest rather than printing a table cell of eighty module paths.
+    #[test]
+    fn a_large_community_summarises_the_members_it_does_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut decls = String::new();
+        for i in 0..MEMBERS_PER_ROW + 3 {
+            decls.push_str(&format!("pub mod m{i};\n"));
+            write_file(
+                dir.path(),
+                &format!("m{i}.rs"),
+                &format!("pub struct S{i};\npub fn f{i}() {{}}\n"),
+            );
+        }
+        // Wire every module to `m0` so they form one community.
+        let lib = write_file(dir.path(), "lib.rs", &decls);
+        for i in 1..MEMBERS_PER_ROW + 3 {
+            write_file(
+                dir.path(),
+                &format!("m{i}.rs"),
+                &format!(
+                    "use crate::m0::S0;\npub struct S{i};\npub fn f{i}(_s: S0) {{ crate::m0::f0(); }}\n"
+                ),
+            );
+        }
+
+        let md = CommunitiesAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains(" more |"), "members should be summarised: {md}");
+        assert!(md.contains("crate::m0"), "got {md}");
+    }
+
+    /// A declared partition of exactly one group scores `Q = 0` by
+    /// construction — every edge is internal and every degree is in it.
+    /// Zero is not below zero, so it takes the ratio wording.
+    #[test]
+    fn a_declared_partition_scoring_zero_still_gets_a_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            "pub mod a;\npub mod b;\npub mod c;\npub mod d;\n",
+        );
+        write_file(dir.path(), "a.rs", "pub struct A;\n");
+        write_file(dir.path(), "b.rs", "use crate::a::A;\npub fn b(_a: A) {}\n");
+        write_file(dir.path(), "c.rs", "pub struct C;\n");
+        write_file(dir.path(), "d.rs", "use crate::c::C;\npub fn d(_c: C) {}\n");
+
+        let json = report(&lib, CommunitiesAnalyzer::new());
+        assert_eq!(json["declared_group_count"], 1, "got {json:#}");
+        assert_eq!(json["modularity"]["declared"], 0.0, "got {json:#}");
+
+        let md = CommunitiesAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("scores 0.00 of the detected one"), "got {md}");
+        assert!(!md.contains("scores below zero"), "got {md}");
     }
 
     #[test]
