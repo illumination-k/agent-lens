@@ -43,6 +43,14 @@ Then once, for the tree the change lives in — a forwarding chain spans files, 
 agent-lens analyze delegation <dir> --diff-only --format md
 ```
 
+And once for the change as a whole, from the repository root — this one asks whether the edit is one change or several tangled together:
+
+```bash
+agent-lens analyze change-entropy . --diff-only --format md
+```
+
+It reports files touched, modules spanned, and the scatter percentile against this repo's own commits. A high percentile spanning several unrelated modules is the case for splitting the commit; one file carrying most of the changed lines is a focused change however many files it touched. Unlike the analyzers above it reads every file type, so `.toml`, `.md` and CI config count.
+
 If a report is empty, skip it silently — empty diff-only output is the success case.
 
 ### 3. Crate / entry-level coupling (no `--diff-only`)

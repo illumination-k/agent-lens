@@ -314,6 +314,15 @@ agent-lens analyze risk crates/agent-lens --since 90.days.ago --top 20
 # `git log`, so `.toml`, `.md` and CI config are covered too
 agent-lens analyze co-change . --since 180.days.ago --min-support 5 --top 20
 
+# Change entropy: how scattered change activity has been per ISO week,
+# and which files accumulated that scatter as history complexity
+agent-lens analyze change-entropy . --since 180.days.ago --top 20
+
+# The same metric turned on the pending change: files touched, modules
+# spanned, and where its scatter sits among this repo's own commits —
+# a high percentile over several modules is the case for splitting it
+agent-lens analyze change-entropy . --diff-only --format md
+
 # Forwarding wrappers (functions that are just `other(args).into()?` etc.)
 agent-lens analyze wrapper src/foo.rs
 
@@ -512,16 +521,16 @@ than a refusal.
 The current binary exposes three top-level command trees plus `run`,
 `baseline`, `skills`, `config`, and `help`:
 
-| Command tree | Commands                                                                                                                                                                                                                                              |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                             |
-| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                             |
-| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                         |
-| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document; `compare <profile> <SNAPSHOT> [--update]` — measure a fresh run against one, exit 2 on a regression                                                 |
-| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                                                                   |
-| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                                                              |
-| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                                                                    |
+| Command tree | Commands                                                                                                                                                                                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                               |
+| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                               |
+| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                           |
+| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document; `compare <profile> <SNAPSHOT> [--update]` — measure a fresh run against one, exit 2 on a regression                                                                   |
+| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                                                                                     |
+| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                                                                                |
+| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                                                                                      |
 
 `agent-lens --help` opens with a question-to-analyzer routing table
 ("what breaks if I change this?" → `analyze impact`) plus the output
@@ -589,6 +598,7 @@ Analyzer-specific options today:
 | `hotspot`        | `--since VALUE`, `--top N`                                                                                                                                                                                                                                           |
 | `risk`           | `--since VALUE`, `--top N`                                                                                                                                                                                                                                           |
 | `co-change`      | `--since VALUE`, `--min-support N`, `--min-confidence FLOAT`, `--max-commit-files N`, `--top N`                                                                                                                                                                      |
+| `change-entropy` | `--since VALUE`, `--period week\|month`, `--diff-only`, `--diff-range RANGE`, `--min-commits N`, `--max-commit-files N`, `--top N`                                                                                                                                   |
 | `hubs`           | `--top N`                                                                                                                                                                                                                                                            |
 | `impact`         | `--function SYMBOL` (repeatable), `--depth N`, `--diff-range RANGE`, `--top N`                                                                                                                                                                                       |
 | `layers`         | `--top N`                                                                                                                                                                                                                                                            |
@@ -627,11 +637,11 @@ Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 extract export status, and count the rest as skipped (`unreachable`
 treats them as entry points, so nothing they call is reported).
 `delegation` runs on all four, but only Rust and Go can exempt a module
-facade, and its confidence is highest on Rust. `co-change` has no language
-matrix at all: it reads `git log` and never parses a file, so it covers
-`.toml`, `.md`, workflow YAML, fixtures, and anything else the repository
-tracks. `hotspot`, `risk`, and `co-change` all require a git working
-tree.
+facade, and its confidence is highest on Rust. `co-change` and
+`change-entropy` have no language matrix at all: both read `git log` and
+never parse a file, so they cover `.toml`, `.md`, workflow YAML,
+fixtures, and anything else the repository tracks. `hotspot`, `risk`,
+`co-change`, and `change-entropy` all require a git working tree.
 
 ### As a Claude Code hook
 
@@ -831,6 +841,8 @@ non-zero.
 | `hotspot`        | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Rust, TS / JS, Python, Go |
 | `risk`           | Files ranked by the rank product of git churn and call-graph centrality (max/sum PageRank over the file's functions, plus transitive caller counts), lower being riskier — the "how carefully should I treat this edit?" prior that separates "hot but leaf" from "hot and load-bearing". Each row carries its raw components and the file's highest-PageRank function.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Rust, TS / JS, Python, Go |
 
+| `change-entropy` | How _scattered_ change activity was, rather than how much of it there was — the part Hassan (2009) found predictive. Per ISO week or calendar month (UTC, calendar-anchored so two runs agree), the Shannon entropy of each file's share of the period's changed lines, normalised by `log2(files)` so periods of different size compare, attributed onto files by Hassan's weighted variant and summed into a per-file history complexity. `--diff-only` turns it around and reads the pending change as one change set: files touched, modules spanned, its entropy, and its percentile among the commits this repository actually makes — the form that is worth having before the commit exists. A prior, never a gate. | Language-agnostic (git) |
+
 | `co-change` | File pairs git history says change together, as association rules over the commit window: co-change count (support), the conditional confidence in **both** directions (the edge is symmetric, the conditional is not), and lift — which separates a real pattern from two files that co-occur because each is hot. Ranked by `support × max(confidence)`, dated so a dead pattern is visibly dead, with renames followed so a rename does not split a pair's evidence. Correlation only: nothing here says why two files move together or which way a dependency runs. | Language-agnostic (git) |
 
 All analyzers default to JSON on stdout; pass `--format md` for a compact
@@ -979,7 +991,7 @@ and drives every one of them:
 | `lenses`     | the four language front-ends, where a fix applied to one can miss three   |
 | `web`        | the TypeScript viewer, the only end-to-end run of the TS front-end        |
 | `changes`    | every tool in `--diff-only` mode: a pre-commit review of the working tree |
-| `history`    | git history repo-wide: which files change together, and how reliably      |
+| `history`    | git history repo-wide: which files change together, and how scattered     |
 | `baseline`   | the metric snapshot `baseline create` reduces to numbers                  |
 
 ```bash

@@ -1,5 +1,6 @@
 //! Shared git-history extraction for the analyzers that read `git log`
-//! (`analyze hotspot`, `analyze risk`, `analyze co-change`).
+//! (`analyze hotspot`, `analyze risk`, `analyze co-change`,
+//! `analyze change-entropy`).
 //!
 //! Every one of them needs the same three things and must agree on all
 //! of them, or their rankings stop being comparable: the working-tree
@@ -11,20 +12,25 @@
 //! `crates/foo/src/lib.rs` against `src/lib.rs` and silently reports
 //! zero churn for every file.
 //!
-//! There is one `git log` invocation behind all of it, parsed into
-//! [`RawCommit`]s. Churn ([`ChurnScope::collect`]) folds that stream into
-//! per-file counts; co-change ([`ChurnScope::collect_commits`]) keeps the
-//! per-commit file sets the counting throws away, which is the substrate
-//! every history-based pair metric needs.
+//! Two `git log` shapes are read here, both scoped and dated the same
+//! way. `--name-status` answers *which files* a commit touched: churn
+//! ([`ChurnScope::collect`]) folds that stream into per-file counts, and
+//! co-change ([`ChurnScope::collect_commits`]) keeps the per-commit file
+//! sets the counting throws away. `--numstat`
+//! ([`ChurnScope::collect_commit_changes`]) answers *how much* of each
+//! commit landed in each file, which is what a scatter metric needs and
+//! a file set cannot say. Both follow renames through the same
+//! [`RenameMap`], so a rename mid-history does not split one file's
+//! evidence between two names in either.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use lens_domain::{CommitFiles, FileChurn};
+use lens_domain::{CommitChanges, CommitFiles, FileChange, FileChurn};
 use tracing::debug;
 
-use super::AnalyzeRoots;
+use super::{AnalyzeRoots, CompiledPathFilter, DiffScope};
 
 /// Failures raised while asking git for churn.
 ///
@@ -176,22 +182,12 @@ impl ChurnScope {
         since: Option<&str>,
     ) -> Result<Vec<CommitFiles>, ChurnError> {
         let raw = self.raw_commits(since)?;
-        // Historical path → the name that path's content goes by today.
-        let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+        let mut renamed = RenameMap::default();
         let mut out = Vec::with_capacity(raw.len());
         for commit in raw {
             let mut files = Vec::with_capacity(commit.entries.len());
             for entry in commit.entries {
-                let current = renamed
-                    .get(&entry.path)
-                    .cloned()
-                    .unwrap_or_else(|| entry.path.clone());
-                if let Some(source) = entry.renamed_from {
-                    // A copy leaves its source in place under its own
-                    // name, so only a rename redirects older mentions.
-                    renamed.insert(source, current.clone());
-                }
-                files.push(current);
+                files.push(renamed.current(&entry.path, entry.renamed_from.as_deref()));
             }
             files.sort_unstable();
             files.dedup();
@@ -201,6 +197,90 @@ impl ChurnScope {
             });
         }
         Ok(out)
+    }
+
+    /// Per-commit changed-line counts under this scope, newest first,
+    /// keyed repo-root-relative and with renames followed.
+    ///
+    /// The weight a scatter metric needs. [`Self::collect_commits`] can
+    /// say a commit touched six files; it cannot say whether that was
+    /// one real edit plus five one-line follow-ons or six real edits,
+    /// and those are the two cases `analyze change-entropy` exists to
+    /// tell apart.
+    ///
+    /// Dates come back as `YYYY-MM-DD` **in UTC**, unlike the other
+    /// readers here, which take git's default of the committer's own
+    /// timezone. A period boundary has to be a property of the commit
+    /// rather than of who ran the report, or two machines bucket the
+    /// same commit into two different weeks.
+    ///
+    /// A commit with no diff — a merge, since merges carry none without
+    /// `--diff-merges`, or an empty commit — comes back with no files
+    /// and is the caller's to drop.
+    pub(crate) fn collect_commit_changes(
+        &self,
+        since: Option<&str>,
+    ) -> Result<Vec<CommitChanges>, ChurnError> {
+        let raw = self.numstat_commits(since)?;
+        let mut renamed = RenameMap::default();
+        let mut out = Vec::with_capacity(raw.len());
+        for commit in raw {
+            let files = commit
+                .entries
+                .into_iter()
+                .map(|entry| FileChange {
+                    path: renamed.current(&entry.path, entry.renamed_from.as_deref()),
+                    lines: entry.lines,
+                })
+                .collect();
+            out.push(CommitChanges {
+                date: commit.date,
+                files,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Changed-line counts for the diff `scope` names, keyed
+    /// repo-root-relative — the pending change in the same shape, and
+    /// the same path space, as the commits it is about to join.
+    ///
+    /// [`DiffScope::Disabled`] reads no diff and returns nothing.
+    /// [`DiffScope::WorkingTree`] is the same `git diff` every other
+    /// `--diff-only` in the tool reads, so a staged or untracked file is
+    /// outside it. The scope's pathspec applies here too: a run pointed
+    /// at one directory measures the part of the pending change that
+    /// landed in it.
+    pub(crate) fn collect_diff_changes(
+        &self,
+        scope: &DiffScope,
+    ) -> Result<Vec<FileChange>, ChurnError> {
+        let range = match scope {
+            DiffScope::Disabled => return Ok(Vec::new()),
+            DiffScope::WorkingTree => None,
+            DiffScope::Range(range) => Some(range.as_str()),
+        };
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(&self.repo_root)
+            .args(["diff", "--no-ext-diff", "--numstat", "-M", "-z"]);
+        if let Some(range) = range {
+            cmd.arg(range);
+        }
+        cmd.arg("--");
+        if self.scope_rels.is_empty() {
+            cmd.arg(".");
+        } else {
+            cmd.args(&self.scope_rels);
+        }
+        let stdout = self.run_log(cmd)?;
+        Ok(parse_numstat_entries(&stdout)
+            .into_iter()
+            .map(|entry| FileChange {
+                path: entry.path,
+                lines: entry.lines,
+            })
+            .collect())
     }
 
     /// Whether the working tree is a shallow clone, in which case any
@@ -234,14 +314,51 @@ impl ChurnScope {
     /// destination. `-M` is passed explicitly so the output does not
     /// depend on the user's `diff.renames` setting.
     fn raw_commits(&self, since: Option<&str>) -> Result<Vec<RawCommit>, ChurnError> {
+        let stdout = self.run_log(self.log_command(
+            since,
+            &[
+                &format!("--pretty=format:{COMMIT_MARKER}%ad"),
+                "--date=short",
+                "--name-status",
+                "-M",
+            ],
+        ))?;
+        Ok(parse_raw_commits(&stdout))
+    }
+
+    /// One `git log --numstat` pass over this scope, parsed into commits
+    /// with per-file line counts.
+    ///
+    /// `-z` rather than the human format: with `-M` a rename's numstat
+    /// line spells both paths as `dir/{old => new}.rs`, which no parser
+    /// can separate from a file literally named that, while `-z` puts
+    /// the two paths in their own NUL-separated fields. It also removes
+    /// `core.quotePath` from the picture, so a non-ASCII path arrives
+    /// verbatim instead of C-quoted.
+    ///
+    /// `TZ=UTC` with `--date=format-local` is what makes the dates
+    /// machine-independent; see [`Self::collect_commit_changes`].
+    fn numstat_commits(&self, since: Option<&str>) -> Result<Vec<RawStatCommit>, ChurnError> {
+        let mut cmd = self.log_command(
+            since,
+            &[
+                "--pretty=format:%ad",
+                "--date=format-local:%Y-%m-%d",
+                "--numstat",
+                "-M",
+                "-z",
+            ],
+        );
+        cmd.env("TZ", "UTC");
+        Ok(parse_numstat_commits(&self.run_log(cmd)?))
+    }
+
+    /// A `git log` invocation over this scope: `args` chooses the
+    /// format, and the window and pathspec are appended in the order git
+    /// requires (pathspecs last, after `--`).
+    fn log_command(&self, since: Option<&str>, args: &[&str]) -> Command {
         let mut cmd = Command::new("git");
-        cmd.arg("-C")
-            .arg(&self.repo_root)
-            .arg("log")
-            .arg(format!("--pretty=format:{COMMIT_MARKER}%ad"))
-            .arg("--date=short")
-            .arg("--name-status")
-            .arg("-M");
+        cmd.arg("-C").arg(&self.repo_root).arg("log").args(args);
         if let Some(s) = since {
             cmd.arg(format!("--since={s}"));
         }
@@ -249,7 +366,11 @@ impl ChurnScope {
             cmd.arg("--");
             cmd.args(&self.scope_rels);
         }
+        cmd
+    }
 
+    /// Run a prepared `git log` and hand back its stdout.
+    fn run_log(&self, mut cmd: Command) -> Result<String, ChurnError> {
         let output = cmd.output().map_err(|source| ChurnError::Io {
             path: self.repo_root.clone(),
             source,
@@ -259,7 +380,7 @@ impl ChurnScope {
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
-        Ok(parse_raw_commits(&String::from_utf8_lossy(&output.stdout)))
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Repo-root-relative key for an absolute path inside the repo,
@@ -406,6 +527,228 @@ fn parse_raw_entry(line: &str) -> Option<RawEntry> {
         }),
         None => None,
     }
+}
+
+/// Whether a path a history reader turned up is one a report can act on.
+///
+/// Two gates, decided once per distinct path rather than once per
+/// mention: the analyzer's own path filter, and whether the file is
+/// still in the working tree at all. History is full of files that were
+/// deleted months ago, and an agent about to edit something cannot go
+/// read one of those — so the `stat` is part of the question, not a
+/// nicety.
+pub(crate) struct ReportablePaths<'a> {
+    filter: &'a CompiledPathFilter,
+    repo_root: &'a Path,
+    decided: BTreeMap<String, bool>,
+}
+
+impl<'a> ReportablePaths<'a> {
+    pub(crate) fn new(filter: &'a CompiledPathFilter, repo_root: &'a Path) -> Self {
+        Self {
+            filter,
+            repo_root,
+            decided: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn keeps(&mut self, path: &str) -> bool {
+        if let Some(decided) = self.decided.get(path) {
+            return *decided;
+        }
+        let keep = self.filter.includes_relative(path) && self.repo_root.join(path).exists();
+        self.decided.insert(path.to_owned(), keep);
+        keep
+    }
+}
+
+/// Historical path → the name that path's content goes by today.
+///
+/// Both history readers walk newest-first, so a rename entry means every
+/// *older* mention of the source is really today's destination, and the
+/// map is applied as the walk descends. Shared rather than written twice
+/// because a rename that one reader follows and the other does not would
+/// put the same file under two names in two reports built from one log.
+#[derive(Debug, Default)]
+struct RenameMap(BTreeMap<String, String>);
+
+impl RenameMap {
+    /// Today's name for `path`, recording `renamed_from` so older
+    /// mentions of the source resolve to it too.
+    ///
+    /// A copy leaves its source in place under its own name, so callers
+    /// pass `None` for one: only a rename redirects older mentions.
+    fn current(&mut self, path: &str, renamed_from: Option<&str>) -> String {
+        let current = self.0.get(path).cloned().unwrap_or_else(|| path.to_owned());
+        if let Some(source) = renamed_from {
+            self.0.insert(source.to_owned(), current.clone());
+        }
+        current
+    }
+}
+
+/// One commit as `git log --numstat -z` describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawStatCommit {
+    /// Author date, `YYYY-MM-DD` in UTC.
+    date: String,
+    entries: Vec<RawStatEntry>,
+}
+
+/// One changed path inside a commit, with the size of its change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawStatEntry {
+    /// The path as of this commit — the destination for a rename.
+    path: String,
+    /// The origin path, set only for a rename.
+    renamed_from: Option<String>,
+    /// Insertions + deletions.
+    lines: u64,
+}
+
+/// A binary file's weight.
+///
+/// git reports its numstat as `-` / `-`, having no lines to count. Zero
+/// would drop it from the change set entirely, and any larger number
+/// would be invented, so it weighs as the smallest change that is still
+/// a change.
+const BINARY_FILE_LINES: u64 = 1;
+
+/// What one field of a `--numstat -z` stream turned out to be.
+///
+/// Position decides, not content: no marker can be ruled out of a path,
+/// but a field that follows a commit's closing empty field is a header
+/// and a field that follows a record is a record.
+#[derive(Debug)]
+enum Field<'a> {
+    /// A commit header — the date — with the first record glued to it by
+    /// a newline, unless the commit carried no diff at all.
+    Header {
+        date: &'a str,
+        first: Option<&'a str>,
+    },
+    /// One `ADDED\tDELETED\tPATH` record.
+    Record(&'a str),
+    /// The empty field that closes a commit's record list.
+    EndOfCommit,
+}
+
+fn classify(chunk: &str, expect_header: bool) -> Field<'_> {
+    if chunk.is_empty() {
+        return Field::EndOfCommit;
+    }
+    if !expect_header {
+        return Field::Record(chunk);
+    }
+    match chunk.split_once('\n') {
+        Some((date, first)) => Field::Header {
+            date,
+            first: Some(first),
+        },
+        // A merge, since merges carry no diff without `--diff-merges`,
+        // or an empty commit: the next field is the next header.
+        None => Field::Header {
+            date: chunk,
+            first: None,
+        },
+    }
+}
+
+/// Split a `git log --pretty=format:%ad --numstat -z` stream into
+/// commits.
+///
+/// The fields are walked through one iterator rather than by index, so a
+/// rename — which spends two extra fields on its paths — consumes them
+/// from the same cursor the loop reads, and there is no cursor
+/// arithmetic to get wrong.
+fn parse_numstat_commits(stdout: &str) -> Vec<RawStatCommit> {
+    let mut fields = stdout.split('\0');
+    let mut commits: Vec<RawStatCommit> = Vec::new();
+    let mut expect_header = true;
+    while let Some(field) = fields.next() {
+        let record = match classify(field, expect_header) {
+            Field::EndOfCommit => {
+                expect_header = true;
+                continue;
+            }
+            Field::Header { date, first } => {
+                commits.push(RawStatCommit {
+                    date: date.trim().to_owned(),
+                    entries: Vec::new(),
+                });
+                expect_header = first.is_none();
+                let Some(first) = first else {
+                    continue;
+                };
+                first
+            }
+            Field::Record(record) => record,
+        };
+        if let (Some(entry), Some(commit)) =
+            (parse_numstat_entry(&mut fields, record), commits.last_mut())
+        {
+            commit.entries.push(entry);
+        }
+    }
+    commits
+}
+
+/// Split a `git diff --numstat -z` stream into records.
+///
+/// The same records [`parse_numstat_commits`] reads, without the commit
+/// headers: a diff is one change set, so there is nothing to group.
+fn parse_numstat_entries(stdout: &str) -> Vec<RawStatEntry> {
+    let mut fields = stdout.split('\0');
+    let mut out = Vec::new();
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            continue;
+        }
+        if let Some(entry) = parse_numstat_entry(&mut fields, field) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// Parse one `--numstat -z` record, taking the two extra fields a rename
+/// spends its paths on from `fields`.
+///
+/// An unrecognised record is skipped rather than guessed at: inventing a
+/// path or a line count for a shape this parser does not model would put
+/// a fabricated file in the report.
+fn parse_numstat_entry<'a>(
+    fields: &mut impl Iterator<Item = &'a str>,
+    record: &'a str,
+) -> Option<RawStatEntry> {
+    let mut columns = record.split('\t');
+    let (added, deleted, path) = (columns.next()?, columns.next()?, columns.next()?);
+    let lines = match (added.parse::<u64>(), deleted.parse::<u64>()) {
+        (Ok(added), Ok(deleted)) => added + deleted,
+        // `-` / `-`: a binary file, which has no lines to count. One
+        // side of the pair spelled that way is a shape git does not
+        // emit, and not one to guess a count for.
+        _ if added == "-" && deleted == "-" => BINARY_FILE_LINES,
+        _ => return None,
+    };
+    if !path.is_empty() {
+        return Some(RawStatEntry {
+            path: path.to_owned(),
+            renamed_from: None,
+            lines,
+        });
+    }
+    // An empty path field means the two paths of a rename follow, each
+    // in its own field.
+    let (source, destination) = (fields.next()?, fields.next()?);
+    if source.is_empty() || destination.is_empty() {
+        return None;
+    }
+    Some(RawStatEntry {
+        path: destination.to_owned(),
+        renamed_from: Some(source.to_owned()),
+        lines,
+    })
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, ChurnError> {
@@ -849,5 +1192,191 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("fatal: not a git repo"), "got {msg}");
         assert!(!msg.ends_with('\n'), "trailing newline should be trimmed");
+    }
+
+    /// The `-z` numstat stream in the exact shape git emits it: the
+    /// commit header glued to its first record, further records in their
+    /// own fields, an empty field closing the list, a rename spending
+    /// two extra fields on its paths, and a binary file with no line
+    /// counts at all. A parser that drifts from this puts fabricated
+    /// paths and weights into every scatter figure.
+    #[test]
+    fn numstat_parsing_covers_every_record_shape_git_emits() {
+        let stream = concat!(
+            "2026-08-18\n1\t1\tdir/new.txt\0",
+            "1\t0\ttwo.txt\0\0",
+            "2026-08-17\n12\t3\t\0dir/old.txt\0dir/new.txt\0\0",
+            "2026-08-16\n-\t-\tbin.dat\0",
+        );
+        let commits = parse_numstat_commits(stream);
+        assert_eq!(commits.len(), 3, "got {commits:?}");
+
+        assert_eq!(commits[0].date, "2026-08-18");
+        assert_eq!(
+            commits[0].entries,
+            vec![
+                RawStatEntry {
+                    path: "dir/new.txt".to_owned(),
+                    renamed_from: None,
+                    lines: 2,
+                },
+                RawStatEntry {
+                    path: "two.txt".to_owned(),
+                    renamed_from: None,
+                    lines: 1,
+                },
+            ],
+        );
+        assert_eq!(
+            commits[1].entries,
+            vec![RawStatEntry {
+                path: "dir/new.txt".to_owned(),
+                renamed_from: Some("dir/old.txt".to_owned()),
+                lines: 15,
+            }],
+        );
+        assert_eq!(
+            commits[2].entries,
+            vec![RawStatEntry {
+                path: "bin.dat".to_owned(),
+                renamed_from: None,
+                lines: BINARY_FILE_LINES,
+            }],
+        );
+    }
+
+    /// A merge carries no diff without `--diff-merges`, and an empty
+    /// commit carries none at all: git emits a bare header with no
+    /// newline and no closing field, and the next field is the next
+    /// header. Reading one of those as a record would attribute the next
+    /// commit's changes to it.
+    #[test]
+    fn a_commit_with_no_diff_is_a_header_on_its_own() {
+        let commits = parse_numstat_commits("2026-08-18\x002026-08-17\x002026-08-16\n4\t0\ta.rs\0");
+        assert_eq!(commits.len(), 3, "got {commits:?}");
+        assert!(commits[0].entries.is_empty(), "got {commits:?}");
+        assert!(commits[1].entries.is_empty(), "got {commits:?}");
+        assert_eq!(commits[2].entries.len(), 1, "got {commits:?}");
+    }
+
+    #[rstest]
+    #[case::empty_stream("")]
+    #[case::truncated_record("2026-08-18\n1\t1")]
+    #[case::rename_with_no_paths("2026-08-18\n1\t1\t\0")]
+    #[case::rename_with_no_source("2026-08-18\n1\t1\t\0\0dir/new.txt\0")]
+    #[case::rename_with_no_destination("2026-08-18\n1\t1\t\0dir/old.txt\0\0")]
+    #[case::unparseable_counts("2026-08-18\nx\ty\ta.rs\0")]
+    #[case::half_binary_counts("2026-08-18\n-\t5\ta.rs\0")]
+    #[case::other_half_binary_counts("2026-08-18\n5\t-\ta.rs\0")]
+    fn an_unrecognised_numstat_record_invents_nothing(#[case] stream: &str) {
+        let commits = parse_numstat_commits(stream);
+        assert!(
+            commits.iter().all(|commit| commit.entries.is_empty()),
+            "got {commits:?}",
+        );
+    }
+
+    #[test]
+    fn diff_records_parse_without_commit_headers() {
+        let entries = parse_numstat_entries("3\t4\ta.rs\0-\t-\tlogo.png\0");
+        assert_eq!(
+            entries,
+            vec![
+                RawStatEntry {
+                    path: "a.rs".to_owned(),
+                    renamed_from: None,
+                    lines: 7,
+                },
+                RawStatEntry {
+                    path: "logo.png".to_owned(),
+                    renamed_from: None,
+                    lines: BINARY_FILE_LINES,
+                },
+            ],
+        );
+    }
+
+    /// The rename map is what keeps one file's history under one name.
+    /// Walking newest-first, a rename means every older mention of the
+    /// source is really today's destination — including one two renames
+    /// back.
+    #[test]
+    fn the_rename_map_forwards_a_chain_of_renames_to_todays_name() {
+        let mut renamed = RenameMap::default();
+        assert_eq!(renamed.current("c.rs", Some("b.rs")), "c.rs");
+        assert_eq!(renamed.current("b.rs", Some("a.rs")), "c.rs");
+        assert_eq!(renamed.current("a.rs", None), "c.rs");
+        // A copy leaves its source in place, so it redirects nothing.
+        assert_eq!(renamed.current("d.rs", None), "d.rs");
+    }
+
+    #[test]
+    fn commit_changes_carry_line_counts_and_follow_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let body: String = (0..12).map(|i| format!("// line {i}\n")).collect();
+        write_file(dir.path(), "crates/app/src/big.rs", &body);
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "add"]);
+        run_git(
+            dir.path(),
+            &["mv", "crates/app/src/big.rs", "crates/app/src/moved.rs"],
+        );
+        write_file(
+            dir.path(),
+            "crates/app/src/moved.rs",
+            &body.replace("// line 0", "// edited"),
+        );
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "move"]);
+
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
+        let commits = scope.collect_commit_changes(None).unwrap();
+        assert_eq!(commits.len(), 3, "got {commits:?}");
+        let paths: Vec<Vec<&str>> = commits
+            .iter()
+            .map(|commit| commit.files.iter().map(|f| f.path.as_str()).collect())
+            .collect();
+        // Newest first: the rename commit, then the commit that created
+        // the file — which reports it under the name it goes by today.
+        assert_eq!(paths[0], vec!["crates/app/src/moved.rs"], "got {paths:?}");
+        assert_eq!(paths[1], vec!["crates/app/src/moved.rs"], "got {paths:?}");
+        assert!(
+            commits.iter().flat_map(|c| &c.files).all(|f| f.lines > 0),
+            "got {commits:?}",
+        );
+        // `--date=format-local` with TZ=UTC, so the date is a date.
+        assert_eq!(commits[0].date.len(), 10, "got {commits:?}");
+    }
+
+    #[test]
+    fn diff_changes_read_the_working_tree_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
+        assert!(
+            scope
+                .collect_diff_changes(&DiffScope::WorkingTree)
+                .unwrap()
+                .is_empty(),
+            "a clean tree has no pending change",
+        );
+        assert!(
+            scope
+                .collect_diff_changes(&DiffScope::Disabled)
+                .unwrap()
+                .is_empty(),
+            "a disabled gate reads no diff at all",
+        );
+
+        write_file(
+            dir.path(),
+            "crates/app/src/lib.rs",
+            "pub fn a() -> i32 {\n    1\n}\n",
+        );
+        let pending = scope.collect_diff_changes(&DiffScope::WorkingTree).unwrap();
+        assert_eq!(pending.len(), 1, "got {pending:?}");
+        assert_eq!(pending[0].path, "crates/app/src/lib.rs");
+        assert!(pending[0].lines > 0, "got {pending:?}");
     }
 }
