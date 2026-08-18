@@ -1574,6 +1574,58 @@ fn analyze_co_change_pairs_files_from_a_git_history() {
     assert!(json.get("shallow_clone").is_none(), "got {json}");
 }
 
+/// `analyze change-entropy` reads history and the pending diff, so the
+/// binary is the only place its wiring can be checked end to end. The
+/// `--diff-only` half especially: a working-tree read that never reached
+/// git would report a focused change for every edit, silently.
+#[test]
+fn analyze_change_entropy_scores_history_and_the_pending_change() {
+    let dir = tempfile::tempdir().unwrap();
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    let body: String = (0..10).map(|i| format!("// line {i}\n")).collect();
+    for (day, path) in [(10, "src/a.rs"), (12, "src/b.rs"), (14, "api.toml")] {
+        write_file(dir.path(), path, &body);
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(
+            dir.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                path,
+                &format!("--date=2026-08-{day}T12:00:00Z"),
+            ],
+        );
+    }
+
+    let history = stdout_json(&agent_lens(
+        &["analyze", "change-entropy", ".", "--min-commits", "1"],
+        dir.path(),
+        None,
+    ));
+    assert_eq!(history["commit_count"], 3, "got {history}");
+    let periods = history["periods"].as_array().unwrap();
+    assert_eq!(periods.len(), 1, "got {history}");
+    assert_eq!(periods[0]["period"], "2026-W33", "got {history}");
+    // Three files, ten lines each: evenly spread, so maximal scatter.
+    assert!(
+        (periods[0]["entropy"].as_f64().unwrap_or(0.0) - 1.0).abs() < 1e-9,
+        "got {history}",
+    );
+
+    write_file(dir.path(), "src/a.rs", "// only this one\n");
+    let verdict = stdout_json(&agent_lens(
+        &["analyze", "change-entropy", ".", "--diff-only"],
+        dir.path(),
+        None,
+    ));
+    assert_eq!(verdict["pending"]["files_touched"], 1, "got {verdict}");
+    assert_eq!(verdict["pending"]["files"][0]["path"], "src/a.rs");
+    assert_eq!(verdict["reference"]["commit_count"], 3, "got {verdict}");
+}
+
 /// `analyze communities` compares the detected clustering against the
 /// declared one, so the binary is where its wiring can be checked end to
 /// end: a missing subcommand registration, a declared partition that
@@ -1630,6 +1682,7 @@ fn analyze_communities_names_a_module_wired_into_a_neighbour() {
 #[case::index_row("| `agent-lens analyze hotspot` |")]
 #[case::risk_index_row("| `agent-lens analyze risk` |")]
 #[case::co_change_index_row("| `agent-lens analyze co-change` |")]
+#[case::change_entropy_index_row("| `agent-lens analyze change-entropy` |")]
 #[case::communities_index_row("| `agent-lens analyze communities` |")]
 #[case::routing("Pick an analyzer by question:")]
 #[case::conventions("Reports go to stdout")]

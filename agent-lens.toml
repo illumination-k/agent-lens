@@ -226,7 +226,14 @@ top = 10
 path = "crates"
 format = "md"
 exclude-tests = true
-tools = ["similarity", "wrapper", "complexity", "cohesion", "delegation"]
+tools = [
+  "similarity",
+  "wrapper",
+  "complexity",
+  "cohesion",
+  "delegation",
+  "change-entropy",
+]
 
 [profile.changes.similarity]
 diff-only = true
@@ -248,6 +255,21 @@ top = 10
 [profile.changes.delegation]
 diff-only = true
 top = 10
+
+# The one tool here that reports on the *shape* of the change rather than
+# on the code it introduced: how many files and modules the pending edit
+# spans, how its scatter compares to the commits this repo actually
+# makes, and therefore whether it wants splitting into several commits.
+#
+# Scoped like the rest of this profile, so the verdict covers the pending
+# change to `crates/` only. For the whole working tree — the `README.md`
+# and `agent-lens.toml` edits that a change to the CLI surface always
+# drags along — run it unscoped:
+#
+#     agent-lens analyze change-entropy . --diff-only --format md
+[profile.changes.change-entropy]
+diff-only = true
+top = 15
 
 # `baseline` is the metric snapshot the roadmap's Phase 0 asks for:
 #
@@ -294,7 +316,7 @@ tools = [
 [profile.history]
 path = "."
 format = "md"
-tools = ["co-change"]
+tools = ["co-change", "change-entropy"]
 
 [profile.history.co-change]
 top = 25
@@ -303,3 +325,12 @@ top = 25
 # at 8 the survivors are patterns rather than coincidences.
 min-support = 8
 min-confidence = 0.6
+
+# The retrospective half of the same history: not which files move
+# together, but how scattered the work in each week was and how much of
+# that scatter each file accumulated. Repo-wide for the same reason
+# `co-change` is — a week's scatter is only measurable over every file
+# the week touched, and this repo's weeks routinely span `crates/`,
+# `web/`, `README.md` and the lockfiles at once.
+[profile.history.change-entropy]
+top = 20

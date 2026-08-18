@@ -33,7 +33,6 @@
 //!   pairs (`src/` ↔ `docs/`, code ↔ CI config) only appear in a run
 //!   whose path covers both.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -44,7 +43,7 @@ use lens_domain::{
 use serde::Serialize;
 use tracing::warn;
 
-use super::churn::ChurnScope;
+use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
 use super::{AnalyzePathFilter, AnalyzeRoots, CompiledPathFilter, OutputFormat, PathFilterError};
 
@@ -271,31 +270,15 @@ impl CoChangeAnalyzer {
 }
 
 /// Drop paths a report cannot act on: those the path filter excludes, and
-/// those no longer in the working tree.
-///
-/// The existence gate is the same call `hotspot` makes by joining against
-/// walked source files: an agent about to edit a file cannot go read a
-/// partner that was deleted three months ago, and history is full of
-/// them. Each distinct path is decided once, so the `stat` cost is per
-/// file rather than per mention.
+/// those no longer in the working tree. See [`ReportablePaths`].
 fn retain_reportable_paths(
     commits: &mut [CommitFiles],
     filter: &CompiledPathFilter,
     repo_root: &Path,
 ) {
-    let mut decided: BTreeMap<String, bool> = BTreeMap::new();
-    for commit in commits.iter() {
-        for file in &commit.files {
-            if !decided.contains_key(file) {
-                let keep = filter.includes_relative(file) && repo_root.join(file).exists();
-                decided.insert(file.clone(), keep);
-            }
-        }
-    }
+    let mut reportable = ReportablePaths::new(filter, repo_root);
     for commit in commits {
-        commit
-            .files
-            .retain(|file| decided.get(file).copied().unwrap_or(false));
+        commit.files.retain(|file| reportable.keeps(file));
     }
 }
 

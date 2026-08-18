@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use agent_lens::analyze::change_entropy::ChangeEntropyOptions;
 use agent_lens::analyze::co_change::CoChangeOptions;
 use agent_lens::analyze::cohesion::CohesionOptions;
 use agent_lens::analyze::communities::CommunitiesOptions;
@@ -736,6 +737,37 @@ pub(super) enum AnalyzeCommand {
     /// default; `--format md` caps the table at `--top` (default 20).
     #[command(name = "co-change", after_long_help = examples::CO_CHANGE)]
     CoChange(AnalyzeCoChangeArgs),
+    /// Report how scattered change activity has been, and how scattered
+    /// the pending change is.
+    ///
+    /// `hotspot` says a file changes a lot. This says whether the change
+    /// activity around it was focused or smeared, which is the part
+    /// Hassan (2009) found predictive. Entropy is Shannon entropy over
+    /// each file's share of the changed lines in a change set, divided
+    /// by `log2(files)` so change sets of different size compare: 0 is
+    /// all of it in one file, 1 is spread perfectly evenly. History is
+    /// bucketed into ISO weeks or calendar months (`--period`), both in
+    /// UTC and calendar-anchored rather than measured back from now, so
+    /// two runs a day apart agree about which commits share a bucket. A
+    /// period's entropy is attributed to its files by Hassan's weighted
+    /// variant — each file takes its share of the period's changed lines
+    /// times the period's entropy — and summed per file into a history
+    /// complexity that ranks files against each other. `--diff-only`
+    /// turns the report around: it measures the pending working-tree
+    /// change as one change set and says where its scatter sits among
+    /// the commits this repository actually makes, which is the form
+    /// worth having before a commit exists rather than after. Like
+    /// `co-change` it reads `git log` and never parses a file, so it has
+    /// no language matrix. Commits touching more than
+    /// `--max-commit-files` files take part in nothing, and periods
+    /// under `--min-commits` are omitted rather than reported from two
+    /// commits. This is a prior, not a gate: a high row says change
+    /// around a file was unfocused, never that the file is wrong. `path`
+    /// must be inside a git working tree, and a shallow clone is warned
+    /// about on stderr. JSON is the default; `--format md` caps its
+    /// tables at `--top` (default 20).
+    #[command(name = "change-entropy", after_long_help = examples::CHANGE_ENTROPY)]
+    ChangeEntropy(AnalyzeChangeEntropyArgs),
     /// Rank functions by how well they match a query.
     ///
     /// The retrieval unit is the function, not the line: every hit is a
@@ -1035,6 +1067,14 @@ pub(super) struct AnalyzeCoChangeArgs {
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(super) opts: CoChangeOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeChangeEntropyArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: ChangeEntropyOptions,
 }
 
 #[derive(Debug, Clone, Args)]

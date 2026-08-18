@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 21] = [
+const TOOL_ORDER: [ToolName; 22] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -31,6 +31,7 @@ const TOOL_ORDER: [ToolName; 21] = [
     ToolName::Hotspot,
     ToolName::Risk,
     ToolName::CoChange,
+    ToolName::ChangeEntropy,
     ToolName::Hubs,
     ToolName::Impact,
     ToolName::Layers,
@@ -79,7 +80,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -312,6 +313,50 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "int",
                 presence: "optional",
                 desc: "Cap the markdown table to the top N pairs.",
+            },
+        ],
+        ToolName::ChangeEntropy => &[
+            Field {
+                key: "since",
+                ty: "string",
+                presence: "optional",
+                desc: "Git window for the history read, e.g. \"180.days.ago\". Periods, file rows and the reference distribution are all computed inside it.",
+            },
+            Field {
+                key: "period",
+                ty: "\"week\" or \"month\"",
+                presence: "default: week",
+                desc: "Bucket entropy is measured over: ISO weeks or calendar months, both in UTC so a commit's bucket does not depend on when the report was run.",
+            },
+            Field {
+                key: "diff-only",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Report the pending working-tree change as one change set — files touched, modules spanned, entropy, and its percentile among this repository's commits — instead of the history.",
+            },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Like diff-only, but for the change in a git revision range (e.g. \"HEAD~1..HEAD\"). Mutually exclusive with diff-only.",
+            },
+            Field {
+                key: "min-commits",
+                ty: "int",
+                presence: "default: 3",
+                desc: "Omit periods with fewer counted commits than this: entropy over two commits is noise.",
+            },
+            Field {
+                key: "max-commit-files",
+                ty: "int",
+                presence: "default: 50",
+                desc: "Drop commits touching more files than this, as tangled or squashed. They take part in nothing, the reference distribution included.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown tables to the top N rows.",
             },
         ],
         ToolName::Search => &[
@@ -682,10 +727,11 @@ mod tests {
     use super::*;
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
-        CoChangeOptions, CohesionOptions, CommunitiesOptions, ComplexityOptions,
-        ContextSpanOptions, CouplingOptions, DelegationOptions, GraphQueryOptions, HotspotOptions,
-        HubsOptions, ImpactOptions, LayersOptions, Profile, RiskOptions, SearchOptions,
-        SimilarityOptions, UnreachableOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
+        ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
+        ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
+        GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
+        RiskOptions, SearchOptions, SimilarityOptions, UnreachableOptions, UntestedOptions,
+        VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -710,6 +756,7 @@ mod tests {
         assert_tool_parity::<ComplexityOptions>(ToolName::Complexity);
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<CoChangeOptions>(ToolName::CoChange);
+        assert_tool_parity::<ChangeEntropyOptions>(ToolName::ChangeEntropy);
         assert_tool_parity::<CommunitiesOptions>(ToolName::Communities);
         assert_tool_parity::<HotspotOptions>(ToolName::Hotspot);
         assert_tool_parity::<RiskOptions>(ToolName::Risk);

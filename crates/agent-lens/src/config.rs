@@ -48,6 +48,7 @@ use crate::analyze::OutputFormat;
 /// them — the keys here cannot drift from the flags they mirror because
 /// they are the flags. They are re-exported so the config surface still
 /// reads as one module.
+pub use crate::analyze::change_entropy::ChangeEntropyOptions;
 pub use crate::analyze::co_change::CoChangeOptions;
 pub use crate::analyze::cohesion::CohesionOptions;
 pub use crate::analyze::communities::CommunitiesOptions;
@@ -143,6 +144,8 @@ pub struct Profile {
     pub risk: Option<RiskOptions>,
     #[serde(default)]
     pub co_change: Option<CoChangeOptions>,
+    #[serde(default)]
+    pub change_entropy: Option<ChangeEntropyOptions>,
     #[serde(default)]
     pub communities: Option<CommunitiesOptions>,
     #[serde(default)]
@@ -258,6 +261,10 @@ impl Profile {
                 "wrapper",
                 self.wrapper.as_ref().map(|o| o.has_diff_conflict()),
             ),
+            (
+                "change-entropy",
+                self.change_entropy.as_ref().map(|o| o.has_diff_conflict()),
+            ),
         ]
         .into_iter()
         .find(|(_, conflict)| conflict.unwrap_or(false))
@@ -320,6 +327,7 @@ impl ProfilePaths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolName {
+    ChangeEntropy,
     CoChange,
     Cohesion,
     Communities,
@@ -347,6 +355,7 @@ impl ToolName {
     /// Stable lowercase spelling, matching the `analyze` subcommand name.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ChangeEntropy => "change-entropy",
             Self::CoChange => "co-change",
             Self::Cohesion => "cohesion",
             Self::Communities => "communities",
