@@ -656,14 +656,17 @@ fn classify(chunk: &str, expect_header: bool) -> Field<'_> {
 
 /// Split a `git log --pretty=format:%ad --numstat -z` stream into
 /// commits.
+///
+/// The fields are walked through one iterator rather than by index, so a
+/// rename — which spends two extra fields on its paths — consumes them
+/// from the same cursor the loop reads, and there is no cursor
+/// arithmetic to get wrong.
 fn parse_numstat_commits(stdout: &str) -> Vec<RawStatCommit> {
-    let chunks: Vec<&str> = stdout.split('\0').collect();
+    let mut fields = stdout.split('\0');
     let mut commits: Vec<RawStatCommit> = Vec::new();
-    let mut index = 0;
     let mut expect_header = true;
-    while let Some(chunk) = chunks.get(index) {
-        index += 1;
-        let record = match classify(chunk, expect_header) {
+    while let Some(field) = fields.next() {
+        let record = match classify(field, expect_header) {
             Field::EndOfCommit => {
                 expect_header = true;
                 continue;
@@ -681,9 +684,9 @@ fn parse_numstat_commits(stdout: &str) -> Vec<RawStatCommit> {
             }
             Field::Record(record) => record,
         };
-        let (entry, next) = parse_numstat_entry(&chunks, index, record);
-        index = next;
-        if let (Some(entry), Some(commit)) = (entry, commits.last_mut()) {
+        if let (Some(entry), Some(commit)) =
+            (parse_numstat_entry(&mut fields, record), commits.last_mut())
+        {
             commit.entries.push(entry);
         }
     }
@@ -695,72 +698,57 @@ fn parse_numstat_commits(stdout: &str) -> Vec<RawStatCommit> {
 /// The same records [`parse_numstat_commits`] reads, without the commit
 /// headers: a diff is one change set, so there is nothing to group.
 fn parse_numstat_entries(stdout: &str) -> Vec<RawStatEntry> {
-    let chunks: Vec<&str> = stdout.split('\0').collect();
+    let mut fields = stdout.split('\0');
     let mut out = Vec::new();
-    let mut index = 0;
-    while let Some(chunk) = chunks.get(index) {
-        index += 1;
-        if chunk.is_empty() {
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
             continue;
         }
-        let (entry, next) = parse_numstat_entry(&chunks, index, chunk);
-        index = next;
-        if let Some(entry) = entry {
+        if let Some(entry) = parse_numstat_entry(&mut fields, field) {
             out.push(entry);
         }
     }
     out
 }
 
-/// Parse one `--numstat -z` record, consuming the two extra fields a
-/// rename spends its paths on. Returns the index of the next unread
-/// field.
+/// Parse one `--numstat -z` record, taking the two extra fields a rename
+/// spends its paths on from `fields`.
 ///
 /// An unrecognised record is skipped rather than guessed at: inventing a
 /// path or a line count for a shape this parser does not model would put
 /// a fabricated file in the report.
 fn parse_numstat_entry<'a>(
-    chunks: &[&'a str],
-    next: usize,
+    fields: &mut impl Iterator<Item = &'a str>,
     record: &'a str,
-) -> (Option<RawStatEntry>, usize) {
-    let mut fields = record.split('\t');
-    let (Some(added), Some(deleted), Some(path)) = (fields.next(), fields.next(), fields.next())
-    else {
-        return (None, next);
-    };
+) -> Option<RawStatEntry> {
+    let mut columns = record.split('\t');
+    let (added, deleted, path) = (columns.next()?, columns.next()?, columns.next()?);
     let lines = match (added.parse::<u64>(), deleted.parse::<u64>()) {
         (Ok(added), Ok(deleted)) => added + deleted,
-        // `-` / `-`: a binary file, which has no lines to count.
+        // `-` / `-`: a binary file, which has no lines to count. One
+        // side of the pair spelled that way is a shape git does not
+        // emit, and not one to guess a count for.
         _ if added == "-" && deleted == "-" => BINARY_FILE_LINES,
-        _ => return (None, next),
+        _ => return None,
     };
-    // An empty path field means the two paths of a rename follow, each
-    // in its own field.
-    if path.is_empty() {
-        let (Some(source), Some(destination)) = (chunks.get(next), chunks.get(next + 1)) else {
-            return (None, chunks.len());
-        };
-        if source.is_empty() || destination.is_empty() {
-            return (None, next + 2);
-        }
-        return (
-            Some(RawStatEntry {
-                path: (*destination).to_owned(),
-                renamed_from: Some((*source).to_owned()),
-                lines,
-            }),
-            next + 2,
-        );
-    }
-    (
-        Some(RawStatEntry {
+    if !path.is_empty() {
+        return Some(RawStatEntry {
             path: path.to_owned(),
             renamed_from: None,
             lines,
-        }),
-        next,
-    )
+        });
+    }
+    // An empty path field means the two paths of a rename follow, each
+    // in its own field.
+    let (source, destination) = (fields.next()?, fields.next()?);
+    if source.is_empty() || destination.is_empty() {
+        return None;
+    }
+    Some(RawStatEntry {
+        path: destination.to_owned(),
+        renamed_from: Some(source.to_owned()),
+        lines,
+    })
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, ChurnError> {
@@ -1275,7 +1263,11 @@ mod tests {
     #[case::empty_stream("")]
     #[case::truncated_record("2026-08-18\n1\t1")]
     #[case::rename_with_no_paths("2026-08-18\n1\t1\t\0")]
+    #[case::rename_with_no_source("2026-08-18\n1\t1\t\0\0dir/new.txt\0")]
+    #[case::rename_with_no_destination("2026-08-18\n1\t1\t\0dir/old.txt\0\0")]
     #[case::unparseable_counts("2026-08-18\nx\ty\ta.rs\0")]
+    #[case::half_binary_counts("2026-08-18\n-\t5\ta.rs\0")]
+    #[case::other_half_binary_counts("2026-08-18\n5\t-\ta.rs\0")]
     fn an_unrecognised_numstat_record_invents_nothing(#[case] stream: &str) {
         let commits = parse_numstat_commits(stream);
         assert!(

@@ -698,6 +698,47 @@ mod tests {
         assert!((scatter.bits - 3.0).abs() < 1e-12, "{scatter:?}");
     }
 
+    /// The normalisation, on a spread that is neither even nor
+    /// concentrated — the case the two bounds cannot pin down, and the
+    /// one that separates dividing by `log2(n)` from anything else that
+    /// happens to agree at the ends.
+    #[test]
+    fn an_uneven_spread_normalises_by_the_log_of_its_file_count() {
+        let scatter = Scatter::of(&[
+            FileChange {
+                path: "half".to_owned(),
+                lines: 2,
+            },
+            FileChange {
+                path: "quarter".to_owned(),
+                lines: 1,
+            },
+            FileChange {
+                path: "other-quarter".to_owned(),
+                lines: 1,
+            },
+        ]);
+        assert_eq!(scatter.file_count, 3);
+        assert_eq!(scatter.changed_lines, 4);
+        // -(1/2·log2 1/2 + 2·1/4·log2 1/4) = 1.5 bits, over log2(3).
+        assert!((scatter.bits - 1.5).abs() < 1e-12, "{scatter:?}");
+        assert!(
+            (scatter.normalised - 1.5 / 3f64.log2()).abs() < 1e-12,
+            "{scatter:?}",
+        );
+        assert!(scatter.normalised < 1.0, "{scatter:?}");
+    }
+
+    #[rstest]
+    #[case(Period::Week, "week")]
+    #[case(Period::Month, "month")]
+    fn a_period_is_named_the_way_its_flag_spells_it(
+        #[case] period: Period,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(period.as_str(), expected);
+    }
+
     /// A file whose diff moved no line is not a file the change touched,
     /// and counting it would inflate the `n` the normalisation divides
     /// by — dragging every scatter figure down for free.
@@ -798,6 +839,27 @@ mod tests {
             "handed out {handed_out}, period has {:?}",
             report.periods[0],
         );
+    }
+
+    /// A file's headline number is the sum of the rows printed under it,
+    /// so a reader can check the ranking against its own evidence.
+    #[test]
+    fn a_files_history_complexity_is_the_sum_of_its_contributions() {
+        // An uneven period, so the entropy it hands out is neither 0 nor
+        // 1 and the multiplication is visible in the result.
+        let commits = vec![
+            commit("2026-08-24", &[("a", 2), ("b", 1), ("c", 1)]),
+            commit("2026-08-17", &[("a", 3), ("b", 1)]),
+        ];
+        let report = compute_change_entropy(&commits, Period::Week, open());
+        for file in &report.files {
+            let summed: f64 = file.periods.iter().map(|p| p.contribution).sum();
+            assert!(
+                (file.history_complexity - summed).abs() < 1e-12,
+                "{file:?} does not sum to {summed}",
+            );
+            assert!(file.history_complexity > 0.0, "{file:?}");
+        }
     }
 
     #[test]
@@ -968,8 +1030,52 @@ mod tests {
     #[test]
     fn an_empty_distribution_answers_nothing() {
         let distribution = EntropyDistribution::default();
+        assert!(distribution.is_empty());
+        assert_eq!(distribution.sample_count(), 0);
         assert_eq!(distribution.median(), None);
         assert_eq!(distribution.percentile_rank(0.5), None);
+        assert!(!EntropyDistribution::new(vec![0.5]).is_empty());
+    }
+
+    /// The calendar the periods are cut from, asserted directly rather
+    /// than through a week key. Every term of the era arithmetic is
+    /// invisible to `Period::key` — a 400-year era is a whole number of
+    /// weeks, so shifting by one leaves every weekday and every ordinal
+    /// exactly where it was — which makes an error here silent until the
+    /// day someone reuses the function. The negative years are the
+    /// branch no git history can reach and no other test enters.
+    #[rstest]
+    #[case::epoch(1970, 1, 1, 0)]
+    #[case::day_after_the_epoch(1970, 1, 2, 1)]
+    #[case::day_before_the_epoch(1969, 12, 31, -1)]
+    #[case::century_leap_year(2000, 1, 1, 10_957)]
+    #[case::a_recent_date(2026, 8, 18, 20_683)]
+    #[case::era_start(1600, 3, 1, -135_080)]
+    #[case::year_one(1, 1, 1, -719_162)]
+    #[case::year_zero(0, 1, 1, -719_528)]
+    #[case::year_zero_after_february(0, 3, 1, -719_468)]
+    #[case::before_year_one(-1, 1, 1, -719_893)]
+    #[case::four_centuries_before(-400, 1, 1, -865_625)]
+    fn days_from_civil_counts_proleptic_gregorian_days(
+        #[case] year: i32,
+        #[case] month: u32,
+        #[case] day: u32,
+        #[case] expected: i64,
+    ) {
+        assert_eq!(days_from_civil(year, month, day), expected);
+    }
+
+    #[rstest]
+    #[case::a_thursday(1970, 1, 1, 4)]
+    #[case::a_monday(2026, 8, 17, 1)]
+    #[case::a_sunday(2026, 8, 16, 7)]
+    fn iso_weekday_numbers_monday_first(
+        #[case] year: i32,
+        #[case] month: u32,
+        #[case] day: u32,
+        #[case] expected: i64,
+    ) {
+        assert_eq!(iso_weekday(days_from_civil(year, month, day)), expected);
     }
 
     #[rstest]
@@ -1065,6 +1171,13 @@ mod tests {
                 .sum();
             let period = report.periods.first().map_or(0.0, |p| p.scatter.normalised);
             prop_assert!((handed_out - period).abs() < 1e-9, "{handed_out} vs {period}");
+            for file in &report.files {
+                let summed: f64 = file.periods.iter().map(|p| p.contribution).sum();
+                prop_assert!(
+                    (file.history_complexity - summed).abs() < 1e-9,
+                    "{file:?} does not sum to {summed}",
+                );
+            }
         }
     }
 }
