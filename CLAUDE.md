@@ -38,9 +38,9 @@ mise run selftest # Run agent-lens over its own sources; not part of ci
 ## Dogfooding
 
 `agent-lens.toml` declares one profile per view of this repository (`self`,
-`self-reach`, `self-tests`, `lenses`, `web`, `changes`, `baseline`), and `mise run selftest`
-builds the binary and drives every one of them. Run a single profile with
-`mise run selftest <profile>`.
+`self-reach`, `self-tests`, `lenses`, `web`, `changes`, `history`, `baseline`),
+and `mise run selftest` builds the binary and drives every one of them. Run a
+single profile with `mise run selftest <profile>`.
 
 After changing an analyzer, run the profiles it appears in and read the diff
 against the previous run — not the report in isolation. Unit tests cover
@@ -76,10 +76,12 @@ Treat analyzer output as agent-facing context, not human-facing decoration. Do n
 
 ## Documentation
 
-A change to the CLI surface is not done until `README.md` matches it. The parts that drift are the ones restating a fact the code already owns:
+`agent-lens help --md` and `agent-lens config schema` are the reference: they are generated from the code, so per-analyzer options and `agent-lens.toml` keys are deliberately **not** restated in the README — do not add such tables back.
 
-- the analyzer options table and the per-tool `agent-lens.toml` tables — a new flag, a new enum value, or a table where declaring one used to be a parse error,
-- the analyzer descriptions under "What's in the box",
-- the language-support claims, when an adapter gains or loses a capability.
+A change to the CLI surface is still not done until `README.md` matches it. The parts that can drift:
 
-Diff those against `agent-lens help --md` and `agent-lens config schema` rather than against memory. Both are generated from the code and are the source of truth; the README is a narrative over them, so it is the side that gets corrected.
+- the analyzer list and one-line descriptions ("Command surface" and "What's in the box"),
+- the language-support claims under "Languages", when an adapter gains or loses a capability,
+- the worked examples in "Quick start", when a flag they use changes.
+
+Diff those against `agent-lens help --md` rather than against memory. The README is a narrative over the generated docs, so it is the side that gets corrected.
