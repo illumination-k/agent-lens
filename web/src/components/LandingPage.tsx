@@ -188,7 +188,7 @@ function AnalyzerSection() {
     <Band
       id="analyzers"
       kicker="The catalogue"
-      title="Eighteen analyzers"
+      title="Twenty-three analyzers"
       intro={
         <>
           Each one is a subcommand: <code>agent-lens analyze &lt;tool&gt; &lt;path&gt;</code>. JSON

@@ -24,6 +24,8 @@ export const LICENSE_URL = `${REPOSITORY_URL}/blob/main/LICENSE`;
 export const README_URL = `${REPOSITORY_URL}#readme`;
 
 const OG_IMAGE = "og-image.png";
+const OG_IMAGE_ALT = "agent-lens — code analysis built for coding agents";
+const OG_LOCALE = "en_US";
 
 export type PageSeo = {
   /** Route path, as the router spells it. */
@@ -90,16 +92,19 @@ export function pageHead(page: PageSeo, structuredData: object[] = []): HeadTags
       { name: "robots", content: "index, follow" },
       { property: "og:type", content: "website" },
       { property: "og:site_name", content: SITE_NAME },
+      { property: "og:locale", content: OG_LOCALE },
       { property: "og:title", content: page.title },
       { property: "og:description", content: page.description },
       { property: "og:url", content: url },
       { property: "og:image", content: assetUrl(OG_IMAGE) },
       { property: "og:image:width", content: "1200" },
       { property: "og:image:height", content: "630" },
+      { property: "og:image:alt", content: OG_IMAGE_ALT },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:title", content: page.title },
       { name: "twitter:description", content: page.description },
       { name: "twitter:image", content: assetUrl(OG_IMAGE) },
+      { name: "twitter:image:alt", content: OG_IMAGE_ALT },
     ],
     links: [{ rel: "canonical", href: url }],
     scripts: structuredData.map((data) => ({
