@@ -44,7 +44,7 @@ export type Stat = {
 
 /** The hero strip. Four numbers a reader can check against the repository. */
 export const STATS: readonly Stat[] = [
-  { label: "Analyzers", value: "18" },
+  { label: "Analyzers", value: "23" },
   { label: "Languages", value: "4" },
   { label: "Hook handlers", value: "5" },
   { label: "Telemetry", value: "0" },
@@ -65,7 +65,7 @@ export const PILLARS: readonly Pillar[] = [
   },
   {
     title: "Analyzers",
-    body: "Twenty on-demand analyses of code shape — duplication, complexity, coupling, call-graph structure, change risk. JSON on stdout by default, compact Markdown with --format md, both sized to drop straight into a prompt.",
+    body: "Twenty-three on-demand analyses of code shape — code search, duplication, complexity, coupling, call-graph structure, change risk. JSON on stdout by default, compact Markdown with --format md, both sized to drop straight into a prompt.",
     command: "agent-lens analyze similarity src --format md",
   },
   {
@@ -97,6 +97,17 @@ export type AnalyzerGroup = {
 };
 
 export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
+  {
+    title: "Retrieval",
+    blurb: "Where the codebase does X, when the identifier is not known.",
+    analyzers: [
+      {
+        name: "search",
+        summary:
+          "Functions ranked by BM25F relevance to a query, tokenized the way identifiers are written — _, camelCase, and the joined form all index as one term. --rank graph re-orders the top hits by call-graph importance so the load-bearing match leads.",
+      },
+    ],
+  },
   {
     title: "Duplication and indirection",
     blurb: "What already exists, and how many hops sit between the caller and the work.",
@@ -226,6 +237,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
           "File pairs git history says change together, with the confidence in each direction and the lift that separates a pattern from two merely busy files (any file type).",
       },
       {
+        name: "change-entropy",
+        summary:
+          "How scattered each period's change activity was — Shannon entropy of the changed lines per file, summed into a per-file history complexity. --diff-only scores the pending change's scatter against the repository's own commits (any file type).",
+      },
+      {
         name: "hidden-coupling",
         summary:
           "The differential: pairs that co-change with no declared dependency between them, and declared dependencies the window never exercised, kept as two separate buckets.",
@@ -289,7 +305,7 @@ export const FAQ: readonly FaqEntry[] = [
   {
     question: "Which languages does it analyze?",
     answer:
-      "Rust, TypeScript / JavaScript, Python, and Go. Every analyzer runs on all four except unreachable and visibility, which need extracted export status and are wired through the Rust and Go adapters only. Analysis is split into a language-neutral core and per-language adapters, so adding a language means writing one adapter crate rather than reimplementing the metrics.",
+      "Rust, TypeScript / JavaScript, Python, and Go. Every analyzer runs on all four except unreachable and visibility, which need extracted export status and are wired through the Rust and Go adapters only. The git-history analyzers — co-change and change-entropy — read git log rather than parsing files, so they cover anything the repository tracks. Analysis is split into a language-neutral core and per-language adapters, so adding a language means writing one adapter crate rather than reimplementing the metrics.",
   },
   {
     question: "Do I have to use it through a coding agent?",

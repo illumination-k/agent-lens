@@ -83,6 +83,13 @@ describe("pageHead", () => {
     expect(metaContent(PAGES.home, "property", "og:image")).toBe(`${SITE_URL}/og-image.png`);
   });
 
+  it.each(ALL_PAGES)("declares the locale and describes the card image of $path", (page) => {
+    expect(metaContent(page, "property", "og:locale")).toBe("en_US");
+    const alt = metaContent(page, "property", "og:image:alt");
+    expect(alt).toBeTruthy();
+    expect(metaContent(page, "name", "twitter:image:alt")).toBe(alt);
+  });
+
   it("emits no script tag when a page has no structured data", () => {
     expect(pageHead(PAGES.analyze).scripts).toEqual([]);
   });
