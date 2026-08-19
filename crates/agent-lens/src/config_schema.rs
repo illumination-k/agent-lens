@@ -20,10 +20,15 @@ use std::fmt::Write as _;
 
 use crate::config::{CONFIG_FILE_NAME, ToolName};
 
-/// Order the per-tool tables are rendered in. Kept in sync with the
-/// exhaustive `match` in [`tool_table`]; a missing variant there is a
-/// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 23] = [
+/// Order the per-tool tables are rendered in: related analyzers next to
+/// each other rather than [`ToolName::ALL`]'s declaration order, because
+/// this list is read by a person deciding which tool to configure.
+///
+/// Presentation only — `ALL` stays the canonical set, and
+/// `tool_order_is_a_permutation_of_all` holds the two together. Without
+/// that check an option-less analyzer could be added to the enum, get
+/// its `None` arm in [`tool_table`], and never be rendered at all.
+const TOOL_ORDER: [ToolName; ToolName::ALL.len()] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -880,6 +885,23 @@ mod tests {
         assert!(
             md.contains("No options. Declaring this table is a parse error."),
             "got: {md}",
+        );
+    }
+
+    /// `TOOL_ORDER` is a second spelling of `ToolName::ALL`, kept only
+    /// for its order, so it has to hold exactly the same analyzers.
+    #[test]
+    fn tool_order_is_a_permutation_of_all() {
+        let rendered: BTreeSet<&str> = TOOL_ORDER.into_iter().map(ToolName::as_str).collect();
+        let all: BTreeSet<&str> = ToolName::ALL.iter().map(|t| t.as_str()).collect();
+        assert_eq!(
+            rendered, all,
+            "config schema tool order/ToolName::ALL drift"
+        );
+        assert_eq!(
+            rendered.len(),
+            TOOL_ORDER.len(),
+            "duplicate entry in TOOL_ORDER"
         );
     }
 

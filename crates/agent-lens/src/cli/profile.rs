@@ -65,7 +65,7 @@ impl ResolvedProfile {
             }
         }
 
-        for tool in unused_tool_option_tables(&profile) {
+        for tool in profile.unused_option_tables() {
             warn!(
                 profile = %selector.profile,
                 tool = tool.as_str(),
@@ -142,46 +142,6 @@ pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error
     write_stdout_line(&render_profile_report(&resolved.name, format, &sections)?)
 }
 
-/// Tool-option tables (`[profile.<name>.<tool>]`) set for a tool the
-/// profile's `tools` list never runs — their options would otherwise be
-/// silently ignored, so `run` warns about each one.
-fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName> {
-    [
-        (profile.similarity.is_some(), config::ToolName::Similarity),
-        (profile.complexity.is_some(), config::ToolName::Complexity),
-        (profile.cohesion.is_some(), config::ToolName::Cohesion),
-        (profile.hotspot.is_some(), config::ToolName::Hotspot),
-        (profile.risk.is_some(), config::ToolName::Risk),
-        (profile.co_change.is_some(), config::ToolName::CoChange),
-        (
-            profile.change_entropy.is_some(),
-            config::ToolName::ChangeEntropy,
-        ),
-        (profile.communities.is_some(), config::ToolName::Communities),
-        (
-            profile.hidden_coupling.is_some(),
-            config::ToolName::HiddenCoupling,
-        ),
-        (profile.hubs.is_some(), config::ToolName::Hubs),
-        (profile.impact.is_some(), config::ToolName::Impact),
-        (profile.layers.is_some(), config::ToolName::Layers),
-        (profile.graph_query.is_some(), config::ToolName::GraphQuery),
-        (
-            profile.context_span.is_some(),
-            config::ToolName::ContextSpan,
-        ),
-        (profile.delegation.is_some(), config::ToolName::Delegation),
-        (profile.unreachable.is_some(), config::ToolName::Unreachable),
-        (profile.untested.is_some(), config::ToolName::Untested),
-        (profile.visibility.is_some(), config::ToolName::Visibility),
-        (profile.wrapper.is_some(), config::ToolName::Wrapper),
-    ]
-    .into_iter()
-    .filter(|&(present, tool)| present && !profile.tools.contains(&tool))
-    .map(|(_, tool)| tool)
-    .collect()
-}
-
 /// Render the per-tool reports as one document: stacked `## <tool>`
 /// sections for markdown, or a `{profile, results}` object for JSON where
 /// each analyzer's JSON output is nested under its tool name.
@@ -251,29 +211,6 @@ mod tests {
             resolved.tools(),
             [config::ToolName::Wrapper, config::ToolName::Complexity],
         );
-    }
-
-    #[test]
-    fn unused_tool_option_tables_flags_tables_off_the_tools_list() {
-        let profile: config::Profile = toml::from_str(
-            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.9\n\n[complexity]\nmin-score = 3\n\n[wrapper]\ndiff-only = true\n",
-        )
-        .unwrap();
-        // similarity is listed in `tools`, so only complexity and wrapper
-        // are flagged — in the fixed iteration order.
-        assert_eq!(
-            unused_tool_option_tables(&profile),
-            [config::ToolName::Complexity, config::ToolName::Wrapper],
-        );
-    }
-
-    #[test]
-    fn unused_tool_option_tables_empty_when_every_table_is_listed() {
-        let profile: config::Profile = toml::from_str(
-            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.9\n",
-        )
-        .unwrap();
-        assert!(unused_tool_option_tables(&profile).is_empty());
     }
 
     #[test]

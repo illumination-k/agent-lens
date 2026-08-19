@@ -177,6 +177,30 @@ pub struct Profile {
     pub wrapper: Option<WrapperOptions>,
 }
 
+/// What a profile declares for one analyzer's options table.
+///
+/// Both questions callers ask about a `[profile.<name>.<tool>]` table
+/// are answered off one exhaustive walk of the struct, so neither can
+/// quietly cover fewer analyzers than the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolTable {
+    /// The table was written at all.
+    present: bool,
+    /// It sets both `diff-only` and `diff-range`. They name different
+    /// diffs; clap rejects the pair on the command line, and a config
+    /// file has no such check, so this is what [`Config::validate`]
+    /// looks at instead.
+    diff_conflict: bool,
+}
+
+impl ToolTable {
+    /// The analyzer takes no options table at all.
+    const ABSENT: Self = Self {
+        present: false,
+        diff_conflict: false,
+    };
+}
+
 impl Profile {
     /// Resolve every entry of `path` against the directory that holds the
     /// config file. An absolute entry is kept unchanged.
@@ -242,38 +266,81 @@ impl Profile {
         None
     }
 
+    /// What this profile declares for `tool`'s options table.
+    ///
+    /// The one place `Profile`'s per-tool fields are enumerated. The
+    /// `match` is exhaustive on purpose: a new [`ToolName`] variant does
+    /// not compile until it is named here, which is what the two lists
+    /// this replaces could not promise — both were maintained by hand
+    /// against the struct, and both had fallen behind it.
+    fn tool_table(&self, tool: ToolName) -> ToolTable {
+        /// An options table with no diff flags to contradict each other.
+        macro_rules! plain {
+            ($field:expr) => {
+                ToolTable {
+                    present: $field.is_some(),
+                    diff_conflict: false,
+                }
+            };
+        }
+        /// An options table carrying both `diff-only` and `diff-range`.
+        macro_rules! diffable {
+            ($field:expr) => {
+                ToolTable {
+                    present: $field.is_some(),
+                    diff_conflict: $field.as_ref().is_some_and(|o| o.has_diff_conflict()),
+                }
+            };
+        }
+        match tool {
+            ToolName::ChangeEntropy => diffable!(self.change_entropy),
+            ToolName::CoChange => plain!(self.co_change),
+            ToolName::Cohesion => diffable!(self.cohesion),
+            ToolName::Communities => plain!(self.communities),
+            ToolName::Complexity => diffable!(self.complexity),
+            ToolName::Coupling => plain!(self.coupling),
+            ToolName::ContextSpan => plain!(self.context_span),
+            ToolName::Delegation => diffable!(self.delegation),
+            ToolName::GraphQuery => plain!(self.graph_query),
+            ToolName::HiddenCoupling => plain!(self.hidden_coupling),
+            ToolName::Hotspot => plain!(self.hotspot),
+            ToolName::Hubs => plain!(self.hubs),
+            ToolName::Impact => plain!(self.impact),
+            ToolName::Layers => plain!(self.layers),
+            ToolName::Risk => plain!(self.risk),
+            ToolName::Search => plain!(self.search),
+            ToolName::Similarity => diffable!(self.similarity),
+            ToolName::Unreachable => plain!(self.unreachable),
+            ToolName::Untested => plain!(self.untested),
+            ToolName::Visibility => plain!(self.visibility),
+            ToolName::Wrapper => diffable!(self.wrapper),
+            // Declaring a table for either is a parse error, so there is
+            // no field to read and nothing to warn about.
+            ToolName::Cycles | ToolName::FunctionGraph => ToolTable::ABSENT,
+        }
+    }
+
+    /// Tools whose `[profile.<name>.<tool>]` table is set but whose name
+    /// the profile's `tools` list never mentions.
+    ///
+    /// Their options would otherwise be read, validated, and then thrown
+    /// away without a word, so `run` warns about each one.
+    pub fn unused_option_tables(&self) -> Vec<ToolName> {
+        ToolName::ALL
+            .iter()
+            .copied()
+            .filter(|&tool| self.tool_table(tool).present && !self.tools.contains(&tool))
+            .collect()
+    }
+
     /// The first tool whose options table sets both `diff-only` and
     /// `diff-range`. Only the diff-capable analyzers have the pair.
     fn diff_conflict_tool(&self) -> Option<&'static str> {
-        [
-            (
-                "similarity",
-                self.similarity.as_ref().map(|o| o.has_diff_conflict()),
-            ),
-            (
-                "complexity",
-                self.complexity.as_ref().map(|o| o.has_diff_conflict()),
-            ),
-            (
-                "cohesion",
-                self.cohesion.as_ref().map(|o| o.has_diff_conflict()),
-            ),
-            (
-                "delegation",
-                self.delegation.as_ref().map(|o| o.has_diff_conflict()),
-            ),
-            (
-                "wrapper",
-                self.wrapper.as_ref().map(|o| o.has_diff_conflict()),
-            ),
-            (
-                "change-entropy",
-                self.change_entropy.as_ref().map(|o| o.has_diff_conflict()),
-            ),
-        ]
-        .into_iter()
-        .find(|(_, conflict)| conflict.unwrap_or(false))
-        .map(|(tool, _)| tool)
+        ToolName::ALL
+            .iter()
+            .copied()
+            .find(|&tool| self.tool_table(tool).diff_conflict)
+            .map(ToolName::as_str)
     }
 
     /// The profile's listed tools that accept only one path, in listed
@@ -328,65 +395,71 @@ impl ProfilePaths {
     }
 }
 
-/// One of the on-demand analyzers a profile can run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ToolName {
-    ChangeEntropy,
-    CoChange,
-    Cohesion,
-    Communities,
-    Complexity,
-    Coupling,
-    ContextSpan,
-    Cycles,
-    Delegation,
-    FunctionGraph,
-    GraphQuery,
-    HiddenCoupling,
-    Hotspot,
-    Hubs,
-    Impact,
-    Layers,
-    Risk,
-    Search,
-    Similarity,
-    Unreachable,
-    Untested,
-    Visibility,
-    Wrapper,
+/// Declare [`ToolName`] once: the variants, the canonical list, and the
+/// kebab-case spelling all expand from the same rows.
+///
+/// What this replaces is three hand-kept lists over the same analyzers,
+/// two of which had already lost an entry. Adding an analyzer here is
+/// now the whole edit — nothing downstream can be short by one, because
+/// nothing downstream writes the list out again.
+macro_rules! tool_names {
+    ($( $variant:ident => $name:literal ),+ $(,)?) => {
+        /// One of the on-demand analyzers a profile can run.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        pub enum ToolName {
+            $($variant,)+
+        }
+
+        impl ToolName {
+            /// Every analyzer, in declaration order.
+            ///
+            /// The order is a traversal order, not a ranking: it decides
+            /// which tool a "both diff flags set" error names first when
+            /// two tables conflict, and the order unused-table warnings
+            /// come out in. `config schema` renders its own thematic
+            /// order on top of this one.
+            pub const ALL: &'static [ToolName] = &[$(ToolName::$variant,)+];
+
+            /// Stable lowercase spelling, matching the `analyze`
+            /// subcommand name. Pinned against serde's `kebab-case`
+            /// rename by `as_str_matches_the_serde_spelling`.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+    };
+}
+
+tool_names! {
+    ChangeEntropy => "change-entropy",
+    CoChange => "co-change",
+    Cohesion => "cohesion",
+    Communities => "communities",
+    Complexity => "complexity",
+    Coupling => "coupling",
+    ContextSpan => "context-span",
+    Cycles => "cycles",
+    Delegation => "delegation",
+    FunctionGraph => "function-graph",
+    GraphQuery => "graph-query",
+    HiddenCoupling => "hidden-coupling",
+    Hotspot => "hotspot",
+    Hubs => "hubs",
+    Impact => "impact",
+    Layers => "layers",
+    Risk => "risk",
+    Search => "search",
+    Similarity => "similarity",
+    Unreachable => "unreachable",
+    Untested => "untested",
+    Visibility => "visibility",
+    Wrapper => "wrapper",
 }
 
 impl ToolName {
-    /// Stable lowercase spelling, matching the `analyze` subcommand name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ChangeEntropy => "change-entropy",
-            Self::CoChange => "co-change",
-            Self::Cohesion => "cohesion",
-            Self::Communities => "communities",
-            Self::Complexity => "complexity",
-            Self::Coupling => "coupling",
-            Self::ContextSpan => "context-span",
-            Self::Cycles => "cycles",
-            Self::Delegation => "delegation",
-            Self::FunctionGraph => "function-graph",
-            Self::GraphQuery => "graph-query",
-            Self::HiddenCoupling => "hidden-coupling",
-            Self::Hotspot => "hotspot",
-            Self::Hubs => "hubs",
-            Self::Impact => "impact",
-            Self::Layers => "layers",
-            Self::Risk => "risk",
-            Self::Search => "search",
-            Self::Similarity => "similarity",
-            Self::Unreachable => "unreachable",
-            Self::Untested => "untested",
-            Self::Visibility => "visibility",
-            Self::Wrapper => "wrapper",
-        }
-    }
-
     /// Whether this analyzer takes exactly one path.
     ///
     /// `coupling`, `context-span` and `communities` grow a module graph
@@ -884,6 +957,109 @@ since = "90.days.ago"
         #[case] expected: bool,
     ) {
         assert_eq!(tool.is_single_root(), expected);
+    }
+
+    /// `as_str` and the `[profile.<name>.<tool>]` heading it is used as
+    /// have to be the same string serde accepts in `tools`. The macro
+    /// takes the literal on trust, so this is where the two are tied
+    /// together — for every variant, without a second list to keep.
+    #[test]
+    fn as_str_matches_the_serde_spelling() {
+        for &tool in ToolName::ALL {
+            let parsed: ToolName = serde_json::from_str(&format!("{:?}", tool.as_str()))
+                .unwrap_or_else(|e| {
+                    panic!("`{}` is not a tool name serde knows: {e}", tool.as_str())
+                });
+            assert_eq!(parsed, tool);
+        }
+    }
+
+    /// `ALL` is what every downstream walk iterates, so a repeat would
+    /// double-report a tool and a gap would hide one.
+    #[test]
+    fn all_lists_each_tool_once() {
+        let mut names: Vec<&str> = ToolName::ALL.iter().map(|t| t.as_str()).collect();
+        let listed = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), listed, "duplicate entry in ToolName::ALL");
+    }
+
+    /// The regression this refactor exists for. `coupling` and `search`
+    /// were both missing from the hand-written warning list, so setting
+    /// either table without listing the tool was silently ignored —
+    /// which is precisely the case the warning is for.
+    ///
+    /// Parameterised over every analyzer that takes a table, so the next
+    /// one to be added cannot be forgotten the same way.
+    #[rstest]
+    fn every_option_table_is_reported_when_its_tool_is_unlisted(
+        #[values(
+            "change-entropy",
+            "co-change",
+            "cohesion",
+            "communities",
+            "complexity",
+            "coupling",
+            "context-span",
+            "delegation",
+            "graph-query",
+            "hidden-coupling",
+            "hotspot",
+            "hubs",
+            "impact",
+            "layers",
+            "risk",
+            "search",
+            "similarity",
+            "unreachable",
+            "untested",
+            "visibility",
+            "wrapper"
+        )]
+        tool: &str,
+    ) {
+        // `tools` lists something else entirely, so the table below can
+        // only be reported as unused.
+        let table = match tool {
+            "graph-query" => format!("[{tool}]\nquery = \"callers\"\nsymbol = \"main\"\n"),
+            "search" => format!("[{tool}]\nquery = \"parse\"\n"),
+            _ => format!("[{tool}]\ntop = 5\n"),
+        };
+        let profile: Profile =
+            toml::from_str(&format!("path = \"web\"\ntools = [\"cycles\"]\n\n{table}")).unwrap();
+        assert_eq!(
+            profile
+                .unused_option_tables()
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>(),
+            [tool],
+        );
+    }
+
+    #[test]
+    fn unused_option_tables_is_empty_when_every_table_is_listed() {
+        let profile: Profile = toml::from_str(
+            "path = \"web\"\ntools = [\"similarity\", \"coupling\"]\n\n[similarity]\nthreshold = 0.9\n\n[coupling]\ntop = 5\n",
+        )
+        .unwrap();
+        assert!(profile.unused_option_tables().is_empty());
+    }
+
+    /// Reported in `ToolName::ALL` order rather than the order the
+    /// tables appear in the file, so the warnings come out the same way
+    /// whatever order the profile was written in.
+    #[test]
+    fn unused_option_tables_reports_in_tool_order() {
+        let profile: Profile = toml::from_str(
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[wrapper]\ndiff-only = true\n\n[complexity]\nmin-score = 3\n\n[similarity]\nthreshold = 0.9\n",
+        )
+        .unwrap();
+        assert_eq!(
+            profile.unused_option_tables(),
+            [ToolName::Complexity, ToolName::Wrapper],
+        );
     }
 
     #[test]
