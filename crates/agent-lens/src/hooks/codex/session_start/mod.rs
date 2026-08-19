@@ -54,54 +54,30 @@ pub type SummaryHook = crate::hooks::core::SummaryHook<CodexSessionStart>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::init_repo_with_crate_for_session_summary;
-    use agent_hooks::Hook;
-    use agent_hooks::codex::{HookContext, SessionStartSource};
-    use std::path::PathBuf;
+    use agent_hooks::codex::SessionStartSource;
+    use rstest::rstest;
 
-    fn ctx(cwd: PathBuf) -> HookContext {
-        HookContext {
-            session_id: "sess".into(),
-            transcript_path: None,
-            cwd,
-            model: "gpt-5".into(),
-        }
-    }
+    use crate::hooks::core::runner::session_start_conformance as conformance;
+    use crate::test_support::codex_hook_context;
 
-    fn input(cwd: PathBuf) -> SessionStartInput {
+    fn input(cwd: &Path) -> SessionStartInput {
         SessionStartInput {
-            context: ctx(cwd),
+            context: codex_hook_context(cwd),
             source: SessionStartSource::Startup,
         }
     }
 
-    #[test]
-    fn no_op_when_cwd_has_neither_repo_nor_crate() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = SummaryHook::new()
-            .handle(input(dir.path().to_path_buf()))
-            .unwrap();
-        assert_eq!(out, SessionStartOutput::default());
-    }
-
-    #[test]
-    fn injects_summary_via_additional_context() {
-        let dir = tempfile::tempdir().unwrap();
-        init_repo_with_crate_for_session_summary(dir.path());
-
-        let out = SummaryHook::new()
-            .handle(input(dir.path().to_path_buf()))
-            .unwrap();
-        let extra = out
-            .hook_specific_output
-            .expect("expected hook_specific_output");
-        assert_eq!(extra.hook_event_name, "SessionStart");
-        let body = extra
-            .additional_context
-            .expect("expected additionalContext");
-
-        assert!(body.starts_with("# agent-lens session-start"), "got {body}");
-        assert!(body.contains("## Hotspots"), "want hotspot: {body}");
-        assert!(body.contains("## Coupling"), "want coupling: {body}");
+    /// What every SessionStart envelope owes the runner. Bodies live in
+    /// [`conformance`] so the Claude Code envelope is held to the same
+    /// ones.
+    #[rstest]
+    #[case::silent_without_repo_or_crate(
+        conformance::stays_silent_without_repo_or_crate::<CodexSessionStart, fn(&Path) -> SessionStartInput>
+    )]
+    #[case::injects_summary(
+        conformance::injects_summary_via_additional_context::<CodexSessionStart, fn(&Path) -> SessionStartInput>
+    )]
+    fn envelope_contract(#[case] assertion: fn(fn(&Path) -> SessionStartInput)) {
+        assertion(input);
     }
 }

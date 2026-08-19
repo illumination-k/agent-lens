@@ -185,12 +185,13 @@ fn event_entries<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    use crate::hooks::setup_engine;
+    use crate::hooks::setup_engine::{self, conformance};
 
     fn plan(path: PathBuf) -> Result<setup_engine::SetupPlan<Value>, SetupError> {
         setup_engine::plan::<ClaudeSettings>(path)
@@ -203,6 +204,39 @@ mod tests {
     fn read(path: &Path) -> Value {
         let text = fs::read_to_string(path).unwrap();
         serde_json::from_str(&text).unwrap()
+    }
+
+    /// The engine contract, run against the JSON format. Bodies live in
+    /// [`conformance`] so Codex's `config.toml` is held to the same ones.
+    #[rstest]
+    #[case::missing_file_installs_everything(
+        conformance::plan_for_missing_file_installs_every_command::<ClaudeSettings>
+    )]
+    #[case::apply_creates_parent_dir(
+        conformance::apply_creates_parent_dir_and_writes_file::<ClaudeSettings>
+    )]
+    #[case::rerun_is_idempotent(conformance::rerunning_setup_is_idempotent::<ClaudeSettings>)]
+    #[case::empty_file_is_missing(conformance::empty_file_is_treated_as_missing::<ClaudeSettings>)]
+    #[case::directory_in_place_of_file(
+        conformance::directory_in_place_of_file_surfaces_io_error::<ClaudeSettings>
+    )]
+    #[case::project_scope_path(
+        conformance::resolve_path_project_joins_relative::<ClaudeSettings>
+    )]
+    fn engine_contract(#[case] assertion: fn()) {
+        assertion();
+    }
+
+    #[test]
+    fn invalid_json_is_reported() {
+        conformance::unparsable_file_is_reported::<ClaudeSettings>("{not json");
+    }
+
+    #[rstest]
+    #[case::hooks_is_not_an_object(r#"{"hooks": "nope"}"#, "hooks")]
+    #[case::event_is_not_an_array(r#"{"hooks": {"PostToolUse": {}}}"#, "hooks.PostToolUse")]
+    fn unexpected_shape_is_reported(#[case] contents: &str, #[case] field: &str) {
+        conformance::unexpected_shape_is_reported::<ClaudeSettings>(contents, field);
     }
 
     #[test]
@@ -289,32 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_creates_parent_dir_and_writes_file() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".claude/settings.json");
-
-        let plan = plan(path.clone()).unwrap();
-        apply(&plan).unwrap();
-
-        assert!(path.exists());
-        assert_eq!(read(&path), plan.after);
-    }
-
-    #[test]
-    fn rerunning_setup_is_idempotent() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".claude/settings.json");
-
-        let first = plan(path.clone()).unwrap();
-        apply(&first).unwrap();
-
-        let second = plan(path.clone()).unwrap();
-        assert!(!second.changed(), "second plan should be a no-op");
-        assert!(second.added_commands.is_empty());
-        assert_eq!(second.before.as_ref(), Some(&second.after));
-    }
-
-    #[test]
     fn preserves_unrelated_keys_and_existing_hooks() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
@@ -356,14 +364,14 @@ mod tests {
         assert_eq!(post[1]["matcher"], POST_TOOL_USE_MATCHER);
     }
 
-    #[test]
-    fn skips_command_already_installed_under_other_matcher() {
-        // Pre-installs every handler the setup writes — under a
-        // non-canonical matcher in each block — so the only queued
-        // command is the post-tool-use wrapper.
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("settings.json");
-        let existing = json!({
+    /// What the merge queues against a file that already carries some
+    /// of the handlers. The bodies are shared with the Codex setup, so
+    /// only the JSON spelling of each situation lives here.
+    #[rstest]
+    // Every handler already installed, each under a non-canonical
+    // matcher, except the post-tool-use wrapper.
+    #[case::installed_under_other_matcher(
+        json!({
             "hooks": {
                 "SessionStart": [{
                     "matcher": "startup",
@@ -387,22 +395,13 @@ mod tests {
                     }],
                 }],
             },
-        });
-        fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
-
-        let plan = plan(path).unwrap();
-        assert_eq!(
-            plan.added_commands,
-            vec!["agent-lens hook post-tool-use wrapper".to_string()],
-            "only the wrapper handler should be queued for install"
-        );
-    }
-
-    #[test]
-    fn tolerates_existing_command_with_trailing_args() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("settings.json");
-        let existing = json!({
+        }),
+        &["agent-lens hook post-tool-use wrapper"]
+    )]
+    // User-added flags on an installed command must not trigger a
+    // reinstall of the bare form.
+    #[case::trailing_args(
+        json!({
             "hooks": {
                 "SessionStart": [{
                     "matcher": SESSION_START_MATCHER,
@@ -425,16 +424,26 @@ mod tests {
                     ],
                 }],
             },
-        });
-        fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
-
-        let plan = plan(path).unwrap();
-        assert!(
-            plan.added_commands.is_empty(),
-            "trailing args should not trigger reinstall, got {:?}",
-            plan.added_commands
-        );
-        assert!(!plan.changed());
+        }),
+        &[]
+    )]
+    // A handler entry with no `command` field — Claude Code's own
+    // `"type": "prompt"` hooks — is skipped rather than erroring, so
+    // every command is still missing.
+    #[case::handler_without_command_field(
+        json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": POST_TOOL_USE_MATCHER,
+                    "hooks": [{"type": "prompt"}],
+                }],
+            },
+        }),
+        &conformance::all_commands::<ClaudeSettings>()
+    )]
+    fn queues_exactly(#[case] existing: Value, #[case] expected: &[&str]) {
+        let text = serde_json::to_string_pretty(&existing).unwrap();
+        conformance::queues_exactly::<ClaudeSettings>(&text, expected);
     }
 
     #[test]
@@ -476,83 +485,5 @@ mod tests {
         assert_eq!(pre.len(), 1, "PreToolUse must not gain a duplicate block");
         let post = plan.after["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1, "PostToolUse must not gain a duplicate block");
-    }
-
-    #[test]
-    fn empty_file_is_treated_as_missing() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, "   \n").unwrap();
-
-        let plan = plan(path).unwrap();
-        assert!(plan.before.is_none());
-        assert!(plan.changed());
-    }
-
-    #[test]
-    fn invalid_json_is_reported() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, "{not json").unwrap();
-
-        let err = plan(path).unwrap_err();
-        assert!(
-            matches!(err, SetupError::Parse { format, .. } if format == "JSON"),
-            "expected a JSON parse error, got {err:?}",
-        );
-    }
-
-    #[test]
-    fn unexpected_shape_for_hooks_field_is_reported() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, r#"{"hooks": "nope"}"#).unwrap();
-
-        let err = plan(path).unwrap_err();
-        assert!(
-            matches!(err, SetupError::UnexpectedShape { ref field, .. } if field == "hooks"),
-            "expected UnexpectedShape at hooks, got {err:?}",
-        );
-    }
-
-    #[test]
-    fn unexpected_shape_for_post_tool_use_is_reported() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, r#"{"hooks": {"PostToolUse": {}}}"#).unwrap();
-
-        let err = plan(path).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SetupError::UnexpectedShape { ref field, .. } if field == "hooks.PostToolUse"
-            ),
-            "expected UnexpectedShape at hooks.PostToolUse, got {err:?}",
-        );
-    }
-
-    #[test]
-    fn resolve_path_project_joins_relative() {
-        let root = Path::new("/tmp/proj");
-        let p =
-            setup_engine::resolve_path::<ClaudeSettings>(setup_engine::SetupScope::Project, root)
-                .unwrap();
-        assert_eq!(p, root.join(".claude/settings.json"));
-    }
-
-    #[test]
-    fn read_existing_propagates_non_not_found_io_errors() {
-        // Pointing at a directory rather than a file makes
-        // `fs::read_to_string` fail with an ErrorKind other than NotFound
-        // (typically IsADirectory on Linux). The match guard must NOT
-        // swallow this as "no settings file" — it has to surface as Io.
-        let dir = TempDir::new().unwrap();
-        let plan_dir = dir.path().join(".claude/settings.json");
-        std::fs::create_dir_all(&plan_dir).unwrap();
-        let err = plan(plan_dir).unwrap_err();
-        assert!(
-            matches!(err, SetupError::Io { .. }),
-            "expected Io error for directory-as-file, got {err:?}",
-        );
     }
 }

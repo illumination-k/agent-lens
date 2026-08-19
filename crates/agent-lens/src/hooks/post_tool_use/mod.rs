@@ -54,25 +54,15 @@ pub(crate) fn prepare_edited_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::write_file;
+    use crate::test_support::{claude_hook_context, write_file};
     use agent_hooks::Hook;
-    use agent_hooks::claude_code::HookContext;
     use serde_json::json;
     use std::path::PathBuf;
-
-    fn ctx(cwd: PathBuf) -> HookContext {
-        HookContext {
-            session_id: "sess".into(),
-            transcript_path: PathBuf::from("/tmp/t.jsonl"),
-            cwd,
-            permission_mode: None,
-        }
-    }
 
     /// Build a Claude Code PostToolUse payload with the given fields.
     fn payload(cwd: PathBuf, tool_name: &str, tool_input: serde_json::Value) -> PostToolUseInput {
         PostToolUseInput {
-            context: ctx(cwd),
+            context: claude_hook_context(&cwd),
             tool_name: tool_name.into(),
             tool_input,
             tool_response: json!({}),

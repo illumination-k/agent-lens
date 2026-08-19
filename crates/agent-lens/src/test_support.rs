@@ -17,6 +17,31 @@ pub fn write_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
     path
 }
 
+/// A Claude Code hook context anchored at `cwd`.
+///
+/// Every hook test needs one and none of them reads a field other than
+/// `cwd`, so the rest are fixed placeholders here rather than respelled
+/// in each hook module.
+pub fn claude_hook_context(cwd: &Path) -> agent_hooks::claude_code::HookContext {
+    agent_hooks::claude_code::HookContext {
+        session_id: "sess".into(),
+        transcript_path: PathBuf::from("/tmp/t.jsonl"),
+        cwd: cwd.to_path_buf(),
+        permission_mode: None,
+    }
+}
+
+/// The Codex counterpart of [`claude_hook_context`]: same role, the
+/// fields Codex's envelope carries instead.
+pub fn codex_hook_context(cwd: &Path) -> agent_hooks::codex::HookContext {
+    agent_hooks::codex::HookContext {
+        session_id: "sess".into(),
+        transcript_path: Some(PathBuf::from("/tmp/t.jsonl")),
+        cwd: cwd.to_path_buf(),
+        model: "gpt-5".into(),
+    }
+}
+
 /// Run `git <args>` against `dir` with hardened, isolated config so a host's
 /// signing helper or `user.*` defaults can't make the test brittle. Panics
 /// on non-zero exit — intended for tests only.
