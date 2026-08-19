@@ -30,25 +30,26 @@ can plan around them.
 The project is pre-alpha. The API, CLI details, and report schemas are still
 allowed to change without a major version bump while the tool settles.
 
+Two commands are the authoritative reference for everything below:
+
+- `agent-lens help --md` — the entire command surface (every subcommand,
+  option, and worked example) as one dense Markdown document.
+- `agent-lens config schema` — the full `agent-lens.toml` reference.
+
+Both are generated from the code. This README is a narrative over them, not a
+substitute for them.
+
 ## Why
 
 Coding agents make decisions on partial context. They can read the file
-they're editing, but they don't see:
-
-- the near-duplicate function three modules over that they're about to fork,
-- the `impl` block whose methods touch disjoint sets of fields and should be
-  split,
-- the module that's a Fan-In bottleneck and shouldn't grow any more,
-- the function whose Cognitive Complexity is 40 and is a landmine to refactor.
+they're editing, but they don't see the near-duplicate function three modules
+over, the `impl` block whose methods touch disjoint sets of fields, the module
+that's a Fan-In bottleneck, or the function whose Cognitive Complexity is 40
+and is a landmine to refactor.
 
 `agent-lens` produces small, structured reports — JSON by default, compact
 Markdown on demand — that fit in a context window and surface that information
 the moment the agent needs it.
-
-The "agent-friendly" stance is enforced in code: `println!`, `eprintln!`,
-`unwrap()`, and `expect()` are all `deny`'d via clippy. Stdout is reserved for
-protocol payloads and reports; everything else goes to stderr through
-`tracing`.
 
 ## Install
 
@@ -58,106 +59,41 @@ protocol payloads and reports; everything else goes to stderr through
 curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash
 ```
 
-This pulls the matching tarball from the latest stable GitHub Release, verifies
-its SHA-256, and drops the binary into `$HOME/.local/bin`. Verification is
-mandatory and fails closed: if the release publishes no `.sha256` asset, or the
-machine has neither `sha256sum` nor `shasum`, the install aborts instead of
-proceeding unverified. Pass `--no-verify` (or `AGENT_LENS_NO_VERIFY=1`) to
-install without verification deliberately.
-
-Override with flags or environment variables — run `--help` for the full list:
-
-```bash
-# explicit destination
-curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh \
-  | bash -s -- --dir /usr/local/bin
-
-# pin a specific release tag, or use rolling for the rolling prerelease
-AGENT_LENS_TAG=v0.1.0 AGENT_LENS_DIR="$HOME/.local/bin" \
-  bash <(curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh)
-
-# list every flag and environment variable
-curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh \
-  | bash -s -- --help
-```
+This pulls the matching tarball from the latest stable GitHub Release,
+verifies its SHA-256 (verification fails closed; pass `--no-verify` to skip
+deliberately), and drops the binary into `$HOME/.local/bin`. Pass
+`--dir <path>` for another destination, `AGENT_LENS_TAG=<tag>` to pin a
+release, or `--help` for every flag and environment variable.
 
 ### Via mise (GitHub backend)
 
-[mise](https://mise.jdx.dev/) can install directly from GitHub Releases — no
-Rust toolchain required, and the version is pinned per project:
+[mise](https://mise.jdx.dev/) installs directly from GitHub Releases — no Rust
+toolchain required, version pinned per project:
 
 ```bash
-# user-global
-mise use -g github:illumination-k/agent-lens
+mise use -g github:illumination-k/agent-lens          # user-global
+mise use github:illumination-k/agent-lens@v0.1.0      # project-local, pinned
 
-# project-local (writes mise.toml in the repo root)
-mise use github:illumination-k/agent-lens
-
-# pin a specific release tag
-mise use github:illumination-k/agent-lens@v0.1.0
-
-# opt into the rolling prerelease built from main
+# rolling prerelease built from main (mise excludes prereleases by default)
 mise use 'github:illumination-k/agent-lens@rolling[prerelease=true]'
 ```
 
-Or add it to `mise.toml` directly:
-
-```toml
-[tools]
-"github:illumination-k/agent-lens" = "v0.1.0"
-```
-
-To track the rolling prerelease built from `main`, opt into prereleases and pin
-`rolling` instead:
-
-```toml
-[tools]
-"github:illumination-k/agent-lens" = { version = "rolling", prerelease = true }
-```
-
-The `prerelease = true` option is required because mise's GitHub backend
-excludes GitHub prereleases by default.
-
-mise auto-detects the right asset for your OS / arch from the
-`agent-lens-<target>.tar.gz` artifacts published by the release workflow.
-
 ### Nix (flake)
 
-The repo is a flake, so no release artifact is involved — `agent-lens` is
-built from source and pinned by `flake.lock`:
+The repo is a flake; `agent-lens` builds from source, pinned by `flake.lock`:
 
 ```bash
-# run without installing
-nix run github:illumination-k/agent-lens -- --version
-
-# install into your profile
-nix profile install github:illumination-k/agent-lens
-
-# pin a tag or commit
-nix profile install github:illumination-k/agent-lens/v0.1.0
+nix run github:illumination-k/agent-lens -- --version   # run without installing
+nix profile install github:illumination-k/agent-lens    # install into profile
 ```
 
-To consume it from another flake, either take `packages.default` directly or
-apply `overlays.default` to get `pkgs.agent-lens`:
-
-```nix
-{
-  inputs.agent-lens.url = "github:illumination-k/agent-lens";
-
-  outputs = { nixpkgs, agent-lens, ... }: {
-    # ...
-    environment.systemPackages = [ agent-lens.packages.x86_64-linux.default ];
-  };
-}
-```
-
-Linux and macOS, x86_64 and aarch64, are wired up; only `x86_64-linux` is
-exercised in CI.
+Consume it from another flake via `packages.default` or `overlays.default`
+(which provides `pkgs.agent-lens`). Linux and macOS, x86_64 and aarch64, are
+wired up; only `x86_64-linux` is exercised in CI.
 
 ### From source
 
-Requires a recent Rust toolchain (the workspace is on `edition = "2024"`, so
-rustc 1.85+):
+Requires rustc 1.85+ (the workspace is on `edition = "2024"`):
 
 ```bash
 cargo install --path crates/agent-lens
@@ -165,741 +101,255 @@ cargo install --path crates/agent-lens
 
 ### Manual download
 
-Pre-built binaries are published for version tags as normal releases. The
-current `main` branch is also published as a rolling prerelease named `rolling`.
-Grab a tarball or `.zip` directly from the
-[GitHub Releases page](https://github.com/illumination-k/agent-lens/releases)
-or pin `rolling` when you explicitly want the prerelease build.
+Pre-built binaries are on the
+[GitHub Releases page](https://github.com/illumination-k/agent-lens/releases):
+normal releases for version tags, plus a rolling prerelease named `rolling`
+built from `main`.
 
 ## Quick start
 
 ### As an analyzer
 
-Stdin is not used; pass a path and pick an output format.
+Stdin is not used; pass one or more paths and pick an output format. A few
+representative invocations:
 
 ```bash
-# Find near-duplicate functions in a file or directory (TSED >= 0.85)
-agent-lens analyze similarity src/foo.rs
+# Near-duplicate functions (TSED >= 0.85), as JSON or a compact summary
 agent-lens analyze similarity crates/lens-rust/src
+agent-lens analyze similarity crates/lens-rust/src --format md --top 10 --min-score 0.9
 
-# Same, but emit a compact summary instead of the full JSON
-agent-lens analyze similarity src/foo.rs --format md --top 10 --min-score 0.9
-
-# Score with token k-gram overlap instead of TSED tree-edit distance:
-# faster and more tolerant of reordered code, but less precise
-agent-lens analyze similarity crates/lens-rust/src --method token
-
-# Sweep several thresholds in one run: cluster at the lowest rung and tag
-# each cluster with the highest rung it survives — verbatim clones vs.
-# merely structural parallels, without re-running at 0.85 / 0.75 / 0.6
-agent-lens analyze similarity crates/lens-rust/src --format md --sweep 0.6,0.75,0.85
-
-# Roll the doc-comment overlap into the markdown report. Diagnostic only —
-# it never feeds the score — but it separates "same stated intent" clones
-# from functions that merely share a shape. JSON carries it per pair either way
-agent-lens analyze similarity crates/lens-rust/src --format md --doc-overlap
-
-# Invert the question: instead of "what is still similar?", ask "what should
-# be similar but no longer is?". Functions are matched by name first and
-# scored second, so parallel implementations that have drifted apart — the
-# ones a threshold report structurally cannot reach — surface worst-first
-agent-lens analyze similarity . --format md --paired-by name
-
-# Compare something other than function bodies. `--target types` compares
-# type definitions on their member shape — Rust struct / enum / alias, TS
-# interface / type alias / enum, Python annotated classes, dataclasses and
-# Enum subclasses, Go struct / alias — so duplicated DTOs and drifted mirror
-# types surface the way duplicated functions do
+# Duplicated type definitions, or copy-pasted fragments inside function bodies
 agent-lens analyze similarity crates --format md --target types
-
-# `--target blocks` compares statement runs *inside* function bodies: the
-# error-mapping tail repeated at 55 call sites, the URL-assembly preamble in
-# every endpoint method. Whole-definition comparison structurally cannot see
-# those, because the enclosing functions differ; the repeated fragment does
 agent-lens analyze similarity crates --format md --target blocks
 
-# Search: rank *functions* by relevance to a query, not lines by literal match.
-# Every hit carries its span, the line inside it that matched best, and which
-# fields the query hit — so a broad query costs a bounded ranked list instead
-# of an unranked wall of matches
+# Parallel implementations that have drifted apart (matched by name, scored second)
+agent-lens analyze similarity . --format md --paired-by name
+
+# Rank functions by relevance to a query — for when you can describe the thing
+# but don't know its name
 agent-lens analyze search crates/ --query 'diff range gate' --format md
 
-# `--explain` adds the per-term scoring breakdown. It is off by default
-# because ranking has already happened: those numbers audit a suspicious
-# ordering, they are not what a reader acts on (they were 54% of the payload)
-agent-lens analyze search crates/ --query 'diff range gate' --explain --format md
-
-# Identifier spelling is not part of the query: `_`, camelCase and spaces
-# all tokenize the same way, and the joined form is indexed too — so an
-# exact identifier is a single high-signal term
-agent-lens analyze search . --query parseDiffRange --limit 5 --format md
-
-# A term the corpus never spells is expanded to nearby vocabulary by
-# character-trigram overlap: half-remembered identifiers, typos, and
-# substrings of a token a script without word boundaries produced
-agent-lens analyze search . --query changed_line_rangs --format md
-
-# Scale relevance by call-graph importance (`1 + ln(1 + fan_in)`) so the
-# load-bearing match leads. This is the question grep cannot express
-agent-lens analyze search . --query 'render report' --rank graph --format md
-```
-
-`search` is for the question `grep` cannot take: _"where does this codebase do
-X"_, when the identifier is not known. When it **is** known, `grep` is still the
-better tool — it is exact, needs no parse, and its output is smaller. Treat the
-two as complementary: `search` is a first move when you can only describe the
-thing, and `grep` takes over once you have a name.
-
-The blind spots are worth knowing before relying on it. The retrieval unit is a
-function, so anything that is not one is invisible: macro bodies, `const` and
-type declarations, and every file the language adapters do not parse (`*.md`,
-`*.toml`, shell). A query whose answer lives only in those still returns a
-ranked list, and nothing in the output says "none of these is what you asked
-for" — scores are absolute, not calibrated against the query, so a list of weak
-matches is shaped exactly like a list of strong ones. `~expanded` marks a hit
-resting on n-gram near-misses rather than literal matches, which catches a
-misspelling; it does **not** catch a query whose parts are common words
-(`self-reach` tokenizes to `self` and `reach`, both of which occur literally
-almost everywhere). Relevance is scored per term, so a rare word that is
-irrelevant to the question ("decide", "handle") pulls the ranking towards
-itself; two to four content words beat a full sentence.
-
-```bash
-# All analyzers accept path filters: focus tests, drop tests, or exclude globs
-agent-lens analyze complexity crates/agent-lens --only-tests --format md --top 20 --min-score 8
-agent-lens analyze similarity crates/lens-rust/src --exclude-tests --min-lines 6
-agent-lens analyze hotspot . --exclude 'target/**' --exclude '**/generated/**'
-
-# Analyze only functions touching unstaged diff hunks for this file
-agent-lens analyze similarity src/foo.rs --diff-only
-
-# Cohesion (LCOM4) per impl block / class / module unit
-agent-lens analyze cohesion src/foo.rs --format md --top 20 --min-score 2
-
-# Cohesion only for units overlapping `git diff -U0` hunks
-agent-lens analyze cohesion src/foo.rs --diff-only
-
-# Cyclomatic / Cognitive / Nesting / Halstead / Maintainability Index
-agent-lens analyze complexity src/foo.rs
-
-# Complexity only for functions overlapping `git diff -U0` hunks
-agent-lens analyze complexity src/foo.rs --diff-only
-
-# Module-level Fan-In / Fan-Out / Henry-Kafura IFC, Instability, and
-# cyclic SCCs for a Rust crate, TS/JS module graph, Go module, or
-# Python package tree
-agent-lens analyze coupling crates/agent-lens --format md --top 15
-
-# Do the declared module boundaries match the clustering the
-# dependencies actually form? Names the files filed in one module but
-# wired into another
-agent-lens analyze communities crates/agent-lens --format md --top 15
-
-# Static function call graph for visualization tooling
-agent-lens analyze function-graph crates/agent-lens
-
-# Function-level call cycles (SCC tangles) with advisory cheapest-cut
-# suggestions for breaking each one
-agent-lens analyze cycles crates/agent-lens
-
-# Per-module transitive dependency closure ("how many files do I need
-# to read to understand this module?")
-agent-lens analyze context-span crates/agent-lens
-
-# Hotspots: rank files by `commits × cognitive_max` (must be in a git tree)
-agent-lens analyze hotspot crates/agent-lens --since 90.days.ago --top 20
-
-# Risk: the blast-radius sibling of hotspot — rank-product of churn and
-# call-graph centrality, so "hot and load-bearing" beats "hot but leaf"
-agent-lens analyze risk crates/agent-lens --since 90.days.ago --top 20
-
-# Co-change: which files git history says move together, with the
-# confidence in each direction and the lift that separates a real pattern
-# from two files that are merely both hot. No language matrix — it reads
-# `git log`, so `.toml`, `.md` and CI config are covered too
-agent-lens analyze co-change . --since 180.days.ago --min-support 5 --top 20
-
-# Change entropy: how scattered change activity has been per ISO week,
-# and which files accumulated that scatter as history complexity
-agent-lens analyze change-entropy . --since 180.days.ago --top 20
-
-# The same metric turned on the pending change: files touched, modules
-# spanned, and where its scatter sits among this repo's own commits —
-# a high percentile over several modules is the case for splitting it
-agent-lens analyze change-entropy . --diff-only --format md
-
-# The differential: pairs history couples that nothing in the code declares,
-# and declared dependencies the window never exercised — reported as two
-# separate buckets, because they license different actions
-agent-lens analyze hidden-coupling . --min-support 5 --format md --top 15
-
-# Forwarding wrappers (functions that are just `other(args).into()?` etc.)
+# Complexity, cohesion (LCOM4), forwarding wrappers, delegation chains
+agent-lens analyze complexity src/foo.rs --format md --top 20 --min-score 8
+agent-lens analyze cohesion src/foo.rs --format md --min-score 2
 agent-lens analyze wrapper src/foo.rs
+agent-lens analyze delegation crates/agent-lens --format md
 
-# Wrapper findings limited to functions overlapping `git diff -U0` hunks
-agent-lens analyze wrapper src/foo.rs --diff-only
+# Module-level structure: coupling, detected vs declared boundaries, layers
+agent-lens analyze coupling crates/agent-lens --format md --top 15
+agent-lens analyze communities crates/agent-lens --format md
+agent-lens analyze layers crates/agent-lens --format md
 
-# Several trees in one report: a duplicate spanning two of them is only
-# visible here, not in three separate runs
+# Git history: hotspots, blast-radius risk, co-change, change scatter
+agent-lens analyze hotspot . --since 90.days.ago --top 20
+agent-lens analyze risk . --since 90.days.ago --top 20
+agent-lens analyze co-change . --since 180.days.ago --min-support 5
+agent-lens analyze hidden-coupling . --min-support 5 --format md
+
+# Scope any report to pending work: --diff-only gates on the unstaged
+# working-tree diff, --diff-range on an explicit range
+agent-lens analyze similarity src/foo.rs --diff-only
+agent-lens analyze complexity src/foo.rs --diff-range main...HEAD
+
+# Path filters work everywhere; several trees form one corpus, so a duplicate
+# or call edge spanning them is visible where per-tree runs would miss it
 agent-lens analyze similarity packages cli web/src --format md --exclude-tests
+agent-lens analyze hotspot . --exclude 'target/**' --exclude '**/generated/**'
 ```
+
+Conventions that hold across analyzers:
+
+- Analyzer commands share `PATH...`, `--format json|md`, `--only-tests`,
+  `--exclude-tests`, and repeatable `--exclude GLOB`. Directory walks follow
+  `.gitignore`.
+- `--top N` caps the Markdown ranking; JSON always carries the full result.
+  `cycles` rejects it — a truncated cycle list reads as the whole list.
+- Every analyzer takes multiple `PATH`s except `coupling`, `context-span`, and
+  `communities`, which grow one module graph from one entry point.
+- `--diff-only` and `--diff-range` conflict (they name different diffs). On
+  `impact` the diff is the seed rather than a gate, so only `--diff-range`
+  applies.
+
+`search` complements `grep` rather than replacing it: reach for `search` when
+you can only describe the thing, and switch to `grep` once you have a name.
+Its retrieval unit is a function, so macro bodies, `const` items, and files no
+adapter parses are invisible — and scores are absolute, so a list of weak
+matches looks like a list of strong ones. Two to four content words beat a
+full sentence.
+
+Per-analyzer options (thresholds, sweep, `--since`, graph queries, …) are in
+`agent-lens help --md`.
 
 ### As a profile runner
 
-For a repeatable multi-analyzer pass, declare a named profile in an
-`agent-lens.toml` and run it with `agent-lens run <name>`. A profile bundles a
-target path (or several), shared path filters, an ordered list of analyzers, and
-optional per-tool overrides; `run` executes each analyzer through the same code
-path as `agent-lens analyze` and emits one combined report.
+For a repeatable multi-analyzer pass, declare a named profile in
+`agent-lens.toml` and run it with `agent-lens run <name>`:
 
 ```toml
 # agent-lens.toml — discovered by walking up from the current directory
 [profile.web]
-path = "web/" # target handed to every tool
+path = "web/" # target handed to every tool; also takes an array
 format = "md" # json (default) or md
-exclude = ["tests/**/*.ts"] # extra --exclude globs
-exclude-tests = true # or only-tests
-tools = ["similarity", "complexity", "cohesion"] # analyzers to run, in order
+exclude-tests = true # or only-tests, plus extra `exclude` globs
+tools = ["similarity", "complexity", "cohesion"]
 
-# Per-tool overrides live in [profile.<name>.<tool>] sub-tables and mirror the
-# matching CLI flags. Tables are optional; omitted options use the analyzer's
-# CLI default. `cycles` and `function-graph` take no table — they have no
-# extra options, so declaring one is a parse error.
+# Per-tool overrides mirror the matching CLI flags
 [profile.web.similarity]
 threshold = 0.9
 min-lines = 8
-method = "tsed" # or "token"
-top = 20
-
-[profile.web.complexity]
-min-score = 12
-top = 20
-
-# `path` also takes an array — the config spelling of `analyze <tool> PATH...`.
-# The trees are walked into one corpus, so a clone or a call edge spanning them
-# is visible where a profile naming only one of them could never find it.
-[profile.backend]
-path = ["internal", "cmd"]
-tools = ["similarity", "unreachable"]
 ```
 
 ```bash
-# Run the `web` profile from the nearest agent-lens.toml
-agent-lens run web
-
-# Point at an explicit config file
+agent-lens run web                       # from the nearest agent-lens.toml
 agent-lens run web --config path/to/agent-lens.toml
-
-# Override the profile's `format` for one run — the profile picks what its
-# usual readers want, this is for piping a markdown profile into `jq`
-agent-lens run web --format json
+agent-lens run web --format json         # override the profile's format
 ```
 
-Keys are kebab-case and match the CLI flags. A relative `path` resolves against
-the directory holding `agent-lens.toml`, each entry on its own when it is an
-array. `coupling` and `context-span` grow one module graph from one entry point,
-so a profile listing either of them alongside more than one `path` is rejected
-by name — split them into their own single-path profile. Unknown keys — a typo
-like `entrypont`, or an option set on the wrong tool — are rejected at parse
-time rather than silently ignored.
-
-`agent-lens config schema` prints the full `agent-lens.toml` reference as dense
-Markdown — every `[profile.<name>]` key and per-tool override table, with types,
-defaults, and a worked example — so an agent can author or audit a config
-without reading the source.
+Keys are kebab-case and match the CLI flags. Unknown keys — a typo, or an
+option set on the wrong tool — are rejected at parse time rather than silently
+ignored. `agent-lens config schema` prints the full reference: every profile
+key and per-tool table, with types, defaults, and a worked example.
 
 ### As a baseline
 
 An analyzer report says what is wrong now. A **baseline** says whether it got
-worse: `agent-lens baseline create <profile>` runs the profile's analyzers and
-reduces each report to a handful of named numbers, so a later run can be
-compared against the stored snapshot. That is what lets a repository adopt a
-threshold without first paying off the debt it already has — only regressions
-have to be new.
+worse: `baseline create` reduces a profile's reports to named metrics, and
+`baseline compare` re-runs the profile against the stored snapshot — exiting
+**2** when a gated metric regressed, distinct from the **1** of a failed run,
+so CI can tell "the code got worse" from "the tool broke".
 
 ```bash
-# Snapshot the profile's metrics on stdout
-agent-lens baseline create baseline
-
-# …or straight to a file (parent directories are created)
 agent-lens baseline create baseline --out target/agent-lens/baseline.json
-```
-
-```json
-{
-  "schema_version": 1,
-  "tool_version": "0.4.0",
-  "profile": "baseline",
-  "target": "crates/agent-lens",
-  "commit": "85488bfd5bd99874e4652ba62741346164c8055c",
-  "tools": [
-    {
-      "tool": "complexity",
-      "metrics": {
-        "cognitive_max": 24,
-        "file_count": 75,
-        "function_count": 1848
-      }
-    }
-  ]
-}
-```
-
-The analyzers always run as JSON here, whatever the profile's `format` says:
-that key shapes the report a reader gets from `run`, while a snapshot is built
-from structured fields. One profile therefore serves both.
-
-Metrics per analyzer:
-
-| Analyzer       | Metrics                                                                                                                                         |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `complexity`   | `file_count`, `function_count`, `cyclomatic_max`, `cognitive_max`, `cognitive_p95`, `max_nesting_max`, `loc_total`, `maintainability_index_min` |
-| `cohesion`     | `file_count`, `unit_count`, `lcom4_max`, `split_unit_count` (units with LCOM4 ≥ 2)                                                              |
-| `coupling`     | `module_count`, `edge_count`, `cycle_count`, `fan_in_max`, `fan_out_max`, `ifc_max`                                                             |
-| `context-span` | `module_count`, `transitive_max`, `transitive_sum`                                                                                              |
-| `hotspot`      | `file_count`, `score_max`, `commits_max`, `cognitive_max`                                                                                       |
-| `similarity`   | `unit_count`, `cluster_count`, `clustered_unit_count`, `cluster_max_size`                                                                       |
-
-Any analyzer in the profile that is not in the table above is listed under
-`skipped` with a reason rather than silently dropped — the graph analyzers rank
-individual symbols, and what a snapshot of one should be is not settled yet.
-
-Two properties make the file safe to store and diff:
-
-- **Deterministic.** Nothing reads the clock. The same tree at the same commit
-  snapshots byte-identically, so regenerating never looks like a change; the
-  recorded `commit` is what anchors the snapshot in time.
-- **Honest about gaps.** A metric that was never measured is omitted rather
-  than written as `0` — "no functions were measured" and "the worst function
-  scored 0" are different facts. An empty-but-present population still gets its
-  totals (`clustered_unit_count: 0` on a clean run), but never a maximum.
-
-#### The ratchet: `baseline compare`
-
-`agent-lens baseline compare <profile> <SNAPSHOT>` re-runs the profile and
-measures it against the stored snapshot. It exits **2** when a gated metric
-moved the wrong way — distinct from the **1** every failure to run exits with,
-so a CI step can tell "the code got worse" from "the tool broke".
-
-```bash
-# Gate a change against the stored snapshot
 agent-lens baseline compare baseline target/agent-lens/baseline.json
-
-# Read the verdict rather than pipe it
-agent-lens baseline compare baseline baseline.json --format md
-
-# Ratchet: write back what improved, keep the bar where it regressed
-agent-lens baseline compare baseline baseline.json --update
+agent-lens baseline compare baseline baseline.json --update   # ratchet
 ```
 
-Each metric is judged by its own direction, and only two of the three gate:
+Each metric gates in its own direction: maxima like `cognitive_max` or
+`lcom4_max` may only fall, `maintainability_index_min` may only rise, and
+context metrics (surface size like `file_count`, git-accumulating numbers like
+`commits_max`) are reported but never gated — a check that fails on every new
+commit is not a check. Snapshots are deterministic (nothing reads the clock)
+and honest about gaps (an unmeasured metric is omitted, never written as `0`).
 
-| Direction         | Metrics                                                                                                                                                                                                                                                        |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| lower is better   | `cyclomatic_max`, `cognitive_max`, `cognitive_p95`, `max_nesting_max`, `lcom4_max`, `split_unit_count`, `cycle_count`, `fan_in_max`, `fan_out_max`, `ifc_max`, `transitive_max`, `transitive_sum`, `cluster_count`, `clustered_unit_count`, `cluster_max_size` |
-| higher is better  | `maintainability_index_min`                                                                                                                                                                                                                                    |
-| context (no gate) | `file_count`, `function_count`, `unit_count`, `module_count`, `edge_count`, `loc_total`, `commits_max`, `score_max`                                                                                                                                            |
-
-The context row is the part that makes the check usable. Surface size
-(`file_count` … `loc_total`) moves with every feature, and gating on it would
-just mean "no new code". Git history (`commits_max`, and the `score_max` built
-on it) only ever accumulates, so a ratchet on either would fail on the next
-commit to the hottest file and keep failing — a check that cannot be satisfied
-by improving the code is not a check. Both are still reported when they move,
-under their own heading, so a reader can see why the codebase grew.
-
-A metric on one side only is coverage, not movement: one the baseline carries
-and this run did not measure is `missing`, the reverse is `new`, and neither
-fails the build. Both snapshots must name the same profile at the same schema
-version; a differing `tool_version` or target is a warning on stderr rather
-than a refusal.
-
-`--update` is the ratchet itself, and it turns one way only:
-
-- a gated metric takes the better of the two values, so re-running with
-  `--update` after a regression cannot launder it into the new bar — and the
-  exit status is unchanged, still 2;
-- context metrics and the header (commit, version, target) follow the fresh
-  run, since nothing gates on them and the truth is more useful than an old
-  number;
-- metrics and whole tools this run did not measure are carried over untouched.
-  Retiring a gate is done with a fresh `baseline create`, not by an analyzer
-  quietly failing to report.
-
-### Current command surface
-
-The current binary exposes three top-level command trees plus `run`,
-`baseline`, `skills`, `config`, and `help`:
-
-| Command tree | Commands                                                                                                                                                                                                                                                                                                  |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                                                                 |
-| `codex-hook` | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                                                                 |
-| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                             |
-| `baseline`   | `create <profile> [--out PATH]` — snapshot that profile's analyzers as a compact metric document; `compare <profile> <SNAPSHOT> [--update]` — measure a fresh run against one, exit 2 on a regression                                                                                                     |
-| `skills`     | `list`, `install` — list and install the bundled Claude Code skills                                                                                                                                                                                                                                       |
-| `config`     | `schema` — print the `agent-lens.toml` schema as agent-friendly Markdown                                                                                                                                                                                                                                  |
-| `help`       | `help [--md]` — print the command reference, optionally as agent-friendly Markdown                                                                                                                                                                                                                        |
-
-`agent-lens --help` opens with a question-to-analyzer routing table
-("what breaks if I change this?" → `analyze impact`) plus the output
-conventions that hold for every analyzer, and each subcommand's
-`--help` ends with worked invocations rather than prose alone.
-
-`agent-lens help --md` prints the entire command surface — a flat
-command index, then every subcommand with its description, options, and
-examples — as one dense Markdown document, so an agent can read the
-whole CLI in a single shot instead of running `--help` on each branch.
-
-`agent-lens skills install` drops the same skills this repo dogfoods
-(under `.claude/skills/`) into a target project so a fresh checkout gets
-`agent-lens`-aware routing:
-
-```bash
-# Project scope: ./.claude/skills (created if missing)
-agent-lens skills install
-
-# User scope: $HOME/.claude/skills
-agent-lens skills install --scope user
-
-# Preview, then overwrite local edits
-agent-lens skills install --dry-run
-agent-lens skills install --force
-```
-
-Install is conservative and idempotent: a skill that already exists with
-different content is reported as a conflict and left untouched unless
-`--force` is passed. `agent-lens skills list` summarises what ships in the
-binary.
-
-Analyzer commands share `PATH`, `--format json|md`, `--only-tests`,
-`--exclude-tests`, and repeatable `--exclude GLOB`. Directory analyzers walk
-recursively with `.gitignore` semantics.
-
-Every analyzer except `coupling`, `context-span` and `communities` takes more
-than one `PATH` and walks them all into a single report — the monorepo case, where the
-trees you care about are siblings and their only common ancestor is the repo
-root. This is not the same as one run per tree: `similarity` clusters across
-the whole corpus and the call-graph analyzers resolve edges across it, so a
-finding spanning two trees is only visible in a combined run. Display paths
-— and the base a `/`-containing `--exclude` glob is anchored at — are
-relative to the paths' deepest common ancestor. `coupling`, `context-span` and
-`communities` grow one module graph out of one entry point, so they keep the
-single-`PATH` signature. A profile's `path` follows the same rule: it takes an
-array as well as a string, and rejects an array of more than one path for those
-three analyzers.
-
-`--top N` bounds the length of a `--format md` report and is accepted by every
-analyzer that can produce a long one; `cycles` is the exception, since a
-truncated cycle list reads as the whole list. JSON output always carries the
-full result — `--top` is a rendering cap, not a filter on the analysis.
-
-Analyzer-specific options today:
-
-| Analyzer          | Extra options                                                                                                                                                                                                                                                        |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `search`          | `--query TEXT` (required), `--limit N`, `--fuzzy off\|missing\|always`, `--rank bm25\|graph`, `--explain`                                                                                                                                                            |
-| `similarity`      | `--target functions\|types\|blocks`, `--threshold FLOAT` (alias: `--min-score`), `--sweep F1,F2,…`, `--paired-by qualified\|method`, `--drift-floor FLOAT`, `--min-lines N`, `--method tsed\|token`, `--doc-overlap`, `--diff-only`, `--diff-range RANGE`, `--top N` |
-| `complexity`      | `--diff-only`, `--diff-range RANGE`, `--top N`, `--min-score N`                                                                                                                                                                                                      |
-| `cohesion`        | `--diff-only`, `--diff-range RANGE`, `--top N`, `--min-score N`                                                                                                                                                                                                      |
-| `wrapper`         | `--diff-only`, `--diff-range RANGE`, `--top N`                                                                                                                                                                                                                       |
-| `delegation`      | `--diff-only`, `--diff-range RANGE`, `--top N`                                                                                                                                                                                                                       |
-| `hotspot`         | `--since VALUE`, `--top N`                                                                                                                                                                                                                                           |
-| `risk`            | `--since VALUE`, `--top N`                                                                                                                                                                                                                                           |
-| `co-change`       | `--since VALUE`, `--min-support N`, `--min-confidence FLOAT`, `--max-commit-files N`, `--top N`                                                                                                                                                                      |
-| `change-entropy`  | `--since VALUE`, `--period week\|month`, `--diff-only`, `--diff-range RANGE`, `--min-commits N`, `--max-commit-files N`, `--top N`                                                                                                                                   |
-| `hidden-coupling` | `--since VALUE`, `--min-support N`, `--min-confidence FLOAT`, `--max-commit-files N`, `--top N`                                                                                                                                                                      |
-| `hubs`            | `--top N`                                                                                                                                                                                                                                                            |
-| `impact`          | `--function SYMBOL` (repeatable), `--depth N`, `--diff-range RANGE`, `--top N`                                                                                                                                                                                       |
-| `layers`          | `--top N`                                                                                                                                                                                                                                                            |
-| `unreachable`     | `--tier confirmed\|likely\|unknown`, `--top N`                                                                                                                                                                                                                       |
-| `untested`        | `--top N`                                                                                                                                                                                                                                                            |
-| `visibility`      | `--top N`                                                                                                                                                                                                                                                            |
-| `graph-query`     | `--query callers\|callees\|neighborhood\|path`, `--symbol SYMBOL`, `--to SYMBOL`, `--depth N`, `--direction in\|out\|both`, `--limit N`                                                                                                                              |
-| `coupling`        | `--top N`                                                                                                                                                                                                                                                            |
-| `communities`     | `--granularity file\|module`, `--min-community N`, `--top N`                                                                                                                                                                                                         |
-| `cycles`          | shared analyzer options only                                                                                                                                                                                                                                         |
-| `function-graph`  | shared analyzer options only                                                                                                                                                                                                                                         |
-| `context-span`    | `--entry-glob GLOB` (repeatable), `--top N`                                                                                                                                                                                                                          |
-
-`--diff-only` gates on the unstaged working-tree diff; `--diff-range` gates on
-`git diff -U0 <range>` instead, so a report can be scoped to a commit that
-already landed (`--diff-range HEAD~1..HEAD`, `--diff-range main...topic`). The
-two conflict — they name different diffs — and on `impact`, where the diff is
-the _seed_ rather than a gate, only `--diff-range` applies.
-
-`--sweep` conflicts with `--threshold`, `--paired-by` conflicts with `--sweep`,
-and `--drift-floor` requires `--paired-by`. `--min-lines` defaults per target:
-5 for `functions` and `blocks`, 3 for `types`. `--target types` accepts only
-the `qualified` / `name` pairing key — `method` has no meaning for a type and
-is rejected.
-
-`context-span --entry-glob` is for frameworks with many implicit entries
-(Next.js App Router, file-routed Remix / Astro): pass it repeatedly to merge
-several TS/JS entry trees into one report, with `PATH` as the project root the
-patterns are evaluated against.
-
-Supported source extensions are `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
-`.jsx`, `.mjs`, `.cjs`; `.py`; and `.go`. `similarity`, `complexity`,
-`wrapper`, `delegation`, `cohesion`, `hotspot`, `risk`, `function-graph`,
-`cycles`, `graph-query`, `hubs`, `impact`, `layers`, `untested`,
-`context-span`, `coupling`, and `communities` cover all four language families.
-`visibility` and `unreachable` judge Rust and Go, the two adapters that
-extract export status, and count the rest as skipped (`unreachable`
-treats them as entry points, so nothing they call is reported).
-`delegation` runs on all four, but only Rust and Go can exempt a module
-facade, and its confidence is highest on Rust. `co-change` and
-`change-entropy` have no language matrix at all: both read `git log` and
-never parse a file, so they cover `.toml`, `.md`, workflow YAML,
-fixtures, and anything else the repository tracks. `hotspot`, `risk`,
-`co-change`, `change-entropy`, and `hidden-coupling` all require a git
-working tree. `hidden-coupling` reads both halves: its history side is
-language-agnostic like `co-change`, and its static side is the same
-Rust / TS / JS / Python / Go graphs `coupling` and the call-graph
-analyzers build, so a pair only reaches the hidden or suspect bucket
-when a backend reads both files.
+`--update` turns one way only: a gated metric takes the better of the two
+values — re-running after a regression cannot launder it into the new bar, and
+the exit status stays 2. Analyzers a snapshot cannot yet cover are listed
+under `skipped` with a reason rather than silently dropped.
 
 ### As a Claude Code hook
 
 Wire `agent-lens` into Claude Code at three event points: a one-shot
 `SessionStart` summary of the repo's hotspots, a `PreToolUse` heads-up about
 complex / low-cohesion code the agent is about to edit, and a `PostToolUse`
-follow-up that flags duplicated or forwarding-only functions in the file the
-agent just changed.
-
-The fastest way is to let `agent-lens` write the `settings.json` block for you:
+follow-up flagging duplicated or forwarding-only functions in the file just
+changed.
 
 ```bash
-# Project scope: ./.claude/settings.json (created if missing)
-agent-lens hook setup
-
-# User scope: $HOME/.claude/settings.json
-agent-lens hook setup --scope user
-
-# Preview without writing
-agent-lens hook setup --dry-run
+agent-lens hook setup                 # project scope: ./.claude/settings.json
+agent-lens hook setup --scope user    # user scope: $HOME/.claude/settings.json
+agent-lens hook setup --dry-run       # preview the exact block without writing
 ```
 
-The merge is conservative: existing entries are preserved, and `SessionStart`
-/ `PreToolUse` / `PostToolUse` blocks are appended only with the commands
-that aren't already wired up. Re-running is a no-op once every handler is
-installed.
-
-If you'd rather edit the file by hand, the equivalent block looks like:
-
-```jsonc
-// ~/.claude/settings.json (or .claude/settings.json in a project)
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "agent-lens hook session-start summary",
-          },
-        ],
-      },
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "agent-lens hook pre-tool-use complexity",
-          },
-          {
-            "type": "command",
-            "command": "agent-lens hook pre-tool-use cohesion",
-          },
-        ],
-      },
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "agent-lens hook post-tool-use similarity",
-          },
-          {
-            "type": "command",
-            "command": "agent-lens hook post-tool-use wrapper",
-          },
-        ],
-      },
-    ],
-  },
-}
-```
+The merge is conservative: existing entries are preserved, missing handlers
+are appended, and re-running is a no-op once everything is installed.
 
 ### As a Codex hook
 
-Codex's hook protocol differs from Claude Code's (every payload carries a
-`model` slug, `apply_patch` can touch multiple files at once, etc.).
-`agent-lens` ships a separate `codex-hook` command tree so the differences
-don't leak into the CLI surface.
-
-The fastest way is to let `agent-lens` write the `config.toml` block for you:
+Codex's hook protocol differs (every payload carries a `model` slug,
+`apply_patch` can touch multiple files at once), so `agent-lens` ships a
+separate `codex-hook` command tree with the same handlers:
 
 ```bash
-# User scope: $HOME/.codex/config.toml (Codex's canonical location)
-agent-lens codex-hook setup
-
-# Project scope: <repo-root>/.codex/config.toml — the repo root comes from
-# `git rev-parse --show-toplevel`, with a fallback to `cwd` outside a git tree
-agent-lens codex-hook setup --scope project
-
-# Preview without writing
-agent-lens codex-hook setup --dry-run
+agent-lens codex-hook setup                    # user scope: $HOME/.codex/config.toml
+agent-lens codex-hook setup --scope project    # <repo-root>/.codex/config.toml
+agent-lens codex-hook setup --dry-run          # preview without writing
 ```
 
-The merge is conservative: existing keys and comments are preserved, and
-`[[hooks.SessionStart]]` / `[[hooks.PreToolUse]]` / `[[hooks.PostToolUse]]`
-blocks are appended only for handlers that aren't already wired up.
-Re-running is a no-op once every handler is installed.
+The same conservative merge applies: existing keys and comments are preserved
+and re-running is a no-op.
 
-If you'd rather edit the file by hand, the equivalent block looks like:
+### Command surface
 
-```toml
-# ~/.codex/config.toml
-[[hooks.SessionStart]]
+| Command tree | Commands                                                                                                                                                                                                                                                                                                  |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                                                                 |
+| `codex-hook` | same handlers as `hook`, speaking Codex's protocol                                                                                                                                                                                                                                                        |
+| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                             |
+| `baseline`   | `create <profile>` — snapshot a profile's metrics; `compare <profile> <SNAPSHOT> [--update]` — gate a fresh run against one                                                                                                                                                                               |
+| `skills`     | `list`, `install` — the bundled Claude Code skills                                                                                                                                                                                                                                                        |
+| `config`     | `schema` — print the `agent-lens.toml` reference                                                                                                                                                                                                                                                          |
+| `help`       | `help [--md]` — print the command reference, optionally as one Markdown document                                                                                                                                                                                                                          |
 
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = "agent-lens codex-hook session-start summary"
+`agent-lens --help` opens with a question-to-analyzer routing table ("what
+breaks if I change this?" → `analyze impact`), and each subcommand's `--help`
+ends with worked invocations.
 
-[[hooks.PreToolUse]]
-matcher = "^apply_patch$"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "agent-lens codex-hook pre-tool-use complexity"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "agent-lens codex-hook pre-tool-use cohesion"
-
-[[hooks.PostToolUse]]
-matcher = "^apply_patch$"
-
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = "agent-lens codex-hook post-tool-use similarity"
-
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = "agent-lens codex-hook post-tool-use wrapper"
-```
+`agent-lens skills install` drops the same skills this repo dogfoods (under
+`.claude/skills/`) into a target project — `--scope user` for
+`$HOME/.claude/skills`, `--dry-run` to preview, `--force` to overwrite a
+conflicting local edit (otherwise conflicts are reported and left untouched).
 
 ## What's in the box
 
 ### Hook handlers
 
-| Agent       | Event          | Handler      | What it does                                                                                             |
-| ----------- | -------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
-| Claude Code | `SessionStart` | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                                    |
-| Claude Code | `PreToolUse`   | `complexity` | Flags functions in the file about to be edited whose Cyclomatic / Cognitive / Nesting cross a threshold. |
-| Claude Code | `PreToolUse`   | `cohesion`   | Flags cohesion units in the file about to be edited whose LCOM4 is greater than 1.                       |
-| Claude Code | `PostToolUse`  | `similarity` | Reports near-duplicate function pairs in the file just edited.                                           |
-| Claude Code | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                                               |
-| Codex       | `SessionStart` | `summary`    | Same hotspot + coupling thumbnail at session start.                                                      |
-| Codex       | `PreToolUse`   | `complexity` | Same complexity heads-up across every file the upcoming `apply_patch` will touch.                        |
-| Codex       | `PreToolUse`   | `cohesion`   | Same LCOM4 heads-up across the touched files.                                                            |
-| Codex       | `PostToolUse`  | `similarity` | Reports near-duplicate function pairs across every file the latest `apply_patch` touched.                |
-| Codex       | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions across the touched files.                                              |
+| Event          | Handler      | What it does                                                                         |
+| -------------- | ------------ | ------------------------------------------------------------------------------------ |
+| `SessionStart` | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                |
+| `PreToolUse`   | `complexity` | Flags functions in the file about to be edited whose complexity crosses a threshold. |
+| `PreToolUse`   | `cohesion`   | Flags cohesion units in the file about to be edited whose LCOM4 is greater than 1.   |
+| `PostToolUse`  | `similarity` | Reports near-duplicate function pairs in the file just edited.                       |
+| `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                           |
 
-Schemas for the remaining events (`UserPromptSubmit`, `Stop`, `SubagentStop`,
-and Codex's `PermissionRequest`) live in the `agent-hooks` crate with no
-handler wired to them yet. They are kept deliberately: `agent-hooks` models
-each protocol in full, so its tagged input enums round-trip every payload an
-agent can send and a new handler is a domain-logic change rather than a
-schema change.
+The `codex-hook` tree ships the same five handlers; the `PreToolUse` /
+`PostToolUse` ones run across every file the `apply_patch` touches. Schemas
+for the remaining events (`UserPromptSubmit`, `Stop`, `SubagentStop`, Codex's
+`PermissionRequest`) live in the `agent-hooks` crate with no handler wired
+yet, so a new handler is a domain-logic change rather than a schema change.
 
-#### When a hook fails
-
-Hook handlers are advisory — what `agent-lens` has to say about a file is
-context, never a gate on the agent's tool call. So a handler that fails
-still answers in the agent's own response schema: the failure is reported
-through the same field a report would have used (`systemMessage`, or
-`additionalContext` for the events that inject context that way), prefixed
-with `agent-lens <event> hook failed:`, and the process exits 0 so the
-agent parses it. The full error is also logged to stderr.
-
-That covers everything from a malformed payload on stdin to an analyzer
-tripping over a pathological file. The `setup` commands are not hooks and
-keep the ordinary CLI contract: an error is logged and the process exits
-non-zero.
+Hook handlers are advisory — never a gate on the agent's tool call. A handler
+that fails still answers in the agent's response schema (prefixed with
+`agent-lens <event> hook failed:`) and exits 0 so the agent parses it; the
+full error goes to stderr. The `setup` commands are not hooks and keep the
+ordinary CLI contract: errors exit non-zero.
 
 ### Analyzers
 
-| Subcommand       | What it surfaces                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Languages                 |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `search`         | Functions ranked by BM25F relevance to a query, over five separately weighted fields (name, file path, signature, doc comment, body) — so a definition _named_ after the query outranks one that merely mentions it. Queries tokenize the way identifiers are written (`_`, camelCase, and the joined form all index as one term), and a term the corpus never spells is expanded to nearby vocabulary by character-trigram overlap, covering misspellings and substrings of a token a script without word boundaries produced. Each hit carries its span, the best-matching line inside it, and the union of fields the query matched in — `name` means the hit is the definition being asked about, `body` alone means it is a mention. The per-term scoring breakdown is behind `--explain`, since ranking has already happened and a reader who is not re-ranking pays for those numbers without using them. `--rank graph` scales relevance by a call-graph importance prior (`1 + ln(1 + fan_in)`), re-ordering the top candidates so load-bearing matches lead. The index is built per run and never persisted, so a result is never stale. | Rust, TS / JS, Python, Go |
-| `similarity`     | Near-duplicate pairs whose normalised AST has TSED ≥ `--threshold` (default 0.85), via APTED edit distance, folded into complete-link clusters. `--target` picks the unit: `functions` (default), `types` (definitions compared on their member shape — struct / enum / interface / alias), or `blocks` (statement runs _inside_ function bodies, the copy-paste whole-definition comparison cannot see). Blocks are scored value-aware: at that size the skeleton belongs to the language, not the author, so a shared idiom (`if err != nil { return nil, err }`, a run of arrow-function declarations) is separated from a pasted fragment by the identifiers, calls, and literals it carries. Two implementations of the _same_ trait method are scored on the body alone, since a shared trait dictates the signature by construction — so trait-impl boilerplate stops being inflated past its honest body similarity.                                                                                                                                                                                                                       | Rust, TS / JS, Python, Go |
-| `wrapper`        | Functions whose body is a forwarding call to another function modulo a short chain of `?`, `.unwrap()`, `.into()`, `.await`, … A Go method wrapper matching an in-scope interface method (name + arity) is annotated as such, since it cannot simply be deleted — embedding the inner value is the idiomatic fix.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Rust, TS / JS, Python, Go |
-| `delegation`     | Chains of functions that only forward (`api::save -> service::save -> repo::save -> db::insert`), with per-hop `file:line`, the terminus that does the work as the headline, and a per-module roll-up of delegator ratio and target concentration (lasagna layers). Generalizes `wrapper` from one hop to many; forwarders that log, lock, or validate are deliberately not counted, and hops the language put there (trait-impl methods — `Deref`, `From`, `Display` forwarding to an inner value) are marked so they can be weighed lower.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Rust, TS / JS, Python, Go |
-| `cohesion`       | LCOM4 per `impl` block, class, or module unit (number of connected components in the field-sharing graph).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Rust, TS / JS, Python, Go |
-| `complexity`     | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Rust, TS / JS, Python, Go |
-| `coupling`       | Module-level Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura IFC `(fan_in × fan_out)²`, per-pair shared-symbol counts, Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components (cycles).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Rust, TS / JS, Python, Go |
-| `communities`    | The module clusters the dependency graph forms, scored against the module boundaries the repository declares. Reports Newman modularity `Q` for both partitions over the same graph — a declared score close to the detected one means the declared structure already is the clustering — plus **misfiled members** (a member whose community is dominated by another declared module _and_ which has more edge weight to that module than to its own) and **spanning communities** (a cluster no declared module owns a majority of). Ranked by how lopsided a member's in/out edge counts are, never by cluster size. The partition is greedy modularity agglomeration over a canonically ordered graph, so the same tree always produces the same report.                                                                                                                                                                                                                                                                                                                                                                                       | Rust, TS / JS, Python, Go |
-| `function-graph` | Static function nodes and heuristic caller→callee edges as visualization-ready JSON. Node weights include static call counts, fan-in/out, LOC, Cyclomatic / Cognitive / Nesting, Halstead Volume, Maintainability Index, plus runtime placeholders for later trace/profile joins.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Rust, TS / JS, Python, Go |
-| `cycles`         | Function-level strongly connected components of the call graph (resolved edges only): recursion knots and cross-file tangles that must change as one unit, with members, same-file flag, nearby-ambiguity warning, and advisory cheapest-cut break suggestions with call-line evidence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Rust, TS / JS, Python, Go |
-| `hubs`           | Hub smells on the function call graph: outlier fan-out (god functions), outlier fan-in (load-bearing blast-radius signal), Henry-Kafura `loc × (fan_in × fan_out)²` bottlenecks, and cross-module pull (misplaced functions), with prod/test fan-in split and deterministic PageRank-importance percentiles.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Rust, TS / JS, Python, Go |
-| `layers`         | Inferred Lakos levelization of the call graph: a function level per function (`1 + max(level of callees)`, cycles collapsed), a module level per module from the induced module graph, entry points, module cycles and skip-level calls with call-site evidence, and per-module member-level spans as a vertical cohesion smell.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Rust, TS / JS, Python, Go |
-| `untested`       | Production functions with no resolved call path from any test function: multi-source forward traversal from every test node, grouped by module and ranked by untested LOC, with each row's LOC / fan-in / complexity, plus the upper-bound support (unresolved and ambiguous call sites leaving test-reached code).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Rust, TS / JS, Python, Go |
-| `unreachable`    | Functions no call path from an entry point reaches, in confidence tiers. Multi-source forward traversal from the emitted entry set (`main`, Go `init`, tests, `pub` / exported declarations, non-inert annotations), then a raw identifier-reference scan over the scanned sources: `confirmed` (private/unexported, unreachable, unreferenced — deletable on this evidence alone), `likely` (nothing in the analyzed path uses or names it, but the declaration reaches outside it), `unknown` (a lead demoted by trait/interface dispatch, an annotation, an ambiguous call site, or a raw reference). Sound in the "confirmed ⇒ really dead" direction only. Clusters that only call each other are reported as islands with total LOC and a deletion order.                                                                                                                                                                                                                                                                                                                                                                                    | Rust, Go                  |
-| `visibility`     | `pub` (Rust) / exported (Go) functions whose resolved callers all sit inside a narrower scope, with the declaration that would still compile (`drop pub`, `pub(super)`, `pub(in …)`, `pub(crate)`, unexport), the caller modules as evidence, and the unattributable call sites that argue against each row. `pub use` re-exports are excluded as intended API; exported Go methods matching an in-scope interface's method (name + arity) are annotated as dispatch candidates and ranked last.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Rust, Go                  |
-| `impact`         | Blast radius of a change: functions transitively calling the seeds (working-tree diff or `--function`) over the SCC condensation, direct callers verbatim, deeper callers folded per depth and module, reachable tests as a verification checklist.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Rust, TS / JS, Python, Go |
-| `graph-query`    | One canned call-graph traversal per run: `callers`, `callees`, `neighborhood`, or the shortest `path` between two symbols, with the call lines of every hop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Rust, TS / JS, Python, Go |
-| `context-span`   | Per-module direct + transitive outgoing dependency closure; counts the distinct source files an agent must read to reason about a module.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Rust, TS / JS, Python, Go |
-| `hotspot`        | Files ranked by `commits × cognitive_max` over an optional `--since=` window — where churn and complexity overlap, i.e. the bug-prone landmines.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Rust, TS / JS, Python, Go |
-| `risk`           | Files ranked by the rank product of git churn and call-graph centrality (max/sum PageRank over the file's functions, plus transitive caller counts), lower being riskier — the "how carefully should I treat this edit?" prior that separates "hot but leaf" from "hot and load-bearing". Each row carries its raw components and the file's highest-PageRank function.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Rust, TS / JS, Python, Go |
+| Subcommand        | What it surfaces                                                                                                                                                                                                                                          |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search`          | Functions ranked by BM25F relevance to a query over weighted fields (name, path, signature, doc, body), with identifier-aware tokenization and trigram expansion for near-miss terms. `--rank graph` folds in call-graph importance.                      |
+| `similarity`      | Near-duplicate pairs (normalised-AST TSED via APTED, complete-link clusters). `--target` picks functions (default), type definitions compared on member shape, or statement blocks inside bodies — the copy-paste whole-definition comparison cannot see. |
+| `wrapper`         | Functions whose body is a forwarding call modulo `?`, `.unwrap()`, `.into()`, `.await`, …; Go interface-satisfying wrappers are annotated since deleting them isn't the fix.                                                                              |
+| `delegation`      | Chains of forwarding-only functions (`api::save -> service::save -> repo::save`), with the terminus doing the work as the headline and a per-module delegator roll-up. Language-mandated hops are marked.                                                 |
+| `cohesion`        | LCOM4 per `impl` block, class, or module unit (connected components of the field-sharing graph).                                                                                                                                                          |
+| `complexity`      | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                        |
+| `coupling`        | Module-level Fan-In / Fan-Out, Henry-Kafura IFC, Instability, shared-symbol counts, and cyclic SCCs.                                                                                                                                                      |
+| `communities`     | The module clusters the dependency graph actually forms, scored (Newman modularity) against the declared boundaries — naming misfiled members and clusters no declared module owns.                                                                       |
+| `function-graph`  | Static function nodes and heuristic caller→callee edges as visualization-ready JSON, with structural and complexity weights per node.                                                                                                                     |
+| `cycles`          | Function-level SCCs of the call graph: recursion knots and cross-file tangles, with advisory cheapest-cut break suggestions and call-line evidence.                                                                                                       |
+| `hubs`            | Call-graph hub smells: outlier fan-out (god functions), outlier fan-in (blast radius), Henry-Kafura bottlenecks, cross-module pull, with PageRank-importance percentiles.                                                                                 |
+| `layers`          | Inferred Lakos levelization: function and module levels, entry points, module cycles, and skip-level calls with call-site evidence.                                                                                                                       |
+| `untested`        | Production functions with no resolved call path from any test, grouped by module and ranked by untested LOC.                                                                                                                                              |
+| `unreachable`     | Functions no entry point reaches, in confidence tiers (`confirmed` / `likely` / `unknown`); sound in the "confirmed ⇒ really dead" direction only, with deletable islands and a deletion order.                                                           |
+| `visibility`      | `pub` / exported functions whose callers all sit inside a narrower scope, with the declaration that would still compile and the caller evidence.                                                                                                          |
+| `impact`          | Blast radius of a change: transitive callers of the seeds (working-tree diff or `--function`), plus reachable tests as a verification checklist.                                                                                                          |
+| `graph-query`     | One canned call-graph traversal per run: `callers`, `callees`, `neighborhood`, or the shortest `path` between two symbols.                                                                                                                                |
+| `context-span`    | Per-module transitive dependency closure: how many files an agent must read to reason about a module.                                                                                                                                                     |
+| `hotspot`         | Files ranked by `commits × cognitive_max` over an optional `--since` window — where churn and complexity overlap.                                                                                                                                         |
+| `risk`            | Files ranked by the rank product of git churn and call-graph centrality — separating "hot but leaf" from "hot and load-bearing".                                                                                                                          |
+| `change-entropy`  | How scattered change activity was per period (Hassan's history complexity), attributed onto files; `--diff-only` scores the pending change against the repo's own commit distribution.                                                                    |
+| `co-change`       | File pairs git history says change together: support, per-direction confidence, and lift, with renames followed. Correlation only.                                                                                                                        |
+| `hidden-coupling` | The differential between history and the static graph: co-changing pairs with no declared dependency (undeclared contracts), and declared dependencies history never exercised — reported as separate buckets.                                            |
 
-| `change-entropy` | How _scattered_ change activity was, rather than how much of it there was — the part Hassan (2009) found predictive. Per ISO week or calendar month (UTC, calendar-anchored so two runs agree), the Shannon entropy of each file's share of the period's changed lines, normalised by `log2(files)` so periods of different size compare, attributed onto files by Hassan's weighted variant and summed into a per-file history complexity. `--diff-only` turns it around and reads the pending change as one change set: files touched, modules spanned, its entropy, and its percentile among the commits this repository actually makes — the form that is worth having before the commit exists. A prior, never a gate. | Language-agnostic (git) |
-| `co-change` | File pairs git history says change together, as association rules over the commit window: co-change count (support), the conditional confidence in **both** directions (the edge is symmetric, the conditional is not), and lift — which separates a real pattern from two files that co-occur because each is hot. Ranked by `support × max(confidence)`, dated so a dead pattern is visibly dead, with renames followed so a rename does not split a pair's evidence. Correlation only: nothing here says why two files move together or which way a dependency runs. | Language-agnostic (git) |
-| `hidden-coupling` | The differential between the two views: co-changing pairs with **no** file-level dependency between them either way (`hidden_coupling` — an undeclared contract to find and make explicit), and declared dependencies whose endpoints both moved in the window but never together (`suspect_dependencies` — the weaker half, since a stable dependency and a dead one look alike over one window). The two are never merged into one score. The static side is the file-level projection of the module graph plus resolved call edges, so it is a lower bound and "no static path" is an upper bound on "undeclared". Test pairs and pairs with a file no backend reads get their own buckets — both have no static edge by construction. | Rust, TS / JS, Python, Go (static half) + git |
-
-All analyzers default to JSON on stdout; pass `--format md` for a compact
+All analyzers default to JSON on stdout; `--format md` emits a compact
 Markdown summary tuned to drop straight into an LLM prompt.
-`coupling`, `context-span` and `communities` name each module the way the
-analyzed language names it. Internally every adapter emits the same
-`crate::a::b` shape so the graph algorithms stay language-neutral; the
-spelling is applied when the report is rendered:
-
-| Language                | Root module         | Nested module                      |
-| ----------------------- | ------------------- | ---------------------------------- |
-| Rust                    | `crate`             | `crate::analyze::coupling`         |
-| Go (with `go.mod`)      | `github.com/x/proj` | `github.com/x/proj/internal/store` |
-| Go (no `go.mod`)        | `.`                 | `internal/store`                   |
-| TypeScript / JavaScript | `.`                 | `components/Chat`                  |
-| Python                  | `.`                 | `util.text`                        |
-
-TS/JS and Python modules are one-per-file, so their labels are the file's
-path relative to the module tree's source root. The same spelling is used
-in the `SessionStart` coupling thumbnail.
-
-Every analyzer except `cycles` accepts `--top`, which caps the Markdown
-ranking while JSON stays complete. `--min-score` filters the Markdown
-ranking for `complexity` (cognitive score) and `cohesion` (LCOM4); for
-`similarity` it is an alias of `--threshold`.
-
-### Output discipline
-
-- **stdout** is reserved for protocol JSON or analyzer reports.
-- **stderr** is for diagnostics, via [`tracing`](https://docs.rs/tracing).
-  Control verbosity with `RUST_LOG` (default `info`).
-- Direct `println!` / `eprintln!`, `unwrap()`, and `expect()` are clippy
-  `deny` so a renegade `dbg!` can't pollute a hook response.
 
 ## Languages
 
 Analysis is split into a language-neutral core and per-language adapters.
 Adding a language means writing one adapter crate and wiring it into the
-`SourceLang` match — the metric implementations themselves are shared.
+`SourceLang` match — the metric implementations are shared.
 
 | Language                | Parser                                                        | Adapter crate |
 | ----------------------- | ------------------------------------------------------------- | ------------- |
@@ -908,98 +358,102 @@ Adding a language means writing one adapter crate and wiring it into the
 | Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser)    | `lens-py`     |
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
-`similarity`, `complexity`, `wrapper`, `delegation`, `cohesion`, `hotspot`,
-`risk`, `function-graph`, `cycles`, `graph-query`, `hubs`, `impact`, `layers`,
-`untested`, `context-span`, `coupling`, and `communities` are wired through the Rust,
-TypeScript / JavaScript, Python, and Go adapters. `visibility` and
-`unreachable` are wired through the Rust and Go adapters only, because
-TypeScript and Python carry no extracted export status; `delegation` runs everywhere but can only apply
-its facade exemption where export status exists.
+Supported source extensions: `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
+`.jsx`, `.mjs`, `.cjs`; `.py`; `.go`.
 
-In TypeScript / JavaScript, a callback passed to a statement-level call is a
-unit like any other, so a vitest / jest suite is not an empty module — which
-matters most to `untested`, whose whole premise is test reachability. A
-callback registered with a recognised harness callee (`describe`, `it`,
-`test`, `suite`, `specify`, `bench`, the `before*` / `after*` hooks, modifier
-chains like `it.skip` included) is named after that callee and its literal
-title, so a finding reads `describe#1("groupFor")::it#2("uses the crate
-name")` rather than `closure#1::closure#2`; other callbacks — IIFEs,
-`app.listen(() => …)` — are extracted as `closure#N`.
+Language coverage per analyzer:
 
-`function-graph` uses a syntactic call-site index rather than type inference
-or macro expansion. Its JSON is meant for external visualization: callers can
-switch graph layers between structure (`fan_in`/`fan_out`, call counts),
-maintainability (`loc`, complexity, MI), and later runtime overlays
-(`total_time_ms`, `self_time_ms`, errors).
+- Most analyzers cover all four language families.
+- `visibility` and `unreachable` judge Rust and Go only — the two adapters
+  that extract export status. `delegation` runs everywhere but can only apply
+  its module-facade exemption where export status exists.
+- `co-change` and `change-entropy` are language-agnostic: they read `git log`
+  and never parse a file, so `.toml`, `.md`, and CI config are covered too.
+- `hotspot`, `risk`, `co-change`, `change-entropy`, and `hidden-coupling`
+  require a git working tree.
+
+`coupling`, `context-span`, and `communities` name modules the way the
+analyzed language does (`crate::analyze::coupling`, `github.com/x/proj/internal/store`,
+`components/Chat`, `util.text`); TS/JS and Python modules are one per file.
+
+In TypeScript / JavaScript, callbacks registered with a recognised test
+harness (`describe`, `it`, `test`, hooks, `it.skip`-style chains) are units
+named after the callee and its literal title — so a vitest / jest suite is not
+an empty module, which matters most to `untested`.
 
 ## Workspace layout
 
 ```
 crates/
-├── agent-lens/    # the CLI binary: clap dispatch, hook handlers, the analyzers
-│                  # and call-graph passes, the agent-lens.toml profile runner,
-│                  # baseline snapshots, and the bundled skills
+├── agent-lens/    # the CLI binary: clap dispatch, hook handlers, analyzers,
+│                  # call-graph passes, profile runner, baselines, skills
 ├── agent-hooks/   # Claude Code & Codex hook protocol schemas + Hook trait
-├── lens-domain/   # language-neutral primitives: TreeNode, APTED, TSED,
-│                  # FunctionDef, CohesionUnit, FunctionComplexity,
-│                  # CouplingReport
-├── lens-rust/     # syn-based Rust adapter (also: cohesion, coupling, wrapper)
+├── lens-domain/   # language-neutral primitives and metric machinery
+│                  # (TreeNode, APTED, TSED, LCOM, IFC, Maintainability Index)
+├── lens-rust/     # syn-based Rust adapter
 ├── lens-ts/       # oxc-based TypeScript / JavaScript adapter
 ├── lens-py/       # ruff_python_parser-based Python adapter
 └── lens-golang/   # tree-sitter-based Go adapter
 ```
 
-`web/` sits beside `crates/` as a separate pnpm workspace: the TanStack Start
-site deployed to GitHub Pages, holding the landing page (`src/routes/index.tsx`,
-with its head metadata and structured data in `src/seo.ts`) and the static
-function-graph viewer (`src/routes/analyze.tsx`) that renders
-`analyze function-graph` JSON.
+Adapters translate a language's AST into the neutral primitives and nothing
+else; `agent-lens` owns everything that needs a whole corpus rather than one
+AST (the call graph, git-churn joins, report rendering, the CLI itself).
 
-Responsibility split:
+`web/` is a separate pnpm workspace: the TanStack Start site deployed to
+GitHub Pages, holding the landing page and the static function-graph viewer.
 
-- **`lens-domain`** owns the metric definitions and the comparison machinery
-  (APTED, TSED, LCOM, IFC, Maintainability Index). It is language-neutral.
-- **`lens-{rust,ts,py,golang}`** translate a language's AST into the neutral
-  primitives and nothing else.
-- **`agent-hooks`** defines the stdin/stdout JSON types for both supported
-  agents and the `Hook` trait handlers implement.
-- **`agent-lens`** binds the above together and owns everything that needs a
-  whole corpus rather than one AST: the call graph and the passes over it, the
-  git-churn joins, report rendering, the profile runner, and the CLI itself.
+## Output discipline
+
+- **stdout** is reserved for protocol JSON or analyzer reports.
+- **stderr** is for diagnostics, via [`tracing`](https://docs.rs/tracing);
+  control verbosity with `RUST_LOG`.
+- Direct `println!` / `eprintln!`, `unwrap()`, and `expect()` are clippy
+  `deny`, so a renegade `dbg!` can't pollute a hook response.
 
 ## Development
 
-All tools are pinned by [mise](https://mise.jdx.dev/). One install gets you
-the Rust toolchain, formatters, linters, security scanners, and mutation
-testing.
+All tools are pinned by [mise](https://mise.jdx.dev/):
 
 ```bash
 mise install      # one-shot setup
 
 mise run fmt      # format everything (cargo fmt, dprint, shfmt, oxfmt)
-mise run lint     # clippy, rustfmt --check, cargo-deny, cargo-audit, prek,
-                  # dprint/shfmt/shellcheck, actionlint/zizmor/ghalint/pinact
-mise run lint:base # base repo lint (dprint, shfmt, shellcheck)
-mise run lint:gha  # GitHub Actions lint (actionlint, zizmor, ghalint, pinact)
+mise run lint     # clippy, cargo-deny/audit, prek, shell + GHA lints
 mise run test     # cargo nextest + doctests + vitest
 mise run ci       # the full lint + test pipeline CI runs
 mise run bench    # Criterion benchmarks (not in CI)
-mise run mutants  # full-workspace cargo-mutants (slow; not in CI by default)
-mise run mutants:rust:diff [base]  # mutation-test Rust changes vs base
+mise run mutants  # full-workspace cargo-mutants (slow; not in normal CI)
+mise run mutants:rust:diff [base]  # diff-scoped mutation tests (what CI runs on a PR)
 mise run selftest # run agent-lens over its own sources (dogfooding)
 ```
 
-`mise run ci` fans out to `ci:base` (prek, dprint/shfmt/shellcheck,
-actionlint/zizmor/ghalint/pinact), `ci:rust`, and `ci:ts`, which together cover
-every required GitHub check — so a green local run means a green PR. The web
-tasks install `web/node_modules` themselves, so `mise run ci` works on a fresh
-checkout.
+A green `mise run ci` means a green PR — it covers every required GitHub
+check, and the web tasks install `web/node_modules` themselves.
+
+On NixOS — or anywhere mise's pre-built binaries won't run — `nix develop`
+provides the same toolchain from nixpkgs; run the underlying commands directly
+(`cargo clippy …`, `cargo nextest run …`, `dprint check`) rather than
+`mise run`. `nix build` builds the CLI and `nix flake check` evaluates every
+flake output. mise and `ci_rust.yml` remain the source of truth for exact tool
+versions.
+
+Testing conventions: prefer [`rstest`](https://docs.rs/rstest) for
+parameterized cases and fixtures, property-based tests where regression risk
+is high, and diff-scoped mutation testing (`mise run mutants:rust:diff`) for
+Rust logic changes. Benchmarked code uses Criterion baselines:
+
+```bash
+git stash && mise run bench:rust --save-baseline base && git stash pop
+mise run bench:rust --baseline base   # reports % change vs the saved run
+```
 
 ### Dogfooding
 
-`agent-lens` is its own first user. The repository's `agent-lens.toml` declares
-one profile per view of this codebase, and `mise run selftest` builds the binary
-and drives every one of them:
+`agent-lens` is its own first user. The repository's `agent-lens.toml`
+declares one profile per view of this codebase, and `mise run selftest` builds
+the binary and drives every one of them (`mise run selftest <profile>` for
+one):
 
 | profile      | what it looks at                                                          |
 | ------------ | ------------------------------------------------------------------------- |
@@ -1012,110 +466,42 @@ and drives every one of them:
 | `history`    | git history repo-wide: which files change together, and how scattered     |
 | `baseline`   | the metric snapshot `baseline create` reduces to numbers                  |
 
-```bash
-mise run selftest                       # every profile, markdown, to stdout
-mise run selftest self                  # one profile
-mise run selftest --format json --out target/agent-lens/self
-```
+This is not a test — there is nothing to assert on a report an agent reads. It
+is the cheapest check for the failure mode unit tests cannot see: an analyzer
+that still returns `Ok` while saying something absurd about code the
+maintainers know by heart. Run it after touching an analyzer and read the diff
+against the previous run, not the report in isolation. Before a commit,
+`mise run selftest changes` is the fast one: an empty report means the pending
+edit introduced no duplicate, no forwarding-only wrapper, and no complexity
+spike.
 
-This is not a test — there is nothing to assert on a report a human or an agent
-reads. It is the cheapest check the project has for the failure mode unit tests
-cannot see: an analyzer that still returns `Ok` while saying something absurd
-about code the maintainers know by heart. Run it after touching an analyzer, and
-read the diff against the previous run rather than the report in isolation. The
-task also fails if any profile exits non-zero, so a panic or a rejected-but-valid
-profile is caught outright.
+### CI
 
-Before a commit, `mise run selftest changes` is the fast one to reach for: every
-tool runs `--diff-only`, so an empty report means the pending edit introduced no
-duplicate, no forwarding-only wrapper, and no complexity spike.
-
-The split between `self` and `self-reach` is not cosmetic. `exclude-tests` is
-what makes the refactor rankings readable, and it is also what removes the
-starting points `untested` and `unreachable` traverse from; a single crate has
-no cross-crate caller for `visibility` to find. Each analyzer says so in its own
-report — the profiles just take it at its word.
-
-Benchmarks use Criterion's baseline mechanism:
-
-```bash
-git stash && mise run bench:rust --save-baseline base && git stash pop
-mise run bench:rust --baseline base   # reports % change vs the saved run
-```
-
-On NixOS — or anywhere mise's pre-built tool binaries won't run — `nix develop`
-provides the same toolchain from nixpkgs instead:
-
-```bash
-nix develop        # rust, cargo-nextest/deny/audit/mutants/llvm-cov, dprint,
-                   # shfmt, shellcheck, actionlint, zizmor, node, pnpm, uv
-
-nix build          # build the CLI (runs the workspace tests in the sandbox)
-nix flake check    # build + evaluate every flake output
-nix fmt            # format the .nix files (nixfmt)
-```
-
-The shell ships the tools, not mise, so run the underlying commands directly
-(`cargo clippy --all-targets --all-features -- -D warnings`, `cargo nextest run
---locked --all-features`, `dprint check`, …) rather than `mise run`. Versions
-track nixpkgs rather than the `mise.*.toml` pins, so mise and `ci_rust.yml`
-remain the source of truth for exact tool versions. direnv users can drop
-`use flake` into a local (git-ignored) `.envrc`.
-
-When adding or changing tests, prefer `rstest` for parameterized cases and
-fixture-style setup. Use property-based tests when regression risk is high,
-especially around core logic.
-
-Run diff-scoped mutation testing whenever practical for Rust logic changes.
-For example, run `mise run mutants:rust:diff origin/main...HEAD` for a PR-style
-diff or omit the argument to compare against `main`. If the changed code has
-Criterion benchmarks, report whether benchmark regression was checked and what
-the result was.
-
-CI (`.github/workflows/`) runs Rust lint/test (`ci_rust.yml`), TypeScript
-lint/test/build (`ci_ts.yml`), the base toolchain lints (`lint_base.yml`),
-GitHub Actions lint (`lint_gha.yml`), CodeQL (Rust, TypeScript, and the
-workflows themselves), dependency review, Trivy, TruffleHog, SBOM generation,
-the flake build (`nix.yml` — on nix/lockfile changes plus a weekly run), and
-PR-diff mutation testing (`mutants.yml` — full runs are available via
-`workflow_dispatch`). Releases share one reusable workflow
-(`release-build.yml`) behind two triggers: `release-latest.yml` for the rolling
-prerelease from `main` and `release-tag.yml` for `v*` tags, which publishes
-build-provenance attestations alongside the archives.
+`.github/workflows/` runs Rust and TypeScript lint/test, base and GHA lints,
+CodeQL, dependency review, Trivy, TruffleHog, SBOM generation, the flake
+build, and PR-diff mutation testing. Releases share one reusable workflow
+behind two triggers: the rolling prerelease from `main`, and `v*` tags, which
+also publish build-provenance attestations.
 
 ## Design principles
 
 - **Signal density over decoration.** Reports go to LLMs. Color, ASCII art,
   emoji, and human-only flourishes don't earn their tokens.
 - **One binary, many surfaces.** Hooks and analyzers ship together so the
-  install + config story stays simple across direct installs, mise, and hook
-  setup commands.
-- **Schema in one place.** Hook protocol types live in `agent-hooks` so a
+  install + config story stays simple.
+- **Schema in one place.** Hook protocol types live in `agent-hooks`, so a
   spec change is a one-crate update.
 - **Fail loudly.** Missing required fields error out non-zero. Unknown fields
   are tolerated so upstream additions don't break existing handlers.
 
 ## Roadmap
 
-The near-term direction is to keep improving the analyzer surfaces that help
-agents make better edit decisions: duplication (of functions, types, and
-statement blocks), wrappers, delegation chains, cohesion, complexity, coupling,
-module communities versus declared boundaries, context span, hotspots, change
-risk, and call-graph structure (hubs, cycles, queries, impact, layers,
-untested, unreachable, visibility).
-
-New metrics are prioritised by _does this change how an agent decides what to
-do?_ rather than _does it look nice in a dashboard?_
-
-Turning those analyzers into checks is the other half. `baseline create` and
-`baseline compare --update` cover it today: a stored metric snapshot, and a
-ratchet that fails a build on a regression rather than on pre-existing debt.
-What is still open there is which analyzers a snapshot can cover — the graph
-analyzers rank individual symbols, and what a snapshot of one should be is not
-settled.
-
-An MCP server front-end is a likely next surface, but the CLI is the source
-of truth.
+Keep improving the analyzer surfaces that help agents make better edit
+decisions, prioritised by _does this change how an agent decides what to do?_
+rather than _does it look nice in a dashboard?_ Turning analyzers into checks
+is the other half — `baseline create` / `baseline compare --update` cover it
+today; which analyzers a snapshot can cover is still open. An MCP server
+front-end is a likely next surface, but the CLI is the source of truth.
 
 ## License
 
