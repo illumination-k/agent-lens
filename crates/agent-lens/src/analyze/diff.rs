@@ -428,6 +428,8 @@ diff --git a/old.rs b/new.rs
     #[case::escaped_quote("\"a\\\"b\"", Some("a\"b"))]
     #[case::backslash("\"a\\\\b\"", Some("a\\b"))]
     #[case::tab("\"a\\tb\"", Some("a\tb"))]
+    #[case::newline("\"a\\nb\"", Some("a\nb"))]
+    #[case::carriage_return("\"a\\rb\"", Some("a\rb"))]
     #[case::octal("\"\\303\\251.rs\"", Some("é.rs"))]
     #[case::unterminated("\"a", None)]
     #[case::bad_escape("\"a\\qb\"", None)]
@@ -472,6 +474,24 @@ diff --git a/old.rs b/new.rs
     /// keying relies on, and `diff.mnemonicPrefix` would replace it.
     /// The forced `--src-prefix`/`--dst-prefix` flags make the batch
     /// path immune, so the edited file still reports its range.
+    /// The batch path only exists when the root resolves: inside a
+    /// repository the canonicalized root comes back, outside none does.
+    /// Pinned directly because a `repo_root_for` that always answered
+    /// `None` would silently degrade every lookup to the per-file
+    /// invocation — same reports, none of the speedup.
+    #[test]
+    fn repo_root_for_resolves_inside_a_repository_and_not_outside() {
+        let (dir, file) = repo_with_history_and_unstaged_edit();
+        let inside = file.parent().unwrap();
+        assert_eq!(
+            repo_root_for(inside),
+            Some(dir.path().canonicalize().unwrap()),
+        );
+
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(repo_root_for(outside.path()), None);
+    }
+
     #[test]
     fn indexed_batch_diff_survives_noprefix_and_mnemonic_config() {
         let (dir, file) = repo_with_history_and_unstaged_edit();
