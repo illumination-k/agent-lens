@@ -216,7 +216,7 @@ fn source_collection_error(path: &Path, error: AnalyzerError) -> HotspotError {
 /// extension so the caller can keep walking other files.
 fn extract_units(file: &Path, source: &str) -> Option<Vec<FunctionComplexity>> {
     let lang = SourceLang::from_path(file)?;
-    match super::dispatch_lens!(lang, source, extract_complexity_units) {
+    match super::index::indexed_complexity_units(lang, source) {
         Ok(u) => Some(u),
         Err(err) => {
             warn!(path = %file.display(), error = %err, "skipping file: parse failed");

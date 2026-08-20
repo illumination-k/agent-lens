@@ -21,7 +21,7 @@ use super::module_label::ModuleLabeler;
 use super::{CrateAnalyzerError, SourceLang, resolve_crate_root};
 
 /// One module in the graph, paired with the file it was read from.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ModuleFile {
     pub(crate) path: ModulePath,
     pub(crate) file: PathBuf,
@@ -32,7 +32,7 @@ pub(crate) struct ModuleFile {
 /// Module paths are stored in the canonical `crate::a::b` shape every
 /// adapter emits; `labeler` carries the language's own spelling of that
 /// shape and is applied when a report is rendered.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ModuleGraph {
     pub(crate) root: PathBuf,
     pub(crate) labeler: ModuleLabeler,
@@ -81,7 +81,10 @@ impl_into_module_file!(
 
 /// The one axis on which the analyzers disagree about what counts as a
 /// usable root.
-#[derive(Debug, Clone, Copy)]
+///
+/// `Eq`/`Hash` because the policy is half of the [`AnalysisIndex`] key
+/// an assembled graph is shared under (the root path is the other).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GraphPolicy {
     /// Whether a `go.mod` directory that walks to zero packages is an
     /// error rather than an empty graph. An explicit Go module marker is
@@ -115,6 +118,20 @@ impl GraphPolicy {
 /// directory can hold `.py` files, so the only honest probe is to walk
 /// it and see whether anything came back.
 pub(crate) fn build_graph(
+    path: &Path,
+    policy: GraphPolicy,
+) -> Result<ModuleGraph, CrateAnalyzerError> {
+    match super::index::AnalysisIndex::active() {
+        Some(index) => index
+            .module_graph((path.to_path_buf(), policy), || {
+                build_graph_uncached(path, policy)
+            })
+            .map(|graph| graph.as_ref().clone()),
+        None => build_graph_uncached(path, policy),
+    }
+}
+
+fn build_graph_uncached(
     path: &Path,
     policy: GraphPolicy,
 ) -> Result<ModuleGraph, CrateAnalyzerError> {

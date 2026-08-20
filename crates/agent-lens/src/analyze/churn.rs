@@ -147,6 +147,24 @@ impl ChurnScope {
     /// names. That is good enough for ranking, and it is what `hotspot`
     /// and `risk` have always reported.
     pub(crate) fn collect(&self, since: Option<&str>) -> Result<Vec<FileChurn>, ChurnError> {
+        // `hotspot` and `risk` read the same `git log`; under an active
+        // analysis index a profile run walks history once.
+        match super::index::AnalysisIndex::active() {
+            Some(index) => index
+                .churn(
+                    (
+                        self.repo_root.clone(),
+                        self.targets.clone(),
+                        since.map(str::to_owned),
+                    ),
+                    || self.collect_uncached(since),
+                )
+                .map(|churn| churn.as_ref().clone()),
+            None => self.collect_uncached(since),
+        }
+    }
+
+    fn collect_uncached(&self, since: Option<&str>) -> Result<Vec<FileChurn>, ChurnError> {
         let commits = self.raw_commits(since)?;
         let mut counts: BTreeMap<String, u32> = BTreeMap::new();
         for commit in commits {

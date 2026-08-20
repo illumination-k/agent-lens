@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_lens::analyze::OutputFormat;
+use agent_lens::analyze::{AnalysisIndexScope, OutputFormat};
 use agent_lens::config::{self, ConfigError};
 use tracing::{info, warn};
 
@@ -134,6 +134,10 @@ pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error
         .or(resolved.profile.format)
         .unwrap_or(OutputFormat::Json);
 
+    // One analysis index for the whole tool loop: the profile's
+    // analyzers walk the same tree, so parses and assembled graphs are
+    // shared instead of redone per tool.
+    let _index = AnalysisIndexScope::activate();
     let mut sections: Vec<(config::ToolName, String)> = Vec::new();
     for tool in resolved.tools() {
         sections.push((tool, resolved.run_tool(tool, format)?));

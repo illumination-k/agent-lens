@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct AnalyzePathFilter {
     only_tests: bool,
     exclude_tests: bool,
