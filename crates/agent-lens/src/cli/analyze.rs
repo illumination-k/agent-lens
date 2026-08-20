@@ -24,6 +24,11 @@ use super::args::{
 use super::write_stdout_line;
 
 pub(super) fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
+    // Even a single tool repeats work against itself: a diff-gated run
+    // asks git about every file, and a delegation build extracts the
+    // same wrapper facts twice. The index turns those into one batch
+    // `git diff` and one extraction, and costs a passthrough otherwise.
+    let _index = agent_lens::analyze::AnalysisIndexScope::activate();
     write_stdout_line(&cmd.run()?)
 }
 

@@ -1,5 +1,8 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use super::index::AnalysisIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRange {
@@ -23,7 +26,7 @@ pub(crate) fn overlaps_any(start: usize, end: usize, ranges: &[LineRange]) -> bo
 /// changed?" — and differ only in the diff they ask. Modelling them as
 /// one value rather than a `bool` plus an `Option<String>` keeps an
 /// analyzer from holding a pair that contradicts itself.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum DiffScope {
     /// No gate: every unit is reported.
     #[default]
@@ -89,7 +92,120 @@ pub fn parse_diff_range(range: &str) -> Result<String, String> {
 /// that fails. A failure is worth a `warn`: an unresolvable range would
 /// otherwise read as "this commit changed nothing", which is exactly
 /// what a caller batching over history must not silently believe.
+///
+/// Under an active [`AnalysisIndex`] the answer comes from one
+/// `git diff` over the file's whole repository, memoized per
+/// `(repository, scope)` — the per-file `git diff` this function
+/// otherwise spawns is a process per file *per analyzer*, which is
+/// where a diff-gated profile run used to spend most of its time.
 pub fn changed_line_ranges(path: &Path, scope: &DiffScope) -> Vec<LineRange> {
+    if !scope.is_enabled() {
+        return Vec::new();
+    }
+    if let Some(index) = AnalysisIndex::active()
+        && let Some(ranges) = indexed_changed_line_ranges(&index, path, scope)
+    {
+        return ranges;
+    }
+    per_file_changed_line_ranges(path, scope)
+}
+
+/// The batch path: resolve the file's repository root (memoized per
+/// directory), diff the whole repository once (memoized per root and
+/// scope), and look the file up. `None` falls back to the per-file
+/// invocation — the file has no resolvable canonical path or no
+/// enclosing repository, and the per-file path owns the warn for that.
+fn indexed_changed_line_ranges(
+    index: &AnalysisIndex,
+    path: &Path,
+    scope: &DiffScope,
+) -> Option<Vec<LineRange>> {
+    let abs = path.canonicalize().ok()?;
+    let dir = if abs.is_dir() {
+        abs.as_path()
+    } else {
+        abs.parent()?
+    };
+    let root = index.repo_root(dir.to_path_buf(), || repo_root_for(dir));
+    let root = root.as_ref().clone()?;
+    let map = index.repo_changed_ranges((root.clone(), scope.clone()), || {
+        diff_repository(&root, scope)
+    });
+    Some(map.get(&abs).cloned().unwrap_or_default())
+}
+
+/// The enclosing working-tree root of `dir`, or `None` outside any
+/// repository. Canonicalized so lookups against canonicalized file
+/// paths agree on one spelling.
+fn repo_root_for(dir: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?;
+    PathBuf::from(root.trim_end()).canonicalize().ok()
+}
+
+/// One `git diff -U0` over the whole repository, split per file and
+/// keyed by canonical absolute path. Failures warn and come back empty
+/// for the same reason the per-file invocation's do.
+fn diff_repository(root: &Path, scope: &DiffScope) -> HashMap<PathBuf, Vec<LineRange>> {
+    let range = match scope {
+        DiffScope::Disabled => return HashMap::new(),
+        DiffScope::WorkingTree => None,
+        DiffScope::Range(range) => Some(range.as_str()),
+    };
+    let mut cmd = Command::new("git");
+    // The prefixes are forced because the parser keys files off
+    // `+++ b/…`: a user's `diff.noprefix` / `diff.mnemonicPrefix`
+    // config would otherwise change the header shape and make every
+    // file read as unchanged. `--no-color` guards the hunk headers
+    // against `color.ui=always` the same way.
+    cmd.args([
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--unified=0",
+    ]);
+    if let Some(range) = range {
+        cmd.arg(range);
+    }
+    cmd.current_dir(root);
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(source) => {
+            tracing::warn!(root = %root.display(), %source, "could not run `git diff`");
+            return HashMap::new();
+        }
+    };
+    if !output.status.success() {
+        tracing::warn!(
+            root = %root.display(),
+            range = range.unwrap_or("<working tree>"),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "`git diff` failed; treating the repository as unchanged",
+        );
+        return HashMap::new();
+    }
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return HashMap::new();
+    };
+    parse_unified_zero_by_file(&stdout)
+        .into_iter()
+        .map(|(rel, ranges)| {
+            let joined = root.join(rel);
+            (joined.canonicalize().unwrap_or(joined), ranges)
+        })
+        .collect()
+}
+
+fn per_file_changed_line_ranges(path: &Path, scope: &DiffScope) -> Vec<LineRange> {
     let range = match scope {
         DiffScope::Disabled => return Vec::new(),
         DiffScope::WorkingTree => None,
@@ -135,35 +251,99 @@ fn diff_invocation(path: &Path) -> (&Path, &Path) {
 }
 
 fn parse_unified_zero_hunks(diff: &str) -> Vec<LineRange> {
-    let mut out = Vec::new();
+    diff.lines().filter_map(parse_hunk_header).collect()
+}
+
+/// The post-image range of one `@@ -a,b +c,d @@` hunk header, or `None`
+/// for any other line (and for pure deletions, whose post-image count
+/// is zero — no surviving line changed).
+fn parse_hunk_header(line: &str) -> Option<LineRange> {
+    let header = line.strip_prefix("@@")?.split("@@").next()?;
+    let plus = header
+        .split_whitespace()
+        .find(|part| part.starts_with('+'))?;
+    let coords = plus.trim_start_matches('+');
+    let mut parts = coords.split(',');
+    let start = parts.next().and_then(|x| x.parse::<usize>().ok())?;
+    let count = parts
+        .next()
+        .and_then(|x| x.parse::<usize>().ok())
+        .unwrap_or(1);
+    if count == 0 {
+        return None;
+    }
+    Some(LineRange {
+        start,
+        end: start.saturating_add(count.saturating_sub(1)),
+    })
+}
+
+/// Split a whole-repository unified diff into per-file post-image
+/// ranges, keyed by the repository-relative path each `+++ b/…` header
+/// names. Deleted files (`+++ /dev/null`) contribute nothing, and a
+/// renamed file is keyed by its new name — the name the analyzers see
+/// on disk.
+fn parse_unified_zero_by_file(diff: &str) -> HashMap<String, Vec<LineRange>> {
+    let mut out: HashMap<String, Vec<LineRange>> = HashMap::new();
+    let mut current: Option<String> = None;
     for line in diff.lines() {
-        let Some(rest) = line.strip_prefix("@@") else {
-            continue;
-        };
-        let Some(header) = rest.split("@@").next() else {
-            continue;
-        };
-        let Some(plus) = header.split_whitespace().find(|part| part.starts_with('+')) else {
-            continue;
-        };
-        let coords = plus.trim_start_matches('+');
-        let mut parts = coords.split(',');
-        let Some(start) = parts.next().and_then(|x| x.parse::<usize>().ok()) else {
-            continue;
-        };
-        let count = parts
-            .next()
-            .and_then(|x| x.parse::<usize>().ok())
-            .unwrap_or(1);
-        if count == 0 {
+        if let Some(target) = line.strip_prefix("+++ ") {
+            current = diff_target_path(target);
             continue;
         }
-        out.push(LineRange {
-            start,
-            end: start.saturating_add(count.saturating_sub(1)),
-        });
+        if let (Some(range), Some(file)) = (parse_hunk_header(line), &current) {
+            out.entry(file.clone()).or_default().push(range);
+        }
     }
     out
+}
+
+/// The repository-relative path a `+++ ` target names, with git's
+/// C-style quoting undone; `None` for `/dev/null` or an unparseable
+/// spelling (that file then reads as unchanged, the same degraded
+/// answer a failed per-file diff gives).
+fn diff_target_path(target: &str) -> Option<String> {
+    let target = target.trim_end();
+    let unquoted = if target.starts_with('"') {
+        unquote_c_style(target)?
+    } else {
+        target.to_owned()
+    };
+    if unquoted == "/dev/null" {
+        return None;
+    }
+    unquoted.strip_prefix("b/").map(str::to_owned)
+}
+
+/// Undo git's `core.quotePath` C-style quoting: surrounding quotes,
+/// backslash escapes, and octal byte escapes for non-ASCII names.
+fn unquote_c_style(quoted: &str) -> Option<String> {
+    let inner = quoted.strip_prefix('"')?.strip_suffix('"')?;
+    let mut bytes = Vec::with_capacity(inner.len());
+    let mut chars = inner.bytes().peekable();
+    while let Some(b) = chars.next() {
+        if b != b'\\' {
+            bytes.push(b);
+            continue;
+        }
+        match chars.next()? {
+            b'\\' => bytes.push(b'\\'),
+            b'"' => bytes.push(b'"'),
+            b'n' => bytes.push(b'\n'),
+            b't' => bytes.push(b'\t'),
+            b'r' => bytes.push(b'\r'),
+            first @ b'0'..=b'7' => {
+                let mut value = u32::from(first - b'0');
+                while let Some(&digit @ b'0'..=b'7') = chars.peek() {
+                    value = value * 8 + u32::from(digit - b'0');
+                    chars.next();
+                }
+                bytes.push(u8::try_from(value).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    String::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]
@@ -192,6 +372,117 @@ mod tests {
                 LineRange { start: 3, end: 4 },
                 LineRange { start: 20, end: 20 },
             ]
+        );
+    }
+
+    #[test]
+    fn parses_a_whole_repository_diff_per_file() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,0 +3,2 @@
++a
++b
+diff --git a/gone.rs b/gone.rs
+--- a/gone.rs
++++ /dev/null
+@@ -1,4 +0,0 @@
+-x
+diff --git \"a/sp ace.rs\" \"b/sp ace.rs\"
+--- \"a/sp ace.rs\"
++++ \"b/sp ace.rs\"
+@@ -10 +20 @@
+-x
++y
+diff --git a/old.rs b/new.rs
+--- a/old.rs
++++ b/new.rs
+@@ -5,1 +7,3 @@
++z
+";
+        let got = parse_unified_zero_by_file(diff);
+        assert_eq!(
+            got.get("src/a.rs"),
+            Some(&vec![LineRange { start: 3, end: 4 }]),
+        );
+        assert_eq!(
+            got.get("sp ace.rs"),
+            Some(&vec![LineRange { start: 20, end: 20 }]),
+            "quoted paths are unquoted",
+        );
+        assert_eq!(
+            got.get("new.rs"),
+            Some(&vec![LineRange { start: 7, end: 9 }]),
+            "a rename is keyed by its new name",
+        );
+        assert_eq!(
+            got.len(),
+            3,
+            "the deleted file contributes nothing: {got:?}"
+        );
+    }
+
+    #[rstest]
+    #[case::plain("\"a b\"", Some("a b"))]
+    #[case::escaped_quote("\"a\\\"b\"", Some("a\"b"))]
+    #[case::backslash("\"a\\\\b\"", Some("a\\b"))]
+    #[case::tab("\"a\\tb\"", Some("a\tb"))]
+    #[case::octal("\"\\303\\251.rs\"", Some("é.rs"))]
+    #[case::unterminated("\"a", None)]
+    #[case::bad_escape("\"a\\qb\"", None)]
+    fn unquotes_c_style_paths(#[case] quoted: &str, #[case] want: Option<&str>) {
+        assert_eq!(unquote_c_style(quoted).as_deref(), want);
+    }
+
+    /// The batch path answers exactly what the per-file path answers,
+    /// for every scope kind, including the file the diff never touched.
+    /// This is the equivalence the index-backed fast path stands on.
+    #[rstest]
+    #[case::working_tree(DiffScope::WorkingTree)]
+    #[case::committed_range(DiffScope::Range("HEAD~1..HEAD".to_owned()))]
+    fn indexed_batch_diff_matches_the_per_file_diff(#[case] scope: DiffScope) {
+        let (dir, file) = repo_with_history_and_unstaged_edit();
+        let untouched = dir.path().join("untouched.rs");
+        std::fs::write(&untouched, b"fn quiet() {}\n").unwrap();
+
+        let per_file = (
+            changed_line_ranges(&file, &scope),
+            changed_line_ranges(&untouched, &scope),
+        );
+        let scope_guard = crate::analyze::AnalysisIndexScope::activate();
+        let indexed = (
+            changed_line_ranges(&file, &scope),
+            changed_line_ranges(&untouched, &scope),
+        );
+        assert_eq!(per_file, indexed);
+        assert!(
+            !indexed.0.is_empty(),
+            "the fixture's edited file must report ranges under {scope:?}",
+        );
+        let (hits, _) = scope_guard.index().stats();
+        assert!(
+            hits > 0,
+            "the second lookup reuses the memoized repository diff",
+        );
+    }
+
+    /// A user's diff-shape config must not change what the batch parser
+    /// sees: `diff.noprefix` would drop the `b/` prefix the per-file
+    /// keying relies on, and `diff.mnemonicPrefix` would replace it.
+    /// The forced `--src-prefix`/`--dst-prefix` flags make the batch
+    /// path immune, so the edited file still reports its range.
+    #[test]
+    fn indexed_batch_diff_survives_noprefix_and_mnemonic_config() {
+        let (dir, file) = repo_with_history_and_unstaged_edit();
+        run_git(dir.path(), &["config", "diff.noprefix", "true"]);
+        run_git(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
+
+        let _scope = crate::analyze::AnalysisIndexScope::activate();
+        let ranges = changed_line_ranges(&file, &DiffScope::WorkingTree);
+        assert!(
+            ranges.iter().any(|r| r.overlaps(2, 2)),
+            "expected the unstaged edit on line 2, got {ranges:?}",
         );
     }
 

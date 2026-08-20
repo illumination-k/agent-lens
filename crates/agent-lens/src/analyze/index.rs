@@ -33,9 +33,12 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
+use lens_domain::{
+    CallShape, FileChurn, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding,
+};
 
 use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::diff::{DiffScope, LineRange};
 use super::module_graph::{GraphPolicy, ModuleGraph};
 use super::roots::AnalyzeRoots;
 use super::{AnalyzerError, SourceLang, dispatch_lens};
@@ -84,6 +87,15 @@ pub struct AnalysisIndex {
     interface_shapes: Table<(SourceKey, String), Vec<InterfaceShape>>,
     call_graphs: Table<CallGraphKey, CallGraph>,
     module_graphs: Table<ModuleGraphKey, ModuleGraph>,
+    /// Enclosing working-tree root per directory (`None`: outside any
+    /// repository), so the batch diff resolves each directory once.
+    repo_roots: Table<PathBuf, Option<PathBuf>>,
+    /// One whole-repository `git diff` per (root, scope), split into
+    /// per-file changed ranges keyed by canonical absolute path.
+    repo_changed_ranges: Table<(PathBuf, DiffScope), HashMap<PathBuf, Vec<LineRange>>>,
+    /// Per-file commit counts per (repository root, targets, `--since`
+    /// window) — `hotspot` and `risk` read the same `git log`.
+    churn: Table<(PathBuf, Vec<PathBuf>, Option<String>), Vec<FileChurn>>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -168,6 +180,43 @@ impl AnalysisIndex {
         compute: impl FnOnce() -> Result<ModuleGraph, E>,
     ) -> Result<Arc<ModuleGraph>, E> {
         self.memoize(&self.module_graphs, key, compute)
+    }
+
+    pub(crate) fn repo_root(
+        &self,
+        dir: PathBuf,
+        compute: impl FnOnce() -> Option<PathBuf>,
+    ) -> Arc<Option<PathBuf>> {
+        self.memoize_ok(&self.repo_roots, dir, compute)
+    }
+
+    pub(crate) fn repo_changed_ranges(
+        &self,
+        key: (PathBuf, DiffScope),
+        compute: impl FnOnce() -> HashMap<PathBuf, Vec<LineRange>>,
+    ) -> Arc<HashMap<PathBuf, Vec<LineRange>>> {
+        self.memoize_ok(&self.repo_changed_ranges, key, compute)
+    }
+
+    pub(crate) fn churn<E>(
+        &self,
+        key: (PathBuf, Vec<PathBuf>, Option<String>),
+        compute: impl FnOnce() -> Result<Vec<FileChurn>, E>,
+    ) -> Result<Arc<Vec<FileChurn>>, E> {
+        self.memoize(&self.churn, key, compute)
+    }
+
+    /// [`Self::memoize`] for computations that cannot fail.
+    fn memoize_ok<K: Eq + Hash, V>(
+        &self,
+        table: &Table<K, V>,
+        key: K,
+        compute: impl FnOnce() -> V,
+    ) -> Arc<V> {
+        match self.memoize::<_, _, std::convert::Infallible>(table, key, || Ok(compute())) {
+            Ok(value) => value,
+            Err(never) => match never {},
+        }
     }
 
     /// Look `key` up in `table`, running `compute` on a miss. The lock
