@@ -25,6 +25,7 @@
 //! * `schema_version: 1` — initial shape.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -58,7 +59,10 @@ impl FunctionGraphAnalyzer {
     ) -> Result<String, AnalyzerError> {
         let roots = roots.into();
         let graph = self.builder.build(&roots)?;
-        let report = Report::build(&roots, graph);
+        // This analyzer serializes the graph verbatim, so it moves the
+        // node and edge tables into the report; a graph shared through
+        // the analysis index is cloned rather than unwrapped.
+        let report = Report::build(&roots, Arc::unwrap_or_clone(graph));
         render_report(&report, format, || format_markdown(&report))
     }
 }

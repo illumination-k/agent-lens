@@ -20,8 +20,7 @@ use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
 use super::{
-    AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64,
-    read_source,
+    AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, format_optional_f64, read_source,
 };
 
 analyzer_options! {
@@ -99,7 +98,10 @@ impl ComplexityAnalyzer {
     /// directory-mode report.
     fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
-        let mut functions = extract_units(lang, &source).map_err(AnalyzerError::Parse)?;
+        // Through the shared analysis index: under an active
+        // `AnalysisIndexScope` this is the same fact a call-graph build
+        // attaches as node weights, so a profile run parses once.
+        let mut functions = super::index::indexed_complexity_units(lang, &source)?;
         self.filter
             .retain_changed(&mut functions, &file.path, |f| (f.start_line, f.end_line));
         if functions.is_empty() {
@@ -110,12 +112,6 @@ impl ComplexityAnalyzer {
             functions,
         }))
     }
-}
-
-type BoxedError = Box<dyn std::error::Error + Send + Sync>;
-
-fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<FunctionComplexity>, BoxedError> {
-    super::dispatch_lens!(lang, source, extract_complexity_units)
 }
 
 /// Per-file slice of the report. Owns the display path so directory mode

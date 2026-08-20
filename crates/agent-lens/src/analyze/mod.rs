@@ -30,6 +30,7 @@ pub mod hidden_coupling;
 pub mod hotspot;
 pub mod hubs;
 pub mod impact;
+pub mod index;
 pub mod layers;
 mod module_graph;
 pub(crate) mod module_label;
@@ -69,6 +70,7 @@ pub use hidden_coupling::{HiddenCouplingAnalyzer, HiddenCouplingError};
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use hubs::HubsAnalyzer;
 pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
+pub use index::{AnalysisIndex, AnalysisIndexScope};
 pub use layers::LayersAnalyzer;
 pub use risk::{RiskAnalyzer, RiskError};
 pub use search::{DEFAULT_SEARCH_LIMIT, FuzzyMode, RankMode, SearchAnalyzer};
@@ -117,7 +119,7 @@ pub enum OutputFormat {
 /// [`lens_ts::Dialect`] so the same dispatch covers `.ts` / `.tsx` /
 /// `.jsx` / `.js` / `.mjs` / `.cjs` without re-deriving it at every call
 /// site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SourceLang {
     Rust,
     TypeScript(lens_ts::Dialect),

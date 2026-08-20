@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 /// Construct with [`AnalyzeRoots::new`], or from anything a single-root
 /// caller already holds — `&Path`, `&PathBuf`, `PathBuf` — via `From`, so
 /// `analyzer.analyze(dir, format)` keeps working unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnalyzeRoots {
     roots: Vec<PathBuf>,
     base: PathBuf,

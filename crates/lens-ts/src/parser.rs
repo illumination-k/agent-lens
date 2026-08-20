@@ -43,7 +43,7 @@ use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 /// JavaScript variants additionally carry the right module-kind (script
 /// vs ESM vs CommonJS) so analyses don't trip over `module.exports = ...`
 /// in `.cjs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Dialect {
     /// `.ts` — TypeScript without JSX.
     #[default]

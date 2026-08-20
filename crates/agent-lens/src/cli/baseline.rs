@@ -37,6 +37,10 @@ pub(super) fn run_baseline(cmd: BaselineCommand) -> Result<ExitCode, Box<dyn std
 /// profile can therefore serve `run` (markdown for the agent), `baseline
 /// create`, and `baseline compare` without a second config.
 fn snapshot(resolved: &ResolvedProfile) -> Result<Baseline, Box<dyn std::error::Error>> {
+    // One analysis index per snapshot: the profile's analyzers walk the
+    // same tree, so parses and assembled graphs are shared instead of
+    // redone per tool.
+    let _index = agent_lens::analyze::AnalysisIndexScope::activate();
     let mut tools = Vec::new();
     let mut skipped = Vec::new();
     for tool in resolved.tools() {

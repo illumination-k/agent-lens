@@ -18,11 +18,13 @@ pub(crate) mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
 use lens_rust::CallIndexOptions;
 
 use super::cargo_meta::CrateNameCache;
+use super::index::{AnalysisIndex, SourceKey};
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, LineRange, SourceFile, SourceLang,
     changed_line_ranges, collect_source_files, read_source,
@@ -165,7 +167,11 @@ pub(crate) fn match_symbol(graph: &CallGraph, symbol: &str) -> Vec<usize> {
 /// Scans source trees into [`FileGraphInput`]s and assembles the
 /// [`CallGraph`]. Shared by `analyze function-graph` and the analyzer
 /// family so test/path filtering semantics stay identical everywhere.
-#[derive(Debug, Default, Clone)]
+///
+/// `Eq`/`Hash` cover the whole configuration because a builder clone
+/// paired with its root set is the [`AnalysisIndex`] key under which an
+/// assembled graph is shared between analyzers.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CallGraphBuilder {
     only_tests: bool,
     exclude_tests: bool,
@@ -257,7 +263,25 @@ impl CallGraphBuilder {
         Ok(out)
     }
 
-    pub(crate) fn build(&self, roots: &AnalyzeRoots) -> Result<CallGraph, AnalyzerError> {
+    /// Build the graph, sharing the result through the active
+    /// [`AnalysisIndex`] when one is installed: two analyzers with the
+    /// same configuration and roots then assemble the graph once. The
+    /// per-file extractions inside [`Self::scan_file`] go through the
+    /// index too, so even builds that differ only in a fact flag
+    /// (delegation, interfaces) re-parse nothing.
+    ///
+    /// Returned behind an `Arc` so a shared graph is handed out without
+    /// cloning its node and edge tables; analyzers only ever read it.
+    pub(crate) fn build(&self, roots: &AnalyzeRoots) -> Result<Arc<CallGraph>, AnalyzerError> {
+        match AnalysisIndex::active() {
+            Some(index) => {
+                index.call_graph((self.clone(), roots.clone()), || self.build_uncached(roots))
+            }
+            None => self.build_uncached(roots).map(Arc::new),
+        }
+    }
+
+    fn build_uncached(&self, roots: &AnalyzeRoots) -> Result<CallGraph, AnalyzerError> {
         let filter = self.collection_filter().compile(roots.base())?;
         let mut files = Vec::new();
         let mut crate_cache = CrateNameCache::new();
@@ -316,19 +340,26 @@ impl CallGraphBuilder {
             _ => None,
         };
         let module = module_path::module_path_for(root, file, lang, crate_info.as_ref(), &source);
-        let mut functions = extract_function_shapes(lang, &source, &module)?;
-        functions.retain(|f| self.includes_function(f, path_is_test));
+        // Every fact below sits behind an `Arc` so a fact served from
+        // the analysis index is shared, not deep-cloned. The test
+        // filter therefore becomes the `included` mask instead of a
+        // `retain` on an owned list.
+        let functions = extract_function_shapes(lang, &source, &module)?;
+        let included = functions
+            .iter()
+            .map(|f| self.includes_function(f, path_is_test))
+            .collect();
         let calls = extract_call_shapes(lang, &source, &module, !self.exclude_tests)?;
-        let complexity = extract_complexity(lang, &source)?;
+        // Complexity (node weights) and wrapper findings (delegation
+        // facts) are the same facts `analyze complexity` and `analyze
+        // wrapper` report, so both go through the shared index helpers.
+        let complexity = super::index::shared_complexity_units(lang, &source)?;
         let wrappers = self
             .delegation_facts
-            .then(|| extract_wrappers(lang, &source))
+            .then(|| super::index::shared_wrapper_findings(lang, &source))
             .transpose()?;
         let interfaces = (self.interface_facts && matches!(lang, SourceLang::Go))
-            .then(|| {
-                lens_golang::extract_interface_shapes_with_module(&source, &module)
-                    .map_err(parse_err)
-            })
+            .then(|| extract_interfaces(lang, &source, &module))
             .transpose()?
             .unwrap_or_default();
 
@@ -338,6 +369,7 @@ impl CallGraphBuilder {
             module,
             path_is_test,
             functions,
+            included,
             calls,
             complexity,
             wrappers,
@@ -421,7 +453,26 @@ where
     AnalyzerError::Parse(Box::new(e))
 }
 
+// Each extraction below consults the active [`AnalysisIndex`] before
+// parsing, keyed by the source *content*, so any two graph builds — and
+// the per-file analyzers that extract the same facts — share one parse
+// per file however their configurations differ. Without an active
+// index they are plain extractions.
+
 fn extract_function_shapes(
+    lang: SourceLang,
+    source: &str,
+    module: &str,
+) -> Result<Arc<Vec<FunctionShape>>, AnalyzerError> {
+    match AnalysisIndex::active() {
+        Some(index) => index.function_shapes(SourceKey::new(lang, source), module, || {
+            extract_function_shapes_uncached(lang, source, module)
+        }),
+        None => extract_function_shapes_uncached(lang, source, module).map(Arc::new),
+    }
+}
+
+fn extract_function_shapes_uncached(
     lang: SourceLang,
     source: &str,
     module: &str,
@@ -443,6 +494,24 @@ fn extract_function_shapes(
 }
 
 fn extract_call_shapes(
+    lang: SourceLang,
+    source: &str,
+    module: &str,
+    include_cfg_test_blocks: bool,
+) -> Result<Arc<Vec<CallShape>>, AnalyzerError> {
+    match AnalysisIndex::active() {
+        Some(index) => index.call_shapes(
+            SourceKey::new(lang, source),
+            module,
+            include_cfg_test_blocks,
+            || extract_call_shapes_uncached(lang, source, module, include_cfg_test_blocks),
+        ),
+        None => extract_call_shapes_uncached(lang, source, module, include_cfg_test_blocks)
+            .map(Arc::new),
+    }
+}
+
+fn extract_call_shapes_uncached(
     lang: SourceLang,
     source: &str,
     module: &str,
@@ -469,28 +538,34 @@ fn extract_call_shapes(
     }
 }
 
-fn extract_complexity(
+/// Interface method sets for one (Go) file. Only collected when the
+/// builder was asked for interface facts.
+fn extract_interfaces(
     lang: SourceLang,
     source: &str,
-) -> Result<Vec<FunctionComplexity>, AnalyzerError> {
-    match lang {
-        SourceLang::Rust => lens_rust::extract_complexity_units(source).map_err(parse_err),
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_complexity_units(source, dialect).map_err(parse_err)
-        }
-        SourceLang::Python => lens_py::extract_complexity_units(source).map_err(parse_err),
-        SourceLang::Go => lens_golang::extract_complexity_units(source).map_err(parse_err),
+    module: &str,
+) -> Result<Arc<Vec<InterfaceShape>>, AnalyzerError> {
+    match AnalysisIndex::active() {
+        Some(index) => index.interface_shapes(SourceKey::new(lang, source), module, || {
+            extract_interfaces_uncached(source, module)
+        }),
+        None => extract_interfaces_uncached(source, module).map(Arc::new),
     }
 }
 
-/// Thin-wrapper findings for one file, from the same detector `analyze
-/// wrapper` reports. Only collected when the builder was asked for
-/// delegation facts.
-fn extract_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, AnalyzerError> {
-    super::dispatch_lens!(lang, source, find_wrappers).map_err(AnalyzerError::Parse)
+fn extract_interfaces_uncached(
+    source: &str,
+    module: &str,
+) -> Result<Vec<InterfaceShape>, AnalyzerError> {
+    lens_golang::extract_interface_shapes_with_module(source, module).map_err(parse_err)
 }
 
 /// Everything the graph needs from one scanned source file.
+///
+/// The fact lists sit behind `Arc`s because they may be shared with the
+/// [`AnalysisIndex`] (and through it with other builds and analyzers);
+/// the graph only reads them. What is build-specific — which functions
+/// the test filter admits — lives in the parallel `included` mask.
 pub(crate) struct FileGraphInput {
     pub(crate) file: String,
     pub(crate) language: GraphLanguage,
@@ -498,15 +573,18 @@ pub(crate) struct FileGraphInput {
     /// inline modules below it).
     pub(crate) module: String,
     pub(crate) path_is_test: bool,
-    pub(crate) functions: Vec<FunctionShape>,
-    pub(crate) calls: Vec<CallShape>,
-    pub(crate) complexity: Vec<FunctionComplexity>,
+    pub(crate) functions: Arc<Vec<FunctionShape>>,
+    /// Parallel to `functions`: whether the builder's test filter
+    /// admits each one as a graph node.
+    pub(crate) included: Vec<bool>,
+    pub(crate) calls: Arc<Vec<CallShape>>,
+    pub(crate) complexity: Arc<Vec<FunctionComplexity>>,
     /// Thin-wrapper findings for this file, or `None` when delegation
     /// facts were not requested.
-    pub(crate) wrappers: Option<Vec<WrapperFinding>>,
+    pub(crate) wrappers: Option<Arc<Vec<WrapperFinding>>>,
     /// Interface declarations in this file. Empty unless interface
     /// facts were requested (and the language extracts them).
-    pub(crate) interfaces: Vec<InterfaceShape>,
+    pub(crate) interfaces: Arc<Vec<InterfaceShape>>,
 }
 
 impl SourceLang {
@@ -524,8 +602,10 @@ impl SourceLang {
 /// list, sorted by qualified name (declarations shadowing each other
 /// across files stay distinct entries — a method set is a method set).
 fn collect_interfaces(files: Vec<FileGraphInput>) -> Vec<InterfaceShape> {
-    let mut interfaces: Vec<InterfaceShape> =
-        files.into_iter().flat_map(|file| file.interfaces).collect();
+    let mut interfaces: Vec<InterfaceShape> = files
+        .into_iter()
+        .flat_map(|file| file.interfaces.iter().cloned().collect::<Vec<_>>())
+        .collect();
     interfaces.sort_by(|a, b| {
         a.qualified_name
             .known_value()
@@ -551,8 +631,14 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<CallGraphNode> {
     let mut nodes = Vec::new();
     for file in files {
         let complexity = ComplexityIndex::new(&file.complexity);
-        let wrappers = file.wrappers.as_deref().map(WrapperIndex::new);
-        for f in &file.functions {
+        let wrappers = file
+            .wrappers
+            .as_ref()
+            .map(|w| WrapperIndex::new(w.as_slice()));
+        for (f, &included) in file.functions.iter().zip(&file.included) {
+            if !included {
+                continue;
+            }
             let metrics = complexity.get(f);
             nodes.push(CallGraphNode {
                 id: node_id(&file.file, f),
@@ -705,7 +791,7 @@ fn build_edges(
     let mut by_module: BTreeMap<String, ResolutionCallCounts> = BTreeMap::new();
 
     for file in files {
-        for site in &file.calls {
+        for site in file.calls.iter() {
             let from = site
                 .caller_qualified_name()
                 .and_then(|caller| caller_index.resolve_in_file(&file.file, caller));

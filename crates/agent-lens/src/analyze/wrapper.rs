@@ -120,7 +120,11 @@ impl WrapperAnalyzer {
     /// a wrapper nor a call site are dropped at the next stage.
     fn scan_file(&self, file: &SourceFile) -> Result<Option<PerFile>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
-        let mut findings = run_wrappers(lang, &source).map_err(AnalyzerError::Parse)?;
+        // Through the shared analysis index: under an active
+        // `AnalysisIndexScope` this is the same fact a delegation-facts
+        // call-graph build attaches to its nodes, so a profile run
+        // detects wrappers once.
+        let mut findings = super::index::indexed_wrapper_findings(lang, &source)?;
         self.filter
             .retain_changed(&mut findings, &file.path, |f| (f.start_line, f.end_line));
         // Call references seed the reuse-metrics pass. Every supported
@@ -343,10 +347,6 @@ fn annotate_interface_satisfaction(per_files: &mut [PerFile]) {
 }
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
-
-fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, BoxedError> {
-    super::dispatch_lens!(lang, source, find_wrappers)
-}
 
 /// Per-file slice of the report. Owns the display path so directory mode
 /// can attach a path relative to the walk root without storing the original
