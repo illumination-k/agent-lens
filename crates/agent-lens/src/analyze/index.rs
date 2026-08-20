@@ -441,6 +441,80 @@ mod tests {
         );
     }
 
+    /// Interface facts flow through the index like every other fact: a
+    /// Go interface declared in the fixture must come back on the
+    /// graph, and a second identical build must serve it as a hit. An
+    /// index that swallowed interface shapes would report every
+    /// interface-dispatched Go method as uncalled in `visibility`.
+    #[test]
+    fn an_interface_facts_build_serves_interfaces_through_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.go",
+            "package lib\n\ntype Named interface {\n\tName() string\n}\n\nfunc Use(n Named) string { return n.Name() }\n",
+        );
+        let roots = AnalyzeRoots::from(dir.path());
+
+        let scope = AnalysisIndexScope::activate();
+        let builder = CallGraphBuilder::new().with_interface_facts(true);
+        let first = builder.build(&roots).unwrap();
+        assert_eq!(
+            first
+                .interfaces
+                .iter()
+                .map(|i| i.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Named"],
+        );
+        let (_, misses_before) = scope.index().stats();
+
+        let second = CallGraphBuilder::new()
+            .with_interface_facts(true)
+            .with_delegation_facts(true)
+            .build(&roots)
+            .unwrap();
+        let (hits, misses) = scope.index().stats();
+        assert_eq!(second.interfaces.len(), 1);
+        assert_eq!(hits, 4, "interfaces join the three base facts as hits");
+        assert_eq!(
+            misses - misses_before,
+            2,
+            "only the new graph key and the wrapper facts are computed"
+        );
+    }
+
+    /// `with_installed` must restore the thread's previous active index
+    /// when it returns — a worker task that left its capture installed
+    /// would leak one build's index into whatever runs next on that
+    /// rayon thread.
+    #[test]
+    fn with_installed_swaps_the_active_index_and_restores_it() {
+        let scope = AnalysisIndexScope::activate();
+        let scope_ptr = std::ptr::from_ref(scope.index());
+        let other = Arc::new(AnalysisIndex::default());
+
+        with_installed(Some(&other), || {
+            assert_eq!(
+                AnalysisIndex::active().map(|idx| Arc::as_ptr(&idx)),
+                Some(Arc::as_ptr(&other)),
+            );
+        });
+        assert_eq!(
+            AnalysisIndex::active().map(|idx| Arc::as_ptr(&idx)),
+            Some(scope_ptr),
+            "returning restores the scope's index",
+        );
+
+        with_installed(None, || {
+            assert!(
+                AnalysisIndex::active().is_none(),
+                "a None capture uninstalls the index for the task",
+            );
+        });
+        assert!(AnalysisIndex::active().is_some(), "and restores it after");
+    }
+
     #[test]
     fn memoize_computes_once_per_key_and_tracks_stats() {
         let index = AnalysisIndex::default();
