@@ -309,6 +309,25 @@ impl Drop for AnalysisIndexScope {
     }
 }
 
+/// Run `f` with `index` installed as this thread's active index,
+/// restoring the previous state afterwards (also on panic).
+///
+/// The active index lives in a thread local, so a rayon worker does not
+/// see the scope its caller activated. A parallel walk captures
+/// [`AnalysisIndex::active`] once on the calling thread and re-installs
+/// it around each unit of work with this helper; `None` is accepted so
+/// the capture can be passed through unconditionally.
+pub(crate) fn with_installed<R>(index: Option<&Arc<AnalysisIndex>>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<AnalysisIndex>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ACTIVE.set(self.0.take());
+        }
+    }
+    let _restore = Restore(ACTIVE.replace(index.map(Arc::clone)));
+    f()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

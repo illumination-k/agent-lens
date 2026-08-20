@@ -18,10 +18,11 @@ pub(crate) mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
 use lens_rust::CallIndexOptions;
+use rayon::prelude::*;
 
 use super::cargo_meta::CrateNameCache;
 use super::index::{AnalysisIndex, SourceKey};
@@ -283,20 +284,30 @@ impl CallGraphBuilder {
 
     fn build_uncached(&self, roots: &AnalyzeRoots) -> Result<CallGraph, AnalyzerError> {
         let filter = self.collection_filter().compile(roots.base())?;
-        let mut files = Vec::new();
-        let mut crate_cache = CrateNameCache::new();
-        for source_file in collect_source_files(roots, &filter)? {
-            if !graphed_language(&source_file.path) {
-                continue;
-            }
-            let path_is_test = filter.is_test_path(&source_file.path);
-            files.push(self.scan_file(
-                roots.base(),
-                &source_file,
-                path_is_test,
-                &mut crate_cache,
-            )?);
-        }
+        let sources: Vec<SourceFile> = collect_source_files(roots, &filter)?
+            .into_iter()
+            .filter(|source_file| graphed_language(&source_file.path))
+            .collect();
+        // Scanning parses every file, so it fans out across rayon
+        // workers. The active analysis index lives in a thread local
+        // the workers cannot see, so it is captured here and
+        // re-installed around each task; results come back in input
+        // order (indexed parallel collect) and errors are reduced in
+        // that same order, so the graph — and the error a bad file
+        // produces — match the sequential walk's exactly.
+        let index = AnalysisIndex::active();
+        let crate_cache = Mutex::new(CrateNameCache::new());
+        let files = sources
+            .par_iter()
+            .map(|source_file| {
+                super::index::with_installed(index.as_ref(), || {
+                    let path_is_test = filter.is_test_path(&source_file.path);
+                    self.scan_file(roots.base(), source_file, path_is_test, &crate_cache)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(CallGraph::build(files))
     }
 
@@ -332,11 +343,16 @@ impl CallGraphBuilder {
         root: &Path,
         file: &SourceFile,
         path_is_test: bool,
-        crate_cache: &mut CrateNameCache,
+        crate_cache: &Mutex<CrateNameCache>,
     ) -> Result<FileGraphInput, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
         let crate_info = match lang {
-            SourceLang::Rust => Some(crate_cache.lookup(&file.path)),
+            SourceLang::Rust => Some(
+                crate_cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .lookup(&file.path),
+            ),
             _ => None,
         };
         let module = module_path::module_path_for(root, file, lang, crate_info.as_ref(), &source);
