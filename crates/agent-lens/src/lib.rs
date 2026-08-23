@@ -11,6 +11,9 @@
 //!   the `run` subcommand fans out across several analyzers.
 //! * [`baseline`] — compact metric snapshots of a profile, the artifact a
 //!   later run compares against to tell a regression from existing debt.
+//! * [`digest`] — the entity-joined rollup `run --digest` renders: one
+//!   row per file across every analyzer, with drill-down commands in
+//!   place of inline evidence.
 //! * [`config_schema`] — renders the `agent-lens.toml` schema as
 //!   agent-friendly Markdown for `config schema`.
 //! * [`skills`] — the Claude Code skills bundled into the binary plus the
@@ -27,6 +30,7 @@ pub mod analyze;
 pub mod baseline;
 pub mod config;
 pub mod config_schema;
+pub mod digest;
 pub mod help_md;
 pub mod hooks;
 pub mod paths;

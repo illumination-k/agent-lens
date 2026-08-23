@@ -168,6 +168,17 @@ pub(super) struct RunArgs {
     /// config.
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub(super) format: Option<OutputFormat>,
+    /// Replace the stacked per-tool sections with an entity-joined
+    /// digest: one row per file aggregating every analyzer's findings
+    /// about it, ranked by cross-tool weight, plus one line per
+    /// corpus-shaped result (module cycles, modularity, co-change
+    /// pairs). Rows carry no inline evidence — each names the `agent-lens
+    /// analyze …` command that reproduces the full detail — so the
+    /// report stays a small fraction of the full sections' size. A flag
+    /// rather than a profile key on purpose: the same profile stays
+    /// comparable across formats.
+    #[arg(long, conflicts_with = "format")]
+    pub(super) digest: bool,
 }
 
 #[derive(Debug, Subcommand)]

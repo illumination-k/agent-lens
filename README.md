@@ -203,12 +203,23 @@ min-lines = 8
 agent-lens run web                       # from the nearest agent-lens.toml
 agent-lens run web --config path/to/agent-lens.toml
 agent-lens run web --format json         # override the profile's format
+agent-lens run web --digest              # entity-joined rollup, not sections
 ```
 
 Keys are kebab-case and match the CLI flags. Unknown keys — a typo, or an
 option set on the wrong tool — are rejected at parse time rather than silently
 ignored. `agent-lens config schema` prints the full reference: every profile
 key and per-tool table, with types, defaults, and a worked example.
+
+`--digest` transposes the report for a context budget: instead of one section
+per tool it prints one row per file, aggregating every analyzer's findings
+about it and ranked by cross-tool weight — a file that is simultaneously a
+hotspot, complex, low-cohesion, and load-bearing floats to the top. Results no
+single file owns (module cycles, modularity gaps, co-changing pairs) become
+one line each. Rows carry no inline evidence; each names the
+`agent-lens analyze …` command that reproduces the full detail, so the digest
+stays a small fraction of the sections' size without losing reach to any of
+it.
 
 ### As a baseline
 

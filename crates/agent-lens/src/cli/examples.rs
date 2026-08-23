@@ -331,6 +331,7 @@ Examples:
 
     agent-lens run audit
     agent-lens run audit --config ./agent-lens.toml
+    agent-lens run audit --digest    # one row per file, drill-down commands
 ";
 
 pub const BASELINE: &str = "\
