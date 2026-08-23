@@ -1566,6 +1566,29 @@ mod tests {
         );
     }
 
+    /// An empty suspect bucket contributes no line at all — a "0
+    /// declared dependencies" claim would read as a measured finding.
+    #[test]
+    fn hidden_coupling_stays_silent_about_an_empty_suspect_bucket() {
+        let report = json!({
+            "hidden_coupling": [ { "a": "a.rs", "b": "b.rs", "cochanges": 8 } ],
+            "suspect_dependencies": [],
+        });
+        let extraction = hidden_coupling(&report);
+        assert_eq!(
+            extraction.corpus,
+            ["1 co-changing pair with no static edge; strongest a.rs <-> b.rs (8 co-changes)"],
+        );
+    }
+
+    #[test]
+    fn cycles_reports_the_count_and_the_largest_tangle() {
+        let report = json!({ "summary": { "scc_count": 2, "largest": 5 } });
+        let extraction = cycles(&report);
+        assert!(extraction.files.is_empty());
+        assert_eq!(extraction.corpus, ["2 call cycles (largest 5 functions)"]);
+    }
+
     #[test]
     fn coupling_reports_cycles_and_the_worst_module_per_axis() {
         let report = json!({
@@ -1634,17 +1657,34 @@ mod tests {
             extraction.corpus,
             [
                 "2 module cycles (15 modules involved)",
-                "91 skip-level pairs"
+                "91 skip-level pairs",
             ],
         );
     }
 
+    #[test]
+    fn layers_reports_wide_span_modules_when_present() {
+        let report = json!({
+            "summary": {
+                "module_cycle_count": 0,
+                "skip_pair_count": 0,
+                "wide_span_module_count": 3,
+            },
+        });
+        let extraction = layers(&report);
+        assert_eq!(extraction.corpus, ["3 wide-span modules"],);
+    }
+
     #[rstest]
     #[case(ToolName::Cycles, json!({ "summary": { "scc_count": 0, "largest": 0 } }))]
-    #[case(ToolName::Coupling, json!({ "cycle_count": 0, "modules": [] }))]
+    #[case(ToolName::Coupling, json!({ "cycle_count": 0, "modules": [ { "path": "crate::a", "fan_in": 0, "ifc": 0 } ] }))]
     #[case(ToolName::CoChange, json!({ "pairs": [] }))]
     #[case(ToolName::Unreachable, json!({ "modules": [], "summary": { "confirmed_count": 0, "likely_count": 0 } }))]
     #[case(ToolName::Delegation, json!({ "chains": [], "summary": { "lasagna_module_count": 0 } }))]
+    #[case(ToolName::HiddenCoupling, json!({ "hidden_coupling": [], "suspect_dependencies": [] }))]
+    #[case(ToolName::Communities, json!({ "misfiled": [], "spanning": [] }))]
+    #[case(ToolName::ContextSpan, json!({ "modules": [ { "path": "crate::a", "transitive": 0, "files": 0 } ] }))]
+    #[case(ToolName::Layers, json!({ "summary": { "module_cycle_count": 0, "skip_pair_count": 0, "wide_span_module_count": 0 } }))]
     fn a_clean_report_digests_to_nothing_rather_than_a_zero_claim(
         #[case] tool: ToolName,
         #[case] report: Value,
