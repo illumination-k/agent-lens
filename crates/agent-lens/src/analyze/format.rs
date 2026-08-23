@@ -7,6 +7,10 @@ use super::call_graph::model::ModuleResolutionSummary;
 /// How many modules the resolution-confidence section lists.
 const CONFIDENCE_TOP_MODULES: usize = 5;
 
+/// Heading of the section [`render_module_confidence`] emits, shared with
+/// [`ConfidenceDeduper`] so the two cannot drift apart.
+const CONFIDENCE_HEADING: &str = "## Resolution confidence (worst modules)";
+
 pub(crate) fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
     match v {
         Some(x) => format!("{x:.precision$}"),
@@ -66,10 +70,7 @@ pub(crate) fn render_module_confidence(
             .then_with(|| b.total_call_count.cmp(&a.total_call_count))
             .then_with(|| a.module.cmp(&b.module))
     });
-    let _ = writeln!(
-        out,
-        "\n## Resolution confidence (worst modules)\n\n{note}\n"
-    );
+    let _ = writeln!(out, "\n{CONFIDENCE_HEADING}\n\n{note}\n");
     for m in worst.iter().take(CONFIDENCE_TOP_MODULES) {
         let unresolved = m.total_call_count - m.calls.resolved_call_count;
         let _ = writeln!(
@@ -80,6 +81,72 @@ pub(crate) fn render_module_confidence(
             m.total_call_count,
             unresolved_share(m) * 100.0,
         );
+    }
+}
+
+/// Collapses repeated resolution-confidence listings across the sections
+/// of one `agent-lens run` markdown report.
+///
+/// Every call-graph analyzer in a profile cites the same worst-resolved
+/// modules — they all read one graph over one corpus — so from the second
+/// section on the rows are context spent on nothing new. The dedupe keeps
+/// each analyzer's note (it says what the shared uncertainty does to
+/// *that* report) and replaces the repeated rows with a pointer at the
+/// section that still carries them. Rows that differ are left alone:
+/// a disagreement between two analyzers' confidence lists is signal.
+#[derive(Debug, Default)]
+pub struct ConfidenceDeduper {
+    /// Section label and confidence rows of the first section seen — the
+    /// copy every later duplicate points back at.
+    first: Option<(String, Vec<String>)>,
+}
+
+impl ConfidenceDeduper {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Rewrite `body`'s confidence rows into a pointer at the earlier
+    /// section when they repeat it row for row. Returns `None` when the
+    /// body stands as-is: no confidence section, the first section seen
+    /// (recorded as the one later duplicates cite), or rows that differ.
+    pub fn dedupe(&mut self, label: &str, body: &str) -> Option<String> {
+        let marker = format!("\n{CONFIDENCE_HEADING}\n");
+        let start = body.find(&marker)?;
+        let section_start = start + marker.len();
+        // The section runs to the next heading or the end of the body.
+        let section_end = body[section_start..]
+            .find("\n#")
+            .map_or(body.len(), |i| section_start + i);
+        let section = &body[section_start..section_end];
+        let rows: Vec<&str> = section
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let Some((first_label, first_rows)) = &self.first else {
+            self.first = Some((
+                label.to_owned(),
+                rows.iter().map(|&r| r.to_owned()).collect(),
+            ));
+            return None;
+        };
+        let same_rows = first_rows.len() == rows.len()
+            && first_rows.iter().zip(&rows).all(|(a, b)| a.as_str() == *b);
+        if !same_rows {
+            return None;
+        }
+        // Keep everything up to the first row — the note — and swap the
+        // rows for the pointer.
+        let rows_offset = section.find("\n- ").map_or(section.len(), |i| i + 1);
+        let mut out = String::with_capacity(body.len());
+        out.push_str(&body[..section_start]);
+        out.push_str(&section[..rows_offset]);
+        let _ = writeln!(out, "Same worst modules as under `## {first_label}`.");
+        out.push_str(&body[section_end..]);
+        Some(out)
     }
 }
 
@@ -239,6 +306,84 @@ mod tests {
                 .count(),
             CONFIDENCE_TOP_MODULES,
         );
+    }
+
+    /// A report body ending in a confidence section, the shape every
+    /// call-graph analyzer produces.
+    fn body_with_confidence(modules: &[ModuleResolutionSummary], note: &str) -> String {
+        let mut body = String::from("# Some report\n\n## Findings\n\n- a finding\n");
+        render_module_confidence(&mut body, modules, note);
+        body
+    }
+
+    #[test]
+    fn deduper_folds_repeated_rows_and_keeps_each_note() {
+        let modules = [summary("murky", 1, 3), summary("dim", 2, 2)];
+        let mut deduper = ConfidenceDeduper::new();
+
+        let first = body_with_confidence(&modules, "delegation note");
+        assert_eq!(deduper.dedupe("delegation", &first), None);
+
+        let second = body_with_confidence(&modules, "layers note");
+        let folded = deduper.dedupe("layers", &second).unwrap();
+        assert!(folded.contains("## Resolution confidence"), "got: {folded}");
+        assert!(folded.contains("layers note"), "got: {folded}");
+        assert!(
+            folded.contains("Same worst modules as under `## delegation`."),
+            "got: {folded}",
+        );
+        assert!(!folded.contains("- `murky`"), "got: {folded}");
+        // Everything before the confidence section is untouched.
+        assert!(folded.contains("- a finding"), "got: {folded}");
+    }
+
+    #[test]
+    fn deduper_leaves_sections_whose_rows_differ() {
+        let mut deduper = ConfidenceDeduper::new();
+        let first = body_with_confidence(&[summary("murky", 1, 3)], "note");
+        assert_eq!(deduper.dedupe("delegation", &first), None);
+        let second = body_with_confidence(&[summary("other", 0, 2)], "note");
+        assert_eq!(deduper.dedupe("layers", &second), None);
+    }
+
+    /// A section-less body between two matching ones must not disturb the
+    /// recorded rows: analyzers without a call graph sit between the ones
+    /// with one in every real profile.
+    #[test]
+    fn deduper_skips_bodies_without_a_confidence_section() {
+        let modules = [summary("murky", 1, 3)];
+        let mut deduper = ConfidenceDeduper::new();
+        assert_eq!(
+            deduper.dedupe("delegation", &body_with_confidence(&modules, "n")),
+            None
+        );
+        assert_eq!(
+            deduper.dedupe("complexity", "# Complexity report\n\n- rows\n"),
+            None
+        );
+        assert!(
+            deduper
+                .dedupe("layers", &body_with_confidence(&modules, "n"))
+                .is_some(),
+        );
+    }
+
+    /// The parser stops at the next heading, so a section that is not the
+    /// body's tail keeps whatever follows it.
+    #[test]
+    fn deduper_preserves_content_after_the_section() {
+        let modules = [summary("murky", 1, 3)];
+        let mut deduper = ConfidenceDeduper::new();
+        assert_eq!(
+            deduper.dedupe("delegation", &body_with_confidence(&modules, "n")),
+            None
+        );
+        let mut second = body_with_confidence(&modules, "n");
+        second.push_str("\n## Trailing section\n\n- kept\n");
+        let folded = deduper.dedupe("layers", &second).unwrap();
+        assert!(folded.contains("## Trailing section"), "got: {folded}");
+        assert!(folded.contains("- kept"), "got: {folded}");
+        assert!(!folded.contains("- `murky`"), "got: {folded}");
     }
 
     #[rstest]

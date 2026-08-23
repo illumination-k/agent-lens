@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_lens::analyze::{AnalysisIndexScope, OutputFormat};
+use agent_lens::analyze::{AnalysisIndexScope, ConfidenceDeduper, OutputFormat};
 use agent_lens::config::{self, ConfigError};
 use tracing::{info, warn};
 
@@ -189,6 +189,12 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
 /// Render the per-tool reports as one document: stacked `## <tool>`
 /// sections for markdown, or a `{profile, results}` object for JSON where
 /// each analyzer's JSON output is nested under its tool name.
+///
+/// The markdown document is one context-window payload, so it gets the
+/// dedupe a standalone report cannot: every call-graph analyzer in the
+/// profile cites the same worst-resolved modules, and
+/// [`ConfidenceDeduper`] folds the repeats into a pointer at the first
+/// listing. Per-tool JSON is untouched either way.
 fn render_profile_report(
     profile: &str,
     format: OutputFormat,
@@ -196,6 +202,7 @@ fn render_profile_report(
 ) -> Result<String, Box<dyn std::error::Error>> {
     Ok(match format {
         OutputFormat::Md => {
+            let mut deduper = ConfidenceDeduper::new();
             let mut out = String::new();
             for (tool, report) in sections {
                 if !out.is_empty() {
@@ -204,7 +211,9 @@ fn render_profile_report(
                 out.push_str("## ");
                 out.push_str(tool.as_str());
                 out.push_str("\n\n");
-                out.push_str(report.trim_end_matches('\n'));
+                let deduped = deduper.dedupe(tool.as_str(), report);
+                let body = deduped.as_deref().unwrap_or(report);
+                out.push_str(body.trim_end_matches('\n'));
                 out.push('\n');
             }
             out
@@ -239,6 +248,35 @@ mod tests {
             out,
             "## complexity\n\ncomplexity body\n\n## wrapper\n\nwrapper body\n",
         );
+    }
+
+    /// Two call-graph analyzers in one profile cite identical
+    /// resolution-confidence rows; the combined markdown carries the rows
+    /// once and points the second section back at the first.
+    #[test]
+    fn render_profile_report_md_folds_repeated_confidence_rows() {
+        let confidence = "## Resolution confidence (worst modules)\n";
+        let row = "- `murky`: 3/4 call sites not resolved (75%)\n";
+        let sections = vec![
+            (
+                config::ToolName::Delegation,
+                format!("# Delegation chains\n\n{confidence}\ndelegation note\n\n{row}"),
+            ),
+            (
+                config::ToolName::Layers,
+                format!("# Layer map\n\n{confidence}\nlayers note\n\n{row}"),
+            ),
+        ];
+        let out = render_profile_report("audit", OutputFormat::Md, &sections).unwrap();
+        assert_eq!(out.matches(row.trim_end()).count(), 1, "got: {out}");
+        assert!(
+            out.contains("Same worst modules as under `## delegation`."),
+            "got: {out}",
+        );
+        // Each analyzer's note survives — it interprets the shared
+        // uncertainty for that report.
+        assert!(out.contains("delegation note"), "got: {out}");
+        assert!(out.contains("layers note"), "got: {out}");
     }
 
     #[test]

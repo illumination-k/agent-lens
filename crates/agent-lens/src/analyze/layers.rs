@@ -83,11 +83,14 @@ const WIDE_SPAN_LEVELS: usize = 2;
 const SKIP_MIN_GAP: usize = 2;
 
 /// Module pairs listed per cycle in markdown. JSON carries all of them.
-const PAIRS_PER_CYCLE: usize = 5;
+const PAIRS_PER_CYCLE: usize = 3;
 
-/// Concrete call sites listed per module pair in markdown. JSON carries
-/// all of them.
-const EVIDENCE_PER_PAIR: usize = 3;
+/// Concrete call sites listed per module pair in markdown: one exemplar
+/// to jump to, with the rest rolled into a count. Evidence is citation,
+/// not finding — the pair line already carries the level gap and call
+/// count — and at the old cap of 3 these rows were the bulk of the
+/// report. JSON carries all of them.
+const EVIDENCE_PER_PAIR: usize = 1;
 
 /// Module names listed per level in markdown. JSON carries all of them.
 const MODULES_PER_LEVEL: usize = 6;
@@ -1644,7 +1647,7 @@ mod tests {
     fn markdown_truncates_long_listings_with_an_explicit_remainder() {
         let dir = tempfile::tempdir().unwrap();
         // Eight leaf modules (two over MODULES_PER_LEVEL), four callers
-        // in `top` reaching the same leaf function (one over
+        // in `top` reaching the same leaf function (three over
         // EVIDENCE_PER_PAIR), and two skip pairs against `--top 1`.
         let mut root = String::from("mod top;\nmod other;\nmod mid;\n");
         for i in 0..8 {
@@ -1680,8 +1683,8 @@ mod tests {
         // All eight leaf modules sit on L1; only MODULES_PER_LEVEL are
         // named, the rest are counted.
         assert!(md.contains(", +2 more\n"), "got: {md}");
-        // Four distinct callers reach the same callee; three are shown.
-        assert!(md.contains("+1 more caller/callee pair(s)"), "got: {md}");
+        // Four distinct callers reach the same callee; one is shown.
+        assert!(md.contains("+3 more caller/callee pair(s)"), "got: {md}");
         // Two skip pairs, capped at --top 1.
         assert!(md.contains("+1 more module pair(s)"), "got: {md}");
         assert!(md.contains("basis: public"), "got: {md}");
