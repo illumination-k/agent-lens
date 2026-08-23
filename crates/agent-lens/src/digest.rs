@@ -1214,6 +1214,45 @@ mod tests {
         );
     }
 
+    /// On a tie the first function in source order keeps the headline:
+    /// a later equal score must not silently rename the row.
+    #[test]
+    fn complexity_keeps_the_first_of_tied_worst_functions() {
+        let report = json!({
+            "files": [
+                { "file": "tied.rs", "functions": [
+                    { "name": "first", "cognitive": 20 },
+                    { "name": "second", "cognitive": 20 },
+                ] },
+            ],
+        });
+        let extraction = complexity(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [("/repo/src/tied.rs", "cognitive 20 (`first`) +1 more ≥10")],
+        );
+    }
+
+    #[test]
+    fn cohesion_keeps_the_first_of_tied_worst_units() {
+        let report = json!({
+            "files": [
+                { "file": "tied.rs", "units": [
+                    { "label": "impl First", "lcom4": 4 },
+                    { "label": "impl Second", "lcom4": 4 },
+                ] },
+            ],
+        });
+        let extraction = cohesion(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [(
+                "/repo/src/tied.rs",
+                "LCOM4 4 (`impl First`) +1 more split units"
+            )],
+        );
+    }
+
     /// Cluster order is the analyzer's ranking, so a file's rank is its
     /// best cluster's position — and a file repeated inside one cluster
     /// still counts that cluster once.
@@ -1332,7 +1371,13 @@ mod tests {
             "god_functions": [
                 { "file": "core.rs", "qualified_name": "a::sprawl", "fan_out": 21 },
             ],
-            "misplaced": [],
+            "misplaced": [
+                {
+                    "file": "lost.rs",
+                    "qualified_name": "c::stray",
+                    "dominant_foreign_module": { "module": "crate::home" },
+                },
+            ],
             "load_bearing": [
                 { "file": "util.rs", "qualified_name": "b::pivot", "fan_in": 18 },
                 { "file": "core.rs", "qualified_name": "a::anchor", "fan_in": 12 },
@@ -1345,6 +1390,10 @@ mod tests {
                 (
                     "/repo/src/core.rs",
                     "bottleneck `squeeze` (fan-in 9, fan-out 8); god function `sprawl` (fan-out 21); +1 more flagged",
+                ),
+                (
+                    "/repo/src/lost.rs",
+                    "misplaced `stray` (pulled toward `crate::home`)"
                 ),
                 ("/repo/src/util.rs", "load-bearing `pivot` (fan-in 18)"),
             ],
@@ -1408,6 +1457,21 @@ mod tests {
         assert_eq!(
             extraction.corpus,
             ["2 confirmed-dead (80 LOC), 1 likely-dead"]
+        );
+    }
+
+    /// One populated tier is enough for the corpus line — only a report
+    /// with *neither* tier stays silent.
+    #[test]
+    fn unreachable_reports_the_corpus_line_with_one_tier_empty() {
+        let report = json!({
+            "modules": [],
+            "summary": { "confirmed_count": 3, "likely_count": 0, "confirmed_loc": 120 },
+        });
+        let extraction = unreachable(&report, &base());
+        assert_eq!(
+            extraction.corpus,
+            ["3 confirmed-dead (120 LOC), 0 likely-dead"]
         );
     }
 
@@ -1580,6 +1644,7 @@ mod tests {
     #[case(ToolName::Coupling, json!({ "cycle_count": 0, "modules": [] }))]
     #[case(ToolName::CoChange, json!({ "pairs": [] }))]
     #[case(ToolName::Unreachable, json!({ "modules": [], "summary": { "confirmed_count": 0, "likely_count": 0 } }))]
+    #[case(ToolName::Delegation, json!({ "chains": [], "summary": { "lasagna_module_count": 0 } }))]
     fn a_clean_report_digests_to_nothing_rather_than_a_zero_claim(
         #[case] tool: ToolName,
         #[case] report: Value,
@@ -1628,13 +1693,13 @@ mod tests {
         let sections = vec![
             (
                 ToolName::Complexity,
-                complexity_report(&[("solo.rs", 40), ("both.rs", 20)]),
+                complexity_report(&[("aa_solo.rs", 40), ("zz_both.rs", 20)]),
             ),
             (
                 ToolName::Cohesion,
                 json!({
                     "files": [
-                        { "file": "both.rs", "units": [ { "label": "module", "lcom4": 5 } ] },
+                        { "file": "zz_both.rs", "units": [ { "label": "module", "lcom4": 5 } ] },
                     ],
                 }),
             ),
@@ -1647,30 +1712,103 @@ mod tests {
         );
         // Two tools at weight 0.5 + 1.0 beat one tool at weight 1.0, so
         // the shared file leads even though the solo file's single score
-        // is higher.
+        // is higher and its path sorts first.
         assert!(
-            out.find("src/both.rs").unwrap() < out.find("src/solo.rs").unwrap(),
+            out.find("src/zz_both.rs").unwrap() < out.find("src/aa_solo.rs").unwrap(),
             "got: {out}"
         );
         assert!(
             out.contains("## Findings by entity (2 files, ranked by cross-tool weight)"),
             "got: {out}"
         );
-        // The row joins both tools' headlines...
+        // The row joins both tools' headlines, with no phantom overflow
+        // marker when every fragment fit...
         assert!(
             out.contains("LCOM4 5 (`module`), cognitive 20 (`f`)"),
             "got: {out}"
         );
+        assert!(!out.contains("+0 more"), "got: {out}");
         // ...and the strongest claim (cohesion, weight 1.0) picks the
         // drill-down, pointed at the file since cohesion is file-scoped.
         assert!(
-            out.contains("detail: `agent-lens analyze cohesion src/both.rs --format md`"),
+            out.contains("detail: `agent-lens analyze cohesion src/zz_both.rs --format md`"),
             "got: {out}"
         );
         assert!(
             out.contains("Full sections: `agent-lens run audit --format md`"),
             "got: {out}"
         );
+    }
+
+    /// A lead tool that needs the whole corpus (hotspot reads git
+    /// churn) must not be handed a single file as its drill-down
+    /// argument — and a run with nothing corpus-shaped must not print
+    /// an empty corpus section.
+    #[test]
+    fn render_points_a_corpus_scoped_lead_tool_at_the_target() {
+        let sections = vec![(
+            ToolName::Hotspot,
+            json!({
+                "repo_root": "/repo",
+                "files": [ { "path": "src/hot.rs", "score": 9, "commits": 3, "cognitive_max": 3 } ],
+            }),
+        )];
+        let out = render(
+            "audit",
+            &sections,
+            &[PathBuf::from("/repo/src")],
+            Path::new("/repo"),
+        );
+        assert!(
+            out.contains("detail: `agent-lens analyze hotspot src --format md`"),
+            "got: {out}"
+        );
+        assert!(!out.contains("## Corpus-level findings"), "got: {out}");
+    }
+
+    /// More entities than the row cap: the overflow is counted, never
+    /// silently dropped.
+    #[test]
+    fn render_counts_the_entities_past_the_row_cap() {
+        let names: Vec<String> = (0..45).map(|i| format!("f{i:03}.rs")).collect();
+        let file_list = |range: std::ops::Range<usize>| {
+            names[range]
+                .iter()
+                .map(|name| (name.as_str(), 30u64))
+                .collect::<Vec<_>>()
+        };
+        let sections = vec![
+            (ToolName::Complexity, complexity_report(&file_list(0..15))),
+            (
+                ToolName::Cohesion,
+                json!({
+                    "files": names[15..30]
+                        .iter()
+                        .map(|name| json!({ "file": name, "units": [ { "label": "m", "lcom4": 3 } ] }))
+                        .collect::<Vec<_>>(),
+                }),
+            ),
+            (
+                ToolName::Wrapper,
+                json!({
+                    "files": names[30..45]
+                        .iter()
+                        .map(|name| json!({ "file": name, "wrappers": [ { "name": "w" } ] }))
+                        .collect::<Vec<_>>(),
+                }),
+            ),
+        ];
+        let out = render(
+            "audit",
+            &sections,
+            &[PathBuf::from("/repo/src")],
+            Path::new("/repo"),
+        );
+        assert!(
+            out.contains("## Findings by entity (45 files, ranked by cross-tool weight)"),
+            "got: {out}"
+        );
+        assert!(out.contains("- … and 5 below the cut"), "got: {out}");
     }
 
     #[test]
