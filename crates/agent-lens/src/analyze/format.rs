@@ -337,6 +337,27 @@ mod tests {
         assert!(folded.contains("- a finding"), "got: {folded}");
     }
 
+    /// The pointer replaces the rows and nothing else: the note keeps
+    /// the blank line that separates it from the pointer, so the folded
+    /// section stays well-formed markdown. Pinned as an exact suffix —
+    /// an off-by-one in the row offset would eat the blank line.
+    #[test]
+    fn deduper_keeps_the_blank_line_between_note_and_pointer() {
+        let modules = [summary("murky", 1, 3)];
+        let mut deduper = ConfidenceDeduper::new();
+        assert_eq!(
+            deduper.dedupe("delegation", &body_with_confidence(&modules, "note a")),
+            None,
+        );
+        let folded = deduper
+            .dedupe("layers", &body_with_confidence(&modules, "note b"))
+            .unwrap();
+        assert!(
+            folded.ends_with("note b\n\nSame worst modules as under `## delegation`.\n"),
+            "got: {folded}",
+        );
+    }
+
     #[test]
     fn deduper_leaves_sections_whose_rows_differ() {
         let mut deduper = ConfidenceDeduper::new();
