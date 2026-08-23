@@ -744,6 +744,73 @@ fn run_profile_emits_combined_markdown_report() {
     assert!(stdout.contains("`branchy`"), "got: {stdout}");
 }
 
+/// `--digest` replaces the stacked sections with the entity rollup:
+/// one row per file with a drill-down command, corpus lines for the
+/// module-shaped tools, and an explicit "nothing to report" list so a
+/// quiet analyzer stays distinguishable from one that never ran.
+#[test]
+fn run_profile_digest_transposes_sections_into_entity_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "fn work(x: i32) -> i32 { x + 1 }\npub fn call_work(x: i32) -> i32 { work(x) }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"wrapper\", \"complexity\", \"cycles\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "audit", "--digest"], dir.path(), None);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("# Digest: audit"), "got: {stdout}");
+    assert!(
+        stdout.contains("- src/lib.rs — 1 forwarding wrapper (`call_work`)"),
+        "got: {stdout}",
+    );
+    assert!(
+        stdout.contains("detail: `agent-lens analyze wrapper src/lib.rs --format md`"),
+        "got: {stdout}",
+    );
+    // The stacked per-tool sections are replaced, not prefixed.
+    assert!(!stdout.contains("## wrapper"), "got: {stdout}");
+    // Both quiet analyzers are named: neither file crosses the
+    // complexity floor and there is no call cycle.
+    assert!(
+        stdout.contains("Nothing to report from: complexity, cycles."),
+        "got: {stdout}",
+    );
+}
+
+/// The digest is its own rendering, so combining it with `--format` is
+/// a parse error rather than a silently ignored flag.
+#[test]
+fn run_profile_digest_rejects_an_explicit_format() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.audit]\npath = \"src\"\ntools = [\"complexity\"]\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(
+        &["run", "audit", "--digest", "--format", "json"],
+        dir.path(),
+        None,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--digest"), "got: {stderr}");
+    assert!(stderr.contains("--format"), "got: {stderr}");
+}
+
 #[test]
 fn run_profile_emits_combined_json_report() {
     let dir = tempfile::tempdir().unwrap();

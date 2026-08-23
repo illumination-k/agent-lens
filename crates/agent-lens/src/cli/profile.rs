@@ -129,10 +129,17 @@ pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error
     let resolved = ResolvedProfile::resolve(args.selector)?;
     // `--format` beats the profile's `format`, which in turn beats the
     // JSON default: the flag is the caller speaking about this one run.
-    let format = args
-        .format
-        .or(resolved.profile.format)
-        .unwrap_or(OutputFormat::Json);
+    // `--digest` is its own rendering (clap rejects combining the two
+    // flags) and reads every tool as JSON, whatever the profile says:
+    // the digest is built from structured fields, and the profile's
+    // `format` shapes the report a reader of the full sections gets.
+    let format = if args.digest {
+        OutputFormat::Json
+    } else {
+        args.format
+            .or(resolved.profile.format)
+            .unwrap_or(OutputFormat::Json)
+    };
 
     // One analysis index for the whole tool loop: the profile's
     // analyzers walk the same tree, so parses and assembled graphs are
@@ -141,6 +148,21 @@ pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error
     let mut sections: Vec<(config::ToolName, String)> = Vec::new();
     for tool in resolved.tools() {
         sections.push((tool, resolved.run_tool(tool, format)?));
+    }
+
+    if args.digest {
+        let mut reports: Vec<(config::ToolName, serde_json::Value)> =
+            Vec::with_capacity(sections.len());
+        for (tool, report) in &sections {
+            reports.push((*tool, serde_json::from_str(report)?));
+        }
+        let cwd = std::env::current_dir()?;
+        return write_stdout_line(&agent_lens::digest::render(
+            &resolved.name,
+            &reports,
+            &resolved.targets,
+            &cwd,
+        ));
     }
 
     write_stdout_line(&render_profile_report(&resolved.name, format, &sections)?)
