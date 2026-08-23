@@ -61,6 +61,7 @@ pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
 pub use cycles::CyclesAnalyzer;
 pub use delegation::DelegationAnalyzer;
+pub use format::ConfidenceDeduper;
 pub use function_graph::FunctionGraphAnalyzer;
 pub use graph_query::{
     DEFAULT_GRAPH_QUERY_DEPTH, DEFAULT_GRAPH_QUERY_LIMIT, GraphDirection, GraphQueryAnalyzer,
