@@ -626,6 +626,41 @@ mod tests {
         assert!(matches!(err, CouplingAnalyzerError::Parse { .. }));
     }
 
+    /// One unparseable file inside the walked Go module must not poison
+    /// the module-wide profile: its package keeps its parseable files'
+    /// edges and the report still covers the whole module (issue #494).
+    #[test]
+    fn go_module_with_one_unparseable_file_still_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module example.com/p\n");
+        write_file(
+            dir.path(),
+            "a/a.go",
+            "package a\n\nimport \"example.com/p/b\"\n\nfunc A() { b.B() }\n",
+        );
+        write_file(dir.path(), "b/b.go", "package b\n\nfunc B() {}\n");
+        write_file(dir.path(), "b/broken.go", "package b\nfunc !!! {");
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let paths: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"example.com/p/a"), "got {paths:?}");
+        assert!(paths.contains(&"example.com/p/b"), "got {paths:?}");
+        let a = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["path"] == "example.com/p/a")
+            .unwrap();
+        assert_eq!(a["fan_out"], 1, "the a -> b edge survives the bad file");
+    }
+
     #[test]
     fn json_report_records_instability_for_directional_modules() {
         let dir = tempfile::tempdir().unwrap();

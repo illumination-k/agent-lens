@@ -3301,6 +3301,30 @@ fn beta(x: i32) -> i32 {
         assert!(matches_expected(&err), "unexpected error variant: {err}");
     }
 
+    /// One unparseable file found by the directory walk drops out of the
+    /// corpus with a warning instead of failing the run — the clone pair
+    /// in the parseable file must still be reported (issue #494). Only
+    /// an explicitly-named single file (the `parse_failure` case above)
+    /// keeps the hard error.
+    #[test]
+    fn walked_unparseable_file_is_skipped_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "broken.go", "package p\nfunc !!! {");
+        write_file(
+            dir.path(),
+            "pair.rs",
+            "fn alpha(x: i32) -> i32 {\n    let a = x + 1;\n    let b = a * 2;\n    let c = b - 3;\n    a + b + c\n}\nfn beta(x: i32) -> i32 {\n    let a = x + 1;\n    let b = a * 2;\n    let c = b - 3;\n    a + b + c\n}\n",
+        );
+        let json = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_min_lines(1)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cluster_count"], 1, "got {parsed}");
+        assert_eq!(parsed["clusters"][0]["size"], 2, "got {parsed}");
+    }
+
     #[test]
     fn report_records_the_scoring_method() {
         let dir = tempfile::tempdir().unwrap();

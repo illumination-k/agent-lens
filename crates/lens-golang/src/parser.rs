@@ -695,6 +695,57 @@ mod tests {
         );
     }
 
+    fn allocation_source(expr: &str) -> String {
+        format!("package p\nfunc mk(s string) string {{ return s }}\nfunc f() {{ _ = {expr} }}\n")
+    }
+
+    /// The `new` / `make` argument shapes the grammar has always covered:
+    /// anything its *type* production reaches, plus the identifier-shaped
+    /// spellings that coincide with one. These must keep parsing whatever
+    /// happens to the Go 1.27 shapes pinned below.
+    #[rstest]
+    #[case::type_argument("new(string)")]
+    #[case::identifier("new(x)")]
+    #[case::identifier_shaped_literal("new(false)")]
+    #[case::composite_type("new(map[string]int)")]
+    #[case::qualified_type("new(pkg.T)")]
+    #[case::make_slice("make([]int, 5)")]
+    #[case::make_map_with_cap("make(map[string]int, 8)")]
+    fn type_shaped_allocation_arguments_parse(#[case] expr: &str) {
+        let src = allocation_source(expr);
+        let mut parser = GoParser::new();
+        parser
+            .parse(&src)
+            .unwrap_or_else(|err| panic!("{expr} should parse: {err}"));
+        let funcs = parser.extract_functions(&src).unwrap();
+        let names: Vec<_> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["mk", "f"]);
+    }
+
+    /// Go 1.27 generalized `new` to accept an arbitrary expression, not
+    /// just a type ([spec: Allocation](https://go.dev/ref/spec#Allocation)),
+    /// and `tree-sitter-go` still restricts that slot to its type
+    /// production — so these shapes do not parse (issue #494). We wait for
+    /// upstream rather than carrying a patched grammar; the cost is bounded
+    /// because a walked file that fails to parse is warned about and
+    /// skipped instead of failing the run.
+    ///
+    /// The limitation is pinned deliberately: a `tree-sitter-go` bump that
+    /// fixes it breaks this test, which is the signal to delete it and move
+    /// these cases up into [`type_shaped_allocation_arguments_parse`].
+    #[rstest]
+    #[case::numeric_literal("new(3)")]
+    #[case::unary_expression("new(-1)")]
+    #[case::call_expression("new(mk(\"hi\"))")]
+    #[case::conversion("new(int64(2))")]
+    #[case::string_literal("new(\"16Gi\")")]
+    fn go_1_27_new_expr_arguments_do_not_parse_yet(#[case] expr: &str) {
+        let err = GoParser::new()
+            .parse(&allocation_source(expr))
+            .expect_err("upstream tree-sitter-go fixed new(expr): see the doc comment");
+        assert!(format!("{err}").contains("parse"));
+    }
+
     #[test]
     fn parse_returns_error_for_invalid_go() {
         // `func !!! {` has no recognisable `func name(...)` shape — the

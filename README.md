@@ -372,6 +372,16 @@ Adding a language means writing one adapter crate and wiring it into the
 Supported source extensions: `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs`; `.py`; `.go`.
 
+A file the parser cannot handle — usually syntax newer than the bundled
+grammars — fails the run only when it was named explicitly. Files found by
+walking a directory or module are skipped with a stderr warning (and dropped
+from call/module graphs), so one too-new file cannot disable analysis of the
+code around it.
+
+Known gap: Go 1.27 generalized `new` to take an arbitrary expression
+(`new(mk("hi"))`, `new(3)`), which `tree-sitter-go` does not parse yet. Such
+a file is skipped under the rule above until upstream covers the syntax.
+
 Language coverage per analyzer:
 
 - Most analyzers cover all four language families.

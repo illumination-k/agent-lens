@@ -90,7 +90,12 @@ pub struct CrateModule {
 /// presentation order can re-sort the result.
 pub fn build_module_tree(root: &Path) -> Result<Vec<CrateModule>, CouplingError> {
     let mut out = Vec::new();
-    walk_file(root, ModulePath::new("crate"), &mut out)?;
+    walk_file(
+        root,
+        ModulePath::new("crate"),
+        &mut out,
+        /* is_root = */ true,
+    )?;
     Ok(out)
 }
 
@@ -98,15 +103,30 @@ fn walk_file(
     file: &Path,
     mod_path: ModulePath,
     out: &mut Vec<CrateModule>,
+    is_root: bool,
 ) -> Result<(), CouplingError> {
     let source = std::fs::read_to_string(file).map_err(|source| CouplingError::Io {
         path: file.to_path_buf(),
         source,
     })?;
-    let parsed = syn::parse_file(&source).map_err(|source| CouplingError::Parse {
-        path: file.to_path_buf(),
-        source,
-    })?;
+    let parsed = match syn::parse_file(&source) {
+        Ok(parsed) => parsed,
+        // A declared submodule file that fails to parse drops out of the
+        // module tree with a warning instead of failing the whole build:
+        // syntax newer than the bundled parser must not disable analysis
+        // of every module around it. The crate root the caller named
+        // keeps the hard error.
+        Err(source) if !is_root => {
+            tracing::warn!(path = %file.display(), error = %source, "skipping file: parse failed");
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(CouplingError::Parse {
+                path: file.to_path_buf(),
+                source,
+            });
+        }
+    };
     let items = split_modules(parsed.items, &mod_path, file, out)?;
     out.push(CrateModule {
         path: mod_path,
@@ -150,7 +170,7 @@ fn split_modules(
                                 .unwrap_or_else(|| Path::new("."))
                                 .to_path_buf(),
                         })?;
-                        walk_file(&resolved, child_path, out)?;
+                        walk_file(&resolved, child_path, out, /* is_root = */ false)?;
                     }
                 }
             }
@@ -553,6 +573,26 @@ mod tests {
         let lib = write_file(dir.path(), "lib.rs", "fn solo() {}\n");
         let tree = build_module_tree(&lib).unwrap();
         assert_eq!(paths(&tree), vec!["crate"]);
+    }
+
+    /// A declared submodule file that fails to parse drops out of the
+    /// tree with a warning while the rest of the crate still builds
+    /// (issue #494); the crate root itself keeps the hard error.
+    #[test]
+    fn unparseable_submodule_is_skipped_but_the_root_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "mod good;\nmod broken;\n");
+        write_file(dir.path(), "good.rs", "pub fn ok() {}\n");
+        write_file(dir.path(), "broken.rs", "fn ??? {");
+
+        let tree = build_module_tree(&lib).expect("bad submodule must not fail the tree");
+        let mut p = paths(&tree);
+        p.sort();
+        assert_eq!(p, vec!["crate", "crate::good"]);
+
+        let broken_root = write_file(dir.path(), "broken_root.rs", "fn ??? {");
+        let err = build_module_tree(&broken_root).unwrap_err();
+        assert!(matches!(err, CouplingError::Parse { .. }), "{err:?}");
     }
 
     #[test]

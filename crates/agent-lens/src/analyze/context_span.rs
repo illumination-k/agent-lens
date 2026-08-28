@@ -865,6 +865,33 @@ mod tests {
         assert!(matches!(err, ContextSpanAnalyzerError::Parse { .. }));
     }
 
+    /// One unparseable file inside the walked Go module must not poison
+    /// the module-wide span profile: the import chain between the
+    /// parseable files still reports (issue #494).
+    #[test]
+    fn go_module_with_one_unparseable_file_still_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "a/a.go",
+            "package a\n\nimport \"github.com/x/proj/b\"\n\nvar _ = b.X\n",
+        );
+        write_file(dir.path(), "b/b.go", "package b\n\nvar X = 1\n");
+        write_file(dir.path(), "b/broken.go", "package b\nfunc !!! {");
+
+        let json = ContextSpanAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules = parsed["modules"].as_array().unwrap();
+        let a = modules
+            .iter()
+            .find(|m| m["path"] == "github.com/x/proj/a")
+            .expect("module a survives the bad file");
+        assert_eq!(a["direct"].as_u64().unwrap(), 1);
+    }
+
     /// Two TS entries that share a transitively-imported file. The
     /// shared file must collapse to one module so the report reflects
     /// the merged graph rather than a per-entry duplicate.

@@ -79,7 +79,18 @@ pub fn build_module_tree(root: &Path) -> Result<Vec<PythonModule>, CouplingError
                 });
             }
         };
-        out.push(parse_one(&file, module_path_for_rel(rel))?);
+        // A walked file that fails to parse drops out of the module tree
+        // with a warning instead of failing the whole build: syntax newer
+        // than the bundled parser must not disable analysis of every
+        // module around it. An explicit single-file root (above) keeps
+        // the hard error.
+        match parse_one(&file, module_path_for_rel(rel)) {
+            Ok(module) => out.push(module),
+            Err(CouplingError::Parse { path, source }) => {
+                tracing::warn!(path = %path.display(), error = %source, "skipping file: parse failed");
+            }
+            Err(other) => return Err(other),
+        }
     }
     Ok(out)
 }
@@ -365,6 +376,37 @@ mod tests {
             resolved.map(|(to, symbol)| (to.as_str().to_owned(), symbol)),
             expected.map(|(to, symbol)| (to.to_owned(), symbol.to_owned())),
         );
+    }
+
+    /// A walked file that fails to parse drops out of the module tree
+    /// with a warning while the rest of the package still builds
+    /// (issue #494); an explicit single-file root keeps the hard error.
+    #[test]
+    fn unparseable_walked_file_is_skipped_but_an_explicit_root_errors() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("a.py"), "class A: pass\n").expect("write a");
+        std::fs::write(root.path().join("main.py"), "import a\n").expect("write main");
+        let broken = root.path().join("broken.py");
+        std::fs::write(&broken, "def ??? broken\n").expect("write broken");
+
+        let modules = build_module_tree(root.path()).expect("bad file must not fail the tree");
+        let paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        assert!(paths.contains(&"crate::a"), "got {paths:?}");
+        assert!(paths.contains(&"crate::main"), "got {paths:?}");
+        assert!(
+            !paths.contains(&"crate::broken"),
+            "the unparseable module is dropped: {paths:?}",
+        );
+        let edges = extract_edges(&modules);
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge == &e("crate::main", "crate::a", "a")),
+            "edges between parseable files survive: {edges:?}",
+        );
+
+        let err = build_module_tree(&broken).unwrap_err();
+        assert!(matches!(err, super::CouplingError::Parse { .. }), "{err:?}",);
     }
 
     #[test]

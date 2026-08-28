@@ -742,6 +742,7 @@ dependencies = [
  "ruff_text_size",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -756,6 +757,7 @@ dependencies = [
  "syn 3.0.3",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -773,6 +775,7 @@ dependencies = [
  "rstest",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
