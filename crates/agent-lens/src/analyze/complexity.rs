@@ -565,6 +565,29 @@ def branchy(n):
         assert!(matches!(err, AnalyzerError::Parse(_)));
     }
 
+    /// One unparseable file found by the directory walk is skipped with
+    /// a warning — source using syntax newer than the bundled grammars
+    /// must not disable analysis of everything around it (issue #494).
+    /// Only the explicit single-file spelling above keeps the hard
+    /// error.
+    #[test]
+    fn walked_unparseable_file_is_skipped_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "broken.go", "package p\nfunc !!! {");
+        write_file(
+            dir.path(),
+            "ok.go",
+            "package p\nfunc Ok(x int) int {\n\tif x > 0 {\n\t\treturn x\n\t}\n\treturn -x\n}\n",
+        );
+        let json = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["scanned_file_count"], 2);
+        assert_eq!(parsed["file_count"], 1);
+        assert_eq!(parsed["files"][0]["file"], "ok.go");
+    }
+
     #[test]
     fn diff_only_filters_to_changed_functions() {
         let dir = tempfile::tempdir().unwrap();

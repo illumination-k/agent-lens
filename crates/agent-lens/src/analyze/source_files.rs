@@ -8,6 +8,13 @@ use super::{AnalyzeRoots, AnalyzerError, CompiledPathFilter, SourceLang};
 pub(crate) struct SourceFile {
     pub path: PathBuf,
     pub display_path: String,
+    /// Whether the file was itself named as an analysis root (as opposed
+    /// to being discovered by a directory walk). Parse failures in
+    /// explicitly-named files abort the run — an empty "no findings"
+    /// report for the one file the caller asked about would be
+    /// misleading — while walked files degrade to warn-and-skip; see
+    /// [`skip_parse_error_if_walked`].
+    pub explicit: bool,
 }
 
 /// Every supported source file under `roots`, deterministically ordered
@@ -50,6 +57,7 @@ fn collect_root_source_files(
             out.push(SourceFile {
                 path: root.to_path_buf(),
                 display_path: roots.display_path(root),
+                explicit: true,
             });
         }
         return Ok(());
@@ -69,9 +77,33 @@ fn collect_root_source_files(
         out.push(SourceFile {
             path: p.to_path_buf(),
             display_path: roots.display_path(p),
+            explicit: false,
         });
     }
     Ok(())
+}
+
+/// Degradation policy for a file that failed to parse: files discovered
+/// by a directory walk are warned about and dropped from the run —
+/// source using syntax newer than the bundled grammars must not disable
+/// analysis of everything around it — while a file the caller named
+/// explicitly keeps the hard error, and every non-parse failure always
+/// propagates.
+///
+/// Returns `Ok(None)` for the skipped case so per-file loops can treat
+/// it like any other file without findings.
+pub(crate) fn skip_parse_error_if_walked<T>(
+    file: &SourceFile,
+    result: Result<T, AnalyzerError>,
+) -> Result<Option<T>, AnalyzerError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(AnalyzerError::Parse(error)) if !file.explicit => {
+            tracing::warn!(path = %file.path.display(), %error, "skipping file: parse failed");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub fn read_source(path: &Path) -> Result<(SourceLang, String), AnalyzerError> {

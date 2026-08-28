@@ -28,7 +28,7 @@ use super::cargo_meta::CrateNameCache;
 use super::index::{AnalysisIndex, SourceKey};
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, LineRange, SourceFile, SourceLang,
-    changed_line_ranges, collect_source_files, read_source,
+    changed_line_ranges, collect_source_files, read_source, skip_parse_error_if_walked,
 };
 use model::{
     CallGraphEdge, CallGraphNode, DelegationFacts, EdgeWeights, GraphLanguage,
@@ -302,12 +302,22 @@ impl CallGraphBuilder {
             .map(|source_file| {
                 super::index::with_installed(index.as_ref(), || {
                     let path_is_test = filter.is_test_path(&source_file.path);
-                    self.scan_file(roots.base(), source_file, path_is_test, &crate_cache)
+                    // A walked file that fails to parse is dropped from
+                    // the graph with a warning instead of failing the
+                    // build, so one file of too-new syntax cannot take
+                    // down every call-graph analyzer.
+                    skip_parse_error_if_walked(
+                        source_file,
+                        self.scan_file(roots.base(), source_file, path_is_test, &crate_cache),
+                    )
                 })
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         Ok(CallGraph::build(files))
     }
 
@@ -1300,6 +1310,35 @@ mod tests {
             .unwrap();
         assert_eq!(visited, ["src/lib.rs"], "the markdown file is not source");
         assert_eq!(count, 1);
+    }
+
+    /// One unparseable file found by the directory walk is dropped from
+    /// the graph with a warning instead of failing the build, so a
+    /// single file of too-new syntax cannot take down every call-graph
+    /// analyzer (issue #494). An explicitly-named file keeps the hard
+    /// error.
+    #[test]
+    fn walked_unparseable_file_is_dropped_from_the_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = write_file(dir.path(), "src/broken.go", "package p\nfunc !!! {");
+        write_file(
+            dir.path(),
+            "src/ok.go",
+            "package p\n\nfunc A() { B() }\n\nfunc B() {}\n",
+        );
+
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
+        let names: Vec<&str> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"A"), "got {names:?}");
+        assert!(names.contains(&"B"), "got {names:?}");
+        assert_eq!(graph.edges.len(), 1);
+
+        let err = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(&broken))
+            .unwrap_err();
+        assert!(matches!(err, AnalyzerError::Parse(_)), "{err:?}");
     }
 
     /// The three properties the caller sets carry beyond being the

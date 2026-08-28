@@ -209,6 +209,7 @@ mod tests {
         SourceFile {
             path: PathBuf::from(display_path),
             display_path: display_path.to_owned(),
+            explicit: false,
         }
     }
 

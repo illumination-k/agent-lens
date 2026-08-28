@@ -58,6 +58,7 @@ use super::runner::render_report;
 use super::similarity::FunctionSelection;
 use super::{
     AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, collect_source_files, read_source,
+    skip_parse_error_if_walked,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -380,7 +381,15 @@ impl SearchAnalyzer {
         let files = collect_source_files(roots, &filter)?;
         let per_file: Vec<Vec<Entry>> = files
             .par_iter()
-            .map(|file| self.collect_file(file, filter.is_test_path(&file.path)))
+            .map(|file| {
+                // A walked file that fails to parse drops out of the
+                // corpus with a warning instead of failing the run.
+                skip_parse_error_if_walked(
+                    file,
+                    self.collect_file(file, filter.is_test_path(&file.path)),
+                )
+                .map(Option::unwrap_or_default)
+            })
             .collect::<Result<_, _>>()?;
 
         let mut documents = Vec::new();

@@ -53,7 +53,7 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
     let entry = normalize_path(entry);
     let mut discovered = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut stack = vec![entry];
+    let mut stack = vec![entry.clone()];
 
     while let Some(file) = stack.pop() {
         if !seen.insert(file.clone()) {
@@ -64,10 +64,24 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
             source,
         })?;
         let dialect = Dialect::from_path(&file).unwrap_or(Dialect::Ts);
-        let links = parse_links(&source, dialect).map_err(|source| CouplingError::Parse {
-            path: file.clone(),
-            source,
-        })?;
+        // A followed import that fails to parse drops out of the module
+        // tree with a warning instead of failing the whole build: syntax
+        // newer than the bundled parser must not disable analysis of
+        // every module around it. The entry file the caller named keeps
+        // the hard error.
+        let links = match parse_links(&source, dialect) {
+            Ok(links) => links,
+            Err(source) if file != entry => {
+                tracing::warn!(path = %file.display(), error = %source, "skipping file: parse failed");
+                continue;
+            }
+            Err(source) => {
+                return Err(CouplingError::Parse {
+                    path: file.clone(),
+                    source,
+                });
+            }
+        };
         let base = file.parent().unwrap_or_else(|| Path::new("."));
         for link in &links {
             if let Some(next) = resolve_relative_module(base, &link.specifier)
@@ -378,6 +392,39 @@ mod tests {
             && e.to.as_str() == "crate::shared"
             && e.symbol == "*"
             && e.kind == EdgeKind::Use));
+    }
+
+    /// A followed import that fails to parse drops out of the module
+    /// tree with a warning while the rest of the graph still builds
+    /// (issue #494); the entry file the caller named keeps the hard
+    /// error.
+    #[test]
+    fn unparseable_followed_import_is_skipped_but_the_entry_errors() {
+        let project = mk_temp_project();
+        let root = project.path();
+        let entry = root.join("main.ts");
+        std::fs::write(
+            &entry,
+            "import { add } from './util'; import { bad } from './broken';",
+        )
+        .expect("write main");
+        std::fs::write(
+            root.join("util.ts"),
+            "export function add(a:number,b:number){ return a+b; }",
+        )
+        .expect("write util");
+        std::fs::write(root.join("broken.ts"), "export function ??? {").expect("write broken");
+
+        let modules = build_module_tree(&entry).expect("bad import must not fail the tree");
+        assert!(modules.iter().any(|m| m.path.as_str() == "crate::main"));
+        assert!(modules.iter().any(|m| m.path.as_str() == "crate::util"));
+        assert!(
+            !modules.iter().any(|m| m.path.as_str() == "crate::broken"),
+            "the unparseable module is dropped",
+        );
+
+        let err = build_module_tree(&root.join("broken.ts")).unwrap_err();
+        assert!(matches!(err, CouplingError::Parse { .. }), "{err:?}");
     }
 
     #[test]

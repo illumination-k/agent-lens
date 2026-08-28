@@ -11,6 +11,7 @@ use super::SimilarityTarget;
 use super::extract::{extract_functions, extract_statement_seqs, extract_types};
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, SourceFile, collect_source_files, read_source,
+    skip_parse_error_if_walked,
 };
 
 /// A single comparison unit plus the file it originated from. The corpus
@@ -108,7 +109,13 @@ pub(super) fn collect_corpus(
         .par_iter()
         .map(|source_file| {
             let path_is_test = filter.is_test_path(&source_file.path);
-            collect_file(source_file, selection, path_is_test, target, min_lines)
+            // A walked file that fails to parse drops out of the corpus
+            // with a warning instead of failing the run.
+            skip_parse_error_if_walked(
+                source_file,
+                collect_file(source_file, selection, path_is_test, target, min_lines),
+            )
+            .map(Option::unwrap_or_default)
         })
         .collect::<Result<_, _>>()?;
 

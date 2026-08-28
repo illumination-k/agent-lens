@@ -15,7 +15,7 @@ use serde::ser::{SerializeStruct, Serializer};
 
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, SourceFile,
-    changed_line_ranges, collect_source_files, overlaps_any,
+    changed_line_ranges, collect_source_files, overlaps_any, skip_parse_error_if_walked,
 };
 
 /// Filter knobs every per-file analyzer shares: a diff gate plus the
@@ -89,6 +89,11 @@ impl FilterConfig {
     /// still count towards `scanned_file_count` — the report must be
     /// able to say "N files were inspected, none had findings" rather
     /// than the misleading "0 file(s)".
+    ///
+    /// A walked file that fails to parse is warned about and skipped
+    /// rather than failing the run ([`skip_parse_error_if_walked`]), so
+    /// one file using syntax newer than the bundled grammars cannot
+    /// disable the whole report.
     pub fn collect_per_file<R>(
         &self,
         roots: &AnalyzeRoots,
@@ -98,7 +103,9 @@ impl FilterConfig {
         let mut scanned_file_count = 0;
         for source_file in self.collect_source_files(roots)? {
             scanned_file_count += 1;
-            if let Some(report) = analyze_one(&source_file)? {
+            if let Some(Some(report)) =
+                skip_parse_error_if_walked(&source_file, analyze_one(&source_file))?
+            {
                 reports.push(report);
             }
         }

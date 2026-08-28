@@ -16,6 +16,7 @@ oxc_parser = "0.142"
 oxc_span = "0.142"
 oxc_syntax = "0.142"
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
