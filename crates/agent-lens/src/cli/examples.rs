@@ -30,6 +30,7 @@ Pick an analyzer by question:
     did I already write this?             analyze similarity
     is this body just a forwarder?        analyze wrapper
     is one caller all this function has?  analyze single-use
+    is one impl all this trait has?       analyze single-impl
     how many hops before real work?       analyze delegation
     does this type do too many things?    analyze cohesion
     which modules are entangled?          analyze coupling
@@ -39,6 +40,7 @@ Pick an analyzer by question:
     what breaks if I change this?         analyze impact
     which level does this code sit on?    analyze layers
     what has no test path guarding it?    analyze untested
+    what do only tests keep alive?        analyze test-only
     can anything still reach this code?   analyze unreachable
     is this `pub` wider than it needs?    analyze visibility
     who calls this / how do I get there?  analyze graph-query
@@ -171,6 +173,13 @@ Examples:
     agent-lens analyze hubs src/ --exclude-tests --format md
 ";
 
+pub const SINGLE_IMPL: &str = "\
+Examples:
+
+    agent-lens analyze single-impl src/ --format md
+    agent-lens analyze single-impl src/ --top 10 --format md
+";
+
 pub const SINGLE_USE: &str = "\
 Examples:
 
@@ -192,6 +201,13 @@ Examples:
 
     agent-lens analyze layers src/ --format md
     agent-lens analyze layers src/ --exclude-tests --top 30 --format md
+";
+
+pub const TEST_ONLY: &str = "\
+Examples:
+
+    agent-lens analyze test-only src/ --format md
+    agent-lens analyze test-only src/ --top 10 --format md
 ";
 
 pub const UNTESTED: &str = "\

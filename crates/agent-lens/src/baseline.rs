@@ -143,7 +143,9 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Layers
         | ToolName::Risk
         | ToolName::Search
+        | ToolName::SingleImpl
         | ToolName::SingleUse
+        | ToolName::TestOnly
         | ToolName::Unreachable
         | ToolName::Untested
         | ToolName::Visibility

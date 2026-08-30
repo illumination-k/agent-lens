@@ -1029,6 +1029,67 @@ fn run_profile_drives_single_use_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_single_impl_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "trait Store { fn get(&self) -> usize; }\n\
+         struct Memory;\n\
+         impl Store for Memory { fn get(&self) -> usize { 1 } }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.abstractions]\npath = \"src\"\ntools = [\"single-impl\"]\n\n\
+         [profile.abstractions.single-impl]\ntop = 5\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "abstractions"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "single-impl");
+    let report = &json["results"][0]["report"];
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "got {findings:?}");
+    assert_eq!(findings[0]["display_name"], "Store");
+    assert_eq!(
+        findings[0]["production_implementors"],
+        serde_json::json!(["Memory"]),
+    );
+}
+
+#[test]
+fn run_profile_drives_test_only_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "fn fixture() -> usize { 1 }\n\
+         pub fn api() -> usize { 2 }\n\
+         #[cfg(test)]\n\
+         mod tests {\n\
+             #[test]\n\
+             fn t() { let v = crate::fixture(); assert_eq!(v, 1); }\n\
+         }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.seams]\npath = \"src\"\ntools = [\"test-only\"]\n\n\
+         [profile.seams.test-only]\ntop = 5\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "seams"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "test-only");
+    let report = &json["results"][0]["report"];
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "got {findings:?}");
+    assert_eq!(findings[0]["qualified_name"], "crate::fixture");
+    assert_eq!(findings[0]["kind"], "test_only");
+}
+
+#[test]
 fn run_profile_drives_untested_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(

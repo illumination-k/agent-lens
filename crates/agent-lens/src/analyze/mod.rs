@@ -41,9 +41,11 @@ mod roots;
 mod runner;
 pub mod search;
 pub mod similarity;
+pub mod single_impl;
 pub mod single_use;
 mod source_files;
 mod static_file_graph;
+pub mod test_only;
 pub mod unreachable;
 pub mod untested;
 pub mod visibility;
@@ -86,7 +88,9 @@ pub use similarity::{
     DEFAULT_TYPE_MIN_LINES as DEFAULT_SIMILARITY_TYPE_MIN_LINES, FunctionSelection, PairKey,
     SimilarityAnalyzer, SimilarityMethod, SimilarityTarget,
 };
+pub use single_impl::SingleImplAnalyzer;
 pub use single_use::SingleUseAnalyzer;
+pub use test_only::TestOnlyAnalyzer;
 pub use unreachable::{Tier as UnreachableTier, UnreachableAnalyzer};
 pub use untested::UntestedAnalyzer;
 pub use visibility::VisibilityAnalyzer;

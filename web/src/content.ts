@@ -132,6 +132,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
         summary:
           "Functions with exactly one resolved production caller, small and simple enough to inline into it — with caveats where the claim is weaker, and a calibration section for setting the thresholds per repository.",
       },
+      {
+        name: "single-impl",
+        summary:
+          "Traits and interfaces with at most one production implementor — candidates for the concrete type, with mock-seam, dyn-dispatch and visibility caveats, and the tree's implementor-count histogram.",
+      },
     ],
   },
   {
@@ -214,6 +219,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
         name: "unreachable",
         summary:
           "Functions no entry point reaches, in confidence tiers — confirmed rows are deletable on that evidence alone (Rust, Go).",
+      },
+      {
+        name: "test-only",
+        summary:
+          "Production functions only tests keep alive — candidates to move into test scope or delete with their tests (Rust, Go).",
       },
       {
         name: "visibility",

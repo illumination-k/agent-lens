@@ -64,7 +64,9 @@ pub use crate::analyze::layers::LayersOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
+pub use crate::analyze::single_impl::SingleImplOptions;
 pub use crate::analyze::single_use::SingleUseOptions;
+pub use crate::analyze::test_only::TestOnlyOptions;
 pub use crate::analyze::unreachable::UnreachableOptions;
 pub use crate::analyze::untested::UntestedOptions;
 pub use crate::analyze::visibility::VisibilityOptions;
@@ -169,7 +171,11 @@ pub struct Profile {
     #[serde(default)]
     pub delegation: Option<DelegationOptions>,
     #[serde(default)]
+    pub single_impl: Option<SingleImplOptions>,
+    #[serde(default)]
     pub single_use: Option<SingleUseOptions>,
+    #[serde(default)]
+    pub test_only: Option<TestOnlyOptions>,
     #[serde(default)]
     pub unreachable: Option<UnreachableOptions>,
     #[serde(default)]
@@ -354,7 +360,9 @@ pub enum ToolName {
     Risk,
     Search,
     Similarity,
+    SingleImpl,
     SingleUse,
+    TestOnly,
     Unreachable,
     Untested,
     Visibility,
@@ -384,7 +392,9 @@ impl ToolName {
             Self::Risk => "risk",
             Self::Search => "search",
             Self::Similarity => "similarity",
+            Self::SingleImpl => "single-impl",
             Self::SingleUse => "single-use",
+            Self::TestOnly => "test-only",
             Self::Unreachable => "unreachable",
             Self::Untested => "untested",
             Self::Visibility => "visibility",
