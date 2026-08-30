@@ -878,6 +878,149 @@ mod tests {
             report["thresholds"]["max_cyclomatic"],
             DEFAULT_MAX_CYCLOMATIC
         );
+        assert_eq!(report["calibration"]["single_caller_count"], 1);
+        assert_eq!(report["calibration"]["within_thresholds_count"], 1);
+    }
+
+    #[test]
+    fn an_ambiguous_inbound_call_site_is_a_caveat() {
+        // The bare `dup()` at crate root matches both module-level
+        // definitions through the last-segment fallback, so each `dup`
+        // keeps its one resolved caller and gains an ambiguous inbound
+        // edge naming it as a candidate.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { fn dup() {} pub fn caller() { dup(); } }\n\
+             mod b { fn dup() {} pub fn caller() { dup(); } }\n\
+             pub fn wild() { dup(); }\n\
+             pub fn root() { a::caller(); b::caller(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = candidate(&report, "a::dup").expect("still single-caller");
+        assert!(
+            entry["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "ambiguous_inbound"),
+            "got {entry:?}",
+        );
+    }
+
+    #[test]
+    fn a_fallback_resolved_caller_is_a_caveat() {
+        // `self.inner.helper()` resolves through the last-segment
+        // fallback, so even the one caller is heuristic.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub struct Inner;\n\
+             impl Inner { fn helper(&self) {} }\n\
+             pub struct S { inner: Inner }\n\
+             impl S { pub fn caller(&self) { self.inner.helper(); } }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = candidate(&report, "Inner::helper").expect("listed");
+        assert!(
+            entry["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "fallback_resolved_call"),
+            "got {entry:?}",
+        );
+    }
+
+    #[test]
+    fn go_interface_matching_methods_are_excluded_but_plain_functions_are_not() {
+        // `Greet` matches the in-scope interface's method set by name
+        // and arity, so its calls can dispatch through the interface
+        // and it can never be inlined; `helper` is a plain function
+        // with one caller and stays a candidate.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.go",
+            "package p\n\n\
+             type Greeter interface {\n\
+             \tGreet(x int) int\n\
+             }\n\n\
+             type T struct{}\n\n\
+             func (t T) Greet(x int) int { return x }\n\n\
+             func helper() int { return 1 }\n\n\
+             func Use() int { return helper() }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["excluded"]["interface_method_count"], 1);
+        assert!(candidate(&report, "::Greet").is_none());
+        assert!(candidate(&report, "::helper").is_some());
+    }
+
+    #[test]
+    fn top_caps_the_markdown_candidate_list() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn first() {}\n\
+             fn second() { let _ = 1; }\n\
+             pub fn caller() { first(); second(); }\n",
+        );
+
+        let md = SingleUseAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("top 1"), "got: {md}");
+        // Sorted smallest-first, so the cap keeps `first` and drops
+        // `second` from the rendering.
+        assert!(md.contains("`crate::first`"), "got: {md}");
+        assert!(!md.contains("`crate::second`"), "got: {md}");
+    }
+
+    #[test]
+    fn markdown_renders_call_sites_test_callers_and_caveat_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn clean_one() {}\n\
+             fn twice() {}\n\
+             fn seam() {}\n\
+             pub fn caller() { clean_one(); twice(); twice(); seam(); }\n\
+             #[cfg(test)]\n\
+             mod tests { fn t() { crate::seam(); } }\n",
+        );
+
+        let md = SingleUseAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        // Multi-site and test-caller counts render only where they are
+        // non-trivial, and caveat text renders verbatim.
+        assert!(md.contains("at 2 sites"), "got: {md}");
+        assert!(!md.contains("at 1 sites"), "got: {md}");
+        assert!(md.contains("+1 test caller(s)"), "got: {md}");
+        assert!(!md.contains("+0 test caller"), "got: {md}");
+        assert!(
+            md.contains("several call sites in the one caller"),
+            "got: {md}",
+        );
+        assert!(md.contains("tests call it directly"), "got: {md}");
+        // The calibration distribution lines render, not just the
+        // section header.
+        assert!(md.contains("- loc: p50="), "got: {md}");
+        // A caveat-free row carries no caveat separator.
+        let clean_line = md
+            .lines()
+            .find(|l| l.contains("`crate::clean_one`"))
+            .expect("clean row rendered");
+        assert!(!clean_line.contains(" — "), "got: {clean_line}");
     }
 
     #[test]
