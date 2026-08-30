@@ -1744,6 +1744,49 @@ mod tests {
     }
 
     #[test]
+    fn the_member_list_rolls_up_only_past_the_cap() {
+        // Two runs: eight members render in full, nine roll the ninth
+        // into a "+1 more".
+        let mut eight = String::new();
+        for i in 1..=8 {
+            let body = if i == 1 {
+                "let _ = 1;".to_owned()
+            } else {
+                format!("a{}();", i - 1)
+            };
+            eight.push_str(&format!("fn a{i}() {{ {body} }}\n"));
+        }
+        eight.push_str("pub fn sink_a() { a8(); }\n");
+        let mut nine = String::new();
+        for i in 1..=9 {
+            let body = if i == 1 {
+                "let _ = 1;".to_owned()
+            } else {
+                format!("b{}();", i - 1)
+            };
+            nine.push_str(&format!("fn b{i}() {{ {body} }}\n"));
+        }
+        nine.push_str("pub fn sink_b() { b9(); }\n");
+
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &format!("{eight}{nine}"));
+
+        let md = SingleUseAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        let sink_a_line = md
+            .lines()
+            .find(|l| l.contains("into `crate::sink_a`"))
+            .expect("eight-member chain rendered");
+        assert!(!sink_a_line.contains("more"), "got: {sink_a_line}");
+        let sink_b_line = md
+            .lines()
+            .find(|l| l.contains("into `crate::sink_b`"))
+            .expect("nine-member chain rendered");
+        assert!(sink_b_line.contains("(+1 more)"), "got: {sink_b_line}");
+    }
+
+    #[test]
     fn markdown_renders_chains_only_when_one_exists() {
         let dir = tempfile::tempdir().unwrap();
         write_file(

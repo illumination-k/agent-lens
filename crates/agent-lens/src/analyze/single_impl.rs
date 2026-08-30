@@ -65,10 +65,6 @@ const SCHEMA_VERSION: u32 = 1;
 /// every finding.
 const DEFAULT_TOP: usize = 20;
 
-/// Implementor names listed inline on a row before the rest are rolled
-/// into a count.
-const IMPLEMENTORS_PER_ROW: usize = 3;
-
 const NOTE: &str = "Each row is a trait or interface declared in the analyzed tree with at most \
      one production implementor. One implementor is a candidate to replace the abstraction with \
      the concrete type — a candidate, not a verdict: the row says when the indirection is \
@@ -297,38 +293,34 @@ impl Inventory {
         builder.visit_source_texts(roots, |file, source| {
             let module = module_of.get(file).copied().unwrap_or("");
             let file_is_test = file_all_test.get(file).copied().unwrap_or(false);
-            match SourceLang::from_path(Path::new(file)) {
+            let lang = SourceLang::from_path(Path::new(file));
+            if !matches!(lang, Some(SourceLang::Rust | SourceLang::Go)) {
+                return;
+            }
+            audit.file_count += 1;
+            let parsed = match lang {
                 Some(SourceLang::Rust) => {
-                    audit.file_count += 1;
-                    let Ok((file_decls, file_impls)) =
-                        lens_rust::extract_trait_shapes_with_module(source, module)
-                    else {
-                        audit.parse_skipped_file_count += 1;
-                        return;
-                    };
-                    for mut shape in file_decls {
-                        shape.is_test |= file_is_test;
-                        decls.push(DeclRecord::new(shape, file, "trait"));
-                    }
-                    for mut shape in file_impls {
-                        shape.is_test |= file_is_test;
-                        rust_impls.push((file.to_owned(), shape));
-                    }
+                    lens_rust::extract_trait_shapes_with_module(source, module)
+                        .map(|(file_decls, file_impls)| {
+                            for mut shape in file_impls {
+                                shape.is_test |= file_is_test;
+                                rust_impls.push((file.to_owned(), shape));
+                            }
+                            ("trait", file_decls)
+                        })
+                        .ok()
                 }
-                Some(SourceLang::Go) => {
-                    audit.file_count += 1;
-                    let Ok(file_decls) =
-                        lens_golang::extract_interface_decls_with_module(source, module)
-                    else {
-                        audit.parse_skipped_file_count += 1;
-                        return;
-                    };
-                    for mut shape in file_decls {
-                        shape.is_test |= file_is_test;
-                        decls.push(DeclRecord::new(shape, file, "interface"));
-                    }
-                }
-                _ => {}
+                _ => lens_golang::extract_interface_decls_with_module(source, module)
+                    .map(|file_decls| ("interface", file_decls))
+                    .ok(),
+            };
+            let Some((kind, file_decls)) = parsed else {
+                audit.parse_skipped_file_count += 1;
+                return;
+            };
+            for mut shape in file_decls {
+                shape.is_test |= file_is_test;
+                decls.push(DeclRecord::new(shape, file, kind));
             }
         })?;
 
@@ -518,9 +510,11 @@ impl UsageScan {
                     let is_dyn = position > 0 && tokens[position - 1] == "dyn";
                     // `impl … Name … for …` in raw text is how a macro
                     // body implements a trait; the block extraction
-                    // never sees it.
-                    let is_impl_pattern = tokens[..position].contains(&"impl")
-                        && tokens[position + 1..].contains(&"for");
+                    // never sees it. The trailing slice may start at
+                    // the matched token itself: a declaration cannot be
+                    // named `for`, so including it changes nothing.
+                    let is_impl_pattern =
+                        tokens[..position].contains(&"impl") && tokens[position..].contains(&"for");
                     for &slot in slots {
                         let accounted = allowed.is_some_and(|spans| {
                             spans.iter().any(|&(start, end, s)| {
@@ -723,22 +717,10 @@ fn render_entries(out: &mut String, entries: &[&AbstractionEntry], limit: usize)
             entry.start_line,
             entry.production_implementors.len(),
         );
-        if !entry.production_implementors.is_empty() {
-            let shown: Vec<String> = entry
-                .production_implementors
-                .iter()
-                .take(IMPLEMENTORS_PER_ROW)
-                .map(|name| format!("`{name}`"))
-                .collect();
-            let _ = write!(out, " ({}", shown.join(", "));
-            if entry.production_implementors.len() > IMPLEMENTORS_PER_ROW {
-                let _ = write!(
-                    out,
-                    ", +{}",
-                    entry.production_implementors.len() - IMPLEMENTORS_PER_ROW,
-                );
-            }
-            out.push(')');
+        // A finding has at most one production implementor by
+        // definition, so the list renders as the one name.
+        if let Some(name) = entry.production_implementors.first() {
+            let _ = write!(out, " (`{name}`)");
         }
         if entry.test_implementor_count > 0 {
             let _ = write!(
@@ -1193,6 +1175,198 @@ mod tests {
         assert!(md.contains("(`Memory`)"), "got: {md}");
         assert!(md.contains("`crate::Unused`"), "got: {md}");
         assert!(md.contains("not a verdict"), "got: {md}");
+    }
+
+    #[test]
+    fn the_audit_counts_files_and_parse_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "trait Store { fn get(&self) -> usize; }\n",
+        );
+        write_file(dir.path(), "src/broken.rs", "fn ??? {\n");
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["audit"]["file_count"], 2);
+        assert_eq!(report["audit"]["parse_skipped_file_count"], 1);
+    }
+
+    #[test]
+    fn declarations_in_test_only_files_are_test_scoped() {
+        // File-level test classification comes from the graph's nodes:
+        // a file whose every function is a test is test scaffolding,
+        // and abstractions declared there are not production findings.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", "pub fn api() {}\n");
+        write_file(
+            dir.path(),
+            "src/lib.go",
+            "package p\n\nfunc Use() int { return 1 }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/lib_test.go",
+            "package p\n\n\
+             import \"testing\"\n\n\
+             type harness interface {\n\
+             \trun(x int) int\n\
+             }\n\n\
+             func TestUse(t *testing.T) {}\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert!(finding(&report, "harness").is_none());
+        assert_eq!(report["audit"]["test_declaration_count"], 1);
+    }
+
+    #[test]
+    fn a_rust_trait_never_gains_a_go_implementor() {
+        // The Go census is structural by method name and arity, so it
+        // must never look at a Rust trait: `other`'s method set covers
+        // `Store`'s by name and arity, and counting it would push the
+        // trait out of the single-impl list.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "trait Store { fn get(&self) -> usize; }\n\
+             struct Memory;\n\
+             impl Store for Memory { fn get(&self) -> usize { 1 } }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/lib.go",
+            "package p\n\n\
+             type other struct{}\n\n\
+             func (o other) get() int { return 2 }\n\n\
+             func Use() int { return 3 }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = finding(&report, "Store").expect("listed");
+        assert_eq!(
+            entry["production_implementors"],
+            serde_json::json!(["Memory"]),
+        );
+    }
+
+    #[test]
+    fn reference_classification_survives_line_and_token_edges() {
+        // Three references with awkward shapes: a bound one line after
+        // the impl block, an `-> impl Store` position (impl before the
+        // name but no `for` after), and a comment where the name is the
+        // line's first token. All are plain references; none is
+        // `dyn`-dispatched or impl-shaped.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "trait Store { fn get(&self) -> usize; }\n\
+             struct Memory;\n\
+             impl Store for Memory { fn get(&self) -> usize { 1 } }\n\
+             pub fn generic<S: Store>(s: S) -> usize { s.get() }\n\
+             pub fn opaque() -> impl Store { Memory }\n\
+             // Store survives in prose\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = finding(&report, "Store").expect("listed");
+        assert_eq!(entry["reference_count"], 3, "got {entry:?}");
+        assert_eq!(entry["dyn_reference_count"], 0);
+        assert_eq!(entry["impl_reference_count"], 0);
+        assert!(
+            !entry["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "macro_impl_pattern"),
+            "got {entry:?}",
+        );
+    }
+
+    #[test]
+    fn an_impl_line_without_a_trailing_for_is_no_macro_pattern() {
+        // `impl Debug for Store` in a macro body has `impl` before the
+        // name and `for` before it too — but not after, so it is a
+        // plain reference, not evidence of a macro implementing Store.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "trait Store { fn get(&self) -> usize; }\n\
+             struct Memory;\n\
+             impl Store for Memory { fn get(&self) -> usize { 1 } }\n\
+             macro_rules! noisy {\n\
+                 () => {\n\
+                     impl core::fmt::Debug for Store {}\n\
+                 };\n\
+             }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = finding(&report, "Store").expect("listed");
+        assert_eq!(entry["impl_reference_count"], 0, "got {entry:?}");
+        assert_eq!(entry["reference_count"], 1, "got {entry:?}");
+    }
+
+    #[test]
+    fn markdown_sections_hold_the_right_rows_and_row_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "trait Store { fn get(&self) -> usize; }\n\
+             struct Memory;\n\
+             impl Store for Memory { fn get(&self) -> usize { 1 } }\n\
+             trait Unused { fn nothing(&self); }\n\
+             pub fn boxed() -> Box<dyn Store> { Box::new(Memory) }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 use super::Store;\n\
+                 struct Fake;\n\
+                 impl Store for Fake { fn get(&self) -> usize { 0 } }\n\
+             }\n",
+        );
+
+        let md = SingleImplAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        // Section membership: the single-impl trait sits in the first
+        // section, the unimplemented one in the second, not vice versa.
+        let single_section = md
+            .split("## Single-implementation abstractions")
+            .nth(1)
+            .and_then(|rest| rest.split("## No production implementor").next())
+            .expect("both sections rendered");
+        let zero_section = md
+            .split("## No production implementor")
+            .nth(1)
+            .expect("zero section rendered");
+        assert!(single_section.contains("`crate::Store`"), "got: {md}");
+        assert!(!single_section.contains("`crate::Unused`"), "got: {md}");
+        assert!(zero_section.contains("`crate::Unused`"), "got: {md}");
+        // Row shape: the one implementor is named, the mock seam and
+        // dyn counts render only when non-zero, and caveat text renders
+        // verbatim (the same strings the JSON names symbolically).
+        assert!(md.contains("(`Memory`)"), "got: {md}");
+        assert!(md.contains("+1 test implementor(s)"), "got: {md}");
+        assert!(!md.contains("+0 test implementor"), "got: {md}");
+        assert!(md.contains("(dyn 1)"), "got: {md}");
+        assert!(!md.contains("(dyn 0)"), "got: {md}");
+        assert!(!md.contains("(impl-shaped"), "got: {md}");
+        assert!(
+            md.contains("a test implementor exists (mock seam)"),
+            "got: {md}",
+        );
+        assert!(md.contains("`dyn`-dispatched"), "got: {md}");
+        // `Unused` is private with no references: its row must carry no
+        // caveat separator.
+        let unused_line = md
+            .lines()
+            .find(|l| l.contains("`crate::Unused`"))
+            .expect("row rendered");
+        assert!(!unused_line.contains(" — "), "got: {unused_line}");
     }
 
     #[test]

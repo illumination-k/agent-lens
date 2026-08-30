@@ -1282,12 +1282,191 @@ mod tests {
     }
 
     #[test]
+    fn the_downstream_of_a_go_interface_method_is_caveated() {
+        // `grinder` is only reachable through `greet`, which the
+        // in-scope interface can dispatch into from production; `plain`
+        // matches no interface, so `quiet` below it stays clean.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.go",
+            "package p\n\n\
+             type greeter interface {\n\
+             \tgreet(x int) int\n\
+             }\n\n\
+             type T struct{}\n\n\
+             func (t T) greet(x int) int { return grinder() }\n\n\
+             func grinder() int { return 1 }\n\n\
+             func (t T) plain(x int) int { return quiet() }\n\n\
+             func quiet() int { return 2 }\n\n\
+             func Use() int { return 3 }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/lib_test.go",
+            "package p\n\n\
+             import \"testing\"\n\n\
+             func TestAll(t *testing.T) {\n\
+             \tv := T{}\n\
+             \t_ = v.greet(1)\n\
+             \t_ = v.plain(2)\n\
+             }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let grinder = finding(&report, "::grinder").expect("grinder listed");
+        assert!(
+            grinder["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "dispatch_reachable"),
+            "got {grinder:?}",
+        );
+        let quiet = finding(&report, "::quiet").expect("quiet listed");
+        assert_eq!(quiet["caveats"], serde_json::json!([]), "got {quiet:?}");
+        let plain = finding(&report, "::plain").expect("plain listed");
+        assert_eq!(plain["caveats"], serde_json::json!([]), "got {plain:?}");
+    }
+
+    #[test]
+    fn markdown_renders_refs_callers_and_caveat_text() {
+        // `hidden` carries a production raw reference; `inner` has a
+        // production caller that is itself unreachable. Both facts must
+        // render, with the caveat text verbatim.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn inner() -> usize { 1 }\n\
+             fn hidden() -> usize { inner() }\n\
+             pub fn api() -> String { format!(\"x{}\", hidden()) }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 #[test]\n\
+                 fn t() { let v = crate::hidden(); assert_eq!(v, 1); }\n\
+             }\n",
+        );
+
+        let md = TestOnlyAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains(", refs: production=1, unattributed=0"),
+            "got: {md}",
+        );
+        assert!(
+            md.contains("1 production caller(s) (themselves not production-reachable)"),
+            "got: {md}",
+        );
+        assert!(
+            md.contains("its bare name is written in production code"),
+            "got: {md}",
+        );
+        assert!(
+            md.contains("reached from a row whose claim is already in doubt"),
+            "got: {md}",
+        );
+    }
+
+    #[test]
+    fn a_main_called_by_tests_is_neither_finding_nor_annotated_skip() {
+        // `main` reaches itself as an entry, so it is no finding — and
+        // it must not be miscounted as a skipped annotated entry.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn main() {}\n\
+             pub fn api() {}\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 #[test]\n\
+                 fn t() { crate::main(); }\n\
+             }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert!(finding(&report, "::main").is_none());
+        assert_eq!(report["audit"]["annotated_entry_count"], 0);
+    }
+
+    #[test]
+    fn an_ambiguous_production_call_site_is_a_caveat() {
+        // The bare `dup()` in reachable production code could target
+        // either module's `dup`, so both rows carry the caveat; the
+        // same bare call from `dead` (which nothing reaches) says
+        // nothing and must not add to the count.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { pub(crate) fn dup() {} }\n\
+             mod b { pub(crate) fn dup() {} }\n\
+             pub fn wild() { dup(); }\n\
+             fn dead() { dup(); }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 #[test]\n\
+                 fn t() { crate::a::dup(); crate::b::dup(); }\n\
+             }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = finding(&report, "a::dup").expect("a::dup listed");
+        assert_eq!(entry["ambiguous_inbound_count"], 1, "got {entry:?}");
+        assert!(
+            entry["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "ambiguous_inbound"),
+            "got {entry:?}",
+        );
+    }
+
+    #[test]
+    fn unattributed_mentions_in_test_only_files_do_not_count() {
+        // The import inside the pure test file is the caller's own
+        // scaffolding; the comment in the production-only file is not,
+        // and is the one unattributed reference.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn fixture() -> usize { 1 }\n\
+             pub fn api() -> usize { 2 }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/other.rs",
+            "// fixture is re-exported nowhere\n\
+             pub fn other_api() {}\n",
+        );
+        write_file(
+            dir.path(),
+            "tests/it.rs",
+            "use agent_lens_fixture::fixture;\n\
+             #[test]\n\
+             fn t() { let v = fixture(); assert_eq!(v, 1); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = finding(&report, "::fixture").expect("listed");
+        assert_eq!(
+            entry["unattributed_reference_count"], 1,
+            "only the production-file comment counts: {entry:?}",
+        );
+    }
+
+    #[test]
     fn an_annotated_public_entry_is_skipped_and_counted() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
             "src/lib.rs",
             "#[no_mangle]\npub fn hook() {}\n\
+             #[no_mangle]\npub fn uncalled_hook() {}\n\
              pub fn api() {}\n\
              #[cfg(test)]\n\
              mod tests {\n\
@@ -1298,6 +1477,8 @@ mod tests {
 
         let report = analyze_json(dir.path());
         assert!(finding(&report, "::hook").is_none());
+        // Only the annotated entry tests actually call counts as a
+        // skipped would-be finding; the uncalled one is nothing here.
         assert_eq!(report["audit"]["annotated_entry_count"], 1);
     }
 
@@ -1399,14 +1580,32 @@ mod tests {
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert!(md.contains("# Test-only report:"), "got: {md}");
-        assert!(md.contains("## Test-only functions"), "got: {md}");
-        assert!(
-            md.contains("## Public surface only tests call"),
-            "got: {md}"
-        );
-        assert!(md.contains("`crate::fixture`"), "got: {md}");
-        assert!(md.contains("`crate::seam`"), "got: {md}");
-        assert!(md.contains("loc total"), "got: {md}");
+        assert!(!md.contains("_No functions to analyze._"), "got: {md}");
+        // Section membership: the private fixture in the first section,
+        // the public seam in the second, and the loc total counts only
+        // the first kind (fixture spans 3 lines).
+        assert!(md.contains("3 loc total"), "got: {md}");
+        let test_only_section = md
+            .split("## Test-only functions")
+            .nth(1)
+            .and_then(|rest| rest.split("## Public surface only tests call").next())
+            .expect("both sections rendered");
+        let entry_section = md
+            .split("## Public surface only tests call")
+            .nth(1)
+            .expect("entry section rendered");
+        assert!(test_only_section.contains("`crate::fixture`"), "got: {md}");
+        assert!(!test_only_section.contains("`crate::seam`"), "got: {md}");
+        assert!(entry_section.contains("`crate::seam`"), "got: {md}");
+        // Row shape: zero counts render nothing, clean rows carry no
+        // caveat separator.
+        assert!(!md.contains("0 production caller"), "got: {md}");
+        assert!(!md.contains(", refs:"), "got: {md}");
+        let fixture_line = md
+            .lines()
+            .find(|l| l.contains("`crate::fixture`"))
+            .expect("row rendered");
+        assert!(!fixture_line.contains(" — "), "got: {fixture_line}");
         // The candidate framing must survive rendering.
         assert!(md.contains("not a verdict"), "got: {md}");
     }

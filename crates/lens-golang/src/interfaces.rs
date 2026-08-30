@@ -152,6 +152,32 @@ mod tests {
     }
 
     #[test]
+    fn decls_carry_span_and_casing_visibility() {
+        let src = "package p\n\n\
+                   type Store interface {\n\
+                   \tGet(id string) string\n\
+                   }\n\n\
+                   type quiet interface {\n\
+                   \thush()\n\
+                   }\n";
+        let decls = extract_interface_decls_with_module(src, "pkg").unwrap();
+        assert_eq!(decls.len(), 2);
+        assert_eq!(decls[0].span.start_line, 3);
+        assert_eq!(decls[0].span.end_line, 5);
+        assert_eq!(
+            decls[0].visibility,
+            SyntaxFact::Known(VisibilityShape::Exported),
+        );
+        assert_eq!(decls[1].span.start_line, 7);
+        assert_eq!(decls[1].span.end_line, 9);
+        assert_eq!(
+            decls[1].visibility,
+            SyntaxFact::Known(VisibilityShape::Unexported),
+        );
+        assert!(decls.iter().all(|decl| !decl.is_test));
+    }
+
+    #[test]
     fn interfaces_carry_their_qualified_name_and_direct_methods() {
         let src = "package p\n\
                    type Store interface {\n\
