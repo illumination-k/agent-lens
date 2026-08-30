@@ -8,7 +8,6 @@ use std::fmt::Write as _;
 
 use lens_domain::WrapperFinding;
 
-use crate::analyze::SourceLang;
 use crate::hooks::core::{EditedSource, HookError};
 
 /// Runner for the thin-wrapper detection hook. No knobs today; the type
@@ -26,7 +25,8 @@ impl WrapperCore {
             sources,
             |total| format!("agent-lens wrapper: {total} thin wrapper(s) detected\n"),
             |src, body| {
-                let findings = run_wrappers(src.lang, &src.source)?;
+                let findings = crate::analyze::dispatch_lens!(src.lang, &src.source, find_wrappers)
+                    .map_err(HookError::Parse)?;
                 if !findings.is_empty() {
                     append_section(body, &src.rel_path, &findings);
                 }
@@ -34,10 +34,6 @@ impl WrapperCore {
             },
         )
     }
-}
-
-fn run_wrappers(lang: SourceLang, source: &str) -> Result<Vec<WrapperFinding>, HookError> {
-    crate::analyze::dispatch_lens!(lang, source, find_wrappers).map_err(HookError::Parse)
 }
 
 fn append_section(out: &mut String, file_path: &str, findings: &[WrapperFinding]) {

@@ -38,7 +38,9 @@ impl CohesionCore {
             sources,
             |total| format!("agent-lens cohesion: {total} incohesive unit(s) before edit\n"),
             |src, body| {
-                let units = extract_units(src.lang, &src.source)?;
+                let units =
+                    crate::analyze::dispatch_lens!(src.lang, &src.source, extract_cohesion_units)
+                        .map_err(HookError::Parse)?;
                 let flagged: Vec<&CohesionUnit> =
                     units.iter().filter(|u| u.lcom4 >= LCOM4_FLOOR).collect();
                 if !flagged.is_empty() {
@@ -48,10 +50,6 @@ impl CohesionCore {
             },
         )
     }
-}
-
-fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, HookError> {
-    crate::analyze::dispatch_lens!(lang, source, extract_cohesion_units).map_err(HookError::Parse)
 }
 
 fn append_section(out: &mut String, file_path: &str, lang: SourceLang, units: &[&CohesionUnit]) {

@@ -99,7 +99,8 @@ impl CohesionAnalyzer {
     /// directory-mode report.
     fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
-        let mut units = extract_units(lang, &source).map_err(AnalyzerError::Parse)?;
+        let mut units = super::dispatch_lens!(lang, &source, extract_cohesion_units)
+            .map_err(AnalyzerError::Parse)?;
         self.filter
             .retain_changed(&mut units, &file.path, |u| (u.start_line, u.end_line));
         if units.is_empty() {
@@ -111,12 +112,6 @@ impl CohesionAnalyzer {
             units,
         }))
     }
-}
-
-type BoxedError = Box<dyn std::error::Error + Send + Sync>;
-
-fn extract_units(lang: SourceLang, source: &str) -> Result<Vec<CohesionUnit>, BoxedError> {
-    super::dispatch_lens!(lang, source, extract_cohesion_units)
 }
 
 /// Per-file slice of the report. Owns the display path so directory mode
