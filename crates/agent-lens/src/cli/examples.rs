@@ -29,6 +29,7 @@ Pick an analyzer by question:
     where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
     is this body just a forwarder?        analyze wrapper
+    is one caller all this function has?  analyze single-use
     how many hops before real work?       analyze delegation
     does this type do too many things?    analyze cohesion
     which modules are entangled?          analyze coupling
@@ -168,6 +169,13 @@ Examples:
 
     agent-lens analyze hubs src/ --format md --top 10
     agent-lens analyze hubs src/ --exclude-tests --format md
+";
+
+pub const SINGLE_USE: &str = "\
+Examples:
+
+    agent-lens analyze single-use src/ --format md
+    agent-lens analyze single-use src/ --max-loc 12 --max-cyclomatic 4 --format md
 ";
 
 pub const IMPACT: &str = "\

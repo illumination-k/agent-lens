@@ -110,11 +110,18 @@ top = 15
 #     see from inside one crate.
 #
 # So this profile keeps the tests and widens to the workspace.
+#
+# `single-use` lives here rather than in `self` for the same reason:
+# under `exclude-tests` a directly-tested helper loses both its
+# test-seam caveat (its test callers are gone from the graph) and the
+# raw-reference scan's view of the test files that mention it, so a
+# deliberate test seam ranks as a clean inline candidate. With tests
+# kept, both signals fire.
 [profile.self-reach]
 path = "crates"
 format = "md"
 exclude = ["agent-lens/benches/**"]
-tools = ["untested", "unreachable", "visibility"]
+tools = ["untested", "unreachable", "visibility", "single-use"]
 
 [profile.self-reach.untested]
 top = 10
@@ -123,6 +130,14 @@ top = 10
 top = 10
 
 [profile.self-reach.visibility]
+top = 10
+
+# Defaults were calibrated on this repository (58% of its production
+# functions are single-caller; loc p75 = 29, cyclomatic p75 = 4), so
+# only the markdown cap is set here. Re-read the report's calibration
+# section after large refactors and retune max-loc / max-cyclomatic if
+# the distribution has moved.
+[profile.self-reach.single-use]
 top = 10
 
 # The same lens turned on the test corpus. Test code has its own failure
@@ -193,6 +208,7 @@ tools = [
   "cohesion",
   "similarity",
   "wrapper",
+  "single-use",
   "cycles",
   "layers",
   "hubs",
@@ -211,6 +227,9 @@ top = 15
 min-lines = 6
 
 [profile.web.layers]
+top = 10
+
+[profile.web.single-use]
 top = 10
 
 [profile.web.hubs]

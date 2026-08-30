@@ -8,8 +8,8 @@ use agent_lens::analyze::{
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
     FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HiddenCouplingAnalyzer,
     HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
-    SearchAnalyzer, SimilarityAnalyzer, UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer,
-    WrapperAnalyzer,
+    SearchAnalyzer, SimilarityAnalyzer, SingleUseAnalyzer, UnreachableAnalyzer, UntestedAnalyzer,
+    VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -19,7 +19,8 @@ use super::args::{
     AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHiddenCouplingArgs,
     AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs,
     AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
-    AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeSingleUseArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
+    AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -128,6 +129,10 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.impact.clone().unwrap_or_default(),
         }),
+        config::ToolName::SingleUse => AnalyzeCommand::SingleUse(AnalyzeSingleUseArgs {
+            common,
+            opts: profile.single_use.clone().unwrap_or_default(),
+        }),
         config::ToolName::Layers => AnalyzeCommand::Layers(AnalyzeLayersArgs {
             common,
             opts: profile.layers.clone().unwrap_or_default(),
@@ -232,6 +237,7 @@ impl_with_analyze_path_args!(
     ImpactAnalyzer,
     LayersAnalyzer,
     RiskAnalyzer,
+    SingleUseAnalyzer,
     UnreachableAnalyzer,
     UntestedAnalyzer,
     VisibilityAnalyzer,
@@ -323,6 +329,7 @@ impl AnalyzeCommand {
                 Layers => LayersAnalyzer,
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,
+                SingleUse => SingleUseAnalyzer,
                 Unreachable => UnreachableAnalyzer,
                 Untested => UntestedAnalyzer,
                 Visibility => VisibilityAnalyzer,
@@ -559,6 +566,29 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.opts.paired_by, None);
         assert!((args.opts.drift_floor - DEFAULT_SIMILARITY_DRIFT_FLOOR).abs() < f64::EPSILON);
         assert!(!args.opts.diff_only);
+    }
+
+    #[test]
+    fn build_analyze_command_maps_single_use_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"single-use\"]\n\n\
+             [single-use]\nmax-loc = 12\nmax-cyclomatic = 4\ntop = 7\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::SingleUse,
+            &profile,
+            &[PathBuf::from("crates")],
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::SingleUse(args) = cmd else {
+            panic!("expected analyze single-use");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.max_loc, Some(12));
+        assert_eq!(args.opts.max_cyclomatic, Some(4));
+        assert_eq!(args.opts.top, Some(7));
     }
 
     #[test]

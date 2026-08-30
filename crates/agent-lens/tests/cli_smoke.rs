@@ -999,6 +999,36 @@ fn run_profile_drives_unreachable_end_to_end() {
 }
 
 #[test]
+fn run_profile_drives_single_use_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "fn helper() -> usize { 1 }\n\
+         fn shared() -> usize { 2 }\n\
+         pub fn caller() -> usize { helper() + shared() }\n\
+         pub fn other() -> usize { shared() }\n",
+    );
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.inline]\npath = \"src\"\ntools = [\"single-use\"]\n\n\
+         [profile.inline.single-use]\nmax-loc = 10\nmax-cyclomatic = 3\ntop = 5\n",
+    )
+    .unwrap();
+
+    let output = agent_lens(&["run", "inline"], dir.path(), None);
+    let json = stdout_json(&output);
+    assert_eq!(json["results"][0]["tool"], "single-use");
+    let report = &json["results"][0]["report"];
+    assert_eq!(report["thresholds"]["max_loc"], 10);
+    assert_eq!(report["thresholds"]["max_cyclomatic"], 3);
+    let candidates = report["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1, "got {candidates:?}");
+    assert_eq!(candidates[0]["qualified_name"], "crate::helper");
+    assert_eq!(candidates[0]["caller"]["qualified_name"], "crate::caller");
+}
+
+#[test]
 fn run_profile_drives_untested_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(

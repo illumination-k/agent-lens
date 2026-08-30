@@ -127,6 +127,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
         summary:
           "Chains that only forward — api::save -> service::save -> repo::save -> db::insert — with the terminus that does the work as the headline and a per-module lasagna roll-up.",
       },
+      {
+        name: "single-use",
+        summary:
+          "Functions with exactly one resolved production caller, small and simple enough to inline into it — with caveats where the claim is weaker, and a calibration section for setting the thresholds per repository.",
+      },
     ],
   },
   {
