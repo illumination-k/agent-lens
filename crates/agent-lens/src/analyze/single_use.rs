@@ -1364,6 +1364,8 @@ mod tests {
         assert!(md.contains("not a verdict"), "got: {md}");
         assert!(md.contains("bare name"), "got: {md}");
         assert!(md.contains("## Threshold calibration"), "got: {md}");
+        // A clean row must not render a zero raw-reference count.
+        assert!(!md.contains("raw refs"), "got: {md}");
         assert!(md.contains("`crate::helper`"), "got: {md}");
     }
 
