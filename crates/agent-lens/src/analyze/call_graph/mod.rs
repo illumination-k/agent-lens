@@ -624,6 +624,15 @@ impl SourceLang {
     }
 }
 
+impl CallGraphNode {
+    /// The graph language of this node, from its file extension, or
+    /// `None` for a path no language claims — which cannot happen for a
+    /// node the graph built.
+    pub(crate) fn graph_language(&self) -> Option<GraphLanguage> {
+        SourceLang::from_path(Path::new(&self.file)).map(SourceLang::graph_language)
+    }
+}
+
 /// Flatten the per-file interface declarations into one deterministic
 /// list, sorted by qualified name (declarations shadowing each other
 /// across files stay distinct entries — a method set is a method set).

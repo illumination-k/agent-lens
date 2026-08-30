@@ -197,6 +197,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             config::ToolName::ContextSpan,
         ),
         (profile.delegation.is_some(), config::ToolName::Delegation),
+        (profile.single_use.is_some(), config::ToolName::SingleUse),
         (profile.unreachable.is_some(), config::ToolName::Unreachable),
         (profile.untested.is_some(), config::ToolName::Untested),
         (profile.visibility.is_some(), config::ToolName::Visibility),

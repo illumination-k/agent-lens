@@ -64,7 +64,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde::Serialize;
 
@@ -599,21 +598,15 @@ fn entry_kind_of(node: &CallGraphNode) -> Option<EntryKind> {
 /// answers `true`: "cannot tell" has to read as "there may be one", or
 /// the tier would rest on a fact nobody established.
 fn has_live_annotation(node: &CallGraphNode) -> bool {
-    let inert = graph_language_of(node).inert_attribute_names();
+    let inert = node
+        .graph_language()
+        .unwrap_or(GraphLanguage::TypeScript)
+        .inert_attribute_names();
     node.attributes.as_ref().is_none_or(|attributes| {
         attributes
             .iter()
             .any(|attribute| !inert.contains(attribute))
     })
-}
-
-/// The graph language of a node, from its file extension. Falls back to
-/// TypeScript's (empty) tables for a path no language claims, which
-/// cannot happen for a node the graph built.
-fn graph_language_of(node: &CallGraphNode) -> GraphLanguage {
-    super::SourceLang::from_path(Path::new(&node.file))
-        .map(super::SourceLang::graph_language)
-        .unwrap_or(GraphLanguage::TypeScript)
 }
 
 /// Where each candidate's bare name is written, across every source file
@@ -1586,6 +1579,7 @@ mod tests {
     use proptest::prelude::*;
     use rstest::rstest;
     use serde_json::Value;
+    use std::path::Path;
 
     fn analyze_json(path: &Path) -> Value {
         let json = UnreachableAnalyzer::new()

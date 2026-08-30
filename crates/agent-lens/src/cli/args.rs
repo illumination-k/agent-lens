@@ -19,6 +19,7 @@ use agent_lens::analyze::layers::LayersOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
+use agent_lens::analyze::single_use::SingleUseOptions;
 use agent_lens::analyze::unreachable::UnreachableOptions;
 use agent_lens::analyze::untested::UntestedOptions;
 use agent_lens::analyze::visibility::VisibilityOptions;
@@ -865,6 +866,31 @@ pub(super) enum AnalyzeCommand {
     /// `--doc-overlap`.
     #[command(after_long_help = examples::SIMILARITY)]
     Similarity(AnalyzeSimilarityArgs),
+    /// Report functions with exactly one resolved production caller as
+    /// inline candidates.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and lists the non-test functions exactly one resolved caller
+    /// needs, provided the body is small and simple enough to fold into
+    /// that caller (`--max-loc`, `--max-cyclomatic`; both absolute and
+    /// per-repository on purpose). Each row names the caller and the
+    /// call sites, and carries caveats where the single-caller claim or
+    /// the edit is weaker: wider-than-private visibility, direct test
+    /// callers, several call sites, a cross-module caller, ambiguous or
+    /// fallback-resolved inbound edges. Trait/interface methods,
+    /// functions with live annotations, and self-recursive functions
+    /// are excluded outright. Fan-in counts resolved edges only, so a
+    /// hidden caller (a macro or closure body, an unresolved call
+    /// site) is possible — the report says to search for the bare name
+    /// before inlining. A
+    /// calibration section carries the loc and cyclomatic distribution
+    /// over every single-caller function, so thresholds can be set from
+    /// one run instead of guessed. The parser is chosen from each file
+    /// extension (Rust, TypeScript/JavaScript, Python, or Go). JSON is
+    /// the default; `--format md` caps the lists at `--top`
+    /// (default 20).
+    #[command(name = "single-use", after_long_help = examples::SINGLE_USE)]
+    SingleUse(AnalyzeSingleUseArgs),
     /// Report production functions with no static call path from any
     /// test function.
     ///
@@ -1165,6 +1191,14 @@ pub(super) struct AnalyzeUntestedArgs {
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(super) opts: UntestedOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeSingleUseArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: SingleUseOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1793,6 +1827,33 @@ mod tests {
         };
         assert!(args.opts.function.is_empty());
         assert_eq!(args.opts.depth, None);
+    }
+
+    #[test]
+    fn parses_analyze_single_use_with_thresholds() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "single-use",
+            "crates",
+            "--max-loc",
+            "12",
+            "--max-cyclomatic",
+            "4",
+            "--top",
+            "10",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::SingleUse(args)) = cli.command else {
+            panic!("expected analyze single-use");
+        };
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.max_loc, Some(12));
+        assert_eq!(args.opts.max_cyclomatic, Some(4));
+        assert_eq!(args.opts.top, Some(10));
     }
 
     #[test]

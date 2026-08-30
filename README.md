@@ -135,6 +135,10 @@ agent-lens analyze cohesion src/foo.rs --format md --min-score 2
 agent-lens analyze wrapper src/foo.rs
 agent-lens analyze delegation crates/agent-lens --format md
 
+# Functions only one caller needs — inline candidates, with a calibration
+# section for tuning --max-loc / --max-cyclomatic to this repository
+agent-lens analyze single-use crates/agent-lens --format md
+
 # Module-level structure: coupling, detected vs declared boundaries, layers
 agent-lens analyze coupling crates/agent-lens --format md --top 15
 agent-lens analyze communities crates/agent-lens --format md
@@ -281,16 +285,16 @@ and re-running is a no-op.
 
 ### Command surface
 
-| Command tree | Commands                                                                                                                                                                                                                                                                                                  |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                                                                 |
-| `codex-hook` | same handlers as `hook`, speaking Codex's protocol                                                                                                                                                                                                                                                        |
-| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                             |
-| `baseline`   | `create <profile>` — snapshot a profile's metrics; `compare <profile> <SNAPSHOT> [--update]` — gate a fresh run against one                                                                                                                                                                               |
-| `skills`     | `list`, `install` — the bundled Claude Code skills                                                                                                                                                                                                                                                        |
-| `config`     | `schema` — print the `agent-lens.toml` reference                                                                                                                                                                                                                                                          |
-| `help`       | `help [--md]` — print the command reference, optionally as one Markdown document                                                                                                                                                                                                                          |
+| Command tree | Commands                                                                                                                                                                                                                                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                                                                               |
+| `codex-hook` | same handlers as `hook`, speaking Codex's protocol                                                                                                                                                                                                                                                                      |
+| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `single-use`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                                           |
+| `baseline`   | `create <profile>` — snapshot a profile's metrics; `compare <profile> <SNAPSHOT> [--update]` — gate a fresh run against one                                                                                                                                                                                             |
+| `skills`     | `list`, `install` — the bundled Claude Code skills                                                                                                                                                                                                                                                                      |
+| `config`     | `schema` — print the `agent-lens.toml` reference                                                                                                                                                                                                                                                                        |
+| `help`       | `help [--md]` — print the command reference, optionally as one Markdown document                                                                                                                                                                                                                                        |
 
 `agent-lens --help` opens with a question-to-analyzer routing table ("what
 breaks if I change this?" → `analyze impact`), and each subcommand's `--help`
@@ -333,6 +337,7 @@ ordinary CLI contract: errors exit non-zero.
 | `similarity`      | Near-duplicate pairs (normalised-AST TSED via APTED, complete-link clusters). `--target` picks functions (default), type definitions compared on member shape, or statement blocks inside bodies — the copy-paste whole-definition comparison cannot see. |
 | `wrapper`         | Functions whose body is a forwarding call modulo `?`, `.unwrap()`, `.into()`, `.await`, …; Go interface-satisfying wrappers are annotated since deleting them isn't the fix.                                                                              |
 | `delegation`      | Chains of forwarding-only functions (`api::save -> service::save -> repo::save`), with the terminus doing the work as the headline and a per-module delegator roll-up. Language-mandated hops are marked.                                                 |
+| `single-use`      | Functions with exactly one resolved production caller, small and simple enough (`--max-loc`, `--max-cyclomatic`) to inline into it — caveated where the claim is weaker, with a calibration section for setting the thresholds per repository.            |
 | `cohesion`        | LCOM4 per `impl` block, class, or module unit (connected components of the field-sharing graph).                                                                                                                                                          |
 | `complexity`      | Per-function Cyclomatic, Cognitive, Max Nesting Depth, Halstead Volume, and Maintainability Index.                                                                                                                                                        |
 | `coupling`        | Module-level Fan-In / Fan-Out, Henry-Kafura IFC, Instability, shared-symbol counts, and cyclic SCCs.                                                                                                                                                      |
@@ -387,7 +392,9 @@ Language coverage per analyzer:
 - Most analyzers cover all four language families.
 - `visibility` and `unreachable` judge Rust and Go only — the two adapters
   that extract export status. `delegation` runs everywhere but can only apply
-  its module-facade exemption where export status exists.
+  its module-facade exemption where export status exists. `single-use` also
+  runs everywhere, but only Rust and Go rows can be caveat-free: TypeScript
+  and Python rows always carry the unknown-export-status caveat.
 - `co-change` and `change-entropy` are language-agnostic: they read `git log`
   and never parse a file, so `.toml`, `.md`, and CI config are covered too.
 - `hotspot`, `risk`, `co-change`, `change-entropy`, and `hidden-coupling`

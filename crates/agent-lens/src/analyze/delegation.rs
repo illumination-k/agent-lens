@@ -48,20 +48,17 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde::Serialize;
 
 use super::call_graph::model::{
-    CallGraphNode, GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
+    GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::{
-    AnalyzeRoots, AnalyzerError, DiffScope, LineRange, OutputFormat, SourceLang, overlaps_any,
-};
+use super::{AnalyzeRoots, AnalyzerError, DiffScope, LineRange, OutputFormat, overlaps_any};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -514,7 +511,7 @@ fn classify(
     if target == idx {
         return Verdict::Works;
     }
-    let Some(language) = graph_language_of(node) else {
+    let Some(language) = node.graph_language() else {
         return Verdict::Works;
     };
     if !outgoing
@@ -604,10 +601,6 @@ fn is_result_constructor(language: GraphLanguage, callee: &str) -> bool {
     }
 }
 
-fn graph_language_of(node: &CallGraphNode) -> Option<GraphLanguage> {
-    SourceLang::from_path(Path::new(&node.file)).map(SourceLang::graph_language)
-}
-
 /// Functions that are the only public surface of a module that has
 /// something behind it.
 ///
@@ -627,7 +620,7 @@ fn facade_nodes(graph: &CallGraph) -> HashSet<usize> {
         if node.is_test {
             continue;
         }
-        let Some(language) = graph_language_of(node) else {
+        let Some(language) = node.graph_language() else {
             continue;
         };
         *function_counts.entry(node.module.as_str()).or_default() += 1;
@@ -1086,6 +1079,7 @@ mod tests {
     use crate::test_support::{run_git, write_file};
     use rstest::rstest;
     use serde_json::Value;
+    use std::path::Path;
 
     fn analyze_json(path: &Path) -> Value {
         let json = DelegationAnalyzer::new()

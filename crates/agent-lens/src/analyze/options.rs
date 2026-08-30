@@ -194,6 +194,7 @@ mod tests {
     use crate::analyze::layers::{LayersAnalyzer, LayersOptions};
     use crate::analyze::risk::{RiskAnalyzer, RiskOptions};
     use crate::analyze::similarity::{SimilarityAnalyzer, SimilarityOptions};
+    use crate::analyze::single_use::{SingleUseAnalyzer, SingleUseOptions};
     use crate::analyze::unreachable::{Tier, UnreachableAnalyzer, UnreachableOptions};
     use crate::analyze::untested::{UntestedAnalyzer, UntestedOptions};
     use crate::analyze::visibility::{VisibilityAnalyzer, VisibilityOptions};
@@ -357,6 +358,18 @@ mod tests {
         risk_options_reach_the_analyzer: RiskAnalyzer,
         RiskOptions { top: Some(3), since: Some("90.days.ago".to_owned()) },
         |a| a.with_top(Some(3)).with_since_opt(Some("90.days.ago".to_owned()))
+    );
+    assert_options_reach_the_analyzer!(
+        single_use_options_reach_the_analyzer: SingleUseAnalyzer,
+        SingleUseOptions {
+            top: Some(3),
+            max_loc: Some(12),
+            max_cyclomatic: Some(4),
+        },
+        |a| a
+            .with_top(Some(3))
+            .with_max_loc(Some(12))
+            .with_max_cyclomatic(Some(4))
     );
     assert_options_reach_the_analyzer!(
         unreachable_options_reach_the_analyzer: UnreachableAnalyzer,

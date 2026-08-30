@@ -299,6 +299,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Hotspot => hotspot(report, base),
         ToolName::Risk => risk(report, base),
         ToolName::Hubs => hubs(report, base),
+        ToolName::SingleUse => single_use(report, base),
         ToolName::Untested => untested(report, base),
         ToolName::Unreachable => unreachable(report, base),
         ToolName::Visibility => visibility(report, base),
@@ -523,6 +524,47 @@ fn wrapper(report: &Value, base: &Path) -> Extraction {
         headline.push_str(if count > 1 { ", …)" } else { ")" });
         rows.push((count, from_base(base, path), headline));
     }
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    Extraction {
+        files: rows
+            .into_iter()
+            .map(|(_, path, headline)| FileFinding { path, headline })
+            .collect(),
+        corpus: Vec::new(),
+    }
+}
+
+/// Inline candidates rolled up per file. The report sorts candidates
+/// cleanest-first, so the first name per file is the row worth opening.
+fn single_use(report: &Value, base: &Path) -> Extraction {
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut per_file: HashMap<PathBuf, (u64, String)> = HashMap::new();
+    for entry in arr(report, "candidates") {
+        let Some(file) = str_of(entry, "file") else {
+            continue;
+        };
+        let Some(name) = str_of(entry, "qualified_name") else {
+            continue;
+        };
+        let path = from_base(base, file);
+        let slot = per_file.entry(path.clone()).or_insert_with(|| {
+            order.push(path);
+            (0, short_name(name).to_owned())
+        });
+        slot.0 += 1;
+    }
+    let mut rows: Vec<(u64, PathBuf, String)> = order
+        .into_iter()
+        .filter_map(|path| {
+            let (count, first) = per_file.remove(&path)?;
+            let mut headline = format!(
+                "{} (`{first}`",
+                counted(count, "inline candidate", "inline candidates"),
+            );
+            headline.push_str(if count > 1 { ", …)" } else { ")" });
+            Some((count, path, headline))
+        })
+        .collect();
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     Extraction {
         files: rows
@@ -1271,6 +1313,25 @@ mod tests {
                 ("/repo/src/a.rs", "in 1 duplicate cluster"),
                 ("/repo/src/b.rs", "in 2 duplicate clusters"),
                 ("/repo/src/c.rs", "in 1 duplicate cluster"),
+            ],
+        );
+    }
+
+    #[test]
+    fn single_use_rolls_candidates_up_per_file() {
+        let report = json!({
+            "candidates": [
+                { "file": "many.rs", "qualified_name": "a::first" },
+                { "file": "many.rs", "qualified_name": "a::second" },
+                { "file": "one.rs", "qualified_name": "b::only" },
+            ],
+        });
+        let extraction = single_use(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [
+                ("/repo/src/many.rs", "2 inline candidates (`first`, …)"),
+                ("/repo/src/one.rs", "1 inline candidate (`only`)"),
             ],
         );
     }

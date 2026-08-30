@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 23] = [
+const TOOL_ORDER: [ToolName; 24] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -36,6 +36,7 @@ const TOOL_ORDER: [ToolName; 23] = [
     ToolName::Hubs,
     ToolName::Impact,
     ToolName::Layers,
+    ToolName::SingleUse,
     ToolName::Untested,
     ToolName::Unreachable,
     ToolName::Visibility,
@@ -81,7 +82,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, single-use, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -462,6 +463,26 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             presence: "optional",
             desc: "Cap each markdown listing to the top N rows.",
         }],
+        ToolName::SingleUse => &[
+            Field {
+                key: "max-loc",
+                ty: "int",
+                presence: "default: 30",
+                desc: "Body-size ceiling in source lines: a single-caller function larger than this is excluded from the candidate list (the calibration section still counts it).",
+            },
+            Field {
+                key: "max-cyclomatic",
+                ty: "int",
+                presence: "default: 6",
+                desc: "Cyclomatic-complexity ceiling: a single-caller function branching more than this is excluded from the candidate list (the calibration section still counts it).",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap each markdown candidate list to the top N rows.",
+            },
+        ],
         ToolName::Untested => &[Field {
             key: "top",
             ty: "int",
@@ -763,8 +784,8 @@ mod tests {
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
         ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        RiskOptions, SearchOptions, SimilarityOptions, UnreachableOptions, UntestedOptions,
-        VisibilityOptions, WrapperOptions,
+        RiskOptions, SearchOptions, SimilarityOptions, SingleUseOptions, UnreachableOptions,
+        UntestedOptions, VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -801,6 +822,7 @@ mod tests {
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
         assert_tool_parity::<ImpactOptions>(ToolName::Impact);
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
+        assert_tool_parity::<SingleUseOptions>(ToolName::SingleUse);
         assert_tool_parity::<UnreachableOptions>(ToolName::Unreachable);
         assert_tool_parity::<UntestedOptions>(ToolName::Untested);
         assert_tool_parity::<VisibilityOptions>(ToolName::Visibility);
