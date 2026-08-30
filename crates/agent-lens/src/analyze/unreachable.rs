@@ -711,7 +711,7 @@ fn line_owners(spans: Option<&[(usize, usize, usize)]>) -> Vec<Option<usize>> {
 /// is Unicode-aware because the languages are: splitting `café` into
 /// `caf` would hide every call to it, which is the one error direction
 /// this analyzer cannot afford.
-fn identifiers(line: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn identifiers(line: &str) -> impl Iterator<Item = &str> {
     line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|token| !token.is_empty())
 }

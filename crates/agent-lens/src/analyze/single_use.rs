@@ -18,15 +18,22 @@
 //!
 //! Soundness runs the *opposite* way from `analyze unreachable`: fan-in
 //! counts resolved call edges only, so "one caller" is a claim about
-//! what the graph could see, and a hidden second caller (a macro or
-//! closure body — Rust closures produce no call edges at all — an
-//! unresolved call site, a raw name reference) makes inlining wrong.
+//! what the graph could see, and a hidden second caller (a macro body —
+//! a call written inside `format!`/`write!` arguments produces no call
+//! edge — an unresolved call site, a raw name reference) makes inlining
+//! wrong.
 //! Every way the graph is known to under-count callers therefore
-//! demotes a row with a caveat rather than silently listing it, the
-//! output says to search for the bare name before acting, and rows
-//! whose caller count cannot be trusted at all — trait and interface
-//! methods, live annotations — are excluded outright since those
-//! cannot be inlined anyway.
+//! demotes a row with a caveat rather than silently listing it, and
+//! rows whose caller count cannot be trusted at all — trait and
+//! interface methods, live annotations — are excluded outright since
+//! those cannot be inlined anyway. The load-bearing demotion is the
+//! raw-reference scan (the same tokenize-everything pass `unreachable`
+//! runs, aimed the other way): a candidate whose bare name is written
+//! anywhere outside its own definition and its known callers' spans is
+//! caveated, which is what catches the callers a syntax-only graph
+//! cannot see — macro arguments, `#[case]` attributes, imports, doc
+//! references. The scan is textual and shares
+//! `unreachable`'s bound: only files the graph scanned are searched.
 //!
 //! Thresholds are absolute and per-repository on purpose (unlike the
 //! outlier rules in `hubs`): what "small enough to inline" means is a
@@ -40,7 +47,7 @@
 //!
 //! * `schema_version: 1` — initial shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use serde::Serialize;
@@ -53,7 +60,9 @@ use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
+use super::unreachable::identifiers;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use std::collections::HashMap;
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -80,10 +89,13 @@ const NOTE: &str = "Each row is a function with exactly one resolved production 
      simple enough (per the thresholds echoed below) that inlining it into that caller is a \
      candidate edit, not a verdict: a single-caller function can be a deliberate, well-named \
      extraction, and keeping it is often right. Fan-in counts resolved call edges only, so \
-     \"one caller\" is what the graph could see — a macro or closure body (Rust closures produce \
-     no call edges at all), an unresolved call site, or a raw name reference can hide a second \
-     caller, and inlining then breaks it. Search the sources for the function's bare name before \
-     inlining. Rows whose single-caller claim is weaker carry \
+     \"one caller\" is what the graph could see — a macro body (a call inside `format!` or \
+     `write!` arguments produces no call edge), an unresolved call site, or a raw name reference \
+     can hide a second caller, and inlining then breaks it. A raw-name scan backs the claim up: a row whose bare \
+     name is written anywhere outside its definition and its known callers carries the \
+     raw-reference caveat with the occurrence count. Only files the graph scanned are searched, \
+     so a name reached from a config file, a template, or another language is still invisible — \
+     check those before inlining. Rows whose single-caller claim is weaker carry \
      caveats; trait/interface methods and annotated functions are excluded outright because a \
      dispatch or annotation caller no call site names can reach them, and the impl surface could \
      not be inlined anyway.";
@@ -179,7 +191,9 @@ impl SingleUseAnalyzer {
             max_loc: self.max_loc.unwrap_or(DEFAULT_MAX_LOC),
             max_cyclomatic: self.max_cyclomatic.unwrap_or(DEFAULT_MAX_CYCLOMATIC),
         };
-        let report = Report::build(&roots, &graph, self.only_tests, thresholds);
+        let collected = SingleCallers::collect(&graph, self.only_tests);
+        let raw = RawReferences::run(&self.builder, &roots, &collected.targets)?;
+        let report = Report::build(&roots, &graph, collected, &raw, thresholds);
         render_report(&report, format, || format_markdown(&report, self.top))
     }
 }
@@ -220,6 +234,14 @@ enum Caveat {
     /// The one incoming edge resolved through a name-fallback heuristic,
     /// so even the first caller is less certain.
     FallbackResolvedCall,
+    /// The bare name is written somewhere outside the definition and its
+    /// known callers — a macro body, a closure, a string, a doc comment,
+    /// an import. Any of those can be, or become, a second caller. The
+    /// scan is textual, so a same-named identifier anywhere in the
+    /// scanned sources counts; a candidate with a ubiquitous name
+    /// (`new`, `get`) will in practice always carry this caveat, which
+    /// is honest — its callers cannot be established textually.
+    RawReference,
 }
 
 impl Caveat {
@@ -232,6 +254,7 @@ impl Caveat {
             Self::CrossModuleCaller => "caller is in another module",
             Self::AmbiguousInbound => "an ambiguous call site names it",
             Self::FallbackResolvedCall => "caller attributed by name fallback",
+            Self::RawReference => "its bare name is written elsewhere",
         }
     }
 }
@@ -268,6 +291,10 @@ struct CandidateEntry {
     /// Distinct test functions calling it (informational; a non-zero
     /// count carries the test-seam caveat).
     test_fan_in: usize,
+    /// Occurrences of the bare name outside the definition and its known
+    /// callers, across every source file the graph scanned. Non-zero
+    /// carries the raw-reference caveat.
+    raw_reference_count: usize,
     /// Why this row is weaker than its presence suggests, sorted. Empty
     /// means the graph saw nothing against the edit.
     caveats: Vec<Caveat>,
@@ -359,18 +386,36 @@ struct Report {
     modules: Vec<ModuleResolutionSummary>,
 }
 
-impl Report {
-    fn build(
-        roots: &AnalyzeRoots,
-        graph: &CallGraph,
-        only_tests: bool,
-        thresholds: Thresholds,
-    ) -> Self {
+/// The single-caller population before thresholds, plus what the
+/// raw-reference scan needs to check each member.
+struct SingleCallers {
+    pool_count: usize,
+    excluded: Excluded,
+    entries: Vec<CandidateEntry>,
+    /// Parallel to `entries`.
+    targets: Vec<ScanTarget>,
+}
+
+/// What the raw-reference scan may ignore for one candidate: mentions
+/// of the name inside the definition itself and inside every caller the
+/// graph already accounts for (the one production caller, and test
+/// callers — their call sites are the test-seam caveat's evidence, not
+/// a hidden caller).
+struct ScanTarget {
+    name: String,
+    /// `(file, start_line, end_line)` spans whose mentions are
+    /// accounted for.
+    allowed: Vec<(String, usize, usize)>,
+}
+
+impl SingleCallers {
+    fn collect(graph: &CallGraph, only_tests: bool) -> Self {
         let interfaces = InterfaceIndex::new(&graph.interfaces);
         let mut excluded = Excluded::default();
         let inbound = InboundCalls::collect(graph, only_tests);
 
-        let mut single_callers: Vec<CandidateEntry> = Vec::new();
+        let mut entries: Vec<CandidateEntry> = Vec::new();
+        let mut targets: Vec<ScanTarget> = Vec::new();
         let mut pool_count = 0usize;
         for (idx, node) in graph.nodes.iter().enumerate() {
             if node.is_test && !only_tests {
@@ -389,8 +434,110 @@ impl Report {
                 continue;
             };
             let caller_node = &graph.nodes[caller_idx];
-            single_callers.push(candidate_entry(node, caller_node, calls, acc));
+            entries.push(candidate_entry(node, caller_node, calls, acc));
+
+            let span_of = |n: &CallGraphNode| (n.file.clone(), n.start_line, n.end_line);
+            let mut allowed = vec![span_of(node), span_of(caller_node)];
+            allowed.extend(acc.test_callers.iter().map(|&t| span_of(&graph.nodes[t])));
+            targets.push(ScanTarget {
+                name: node.name.clone(),
+                allowed,
+            });
         }
+
+        Self {
+            pool_count,
+            excluded,
+            entries,
+            targets,
+        }
+    }
+}
+
+/// Bare-name occurrences per candidate, outside its allowed spans.
+struct RawReferences {
+    /// Parallel to [`SingleCallers::entries`].
+    counts: Vec<usize>,
+}
+
+impl RawReferences {
+    /// Tokenize every source file the graph scanned and count, per
+    /// candidate, the occurrences of its bare name outside the spans
+    /// its callers already account for. Only scanned files are
+    /// searched, so a name reached from a config file, a template, or
+    /// another language is invisible here — the same bound as `analyze
+    /// unreachable`'s reference scan.
+    fn run(
+        builder: &CallGraphBuilder,
+        roots: &AnalyzeRoots,
+        targets: &[ScanTarget],
+    ) -> Result<Self, AnalyzerError> {
+        let mut counts = vec![0usize; targets.len()];
+        if targets.is_empty() {
+            return Ok(Self { counts });
+        }
+        let mut slots_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut allowed_by_file: HashMap<&str, Vec<(usize, usize, usize)>> = HashMap::new();
+        for (slot, target) in targets.iter().enumerate() {
+            slots_by_name
+                .entry(target.name.as_str())
+                .or_default()
+                .push(slot);
+            for (file, start, end) in &target.allowed {
+                allowed_by_file
+                    .entry(file.as_str())
+                    .or_default()
+                    .push((*start, *end, slot));
+            }
+        }
+
+        builder.visit_source_texts(roots, |file, source| {
+            let allowed = allowed_by_file.get(file).map(Vec::as_slice);
+            for (offset, line) in source.lines().enumerate() {
+                let line_no = offset + 1;
+                for token in identifiers(line) {
+                    let Some(slots) = slots_by_name.get(token) else {
+                        continue;
+                    };
+                    for &slot in slots {
+                        let accounted = allowed.is_some_and(|spans| {
+                            spans.iter().any(|&(start, end, s)| {
+                                s == slot && start <= line_no && line_no <= end
+                            })
+                        });
+                        if !accounted {
+                            counts[slot] += 1;
+                        }
+                    }
+                }
+            }
+        })?;
+        Ok(Self { counts })
+    }
+}
+
+impl Report {
+    fn build(
+        roots: &AnalyzeRoots,
+        graph: &CallGraph,
+        collected: SingleCallers,
+        raw: &RawReferences,
+        thresholds: Thresholds,
+    ) -> Self {
+        let SingleCallers {
+            pool_count,
+            excluded,
+            mut entries,
+            targets: _,
+        } = collected;
+        for (entry, &count) in entries.iter_mut().zip(&raw.counts) {
+            if count > 0 {
+                entry.raw_reference_count = count;
+                entry.caveats.push(Caveat::RawReference);
+                entry.caveats.sort_unstable();
+            }
+        }
+        let single_callers = entries;
 
         let calibration = Calibration {
             single_caller_count: single_callers.len(),
@@ -450,8 +597,10 @@ struct InboundAccumulator {
     /// the aggregated call sites from each.
     callers: BTreeMap<usize, CallsFromCaller>,
     /// Distinct test callers, kept out of `callers` so a test cannot
-    /// turn a single-caller function into a two-caller one.
-    test_caller_count: usize,
+    /// turn a single-caller function into a two-caller one. Their spans
+    /// are also what lets the raw-reference scan ignore test call
+    /// sites it already knows about.
+    test_callers: BTreeSet<usize>,
     /// Ambiguous call sites naming this node as a candidate target.
     ambiguous_inbound_count: usize,
     /// This node calls itself on a resolved edge.
@@ -496,7 +645,7 @@ impl InboundCalls {
             // Mirrors `analyze hubs`: outside `--only-tests`, a test
             // caller is informational and never a production caller.
             if graph.nodes[from].is_test && !only_tests {
-                per_node[to].test_caller_count += 1;
+                per_node[to].test_callers.insert(from);
                 continue;
             }
             let calls = per_node[to].callers.entry(from).or_default();
@@ -592,7 +741,7 @@ fn candidate_entry(
         Some(_) => {}
         None => caveats.push(Caveat::UnknownVisibility),
     }
-    if acc.test_caller_count > 0 {
+    if !acc.test_callers.is_empty() {
         caveats.push(Caveat::TestCallers);
     }
     if calls.call_count > 1 {
@@ -626,7 +775,8 @@ fn candidate_entry(
         },
         call_count: calls.call_count,
         call_lines: calls.call_lines.clone(),
-        test_fan_in: acc.test_caller_count,
+        test_fan_in: acc.test_callers.len(),
+        raw_reference_count: 0,
         caveats,
     }
 }
@@ -730,6 +880,9 @@ fn render_entries(out: &mut String, entries: &[&CandidateEntry], limit: usize) {
         }
         if entry.test_fan_in > 0 {
             let _ = write!(out, ", +{} test caller(s)", entry.test_fan_in);
+        }
+        if entry.raw_reference_count > 0 {
+            let _ = write!(out, ", raw refs={}", entry.raw_reference_count);
         }
         if !entry.caveats.is_empty() {
             let caveats: Vec<&str> = entry.caveats.iter().map(|c| c.as_str()).collect();
@@ -967,6 +1120,101 @@ mod tests {
                 .iter()
                 .any(|c| c == "test_callers"),
             "got {entry:?}",
+        );
+        // The test callers' spans are known, so their call sites are
+        // not raw references on top of the test-seam caveat.
+        assert_eq!(entry["raw_reference_count"], 0);
+    }
+
+    #[test]
+    fn a_caller_hidden_in_a_macro_body_demotes_with_raw_reference() {
+        // `format!` arguments produce no call edge, so `shorten` looks
+        // single-caller to the graph; the raw-name scan is what says
+        // otherwise.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn shorten(s: &str) -> &str { s }\n\
+             pub fn caller(s: &str) { let _ = shorten(s); }\n\
+             pub fn formats(s: &str) -> String { format!(\"x {}\", shorten(s)) }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = candidate(&report, "::shorten").expect("graph sees one caller");
+        assert_eq!(entry["raw_reference_count"], 1);
+        assert_eq!(entry["caveats"], serde_json::json!(["raw_reference"]));
+    }
+
+    #[test]
+    fn mentions_inside_the_definition_and_its_caller_do_not_demote() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn tidy() {\n\
+                 let _ = 1;\n\
+             }\n\
+             pub fn caller() {\n\
+                 // tidy folds into here\n\
+                 tidy();\n\
+             }\n\
+             pub fn other() { caller(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let entry = candidate(&report, "::tidy").expect("listed");
+        assert_eq!(entry["raw_reference_count"], 0);
+        assert_eq!(entry["caveats"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn candidates_sharing_a_name_caveat_each_other() {
+        // The scan is textual: each `helper` sees the other module's
+        // definition and call site as raw references. A shared name
+        // cannot be verified textually, so both rows demote.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod a { fn helper() {} pub fn go() { helper(); } }\n\
+             mod b { fn helper() {} pub fn go() { helper(); } }\n\
+             pub fn root() { a::go(); b::go(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        for name in ["a::helper", "b::helper"] {
+            let entry = candidate(&report, name).expect("listed");
+            assert_eq!(entry["raw_reference_count"], 2, "for {name}: {entry:?}");
+            assert!(
+                entry["caveats"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|c| c == "raw_reference"),
+                "for {name}: {entry:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_carries_the_raw_reference_count() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn shorten(s: &str) -> &str { s }\n\
+             pub fn caller(s: &str) { let _ = shorten(s); }\n\
+             pub fn formats(s: &str) -> String { format!(\"x {}\", shorten(s)) }\n",
+        );
+
+        let md = SingleUseAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("raw refs=1"), "got: {md}");
+        assert!(
+            md.contains("its bare name is written elsewhere"),
+            "got: {md}"
         );
     }
 

@@ -880,9 +880,11 @@ pub(super) enum AnalyzeCommand {
     /// fallback-resolved inbound edges. Trait/interface methods,
     /// functions with live annotations, and self-recursive functions
     /// are excluded outright. Fan-in counts resolved edges only, so a
-    /// hidden caller (a macro or closure body, an unresolved call
-    /// site) is possible — the report says to search for the bare name
-    /// before inlining. A
+    /// hidden caller (a macro body, an unresolved call site) is
+    /// possible — a raw-name scan therefore caveats any row whose bare
+    /// name is written outside its definition and its known callers,
+    /// and the report says what the scan cannot see (files the graph
+    /// did not scan). A
     /// calibration section carries the loc and cyclomatic distribution
     /// over every single-caller function, so thresholds can be set from
     /// one run instead of guessed. The parser is chosen from each file
