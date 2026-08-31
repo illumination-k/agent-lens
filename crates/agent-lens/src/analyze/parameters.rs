@@ -1796,7 +1796,7 @@ mod tests {
         // Rust row with clean claims carries none of them, and no
         // caveat separator either.
         assert!(!md.contains("test site(s)"), "got: {md}");
-        assert!(!md.contains("unanalyzed,"), "got: {md}");
+        assert!(!md.contains("0 unanalyzed"), "got: {md}");
         assert!(!md.contains("raw refs="), "got: {md}");
         for line in md.lines().filter(|l| l.starts_with("- `crate::emit`")) {
             assert!(!line.contains(" — "), "got: {line}");
