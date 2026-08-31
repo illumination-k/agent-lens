@@ -971,6 +971,11 @@ mod tests {
                 .any(|c| c == "macro_impl_pattern"),
             "got {entry:?}",
         );
+
+        let md = SingleImplAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("(impl-shaped 1)"), "got: {md}");
     }
 
     #[test]

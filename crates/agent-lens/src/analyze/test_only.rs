@@ -1282,6 +1282,28 @@ mod tests {
     }
 
     #[test]
+    fn an_uncalled_annotated_entry_is_not_counted_as_skipped() {
+        // The skipped-annotated audit counts would-be findings —
+        // annotated entries tests actually call. One nothing calls is
+        // `unreachable`'s uncalled-entry question, not this one.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "#[no_mangle]\npub fn uncalled_hook() {}\n\
+             pub fn api() {}\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 #[test]\n\
+                 fn t() { crate::api(); }\n\
+             }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["audit"]["annotated_entry_count"], 0);
+    }
+
+    #[test]
     fn the_downstream_of_a_go_interface_method_is_caveated() {
         // `grinder` is only reachable through `greet`, which the
         // in-scope interface can dispatch into from production; `plain`
@@ -1404,7 +1426,7 @@ mod tests {
             "mod a { pub(crate) fn dup() {} }\n\
              mod b { pub(crate) fn dup() {} }\n\
              pub fn wild() { dup(); }\n\
-             fn dead() { dup(); }\n\
+             fn dead() { dup(); dup(); }\n\
              #[cfg(test)]\n\
              mod tests {\n\
                  #[test]\n\
@@ -1447,6 +1469,7 @@ mod tests {
             dir.path(),
             "tests/it.rs",
             "use agent_lens_fixture::fixture;\n\
+             // fixture, mentioned twice outside any function\n\
              #[test]\n\
              fn t() { let v = fixture(); assert_eq!(v, 1); }\n",
         );
@@ -1456,6 +1479,16 @@ mod tests {
         assert_eq!(
             entry["unattributed_reference_count"], 1,
             "only the production-file comment counts: {entry:?}",
+        );
+
+        // Rendering: a row with unattributed references and no
+        // production ones still gets its refs field.
+        let md = TestOnlyAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains(", refs: production=0, unattributed=1"),
+            "got: {md}",
         );
     }
 
