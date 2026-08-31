@@ -121,7 +121,17 @@ top = 15
 path = "crates"
 format = "md"
 exclude = ["agent-lens/benches/**"]
-tools = ["untested", "unreachable", "visibility", "single-use"]
+# `test-only` and `single-impl` live here for the same reason: the first
+# is defined relative to test entry points, and the second's mock-seam
+# caveat needs the `#[cfg(test)]` implementors kept visible.
+tools = [
+  "untested",
+  "unreachable",
+  "visibility",
+  "single-use",
+  "test-only",
+  "single-impl",
+]
 
 [profile.self-reach.untested]
 top = 10
@@ -138,6 +148,12 @@ top = 10
 # section after large refactors and retune max-loc / max-cyclomatic if
 # the distribution has moved.
 [profile.self-reach.single-use]
+top = 10
+
+[profile.self-reach.test-only]
+top = 10
+
+[profile.self-reach.single-impl]
 top = 10
 
 # The same lens turned on the test corpus. Test code has its own failure

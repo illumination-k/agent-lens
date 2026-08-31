@@ -8,8 +8,8 @@ use agent_lens::analyze::{
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
     FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HiddenCouplingAnalyzer,
     HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
-    SearchAnalyzer, SimilarityAnalyzer, SingleUseAnalyzer, UnreachableAnalyzer, UntestedAnalyzer,
-    VisibilityAnalyzer, WrapperAnalyzer,
+    SearchAnalyzer, SimilarityAnalyzer, SingleImplAnalyzer, SingleUseAnalyzer, TestOnlyAnalyzer,
+    UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -19,8 +19,8 @@ use super::args::{
     AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHiddenCouplingArgs,
     AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs,
     AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
-    AnalyzeSingleUseArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
-    AnalyzeWrapperArgs,
+    AnalyzeSingleImplArgs, AnalyzeSingleUseArgs, AnalyzeTestOnlyArgs, AnalyzeUnreachableArgs,
+    AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -129,9 +129,17 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.impact.clone().unwrap_or_default(),
         }),
+        config::ToolName::SingleImpl => AnalyzeCommand::SingleImpl(AnalyzeSingleImplArgs {
+            common,
+            opts: profile.single_impl.clone().unwrap_or_default(),
+        }),
         config::ToolName::SingleUse => AnalyzeCommand::SingleUse(AnalyzeSingleUseArgs {
             common,
             opts: profile.single_use.clone().unwrap_or_default(),
+        }),
+        config::ToolName::TestOnly => AnalyzeCommand::TestOnly(AnalyzeTestOnlyArgs {
+            common,
+            opts: profile.test_only.clone().unwrap_or_default(),
         }),
         config::ToolName::Layers => AnalyzeCommand::Layers(AnalyzeLayersArgs {
             common,
@@ -237,7 +245,9 @@ impl_with_analyze_path_args!(
     ImpactAnalyzer,
     LayersAnalyzer,
     RiskAnalyzer,
+    SingleImplAnalyzer,
     SingleUseAnalyzer,
+    TestOnlyAnalyzer,
     UnreachableAnalyzer,
     UntestedAnalyzer,
     VisibilityAnalyzer,
@@ -329,7 +339,9 @@ impl AnalyzeCommand {
                 Layers => LayersAnalyzer,
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,
+                SingleImpl => SingleImplAnalyzer,
                 SingleUse => SingleUseAnalyzer,
+                TestOnly => TestOnlyAnalyzer,
                 Unreachable => UnreachableAnalyzer,
                 Untested => UntestedAnalyzer,
                 Visibility => VisibilityAnalyzer,
@@ -588,6 +600,45 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.max_loc, Some(12));
         assert_eq!(args.opts.max_cyclomatic, Some(4));
+        assert_eq!(args.opts.top, Some(7));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_single_impl_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"single-impl\"]\n\n[single-impl]\ntop = 6\n",
+        )
+        .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::SingleImpl,
+            &profile,
+            &[PathBuf::from("crates")],
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::SingleImpl(args) = cmd else {
+            panic!("expected analyze single-impl");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.top, Some(6));
+    }
+
+    #[test]
+    fn build_analyze_command_maps_test_only_options() {
+        let profile: config::Profile =
+            toml::from_str("path = \"crates\"\ntools = [\"test-only\"]\n\n[test-only]\ntop = 7\n")
+                .unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::TestOnly,
+            &profile,
+            &[PathBuf::from("crates")],
+            OutputFormat::Md,
+        )
+        .unwrap();
+        let AnalyzeCommand::TestOnly(args) = cmd else {
+            panic!("expected analyze test-only");
+        };
+        assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(7));
     }
 

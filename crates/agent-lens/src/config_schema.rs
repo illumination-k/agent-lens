@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 24] = [
+const TOOL_ORDER: [ToolName; 26] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -36,7 +36,9 @@ const TOOL_ORDER: [ToolName; 24] = [
     ToolName::Hubs,
     ToolName::Impact,
     ToolName::Layers,
+    ToolName::SingleImpl,
     ToolName::SingleUse,
+    ToolName::TestOnly,
     ToolName::Untested,
     ToolName::Unreachable,
     ToolName::Visibility,
@@ -82,7 +84,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, single-use, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, single-impl, single-use, test-only, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -483,6 +485,18 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap each markdown candidate list to the top N rows.",
             },
         ],
+        ToolName::SingleImpl => &[Field {
+            key: "top",
+            ty: "int",
+            presence: "optional",
+            desc: "Cap each markdown section to the top N rows.",
+        }],
+        ToolName::TestOnly => &[Field {
+            key: "top",
+            ty: "int",
+            presence: "optional",
+            desc: "Cap each markdown section to the top N rows.",
+        }],
         ToolName::Untested => &[Field {
             key: "top",
             ty: "int",
@@ -784,8 +798,8 @@ mod tests {
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
         ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        RiskOptions, SearchOptions, SimilarityOptions, SingleUseOptions, UnreachableOptions,
-        UntestedOptions, VisibilityOptions, WrapperOptions,
+        RiskOptions, SearchOptions, SimilarityOptions, SingleImplOptions, SingleUseOptions,
+        TestOnlyOptions, UnreachableOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -822,7 +836,9 @@ mod tests {
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
         assert_tool_parity::<ImpactOptions>(ToolName::Impact);
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
+        assert_tool_parity::<SingleImplOptions>(ToolName::SingleImpl);
         assert_tool_parity::<SingleUseOptions>(ToolName::SingleUse);
+        assert_tool_parity::<TestOnlyOptions>(ToolName::TestOnly);
         assert_tool_parity::<UnreachableOptions>(ToolName::Unreachable);
         assert_tool_parity::<UntestedOptions>(ToolName::Untested);
         assert_tool_parity::<VisibilityOptions>(ToolName::Visibility);

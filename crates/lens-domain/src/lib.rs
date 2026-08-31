@@ -149,7 +149,8 @@ pub use search::{
 pub use syntax::{
     BodyShape, CallShape, FunctionShape, ImportShape, InterfaceMethodShape, InterfaceShape,
     LexicalResolutionStatus, OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind,
-    SignatureShape, SourceSpan, SyntaxFact, VisibilityShape, callee_names_local_binding,
+    SignatureShape, SourceSpan, SyntaxFact, TraitDeclShape, TraitImplShape, VisibilityShape,
+    callee_names_local_binding,
 };
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};

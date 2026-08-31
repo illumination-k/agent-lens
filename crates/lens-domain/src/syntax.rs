@@ -136,6 +136,41 @@ pub struct InterfaceMethodShape {
     pub param_count: usize,
 }
 
+/// A named abstraction declaration — a Rust `trait` or a Go
+/// `interface` — with the location and visibility facts an implementor
+/// census needs on top of the method set [`InterfaceShape`] carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitDeclShape {
+    pub display_name: String,
+    pub qualified_name: String,
+    /// Every directly declared method, body-less signatures included,
+    /// by name and parameter-slot count (receivers not counted).
+    pub methods: Vec<InterfaceMethodShape>,
+    pub span: SourceSpan,
+    pub visibility: SyntaxFact<VisibilityShape>,
+    /// Declared in a test context the adapter could see
+    /// (`#[cfg(test)]`). File-level test classification is the
+    /// consumer's to apply on top.
+    pub is_test: bool,
+}
+
+/// One `impl Trait for Type` block, the unit a Rust implementor census
+/// counts. Go has no analogue — satisfaction there is structural and
+/// is computed from method sets instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitImplShape {
+    /// Trailing identifier of the implemented trait's path, as written
+    /// (`Display` for `impl fmt::Display for Foo`).
+    pub trait_name: String,
+    /// Trailing identifier of the implementing type, or `None` when
+    /// the self type is not a path (a reference, a tuple).
+    pub self_type: Option<String>,
+    pub span: SourceSpan,
+    /// Declared in a test context the adapter could see; file-level
+    /// classification is the consumer's, as on [`TraitDeclShape`].
+    pub is_test: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerShape {
     pub display_name: String,

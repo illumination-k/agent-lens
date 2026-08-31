@@ -285,10 +285,12 @@ struct EntryKindCount {
 }
 
 /// Why a function is an entry point. Declaration order is the priority
-/// when several apply, most specific first.
+/// when several apply, most specific first. Shared with `analyze
+/// test-only`, whose production entry set is exactly this one minus the
+/// test kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum EntryKind {
+pub(crate) enum EntryKind {
     /// A `main` function: the program starts here.
     Main,
     /// A Go `init` function: the runtime calls it before `main`.
@@ -566,7 +568,7 @@ impl Reachability {
 /// Why this node roots the traversal, if it does. The first reason that
 /// applies wins, so the emitted entry set reads as "what kind of entry
 /// point is this" rather than "which rule fired last".
-fn entry_kind_of(node: &CallGraphNode) -> Option<EntryKind> {
+pub(crate) fn entry_kind_of(node: &CallGraphNode) -> Option<EntryKind> {
     let Some(lang) = ExportLang::of(node) else {
         // No export status extracted for this language, so it cannot be
         // judged — and treating it as live is what keeps everything it

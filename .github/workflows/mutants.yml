@@ -17,7 +17,13 @@ jobs:
   pr-diff:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # cargo-mutants runs serially here (--in-place cannot parallelize),
+    # so the budget scales with diff size: a large PR carries hundreds
+    # of mutants at roughly 20-30s each on this runner. 60 minutes was
+    # first exceeded by a ~260-mutant diff; cargo-mutants' own per-mutant
+    # timeouts bound a hang, so a generous ceiling only costs runner
+    # time on PRs that genuinely need it.
+    timeout-minutes: 180
     permissions:
       contents: read
     env:

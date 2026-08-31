@@ -312,7 +312,7 @@ fn with_block_attributes(block: &[String], attrs: &[syn::Attribute]) -> Vec<Stri
     out
 }
 
-fn visibility_shape(vis: &syn::Visibility) -> VisibilityShape {
+pub(crate) fn visibility_shape(vis: &syn::Visibility) -> VisibilityShape {
     match vis {
         syn::Visibility::Public(_) => VisibilityShape::Public,
         syn::Visibility::Restricted(restricted) => {

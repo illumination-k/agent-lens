@@ -19,7 +19,9 @@ use agent_lens::analyze::layers::LayersOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
+use agent_lens::analyze::single_impl::SingleImplOptions;
 use agent_lens::analyze::single_use::SingleUseOptions;
+use agent_lens::analyze::test_only::TestOnlyOptions;
 use agent_lens::analyze::unreachable::UnreachableOptions;
 use agent_lens::analyze::untested::UntestedOptions;
 use agent_lens::analyze::visibility::VisibilityOptions;
@@ -866,6 +868,27 @@ pub(super) enum AnalyzeCommand {
     /// `--doc-overlap`.
     #[command(after_long_help = examples::SIMILARITY)]
     Similarity(AnalyzeSimilarityArgs),
+    /// Report traits and interfaces with at most one production
+    /// implementor.
+    ///
+    /// Inventories every Rust `trait` and Go `interface` declared in
+    /// the analyzed tree and takes an implementor census: `impl Trait
+    /// for Type` blocks matched by the trait path's trailing identifier
+    /// for Rust, and in-tree types whose method sets cover the
+    /// interface by name and parameter count for Go. Declarations with
+    /// at most one production implementor are reported — an abstraction
+    /// with one user is a candidate for replacement with the concrete
+    /// type, not a verdict — with caveats where the indirection is
+    /// deliberate or the census weaker: a test implementor (a mock
+    /// seam), `dyn` references (dynamic dispatch), public visibility
+    /// (implementors outside the tree), a shared declaration name. A
+    /// raw-name scan counts references outside the declaration and its
+    /// implementors' blocks, which is what removing the abstraction
+    /// costs. An implementor-count histogram gives the tree's base
+    /// rate. Rust and Go only. JSON is the default; `--format md` caps
+    /// each section at `--top` (default 20).
+    #[command(name = "single-impl", after_long_help = examples::SINGLE_IMPL)]
+    SingleImpl(AnalyzeSingleImplArgs),
     /// Report functions with exactly one resolved production caller as
     /// inline candidates.
     ///
@@ -893,6 +916,29 @@ pub(super) enum AnalyzeCommand {
     /// (default 20).
     #[command(name = "single-use", after_long_help = examples::SINGLE_USE)]
     SingleUse(AnalyzeSingleUseArgs),
+    /// Report production functions only tests keep alive.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// and lists the non-test functions no resolved call path from any
+    /// production entry point (`main`, a public/exported declaration, a
+    /// live annotation) reaches, while a test does — the code `analyze
+    /// unreachable` never reports (tests root its traversal) and
+    /// `analyze untested` blesses (tests do reach it). The candidate
+    /// edit is moving the function into the language's test scope, or
+    /// deleting it together with the tests that exist only to exercise
+    /// it. Public/exported declarations whose resolved callers are all
+    /// tests are listed as a separate, weaker section — in a library a
+    /// consumer outside the analyzed tree cannot be ruled out. Rows
+    /// carry caveats where the claim is weaker (crate-restricted
+    /// visibility, trait/interface dispatch, ambiguous inbound calls,
+    /// the bare name written in a production body), and a raw-name scan
+    /// counts unattributed references (imports, attributes, top-level
+    /// macros) informationally. Rust and Go only — TypeScript and
+    /// Python carry no extracted export status, and the report counts
+    /// what it skipped. JSON is the default; `--format md` caps each
+    /// section at `--top` (default 20).
+    #[command(name = "test-only", after_long_help = examples::TEST_ONLY)]
+    TestOnly(AnalyzeTestOnlyArgs),
     /// Report production functions with no static call path from any
     /// test function.
     ///
@@ -1201,6 +1247,22 @@ pub(super) struct AnalyzeSingleUseArgs {
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(super) opts: SingleUseOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeSingleImplArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: SingleImplOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeTestOnlyArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: TestOnlyOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1855,6 +1917,48 @@ mod tests {
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.max_loc, Some(12));
         assert_eq!(args.opts.max_cyclomatic, Some(4));
+        assert_eq!(args.opts.top, Some(10));
+    }
+
+    #[test]
+    fn parses_analyze_single_impl_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "single-impl",
+            "crates",
+            "--top",
+            "10",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::SingleImpl(args)) = cli.command else {
+            panic!("expected analyze single-impl");
+        };
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.top, Some(10));
+    }
+
+    #[test]
+    fn parses_analyze_test_only_with_top() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "test-only",
+            "crates",
+            "--top",
+            "10",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::TestOnly(args)) = cli.command else {
+            panic!("expected analyze test-only");
+        };
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
+        assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(10));
     }
 

@@ -13,7 +13,10 @@
 //! interface literals in field or parameter positions carry no name to
 //! report and are skipped for the same reason.
 
-use lens_domain::{InterfaceMethodShape, InterfaceShape, SyntaxFact, qualify_module};
+use lens_domain::{
+    InterfaceMethodShape, InterfaceShape, SourceSpan, SyntaxFact, TraitDeclShape, VisibilityShape,
+    qualify_module, starts_uppercase,
+};
 use tree_sitter::Node;
 
 use crate::node_text::node_str;
@@ -26,13 +29,32 @@ pub fn extract_interface_shapes_with_module(
     source: &str,
     module: &str,
 ) -> Result<Vec<InterfaceShape>, GoParseError> {
+    Ok(extract_interface_decls_with_module(source, module)?
+        .into_iter()
+        .map(|decl| InterfaceShape {
+            display_name: decl.display_name,
+            qualified_name: SyntaxFact::Known(decl.qualified_name),
+            methods: decl.methods,
+        })
+        .collect())
+}
+
+/// The same declarations as [`extract_interface_shapes_with_module`],
+/// with the span and visibility facts an implementor census needs on
+/// top of the method sets. Visibility follows Go's casing rule; the
+/// caller decides file-level test classification (`_test.go`), so
+/// `is_test` is always `false` here.
+pub fn extract_interface_decls_with_module(
+    source: &str,
+    module: &str,
+) -> Result<Vec<TraitDeclShape>, GoParseError> {
     let tree = parse_tree(source)?;
     let mut out = Vec::new();
     collect_interfaces(tree.root_node(), source.as_bytes(), module, &mut out);
     Ok(out)
 }
 
-fn collect_interfaces(node: Node<'_>, source: &[u8], module: &str, out: &mut Vec<InterfaceShape>) {
+fn collect_interfaces(node: Node<'_>, source: &[u8], module: &str, out: &mut Vec<TraitDeclShape>) {
     if node.kind() == "type_declaration" {
         let mut cursor = node.walk();
         for spec in node.named_children(&mut cursor) {
@@ -53,7 +75,7 @@ fn collect_interface_spec(
     spec: Node<'_>,
     source: &[u8],
     module: &str,
-    out: &mut Vec<InterfaceShape>,
+    out: &mut Vec<TraitDeclShape>,
 ) {
     let Some(ty) = spec.child_by_field_name("type") else {
         return;
@@ -67,10 +89,21 @@ fn collect_interface_spec(
     else {
         return;
     };
-    out.push(InterfaceShape {
+    let visibility = if starts_uppercase(name) {
+        VisibilityShape::Exported
+    } else {
+        VisibilityShape::Unexported
+    };
+    out.push(TraitDeclShape {
         display_name: name.to_owned(),
-        qualified_name: SyntaxFact::Known(qualify_module(module, name)),
+        qualified_name: qualify_module(module, name),
         methods: interface_methods(ty, source),
+        span: SourceSpan {
+            start_line: spec.start_position().row + 1,
+            end_line: spec.end_position().row + 1,
+        },
+        visibility: SyntaxFact::Known(visibility),
+        is_test: false,
     });
 }
 
@@ -116,6 +149,32 @@ mod tests {
             .iter()
             .map(|m| (m.name.as_str(), m.param_count))
             .collect()
+    }
+
+    #[test]
+    fn decls_carry_span_and_casing_visibility() {
+        let src = "package p\n\n\
+                   type Store interface {\n\
+                   \tGet(id string) string\n\
+                   }\n\n\
+                   type quiet interface {\n\
+                   \thush()\n\
+                   }\n";
+        let decls = extract_interface_decls_with_module(src, "pkg").unwrap();
+        assert_eq!(decls.len(), 2);
+        assert_eq!(decls[0].span.start_line, 3);
+        assert_eq!(decls[0].span.end_line, 5);
+        assert_eq!(
+            decls[0].visibility,
+            SyntaxFact::Known(VisibilityShape::Exported),
+        );
+        assert_eq!(decls[1].span.start_line, 7);
+        assert_eq!(decls[1].span.end_line, 9);
+        assert_eq!(
+            decls[1].visibility,
+            SyntaxFact::Known(VisibilityShape::Unexported),
+        );
+        assert!(decls.iter().all(|decl| !decl.is_test));
     }
 
     #[test]

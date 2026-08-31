@@ -299,7 +299,9 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Hotspot => hotspot(report, base),
         ToolName::Risk => risk(report, base),
         ToolName::Hubs => hubs(report, base),
+        ToolName::SingleImpl => single_impl(report, base),
         ToolName::SingleUse => single_use(report, base),
+        ToolName::TestOnly => test_only(report, base),
         ToolName::Untested => untested(report, base),
         ToolName::Unreachable => unreachable(report, base),
         ToolName::Visibility => visibility(report, base),
@@ -534,22 +536,30 @@ fn wrapper(report: &Value, base: &Path) -> Extraction {
     }
 }
 
-/// Inline candidates rolled up per file. The report sorts candidates
-/// cleanest-first, so the first name per file is the row worth opening.
-fn single_use(report: &Value, base: &Path) -> Extraction {
+/// Shared per-file rollup for the entry-list analyzers: count rows per
+/// file and headline the first name — the reports sort strongest-first,
+/// so that first name is the row worth opening.
+fn per_file_rollup(
+    report: &Value,
+    base: &Path,
+    entries_key: &str,
+    first_name: impl Fn(&Value) -> Option<String>,
+    singular: &str,
+    plural: &str,
+) -> Extraction {
     let mut order: Vec<PathBuf> = Vec::new();
     let mut per_file: HashMap<PathBuf, (u64, String)> = HashMap::new();
-    for entry in arr(report, "candidates") {
+    for entry in arr(report, entries_key) {
         let Some(file) = str_of(entry, "file") else {
             continue;
         };
-        let Some(name) = str_of(entry, "qualified_name") else {
+        let Some(name) = first_name(entry) else {
             continue;
         };
         let path = from_base(base, file);
         let slot = per_file.entry(path.clone()).or_insert_with(|| {
             order.push(path);
-            (0, short_name(name).to_owned())
+            (0, name)
         });
         slot.0 += 1;
     }
@@ -557,10 +567,7 @@ fn single_use(report: &Value, base: &Path) -> Extraction {
         .into_iter()
         .filter_map(|path| {
             let (count, first) = per_file.remove(&path)?;
-            let mut headline = format!(
-                "{} (`{first}`",
-                counted(count, "inline candidate", "inline candidates"),
-            );
+            let mut headline = format!("{} (`{first}`", counted(count, singular, plural));
             headline.push_str(if count > 1 { ", …)" } else { ")" });
             Some((count, path, headline))
         })
@@ -573,6 +580,42 @@ fn single_use(report: &Value, base: &Path) -> Extraction {
             .collect(),
         corpus: Vec::new(),
     }
+}
+
+/// Inline candidates per file, headlined by the cleanest one.
+fn single_use(report: &Value, base: &Path) -> Extraction {
+    per_file_rollup(
+        report,
+        base,
+        "candidates",
+        |entry| str_of(entry, "qualified_name").map(|name| short_name(name).to_owned()),
+        "inline candidate",
+        "inline candidates",
+    )
+}
+
+/// Single-impl abstractions per file, headlined by the strongest row.
+fn single_impl(report: &Value, base: &Path) -> Extraction {
+    per_file_rollup(
+        report,
+        base,
+        "findings",
+        |entry| str_of(entry, "display_name").map(str::to_owned),
+        "single-impl abstraction",
+        "single-impl abstractions",
+    )
+}
+
+/// Test-only findings per file, headlined by the strongest row.
+fn test_only(report: &Value, base: &Path) -> Extraction {
+    per_file_rollup(
+        report,
+        base,
+        "findings",
+        |entry| str_of(entry, "qualified_name").map(|name| short_name(name).to_owned()),
+        "test-only function",
+        "test-only functions",
+    )
 }
 
 /// Chains grouped by terminus file — the terminus is where the work
@@ -1332,6 +1375,47 @@ mod tests {
             [
                 ("/repo/src/many.rs", "2 inline candidates (`first`, …)"),
                 ("/repo/src/one.rs", "1 inline candidate (`only`)"),
+            ],
+        );
+    }
+
+    #[test]
+    fn single_impl_rolls_findings_up_per_file() {
+        let report = json!({
+            "findings": [
+                { "file": "many.rs", "display_name": "Store" },
+                { "file": "many.rs", "display_name": "Codec" },
+                { "file": "one.rs", "display_name": "Sink" },
+            ],
+        });
+        let extraction = single_impl(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [
+                (
+                    "/repo/src/many.rs",
+                    "2 single-impl abstractions (`Store`, …)"
+                ),
+                ("/repo/src/one.rs", "1 single-impl abstraction (`Sink`)"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_only_rolls_findings_up_per_file() {
+        let report = json!({
+            "findings": [
+                { "file": "many.rs", "qualified_name": "a::first" },
+                { "file": "many.rs", "qualified_name": "a::second" },
+                { "file": "one.rs", "qualified_name": "b::only" },
+            ],
+        });
+        let extraction = test_only(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [
+                ("/repo/src/many.rs", "2 test-only functions (`first`, …)"),
+                ("/repo/src/one.rs", "1 test-only function (`only`)"),
             ],
         );
     }

@@ -46,6 +46,8 @@
 //! # Schema history
 //!
 //! * `schema_version: 1` — initial shape.
+//! * `schema_version: 2` — `chains`: clusters of candidates whose one
+//!   caller is itself a candidate, with the sink they all fold into.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -64,7 +66,7 @@ use super::unreachable::identifiers;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use std::collections::HashMap;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Markdown ranking cap when `--top` is not given. JSON always carries
 /// every candidate.
@@ -380,10 +382,111 @@ struct Report {
     /// Single-caller functions within the thresholds, cleanest and
     /// smallest first.
     candidates: Vec<CandidateEntry>,
+    /// Clusters of candidates whose one caller is itself a candidate,
+    /// largest first. Inlining a cluster's members deepest-first folds
+    /// the whole run into its sink in one pass, so the loc reclaimed is
+    /// the sum, not one row's worth.
+    chains: Vec<Chain>,
     /// Per-module call-site resolution counts. A module whose call
     /// sites mostly failed to resolve can hide callers, which weakens
     /// every single-caller claim inside it.
     modules: Vec<ModuleResolutionSummary>,
+}
+
+/// A cluster of candidates linked by their callers: every member's one
+/// caller is either another member or the sink. The candidate edit
+/// compounds — inlining members deepest-first folds every one of them
+/// into the sink.
+#[derive(Debug, Serialize)]
+struct Chain {
+    /// The first non-candidate caller, where the whole cluster lands.
+    sink: Caller,
+    function_count: usize,
+    /// Source lines the cluster holds — what folding it reclaims.
+    total_loc: usize,
+    /// Members with no caveat at all.
+    clean_count: usize,
+    /// Members deepest-first: inlining in this order never inlines a
+    /// function whose own callee list still names a member.
+    members: Vec<ChainMember>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainMember {
+    id: String,
+    qualified_name: String,
+    loc: usize,
+}
+
+/// Cluster the candidates by the "my caller is also a candidate"
+/// relation. Each candidate has exactly one caller, so the clusters are
+/// trees rooted where a caller is not itself a candidate; a cycle of
+/// candidates has no such root and is deliberately not reported (its
+/// members still appear as plain candidates).
+fn collapse_chains(candidates: &[CandidateEntry]) -> Vec<Chain> {
+    let by_position: HashMap<(&str, usize), usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| ((entry.file.as_str(), entry.start_line), idx))
+        .collect();
+    let parent_of = |entry: &CandidateEntry| {
+        by_position
+            .get(&(entry.caller.file.as_str(), entry.caller.start_line))
+            .copied()
+    };
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); candidates.len()];
+    for (idx, entry) in candidates.iter().enumerate() {
+        if let Some(parent) = parent_of(entry) {
+            children[parent].push(idx);
+        }
+    }
+
+    let mut chains = Vec::new();
+    for (root, entry) in candidates.iter().enumerate() {
+        if parent_of(entry).is_some() || children[root].is_empty() {
+            continue;
+        }
+        // Post-order walk: children (deeper members) come before their
+        // caller, which is the inline-safe order. Recursion rather than
+        // an explicit revisit-flag stack on purpose: a single wedged
+        // branch in a flag-driven loop spins while *allocating*, which
+        // is how a mutated build once took a CI runner down with it —
+        // a wedged recursion just overflows its own stack and dies
+        // contained. Depth is bounded by the cluster's own size.
+        let mut members: Vec<usize> = Vec::new();
+        emit_post_order(root, &children, &mut members);
+        chains.push(Chain {
+            sink: entry.caller.clone(),
+            function_count: members.len(),
+            total_loc: members.iter().map(|&idx| candidates[idx].loc).sum(),
+            clean_count: members
+                .iter()
+                .filter(|&&idx| candidates[idx].caveats.is_empty())
+                .count(),
+            members: members
+                .into_iter()
+                .map(|idx| ChainMember {
+                    id: candidates[idx].id.clone(),
+                    qualified_name: candidates[idx].qualified_name.clone(),
+                    loc: candidates[idx].loc,
+                })
+                .collect(),
+        });
+    }
+    chains.sort_by(|a, b| {
+        b.total_loc
+            .cmp(&a.total_loc)
+            .then_with(|| a.sink.qualified_name.cmp(&b.sink.qualified_name))
+    });
+    chains
+}
+
+/// Append `idx`'s subtree to `members`, every child before its caller.
+fn emit_post_order(idx: usize, children: &[Vec<usize>], members: &mut Vec<usize>) {
+    for &child in &children[idx] {
+        emit_post_order(child, children, members);
+    }
+    members.push(idx);
 }
 
 /// The single-caller population before thresholds, plus what the
@@ -566,6 +669,7 @@ impl Report {
                 .then_with(|| a.loc.cmp(&b.loc))
                 .then_with(|| a.id.cmp(&b.id))
         });
+        let chains = collapse_chains(&candidates);
 
         Self {
             schema_version: SCHEMA_VERSION,
@@ -581,6 +685,7 @@ impl Report {
                 ..calibration
             },
             candidates,
+            chains,
             modules: graph.module_summary.clone(),
         }
     }
@@ -821,6 +926,39 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         "\nSame single-caller shape, but the claim or the edit is weaker — each row says how.\n",
     );
     render_entries(&mut out, &caveated, limit);
+
+    if !report.chains.is_empty() {
+        let _ = writeln!(out, "\n## Collapsible chains (top {limit})");
+        out.push_str(
+            "\nEach cluster is candidates whose one caller is itself a candidate: inline the \
+             members in the order listed (deepest first) and the whole run folds into the \
+             sink, reclaiming the summed loc. Caveats on the individual rows above still \
+             apply.\n\n",
+        );
+        for chain in report.chains.iter().take(limit) {
+            const MEMBERS_SHOWN: usize = 8;
+            let shown: Vec<String> = chain
+                .members
+                .iter()
+                .take(MEMBERS_SHOWN)
+                .map(|m| format!("`{}`", m.qualified_name))
+                .collect();
+            let _ = write!(
+                out,
+                "- {} function(s), {} loc into `{}` ({}:{}): {}",
+                chain.function_count,
+                chain.total_loc,
+                chain.sink.qualified_name,
+                chain.sink.file,
+                chain.sink.start_line,
+                shown.join(", "),
+            );
+            if chain.members.len() > MEMBERS_SHOWN {
+                let _ = write!(out, ", … (+{} more)", chain.members.len() - MEMBERS_SHOWN);
+            }
+            out.push('\n');
+        }
+    }
 
     let _ = writeln!(out, "\n## Threshold calibration");
     let _ = writeln!(
@@ -1521,6 +1659,163 @@ mod tests {
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert!(md.contains("_No functions to analyze._"), "got: {md}");
+    }
+
+    #[test]
+    fn a_linear_run_of_candidates_is_a_chain_into_the_sink() {
+        // `a`'s one caller is `b`, whose one caller is `c`; `c` itself
+        // has no caller, so it is no candidate and becomes the sink.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn a() { let _ = 1; }\n\
+             fn b() { a(); }\n\
+             pub fn c() { b(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let chains = report["chains"].as_array().unwrap();
+        assert_eq!(chains.len(), 1, "got {chains:?}");
+        let chain = &chains[0];
+        assert_eq!(chain["sink"]["qualified_name"], "crate::c");
+        assert_eq!(chain["function_count"], 2);
+        let names: Vec<&str> = chain["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["qualified_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["crate::a", "crate::b"], "deepest first");
+        let member_loc: u64 = chain["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["loc"].as_u64().unwrap())
+            .sum();
+        assert_eq!(chain["total_loc"].as_u64().unwrap(), member_loc);
+    }
+
+    #[test]
+    fn a_branching_cluster_lists_the_caller_last() {
+        // `x` and `y` both fold into `mid`, and `mid` folds into `sink`
+        // — one cluster of three, with `mid` after its callees.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn x() {}\n\
+             fn y() {}\n\
+             fn mid() { x(); y(); }\n\
+             pub fn sink() { mid(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let chains = report["chains"].as_array().unwrap();
+        assert_eq!(chains.len(), 1, "got {chains:?}");
+        let chain = &chains[0];
+        assert_eq!(chain["function_count"], 3);
+        assert_eq!(chain["sink"]["qualified_name"], "crate::sink");
+        let names: Vec<&str> = chain["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["qualified_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.last().copied(), Some("crate::mid"), "got {names:?}");
+        assert!(names.contains(&"crate::x") && names.contains(&"crate::y"));
+    }
+
+    #[test]
+    fn lone_candidates_and_candidate_cycles_form_no_chain() {
+        // `solo`'s caller is no candidate, so there is no run to fold;
+        // `ping`/`pong` call only each other, so their cluster has no
+        // sink to land in and is left to the plain candidate list.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn solo() {}\n\
+             pub fn caller() { solo(); }\n\
+             fn ping() { pong(); }\n\
+             fn pong() { ping(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["chains"], serde_json::json!([]));
+        assert!(candidate(&report, "::solo").is_some());
+    }
+
+    #[test]
+    fn the_member_list_rolls_up_only_past_the_cap() {
+        // Two runs: eight members render in full, nine roll the ninth
+        // into a "+1 more".
+        let mut eight = String::new();
+        for i in 1..=8 {
+            let body = if i == 1 {
+                "let _ = 1;".to_owned()
+            } else {
+                format!("a{}();", i - 1)
+            };
+            eight.push_str(&format!("fn a{i}() {{ {body} }}\n"));
+        }
+        eight.push_str("pub fn sink_a() { a8(); }\n");
+        let mut nine = String::new();
+        for i in 1..=9 {
+            let body = if i == 1 {
+                "let _ = 1;".to_owned()
+            } else {
+                format!("b{}();", i - 1)
+            };
+            nine.push_str(&format!("fn b{i}() {{ {body} }}\n"));
+        }
+        nine.push_str("pub fn sink_b() { b9(); }\n");
+
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &format!("{eight}{nine}"));
+
+        let md = SingleUseAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        let sink_a_line = md
+            .lines()
+            .find(|l| l.contains("into `crate::sink_a`"))
+            .expect("eight-member chain rendered");
+        assert!(!sink_a_line.contains("more"), "got: {sink_a_line}");
+        let sink_b_line = md
+            .lines()
+            .find(|l| l.contains("into `crate::sink_b`"))
+            .expect("nine-member chain rendered");
+        assert!(sink_b_line.contains("(+1 more)"), "got: {sink_b_line}");
+    }
+
+    #[test]
+    fn markdown_renders_chains_only_when_one_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn a() { let _ = 1; }\n\
+             fn b() { a(); }\n\
+             pub fn c() { b(); }\n",
+        );
+        let md = SingleUseAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("## Collapsible chains"), "got: {md}");
+        assert!(md.contains("into `crate::c`"), "got: {md}");
+        assert!(md.contains("`crate::a`, `crate::b`"), "got: {md}");
+
+        let solo = tempfile::tempdir().unwrap();
+        write_file(
+            solo.path(),
+            "src/lib.rs",
+            "fn helper() {}\npub fn caller() { helper(); }\n",
+        );
+        let md = SingleUseAnalyzer::new()
+            .analyze(solo.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(!md.contains("## Collapsible chains"), "got: {md}");
     }
 
     #[rstest]
