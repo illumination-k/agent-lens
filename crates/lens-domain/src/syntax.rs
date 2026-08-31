@@ -700,6 +700,38 @@ mod tests {
         ));
     }
 
+    /// Only literals and const-like paths can claim "same text, same
+    /// value" — and the claim carries the verbatim text, since it is
+    /// what the analyzer compares across call sites.
+    #[test]
+    fn constant_text_is_the_verbatim_text_of_constant_shapes_only() {
+        assert_eq!(
+            ArgumentShape::Literal { text: "1".to_owned() }.constant_text(),
+            Some("1"),
+        );
+        assert_eq!(
+            ArgumentShape::Const {
+                text: "Color::Red".to_owned()
+            }
+            .constant_text(),
+            Some("Color::Red"),
+        );
+        assert_eq!(
+            ArgumentShape::Identifier { text: "x".to_owned() }.constant_text(),
+            None,
+        );
+        assert_eq!(ArgumentShape::Spread.constant_text(), None);
+        assert_eq!(ArgumentShape::Other.constant_text(), None);
+        assert_eq!(
+            ArgumentShape::Keyword {
+                name: "mode".to_owned(),
+                value: Box::new(ArgumentShape::Literal { text: "1".to_owned() }),
+            }
+            .constant_text(),
+            None,
+        );
+    }
+
     fn call_shape() -> CallShape {
         CallShape {
             caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),

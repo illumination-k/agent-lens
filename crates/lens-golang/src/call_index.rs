@@ -616,6 +616,27 @@ mod tests {
         extract_call_shapes_with_module(src, module).unwrap()
     }
 
+    /// The non-constant boundary of the classifier: negation of
+    /// anything but a literal and a selector on a lowercase local stay
+    /// opaque, while parens peel to the value inside.
+    #[rstest]
+    #[case::negated_identifier("func a(x int) { f(-x) }", ArgumentShape::Other)]
+    #[case::lowercase_selector("func a(obj *T) { f(obj.field) }", ArgumentShape::Other)]
+    #[case::parenthesised_identifier(
+        "func a(x int) { f((x)) }",
+        ArgumentShape::Identifier { text: "x".to_owned() }
+    )]
+    fn argument_shape_edge_cases(#[case] body: &str, #[case] expected: ArgumentShape) {
+        let call = calls(&format!("package p\n\n{body}\n"), "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![expected],
+        );
+    }
+
     /// Argument shapes: literals (`nil` and a negative number included)
     /// carry source text, uppercase identifiers and alias-rooted
     /// selectors are consts, lowercase identifiers stay identifiers, a

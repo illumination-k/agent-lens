@@ -593,6 +593,23 @@ mod tests {
         );
     }
 
+    /// The non-constant boundary of the classifier: negation of
+    /// anything but a number literal and an attribute chain on a
+    /// lowercase local stay opaque.
+    #[rstest]
+    #[case::negated_identifier("def a(x):\n    f(-x)\n", ArgumentShape::Other)]
+    #[case::lowercase_attribute("def a(obj):\n    f(obj.attr)\n", ArgumentShape::Other)]
+    fn argument_shape_edge_cases(#[case] src: &str, #[case] expected: ArgumentShape) {
+        let call = calls(src, "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![expected],
+        );
+    }
+
     /// Argument shapes: literals (`None`, `True`, a negative number)
     /// carry source text, uppercase names and attribute chains are
     /// consts, keywords carry their name and value shape, and `*`/`**`

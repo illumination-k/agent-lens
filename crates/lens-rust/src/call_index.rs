@@ -961,6 +961,45 @@ mod tests {
         );
     }
 
+    /// The non-constant boundary of the classifier: negation of
+    /// anything but a literal, a qualified-self path, and other
+    /// expressions stay opaque, while parens peel to the value inside.
+    #[rstest]
+    #[case::negated_identifier("fn a(x: i32) { f(-x); }", ArgumentShape::Other)]
+    #[case::not_a_negation("fn a() { f(!true); }", ArgumentShape::Other)]
+    #[case::qualified_self_path("fn a() { f(<S as T>::VALUE); }", ArgumentShape::Other)]
+    #[case::parenthesised_identifier(
+        "fn a(x: i32) { f((x)); }",
+        ArgumentShape::Identifier { text: "x".to_owned() }
+    )]
+    fn argument_shape_edge_cases(#[case] src: &str, #[case] expected: ArgumentShape) {
+        let sites = run(src);
+        let site = sites
+            .iter()
+            .find(|s| s.callee_name.as_deref() == Some("f"))
+            .expect("f call site");
+        assert_eq!(site.arguments, vec![expected]);
+    }
+
+    /// `Expr::Group` wraps an expression that arrived through a macro's
+    /// token stream, so it never appears in a file parsed from source —
+    /// build one directly to pin that the wrapper is peeled like a
+    /// paren.
+    #[test]
+    fn grouped_argument_expressions_are_peeled() {
+        let grouped = Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: Default::default(),
+            expr: Box::new(syn::parse_quote!(x)),
+        });
+        assert_eq!(
+            argument_shape(&grouped),
+            ArgumentShape::Identifier {
+                text: "x".to_owned()
+            },
+        );
+    }
+
     /// A method call's receiver is not an argument: only the
     /// parenthesised list is classified.
     #[test]

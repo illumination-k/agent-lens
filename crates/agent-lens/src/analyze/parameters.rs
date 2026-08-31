@@ -746,7 +746,10 @@ impl Collected {
             if analyzable < min_call_sites {
                 continue;
             }
-            let fully_provided = aggregate.omitted == 0 && aggregate.provided == analyzable;
+            // Every analyzable site records exactly one of
+            // provided/omitted per slot, so zero omissions means every
+            // site provided a value.
+            let fully_provided = aggregate.omitted == 0;
             if fully_provided {
                 self.calibration.measured_parameter_count += 1;
                 if aggregate.non_constant > 0 {
@@ -1209,6 +1212,7 @@ mod tests {
         // `msg` is an identifier at every site: it varies by scope, so
         // no row — and the calibration counts it as varying.
         assert!(constant_row(&report, "::emit", 1).is_none());
+        assert_eq!(report["calibration"]["measured_parameter_count"], 2);
         assert_eq!(report["calibration"]["one_value_count"], 1);
         assert_eq!(report["calibration"]["varying_count"], 1);
     }
@@ -1360,12 +1364,161 @@ mod tests {
         let report = analyze_json(dir.path());
         let row = constant_row(&report, "::emit", 0).expect("level listed");
         assert_eq!(row["unanalyzed_call_site_count"], 1);
+        assert_eq!(report["audit"]["unanalyzed_call_site_count"], 1);
         assert!(
             row["caveats"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|c| c == "unanalyzed_call_sites"),
+            "got {row:?}",
+        );
+    }
+
+    #[test]
+    fn more_arguments_than_slots_mark_the_site_unanalyzable() {
+        // A call passing more arguments than the resolved signature
+        // declares did not really resolve to it (a variadic or a
+        // same-named overload); the site is skipped with a count
+        // instead of shifting positions.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/app.py",
+            "def emit(level):\n    return level\n\
+             \n\
+             def a():\n    emit(3)\n\
+             \n\
+             def b():\n    emit(3)\n\
+             \n\
+             def c():\n    emit(3, 4)\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let row = constant_row(&report, "::emit", 0).expect("level listed");
+        assert_eq!(row["call_site_count"], 2);
+        assert_eq!(row["unanalyzed_call_site_count"], 1);
+    }
+
+    #[test]
+    fn a_fallback_resolved_caller_is_a_caveat() {
+        // `self.inner.helper(3)` resolves through the last-segment
+        // fallback, so even the counted call sites are heuristic.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub struct Inner;\n\
+             impl Inner { fn helper(&self, level: u32) { let _ = level; } }\n\
+             pub struct S { inner: Inner }\n\
+             impl S {\n\
+                 pub fn a(&self) { self.inner.helper(3); }\n\
+                 pub fn b(&self) { self.inner.helper(3); }\n\
+             }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let row = constant_row(&report, "Inner::helper", 0).expect("level listed");
+        assert!(
+            row["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "fallback_resolved_call"),
+            "got {row:?}",
+        );
+    }
+
+    #[test]
+    fn mixed_omission_and_provision_is_not_default_only() {
+        // One caller relies on the default, another passes a value: the
+        // default is not the only value, and the provided value cannot
+        // claim "every site" either. No finding.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/app.py",
+            "def emit(level, flag=True):\n    return (level, flag)\n\
+             \n\
+             def a():\n    emit(1, flag=False)\n\
+             \n\
+             def b():\n    emit(2)\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert!(constant_row(&report, "::emit", 1).is_none(), "{report:?}");
+    }
+
+    #[test]
+    fn a_zero_site_floor_does_not_invent_default_only_rows() {
+        // `--min-call-sites 0` is a degenerate floor; an uncalled
+        // Python function must still not read as "always defaulted".
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/app.py",
+            "def emit(level, flag=True):\n    return (level, flag)\n",
+        );
+
+        let report = analyze_json_with(
+            dir.path(),
+            ParametersAnalyzer::new().with_min_call_sites(Some(0)),
+        );
+        assert_eq!(report["constant_arguments"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_test_omitting_a_default_only_parameter_does_not_caveat() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/app.py",
+            "def emit(level, flag=True):\n    return (level, flag)\n\
+             \n\
+             def a():\n    emit(1)\n\
+             \n\
+             def b():\n    emit(2)\n\
+             \n\
+             def test_emit():\n    emit(3)\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let row = constant_row(&report, "::emit", 1).expect("flag listed");
+        assert_eq!(row["kind"], "default_only");
+        assert!(
+            !row["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "tests_vary_value"),
+            "got {row:?}",
+        );
+    }
+
+    #[test]
+    fn a_test_passing_a_default_only_parameter_is_a_seam_caveat() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/app.py",
+            "def emit(level, flag=True):\n    return (level, flag)\n\
+             \n\
+             def a():\n    emit(1)\n\
+             \n\
+             def b():\n    emit(2)\n\
+             \n\
+             def test_emit():\n    emit(3, flag=False)\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let row = constant_row(&report, "::emit", 1).expect("flag listed");
+        assert_eq!(row["kind"], "default_only");
+        assert!(
+            row["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "tests_vary_value"),
             "got {row:?}",
         );
     }
@@ -1505,6 +1658,41 @@ mod tests {
         assert!(dead_row(&report, suffix, "a").is_none());
     }
 
+    /// The receiver spellings are skipped per name, not per language:
+    /// a Go parameter literally named `self` or `cls` is (rare but)
+    /// unread here, and still stays out of the dead list.
+    #[test]
+    fn receiver_spelled_names_are_never_dead_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.go",
+            "package p\n\nfunc handle(self int, cls int) int { return 0 }\n\nfunc Use() int { return handle(1, 2) }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert!(dead_row(&report, "::handle", "self").is_none());
+        assert!(dead_row(&report, "::handle", "cls").is_none());
+    }
+
+    #[test]
+    fn nameless_slots_are_skipped_with_an_audit_count() {
+        // A destructuring pattern is one positional slot with no single
+        // binding name: the dead check cannot ask about it, and the
+        // audit says so rather than dropping it silently.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.ts",
+            "function pick({a}: {a: number}): number { return a; }\n\
+             export function caller(): number { return pick({a: 1}); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(report["audit"]["unnamed_parameter_count"], 1);
+        assert_eq!(report["dead_parameters"].as_array().unwrap().len(), 0);
+    }
+
     #[test]
     fn a_mention_in_a_string_counts_as_a_read() {
         // The check is textual and leans toward under-reporting: any
@@ -1604,6 +1792,156 @@ mod tests {
             "got: {md}",
         );
         assert!(md.contains("## Threshold calibration"), "got: {md}");
+        // Suffixes render only where they carry information; a private
+        // Rust row with clean claims carries none of them, and no
+        // caveat separator either.
+        assert!(!md.contains("test site(s)"), "got: {md}");
+        assert!(!md.contains("unanalyzed,"), "got: {md}");
+        assert!(!md.contains("raw refs="), "got: {md}");
+        for line in md.lines().filter(|l| l.starts_with("- `crate::emit`")) {
+            assert!(!line.contains(" — "), "got: {line}");
+        }
+    }
+
+    #[test]
+    fn markdown_renders_row_suffixes_and_caveat_text() {
+        // `emit` is public (wider-than-private caveat text must render
+        // verbatim), has a test caller, a spread site, and its name in
+        // a comment outside any known caller — every markdown suffix at
+        // once, on both row kinds.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn emit(level: u32, dead: u32) -> u32 { level }\n\
+             pub fn a() { emit(3, 1); }\n\
+             pub fn b() { emit(3, 2); }\n\
+             // emit is also named here, outside every caller.\n\
+             #[cfg(test)]\n\
+             mod tests { fn t() { crate::emit(3, 9); } }\n",
+        );
+
+        let md = ParametersAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains(", +1 test site(s)"), "got: {md}");
+        assert!(md.contains(", raw refs="), "got: {md}");
+        assert!(md.contains("visible outside its module"), "got: {md}");
+        assert!(md.contains("its bare name is written elsewhere"), "got: {md}");
+        // The dead row carries the caveat separator with the text.
+        let dead_line = md
+            .lines()
+            .find(|l| l.contains("parameter `dead`"))
+            .expect("dead row rendered");
+        assert!(dead_line.contains(" — visible outside its module"), "got: {dead_line}");
+    }
+
+    #[test]
+    fn markdown_renders_the_unanalyzed_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/app.py",
+            "def emit(level):\n    return level\n\
+             \n\
+             def a():\n    emit(3)\n\
+             \n\
+             def b():\n    emit(3)\n\
+             \n\
+             def c(args):\n    emit(*args)\n",
+        );
+
+        let md = ParametersAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains(", 1 unanalyzed"), "got: {md}");
+    }
+
+    /// The one edge the end-to-end fixtures cannot produce: a call
+    /// shape whose adapter extracted no argument facts. The edge still
+    /// counts call sites, so the gap must surface as an unanalyzed
+    /// count rather than silently shrinking the claim's denominator —
+    /// and a pool function without a parameter list must be audited,
+    /// not skipped without trace.
+    #[test]
+    fn missing_argument_facts_and_signatures_are_audited() {
+        use crate::analyze::call_graph::FileGraphInput;
+        use lens_domain::{
+            BodyShape, CallShape, FunctionShape, LexicalResolutionStatus, ParameterShape,
+            ReceiverExprKind, ReceiverShape, SignatureShape, SourceSpan, SyntaxFact,
+        };
+        use std::sync::Arc;
+
+        let signature = SignatureShape {
+            name_tokens: SyntaxFact::Unknown,
+            params: vec![ParameterShape {
+                name: SyntaxFact::Known(Some("level".to_owned())),
+                type_annotation: SyntaxFact::Unknown,
+                type_paths: Vec::new(),
+            }],
+            return_type: SyntaxFact::Unknown,
+            return_type_paths: Vec::new(),
+            receiver: SyntaxFact::Known(ReceiverShape::None),
+            generics: SyntaxFact::Unknown,
+            bounds: SyntaxFact::Unknown,
+        };
+        let function = |name: &str, line: usize, signature: SyntaxFact<SignatureShape>| {
+            FunctionShape {
+                display_name: name.to_owned(),
+                qualified_name: SyntaxFact::Known(format!("m::{name}")),
+                module_path: SyntaxFact::Known("m".to_owned()),
+                owner: SyntaxFact::Known(None),
+                visibility: SyntaxFact::Unknown,
+                signature,
+                doc: None,
+                attributes: SyntaxFact::Unknown,
+                body: BodyShape {
+                    tree: lens_domain::TreeNode::leaf("Block"),
+                },
+                span: SourceSpan {
+                    start_line: line,
+                    end_line: line,
+                },
+                is_test: false,
+            }
+        };
+        let call = CallShape {
+            caller_qualified_name: SyntaxFact::Known(Some("m::caller".to_owned())),
+            caller_module: SyntaxFact::Known("m".to_owned()),
+            caller_owner: SyntaxFact::Known(None),
+            callee_display_name: SyntaxFact::Known(Some("target".to_owned())),
+            callee_path_segments: SyntaxFact::Known(vec!["target".to_owned()]),
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            // The point of the fixture: the adapter did not extract
+            // argument facts for this site.
+            arguments: SyntaxFact::Unknown,
+            callee_is_locally_bound: SyntaxFact::Known(false),
+            lexical_resolution: LexicalResolutionStatus::NotAttempted,
+            visible_imports: Vec::new(),
+            line: 2,
+        };
+        let graph = CallGraph::build(
+            vec![FileGraphInput {
+                file: "src/lib.py".to_owned(),
+                language: GraphLanguage::Python,
+                module: "m".to_owned(),
+                path_is_test: false,
+                functions: Arc::new(vec![
+                    function("target", 1, SyntaxFact::Known(signature)),
+                    function("caller", 2, SyntaxFact::Unknown),
+                ]),
+                included: vec![true, true],
+                calls: Arc::new(vec![call]),
+                complexity: Arc::new(Vec::new()),
+                wrappers: None,
+                interfaces: Arc::new(Vec::new()),
+            }],
+            true,
+        );
+
+        let collected = Collected::collect(&graph, false, DEFAULT_MIN_CALL_SITES);
+        assert_eq!(collected.audit.unanalyzed_call_site_count, 1);
+        assert_eq!(collected.audit.missing_signature_count, 1);
     }
 
     #[test]

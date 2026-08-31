@@ -652,6 +652,46 @@ mod tests {
         assert!(!call.callee_is_locally_bound());
     }
 
+    /// The non-constant boundary of the classifier: a template with
+    /// substitutions, negation of anything but a literal, and a member
+    /// chain on a lowercase local stay opaque, while parens and the
+    /// TS-only wrappers peel to the value inside.
+    #[rstest]
+    #[case::template_with_substitution(
+        "function a(x: number) { f(`v${x}`); }",
+        ArgumentShape::Other
+    )]
+    #[case::negated_identifier("function a(x: number) { f(-x); }", ArgumentShape::Other)]
+    #[case::not_a_negation("function a() { f(!0); }", ArgumentShape::Other)]
+    #[case::lowercase_member("function a(obj: T) { f(obj.prop); }", ArgumentShape::Other)]
+    #[case::parenthesised(
+        "function a(x: number) { f((x)); }",
+        ArgumentShape::Identifier { text: "x".to_owned() }
+    )]
+    #[case::as_cast(
+        "function a(x: number) { f(x as unknown); }",
+        ArgumentShape::Identifier { text: "x".to_owned() }
+    )]
+    #[case::non_null(
+        "function a(x?: number) { f(x!); }",
+        ArgumentShape::Identifier { text: "x".to_owned() }
+    )]
+    #[case::satisfies(
+        "function a(x: number) { f(x satisfies number); }",
+        ArgumentShape::Identifier { text: "x".to_owned() }
+    )]
+    fn argument_shape_edge_cases(#[case] source: &str, #[case] expected: ArgumentShape) {
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::m")
+            .unwrap()
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![expected],
+        );
+    }
+
     /// Argument shapes: literals (with `undefined` and a plain template
     /// string) carry text, uppercase-initial names and member chains are
     /// consts, lowercase identifiers stay identifiers, spreads and

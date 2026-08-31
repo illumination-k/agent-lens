@@ -1426,6 +1426,30 @@ mod tests {
     }
 
     #[test]
+    fn parameters_rolls_both_finding_kinds_up_per_file() {
+        // A constant argument and a dead parameter in the same file
+        // fold into one count; a file with one finding keeps the
+        // singular headline without the ellipsis.
+        let report = json!({
+            "constant_arguments": [
+                { "file": "many.rs", "qualified_name": "a::emit" },
+            ],
+            "dead_parameters": [
+                { "file": "many.rs", "qualified_name": "a::pick" },
+                { "file": "one.rs", "qualified_name": "b::only" },
+            ],
+        });
+        let extraction = parameters(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [
+                ("/repo/src/many.rs", "2 parameter findings (`emit`, …)"),
+                ("/repo/src/one.rs", "1 parameter finding (`only`)"),
+            ],
+        );
+    }
+
+    #[test]
     fn single_impl_rolls_findings_up_per_file() {
         let report = json!({
             "findings": [
