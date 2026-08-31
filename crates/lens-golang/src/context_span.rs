@@ -5,37 +5,38 @@
 //! self-loops are normalized exactly the same way as the other language
 //! adapters.
 
-use std::path::Path;
-
 use lens_domain::{ContextSpanReport, compute_context_spans, compute_report};
 
-use crate::coupling::{CouplingError, GoPackage, build_module_tree, extract_edges};
+use crate::coupling::{GoPackage, extract_edges};
 
 /// Compute context spans for already-parsed Go packages.
 ///
 /// `direct` counts each package's unique outgoing neighbors, and
 /// `transitive` counts unique packages reachable by one-or-more outgoing
 /// steps while excluding the package itself.
+///
+/// Kept as the adapter's context-span entry point, mirroring
+/// `lens_ts::extract_context_spans`: `analyze context-span` composes
+/// the coupling primitives itself, so the tests below are this
+/// function's in-tree callers.
 pub fn extract_context_spans(packages: &[GoPackage]) -> ContextSpanReport {
     let module_paths = packages.iter().map(|p| p.path.clone()).collect::<Vec<_>>();
     let report = compute_report(&module_paths, extract_edges(packages));
     compute_context_spans(&module_paths, &report.edges)
 }
 
-/// Build a Go package tree from `root` and compute its context spans.
-///
-/// `root` must be a `.go` file or a directory containing Go files
-/// (typically a Go module rooted at `go.mod`).
-pub fn build_context_span_report(root: &Path) -> Result<ContextSpanReport, CouplingError> {
-    let modules = build_module_tree(root)?;
-    Ok(extract_context_spans(&modules))
-}
-
 #[cfg(test)]
 mod tests {
     use lens_domain::ModulePath;
 
-    use super::build_context_span_report;
+    use super::extract_context_spans;
+    use crate::coupling::{CouplingError, build_module_tree};
+
+    fn build_context_span_report(
+        root: &std::path::Path,
+    ) -> Result<lens_domain::ContextSpanReport, CouplingError> {
+        Ok(extract_context_spans(&build_module_tree(root)?))
+    }
 
     fn write(root: &std::path::Path, rel: &str, contents: &str) {
         let path = root.join(rel);

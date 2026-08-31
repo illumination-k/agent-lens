@@ -244,6 +244,10 @@ impl SearchAnalyzer {
     /// path-level filter — the same two granularities similarity uses,
     /// so a `#[cfg(test)]` function inside a production file obeys
     /// `--exclude-tests`.
+    /// Production drives this through the CLI's
+    /// `impl_with_analyze_path_args!` dispatch macro, whose body is
+    /// invisible to the call graph — which is why `analyze test-only`
+    /// lists it with unattributed references rather than callers.
     pub fn with_function_selection(mut self, selection: FunctionSelection) -> Self {
         self.selection = selection;
         self

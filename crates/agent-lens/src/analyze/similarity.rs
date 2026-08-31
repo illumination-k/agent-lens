@@ -486,16 +486,9 @@ impl SimilarityAnalyzer {
 
     /// Skip units shorter than this many source lines. `similarity-ts`
     /// uses the same idea: tiny one-liners produce too many spurious
-    /// matches to be useful. Left unset, the cut defaults per target:
-    /// [`DEFAULT_MIN_LINES`] for functions, [`DEFAULT_TYPE_MIN_LINES`]
-    /// for types.
-    pub fn with_min_lines(mut self, min_lines: usize) -> Self {
-        self.min_lines = Some(min_lines);
-        self
-    }
-
-    /// Optional variant of [`Self::with_min_lines`] for callers holding
-    /// a CLI/profile `Option`: `None` keeps the target-specific default.
+    /// matches to be useful. `None` keeps the per-target default
+    /// ([`DEFAULT_MIN_LINES`] for functions, [`DEFAULT_TYPE_MIN_LINES`]
+    /// for types), which is what a CLI/profile `Option` passes through.
     pub fn with_min_lines_opt(mut self, min_lines: Option<usize>) -> Self {
         self.min_lines = min_lines;
         self
@@ -2740,7 +2733,7 @@ fn beta(x: i32)  -> i32 { x + 1 }
 
         let permissive = SimilarityAnalyzer::new()
             .with_threshold(0.5)
-            .with_min_lines(1)
+            .with_min_lines_opt(Some(1))
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&permissive).unwrap();
@@ -2748,7 +2741,7 @@ fn beta(x: i32)  -> i32 { x + 1 }
 
         let strict = SimilarityAnalyzer::new()
             .with_threshold(0.5)
-            .with_min_lines(5)
+            .with_min_lines_opt(Some(5))
             .analyze(&file, OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&strict).unwrap();
@@ -3295,7 +3288,7 @@ fn beta(x: i32) -> i32 {
         let dir = tempfile::tempdir().unwrap();
         let path = setup(dir.path());
         let err = SimilarityAnalyzer::new()
-            .with_min_lines(1)
+            .with_min_lines_opt(Some(1))
             .analyze(&path, OutputFormat::Json)
             .unwrap_err();
         assert!(matches_expected(&err), "unexpected error variant: {err}");
@@ -3317,7 +3310,7 @@ fn beta(x: i32) -> i32 {
         );
         let json = SimilarityAnalyzer::new()
             .with_threshold(0.5)
-            .with_min_lines(1)
+            .with_min_lines_opt(Some(1))
             .analyze(dir.path(), OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -4188,7 +4181,7 @@ impl Counter {
             .map(|min_lines| {
                 let json = SimilarityAnalyzer::new()
                     .with_target(SimilarityTarget::Blocks)
-                    .with_min_lines(min_lines)
+                    .with_min_lines_opt(Some(min_lines))
                     .analyze(dir.path(), OutputFormat::Json)
                     .unwrap();
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -4539,7 +4532,7 @@ impl Counter {
 
         let json = SimilarityAnalyzer::new()
             .with_target(SimilarityTarget::Types)
-            .with_min_lines(1)
+            .with_min_lines_opt(Some(1))
             .analyze(dir.path(), OutputFormat::Json)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();

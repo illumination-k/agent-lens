@@ -182,6 +182,11 @@ pub struct SimilarCluster {
 
 /// Compute pairwise similarity over `functions` and return every pair whose
 /// TSED score is `>= threshold`, sorted from most to least similar.
+///
+/// The language adapters' shared test seam: their parser tests all
+/// drive pairwise comparison through this one entry, so its callers
+/// live in other crates' test modules — `analyze test-only` lists it
+/// for exactly that reason, and that is the intended shape.
 pub fn find_similar_functions<'a>(
     functions: &'a [FunctionDef],
     threshold: f64,

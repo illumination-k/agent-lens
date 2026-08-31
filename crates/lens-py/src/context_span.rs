@@ -5,36 +5,38 @@
 //! [`lens_domain::compute_report`] first so duplicate edges and self-loops are
 //! normalized exactly the same way as other language adapters.
 
-use std::path::Path;
-
 use lens_domain::{ContextSpanReport, compute_context_spans, compute_report};
 
-use crate::coupling::{CouplingError, PythonModule, build_module_tree, extract_edges};
+use crate::coupling::{PythonModule, extract_edges};
 
 /// Compute context spans for already-parsed Python modules.
 ///
 /// `direct` counts each module's unique outgoing neighbors, and `transitive`
 /// counts unique modules reachable by one-or-more outgoing steps while
 /// excluding the module itself.
+///
+/// Kept as the adapter's context-span entry point, mirroring
+/// `lens_ts::extract_context_spans`: `analyze context-span` composes the
+/// coupling primitives itself, so the tests below are this function's
+/// in-tree callers.
 pub fn extract_context_spans(modules: &[PythonModule]) -> ContextSpanReport {
     let module_paths = modules.iter().map(|m| m.path.clone()).collect::<Vec<_>>();
     let report = compute_report(&module_paths, extract_edges(modules));
     compute_context_spans(&module_paths, &report.edges)
 }
 
-/// Build a Python module tree from `root` and compute its context spans.
-///
-/// `root` must be a `.py` file or a directory containing Python files.
-pub fn build_context_span_report(root: &Path) -> Result<ContextSpanReport, CouplingError> {
-    let modules = build_module_tree(root)?;
-    Ok(extract_context_spans(&modules))
-}
-
 #[cfg(test)]
 mod tests {
     use lens_domain::ModulePath;
 
-    use super::build_context_span_report;
+    use super::extract_context_spans;
+    use crate::coupling::{CouplingError, build_module_tree};
+
+    fn build_context_span_report(
+        root: &std::path::Path,
+    ) -> Result<lens_domain::ContextSpanReport, CouplingError> {
+        Ok(extract_context_spans(&build_module_tree(root)?))
+    }
 
     fn span<'a>(
         report: &'a lens_domain::ContextSpanReport,
