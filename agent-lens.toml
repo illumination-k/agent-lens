@@ -129,6 +129,7 @@ tools = [
   "unreachable",
   "visibility",
   "single-use",
+  "parameters",
   "test-only",
   "single-impl",
 ]
@@ -148,6 +149,12 @@ top = 10
 # section after large refactors and retune max-loc / max-cyclomatic if
 # the distribution has moved.
 [profile.self-reach.single-use]
+top = 10
+
+# `parameters` keeps tests for the same reason as `single-use`: a test
+# call site passing a different value is the tests-vary-value caveat,
+# and dropping the test files would silently promote deliberate seams.
+[profile.self-reach.parameters]
 top = 10
 
 [profile.self-reach.test-only]

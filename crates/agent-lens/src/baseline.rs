@@ -141,6 +141,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Hubs
         | ToolName::Impact
         | ToolName::Layers
+        | ToolName::Parameters
         | ToolName::Risk
         | ToolName::Search
         | ToolName::SingleImpl
@@ -593,6 +594,7 @@ mod tests {
     #[case(ToolName::Hubs)]
     #[case(ToolName::Impact)]
     #[case(ToolName::Layers)]
+    #[case(ToolName::Parameters)]
     #[case(ToolName::Risk)]
     #[case(ToolName::Unreachable)]
     #[case(ToolName::Untested)]

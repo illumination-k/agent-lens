@@ -30,6 +30,7 @@ Pick an analyzer by question:
     did I already write this?             analyze similarity
     is this body just a forwarder?        analyze wrapper
     is one caller all this function has?  analyze single-use
+    is one value all this param gets?     analyze parameters
     is one impl all this trait has?       analyze single-impl
     how many hops before real work?       analyze delegation
     does this type do too many things?    analyze cohesion
@@ -185,6 +186,13 @@ Examples:
 
     agent-lens analyze single-use src/ --format md
     agent-lens analyze single-use src/ --max-loc 12 --max-cyclomatic 4 --format md
+";
+
+pub const PARAMETERS: &str = "\
+Examples:
+
+    agent-lens analyze parameters src/ --format md
+    agent-lens analyze parameters src/ --min-call-sites 3 --format md
 ";
 
 pub const IMPACT: &str = "\

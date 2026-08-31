@@ -8,7 +8,7 @@
 //! part of the JSON schema.
 
 use lens_domain::{
-    BuiltinFunctionNames, FunctionShape, InertAttributeNames, OwnerKind, SyntaxFact,
+    ArgumentShape, BuiltinFunctionNames, FunctionShape, InertAttributeNames, OwnerKind, SyntaxFact,
     UbiquitousMethodNames, VisibilityShape,
 };
 use serde::Serialize;
@@ -42,6 +42,20 @@ pub(crate) struct CallGraphNode {
     /// of the serialized graph until an analyzer reports it.
     #[serde(skip)]
     pub(crate) param_count: Option<usize>,
+    /// Declared parameter names, one entry per slot in position order,
+    /// when the adapter extracted a signature. A slot with no single
+    /// binding name (an unnamed Go slot, a TS destructuring pattern) is
+    /// `None`. Read by the parameters analyzer to line call-site
+    /// arguments up against slots; kept out of the serialized graph.
+    #[serde(skip)]
+    pub(crate) param_names: Option<Vec<Option<String>>>,
+    /// Whether the function takes a syntactic receiver (`self`, a Go
+    /// method receiver) that is *not* one of its parameter slots.
+    /// `None` when the adapter's signature does not say. A path call to
+    /// such a function passes the receiver as its first argument, which
+    /// the parameters analyzer must skip before lining positions up.
+    #[serde(skip)]
+    pub(crate) has_receiver: Option<bool>,
     /// Non-doc annotations on the declaration (`no_mangle`,
     /// `tokio::main`, `go:linkname`), or `None` where the adapter does
     /// not extract them — which reachability analysis must read as "an
@@ -151,6 +165,25 @@ pub(crate) struct CallGraphEdge {
     pub(crate) call_count: usize,
     pub(crate) call_lines: Vec<usize>,
     pub(crate) weights: EdgeWeights,
+    /// Per-call-site argument facts, one entry per site whose adapter
+    /// extracted arguments. Empty — and absent from JSON — unless the
+    /// graph was built with
+    /// [`super::CallGraphBuilder::with_argument_facts`]; only the
+    /// parameters analyzer reads it.
+    #[serde(skip)]
+    pub(crate) call_sites: Vec<CallSiteFacts>,
+}
+
+/// One call site's argument-level facts, kept per site because edge
+/// aggregation would otherwise collapse the very thing the parameters
+/// analyzer compares across sites.
+#[derive(Debug, Clone)]
+pub(crate) struct CallSiteFacts {
+    pub(crate) line: usize,
+    /// The call was written through a receiver expression
+    /// (`obj.method(...)`), so the receiver is not in `arguments`.
+    pub(crate) has_receiver_expression: bool,
+    pub(crate) arguments: Vec<ArgumentShape>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

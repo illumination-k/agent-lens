@@ -16,6 +16,7 @@ use agent_lens::analyze::hotspot::HotspotOptions;
 use agent_lens::analyze::hubs::HubsOptions;
 use agent_lens::analyze::impact::ImpactOptions;
 use agent_lens::analyze::layers::LayersOptions;
+use agent_lens::analyze::parameters::ParametersOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
@@ -916,6 +917,32 @@ pub(super) enum AnalyzeCommand {
     /// (default 20).
     #[command(name = "single-use", after_long_help = examples::SINGLE_USE)]
     SingleUse(AnalyzeSingleUseArgs),
+    /// Report constant arguments and dead parameters.
+    ///
+    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// with per-call-site argument shapes, and asks two questions per
+    /// declared parameter. Constant argument: does every resolved
+    /// production call site pass the same literal (or the same
+    /// constant-looking path)? The candidate edit is inlining the value
+    /// and dropping the parameter; a Python/TypeScript parameter no
+    /// call site ever passes is reported as default-only. Dead
+    /// parameter: does the body ever read the name past its
+    /// declaration? The check is textual (mentions in strings or
+    /// comments count as reads), so it under-reports. "Every call
+    /// site" is what the graph could see: sites with spreads,
+    /// unmatched keywords, or arity mismatches, ambiguous inbound
+    /// edges, raw name references, and public/exported visibility each
+    /// demote a row with a caveat. Trait/interface methods and
+    /// annotated functions are excluded outright — their signatures
+    /// are not theirs to change. A parameter with one call site is
+    /// `analyze single-use`'s finding, so `--min-call-sites` defaults
+    /// to 2; a calibration section reports how many parameters have
+    /// 1 / 2 / 3+ distinct values so the threshold can be set per
+    /// repository. The parser is chosen from each file extension
+    /// (Rust, TypeScript/JavaScript, Python, or Go). JSON is the
+    /// default; `--format md` caps the lists at `--top` (default 20).
+    #[command(after_long_help = examples::PARAMETERS)]
+    Parameters(AnalyzeParametersArgs),
     /// Report production functions only tests keep alive.
     ///
     /// Builds the same heuristic call graph as `analyze function-graph`
@@ -1247,6 +1274,14 @@ pub(super) struct AnalyzeSingleUseArgs {
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(super) opts: SingleUseOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeParametersArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: ParametersOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1917,6 +1952,30 @@ mod tests {
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.max_loc, Some(12));
         assert_eq!(args.opts.max_cyclomatic, Some(4));
+        assert_eq!(args.opts.top, Some(10));
+    }
+
+    #[test]
+    fn parses_analyze_parameters_with_min_call_sites() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "parameters",
+            "crates",
+            "--min-call-sites",
+            "3",
+            "--top",
+            "10",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Parameters(args)) = cli.command else {
+            panic!("expected analyze parameters");
+        };
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.opts.min_call_sites, Some(3));
         assert_eq!(args.opts.top, Some(10));
     }
 

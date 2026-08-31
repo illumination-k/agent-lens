@@ -25,15 +25,15 @@
 use std::collections::{BTreeMap, HashSet};
 
 use lens_domain::{
-    CallShape, ImportShape, LexicalResolutionStatus, ReceiverExprKind, SyntaxFact, qualify,
-    qualify_module,
+    ArgumentShape, CallShape, ImportShape, LexicalResolutionStatus, ReceiverExprKind, SyntaxFact,
+    qualify, qualify_module, starts_uppercase,
 };
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     Block, Expr, ExprCall, ExprMethodCall, FnArg, GenericArgument, GenericParam, Generics,
     ImplItem, Item, ItemFn, ItemUse, Local, Pat, PathArguments, Signature, TraitItem, Type,
-    TypeParamBound, UseTree, WherePredicate,
+    TypeParamBound, UnOp, UseTree, WherePredicate,
 };
 
 use crate::attrs::has_cfg_test;
@@ -74,6 +74,9 @@ pub struct CallSite {
     pub callee_is_locally_bound: bool,
     /// Lexically visible `use` aliases at this call site.
     pub visible_aliases: Vec<UseAlias>,
+    /// Syntactic shape of each argument, in source order. For a method
+    /// call the receiver is not an argument.
+    pub arguments: Vec<ArgumentShape>,
     /// 1-based line number of the call expression.
     pub line: usize,
 }
@@ -169,6 +172,7 @@ impl From<CallSite> for CallShape {
                 .map(path_segments)
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             receiver_expr_kind: SyntaxFact::Known(receiver_expr_kind),
+            arguments: SyntaxFact::Known(site.arguments),
             callee_is_locally_bound: SyntaxFact::Known(site.callee_is_locally_bound),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: site
@@ -368,6 +372,7 @@ impl CallVisitor {
         callee_name: Option<String>,
         callee_path: Option<String>,
         call_kind: CallKind,
+        arguments: Vec<ArgumentShape>,
         line: usize,
     ) {
         let caller = self.current_caller();
@@ -385,6 +390,7 @@ impl CallVisitor {
             call_kind,
             callee_is_locally_bound,
             visible_aliases: self.current_aliases(),
+            arguments,
             line,
         });
     }
@@ -435,7 +441,8 @@ impl<'ast> Visit<'ast> for CallVisitor {
         let line = call.span().start().line;
         let callee_name = path_call_name(&call.func);
         let callee_path = path_call_path(&call.func);
-        self.record(callee_name, callee_path, CallKind::Path, line);
+        let arguments = call.args.iter().map(argument_shape).collect();
+        self.record(callee_name, callee_path, CallKind::Path, arguments, line);
         // Recurse into arguments and the callee expression so nested
         // calls get their own sites (e.g. `outer(inner())` records both).
         visit::visit_expr_call(self, call);
@@ -446,7 +453,14 @@ impl<'ast> Visit<'ast> for CallVisitor {
         let callee_name = Some(call.method.to_string());
         let receiver = render_tokens(call.receiver.as_ref());
         let callee_path = Some(format!("{receiver}.{}", call.method));
-        self.record(callee_name, callee_path, CallKind::ReceiverMethod, line);
+        let arguments = call.args.iter().map(argument_shape).collect();
+        self.record(
+            callee_name,
+            callee_path,
+            CallKind::ReceiverMethod,
+            arguments,
+            line,
+        );
         visit::visit_expr_method_call(self, call);
     }
 }
@@ -740,6 +754,44 @@ fn rewrite_crate_prefix(path: &str, current_module: &str) -> String {
     path.to_owned()
 }
 
+/// Classify one call argument. References, parens, and groups are
+/// peeled first — `f(&CONFIG)` names the same value as `f(CONFIG)` for
+/// the "same text, same value" question — and the rendered text is
+/// then the peeled expression's. A path is [`ArgumentShape::Const`]
+/// when it has more than one segment (`Color::Red`, `u32::MAX`) or its
+/// one segment starts uppercase (`None`, a unit variant, a `const`):
+/// Rust's naming convention keeps locals lowercase, so an
+/// uppercase-initial bare name denotes the same item wherever it is in
+/// scope. Anything else that is not a literal is an arbitrary
+/// expression.
+fn argument_shape(expr: &Expr) -> ArgumentShape {
+    match expr {
+        Expr::Lit(_) => ArgumentShape::Literal {
+            text: render_tokens(expr),
+        },
+        Expr::Unary(unary) if matches!(unary.op, UnOp::Neg(_)) => {
+            match argument_shape(&unary.expr) {
+                ArgumentShape::Literal { text } => ArgumentShape::Literal {
+                    text: format!("-{text}"),
+                },
+                _ => ArgumentShape::Other,
+            }
+        }
+        Expr::Path(path) if path.qself.is_none() => {
+            let text = render_tokens(expr);
+            match path.path.segments.len() {
+                1 if starts_uppercase(&text) => ArgumentShape::Const { text },
+                1 => ArgumentShape::Identifier { text },
+                _ => ArgumentShape::Const { text },
+            }
+        }
+        Expr::Reference(reference) => argument_shape(&reference.expr),
+        Expr::Paren(paren) => argument_shape(&paren.expr),
+        Expr::Group(group) => argument_shape(&group.expr),
+        _ => ArgumentShape::Other,
+    }
+}
+
 /// Pull the last path segment out of a free-call callee expression. We
 /// peel through `&`, parens, and invisible groups so e.g.
 /// `(crate::a::foo)(x)` still resolves to `foo`. Anything more
@@ -872,6 +924,57 @@ mod tests {
                 (Some("inner".to_owned()), false),
                 (Some("pump".to_owned()), true),
             ]
+        );
+    }
+
+    /// Argument shapes: literals and constant-looking paths carry their
+    /// text, bare lowercase identifiers stay identifiers, and arbitrary
+    /// expressions are opaque. References peel to the value they name.
+    #[test]
+    fn call_arguments_are_classified_by_shape() {
+        let sites =
+            run("fn a(x: u8) { f(1, -2, \"s\", true, None, Color::Red, x, g(), &LIMIT); }\n");
+        let site = sites
+            .iter()
+            .find(|s| s.callee_name.as_deref() == Some("f"))
+            .expect("f call site");
+        let text = |t: &str| t.to_owned();
+        assert_eq!(
+            site.arguments,
+            vec![
+                ArgumentShape::Literal { text: text("1") },
+                ArgumentShape::Literal { text: text("-2") },
+                ArgumentShape::Literal {
+                    text: text("\"s\"")
+                },
+                ArgumentShape::Literal { text: text("true") },
+                ArgumentShape::Const { text: text("None") },
+                ArgumentShape::Const {
+                    text: text("Color::Red")
+                },
+                ArgumentShape::Identifier { text: text("x") },
+                ArgumentShape::Other,
+                ArgumentShape::Const {
+                    text: text("LIMIT")
+                },
+            ],
+        );
+    }
+
+    /// A method call's receiver is not an argument: only the
+    /// parenthesised list is classified.
+    #[test]
+    fn method_call_arguments_exclude_the_receiver() {
+        let sites = run("fn a(x: T) { x.foo(1); }\n");
+        let site = sites
+            .iter()
+            .find(|s| s.callee_name.as_deref() == Some("foo"))
+            .expect("foo call site");
+        assert_eq!(
+            site.arguments,
+            vec![ArgumentShape::Literal {
+                text: "1".to_owned()
+            }],
         );
     }
 

@@ -7,9 +7,10 @@ use agent_lens::analyze::{
     ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer,
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
     FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HiddenCouplingAnalyzer,
-    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat, RiskAnalyzer,
-    SearchAnalyzer, SimilarityAnalyzer, SingleImplAnalyzer, SingleUseAnalyzer, TestOnlyAnalyzer,
-    UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat,
+    ParametersAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer, SingleImplAnalyzer,
+    SingleUseAnalyzer, TestOnlyAnalyzer, UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer,
+    WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -17,10 +18,10 @@ use super::args::{
     AnalyzeChangeEntropyArgs, AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand,
     AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
     AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHiddenCouplingArgs,
-    AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs, AnalyzePathArgs,
-    AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
-    AnalyzeSingleImplArgs, AnalyzeSingleUseArgs, AnalyzeTestOnlyArgs, AnalyzeUnreachableArgs,
-    AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs,
+    AnalyzeParametersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs,
+    AnalyzeSimilarityArgs, AnalyzeSingleImplArgs, AnalyzeSingleUseArgs, AnalyzeTestOnlyArgs,
+    AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -137,6 +138,10 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.single_use.clone().unwrap_or_default(),
         }),
+        config::ToolName::Parameters => AnalyzeCommand::Parameters(AnalyzeParametersArgs {
+            common,
+            opts: profile.parameters.clone().unwrap_or_default(),
+        }),
         config::ToolName::TestOnly => AnalyzeCommand::TestOnly(AnalyzeTestOnlyArgs {
             common,
             opts: profile.test_only.clone().unwrap_or_default(),
@@ -244,6 +249,7 @@ impl_with_analyze_path_args!(
     HubsAnalyzer,
     ImpactAnalyzer,
     LayersAnalyzer,
+    ParametersAnalyzer,
     RiskAnalyzer,
     SingleImplAnalyzer,
     SingleUseAnalyzer,
@@ -337,6 +343,7 @@ impl AnalyzeCommand {
                 Hubs => HubsAnalyzer,
                 Impact => ImpactAnalyzer,
                 Layers => LayersAnalyzer,
+                Parameters => ParametersAnalyzer,
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,
                 SingleImpl => SingleImplAnalyzer,

@@ -301,6 +301,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Hubs => hubs(report, base),
         ToolName::SingleImpl => single_impl(report, base),
         ToolName::SingleUse => single_use(report, base),
+        ToolName::Parameters => parameters(report, base),
         ToolName::TestOnly => test_only(report, base),
         ToolName::Untested => untested(report, base),
         ToolName::Unreachable => unreachable(report, base),
@@ -592,6 +593,51 @@ fn single_use(report: &Value, base: &Path) -> Extraction {
         "inline candidate",
         "inline candidates",
     )
+}
+
+/// Parameter findings per file — constant arguments and dead
+/// parameters folded into one count, headlined by the first row's
+/// function (the lists are already sorted strongest-claim first).
+fn parameters(report: &Value, base: &Path) -> Extraction {
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut per_file: HashMap<PathBuf, (u64, String)> = HashMap::new();
+    let rows = arr(report, "constant_arguments")
+        .iter()
+        .chain(arr(report, "dead_parameters"));
+    for entry in rows {
+        let Some(file) = str_of(entry, "file") else {
+            continue;
+        };
+        let Some(name) = str_of(entry, "qualified_name").map(|n| short_name(n).to_owned()) else {
+            continue;
+        };
+        let path = from_base(base, file);
+        let slot = per_file.entry(path.clone()).or_insert_with(|| {
+            order.push(path);
+            (0, name)
+        });
+        slot.0 += 1;
+    }
+    let mut rows: Vec<(u64, PathBuf, String)> = order
+        .into_iter()
+        .filter_map(|path| {
+            let (count, first) = per_file.remove(&path)?;
+            let mut headline = format!(
+                "{} (`{first}`",
+                counted(count, "parameter finding", "parameter findings"),
+            );
+            headline.push_str(if count > 1 { ", …)" } else { ")" });
+            Some((count, path, headline))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    Extraction {
+        files: rows
+            .into_iter()
+            .map(|(_, path, headline)| FileFinding { path, headline })
+            .collect(),
+        corpus: Vec::new(),
+    }
 }
 
 /// Single-impl abstractions per file, headlined by the strongest row.

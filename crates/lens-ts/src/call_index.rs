@@ -8,9 +8,10 @@
 use std::collections::HashSet;
 
 use lens_domain::{
-    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, LineIndex,
-    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, callee_names_local_binding,
-    qualify_module, starts_uppercase,
+    ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus,
+    LineIndex, OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind, ReceiverShape,
+    SignatureShape, SourceSpan, SyntaxFact, callee_names_local_binding, qualify_module,
+    starts_uppercase,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -112,7 +113,7 @@ impl FunctionVisitor for FunctionShapeCollector {
             // Export status is not extracted yet, so stay honest with
             // `Unknown` instead of hardcoding `Unexported`.
             visibility: SyntaxFact::Unknown,
-            signature: SyntaxFact::Unknown,
+            signature: SyntaxFact::Known(parameter_signature(item.params)),
             doc,
             // Decorators are not extracted yet; `Unknown` keeps a
             // framework-registered function from reading as unannotated.
@@ -130,6 +131,38 @@ impl FunctionVisitor for FunctionShapeCollector {
             // still marked when its name says nothing.
             is_test: is_test_item(&item.name),
         });
+    }
+}
+
+/// Project the declared parameter list into a [`SignatureShape`] that
+/// carries one slot per parameter, positionally: a destructuring
+/// pattern (`{a, b}`) has no single binding name and stays `None`
+/// rather than expanding into several misaligned slots. TS/JS have no
+/// syntactic receiver, so [`ReceiverShape::None`] is always correct.
+/// Every other signature fact stays [`SyntaxFact::Unknown`] rather
+/// than being half-extracted here.
+fn parameter_signature(params: &FormalParameters) -> SignatureShape {
+    let slot = |pattern: &BindingPattern| ParameterShape {
+        name: SyntaxFact::Known(
+            pattern
+                .get_binding_identifier()
+                .map(|id| id.name.to_string()),
+        ),
+        type_annotation: SyntaxFact::Unknown,
+        type_paths: Vec::new(),
+    };
+    let mut slots: Vec<ParameterShape> = params.items.iter().map(|p| slot(&p.pattern)).collect();
+    if let Some(rest) = &params.rest {
+        slots.push(slot(&rest.rest.argument));
+    }
+    SignatureShape {
+        name_tokens: SyntaxFact::Unknown,
+        params: slots,
+        return_type: SyntaxFact::Unknown,
+        return_type_paths: Vec::new(),
+        receiver: SyntaxFact::Known(ReceiverShape::None),
+        generics: SyntaxFact::Unknown,
+        bounds: SyntaxFact::Unknown,
     }
 }
 
@@ -255,7 +288,8 @@ struct FunctionBodyCallVisitor<'a> {
 
 impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_> {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        let shape = self.call_shape(&it.callee, self.line_index.line(it.span.start));
+        let arguments = it.arguments.iter().map(argument_shape).collect();
+        let shape = self.call_shape(&it.callee, arguments, self.line_index.line(it.span.start));
         self.out.push(shape);
         walk::walk_call_expression(self, it);
     }
@@ -275,7 +309,12 @@ impl FunctionBodyCallVisitor<'_> {
     /// The visitor already owns every caller-side fact a call shape
     /// needs, so this reads them off `self` instead of taking them as a
     /// parameter list.
-    fn call_shape(&self, callee: &Expression, line: usize) -> CallShape {
+    fn call_shape(
+        &self,
+        callee: &Expression,
+        arguments: Vec<ArgumentShape>,
+        line: usize,
+    ) -> CallShape {
         let callee = callee_facts(callee, self.namespace_aliases);
         let callee_is_locally_bound = callee_names_local_binding(
             callee.receiver,
@@ -291,11 +330,80 @@ impl FunctionBodyCallVisitor<'_> {
                 .path_segments
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             receiver_expr_kind: SyntaxFact::Known(callee.receiver),
+            arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: self.imports.to_vec(),
             line,
         }
+    }
+}
+
+/// Classify one call argument. Only literals — and `undefined`, which
+/// is an identifier syntactically but a value nothing sane shadows —
+/// can claim "the same text is the same value"; an uppercase-initial
+/// name or member chain (`Color.Red`, `DEFAULTS`) gets the weaker
+/// [`ArgumentShape::Const`] on the same naming convention the callee
+/// classifier above already trusts. TS-only wrappers (`x as T`, `x!`,
+/// parens) are peeled first.
+fn argument_shape(arg: &Argument) -> ArgumentShape {
+    match arg {
+        Argument::SpreadElement(_) => ArgumentShape::Spread,
+        _ => arg
+            .as_expression()
+            .map_or(ArgumentShape::Other, expression_argument_shape),
+    }
+}
+
+fn expression_argument_shape(expr: &Expression) -> ArgumentShape {
+    let literal = |text: String| ArgumentShape::Literal { text };
+    match expr {
+        Expression::BooleanLiteral(lit) => literal(lit.value.to_string()),
+        Expression::NullLiteral(_) => literal("null".to_owned()),
+        Expression::NumericLiteral(lit) => literal(
+            lit.raw
+                .as_ref()
+                .map_or_else(|| lit.value.to_string(), ToString::to_string),
+        ),
+        Expression::StringLiteral(lit) => literal(format!("\"{}\"", lit.value)),
+        Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
+            match template
+                .quasis
+                .first()
+                .and_then(|q| q.value.cooked.as_ref())
+            {
+                Some(text) => literal(format!("\"{text}\"")),
+                None => ArgumentShape::Other,
+            }
+        }
+        Expression::Identifier(id) if id.name == "undefined" => literal("undefined".to_owned()),
+        Expression::Identifier(id) => {
+            let text = id.name.to_string();
+            if starts_uppercase(&text) {
+                ArgumentShape::Const { text }
+            } else {
+                ArgumentShape::Identifier { text }
+            }
+        }
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::UnaryNegation => {
+            match expression_argument_shape(&unary.argument) {
+                ArgumentShape::Literal { text } => literal(format!("-{text}")),
+                _ => ArgumentShape::Other,
+            }
+        }
+        Expression::StaticMemberExpression(_) => match expression_path(expr) {
+            Some(segments) if segments.first().is_some_and(|s| starts_uppercase(s)) => {
+                ArgumentShape::Const {
+                    text: segments.join("."),
+                }
+            }
+            _ => ArgumentShape::Other,
+        },
+        Expression::ParenthesizedExpression(inner) => expression_argument_shape(&inner.expression),
+        Expression::TSAsExpression(inner) => expression_argument_shape(&inner.expression),
+        Expression::TSNonNullExpression(inner) => expression_argument_shape(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => expression_argument_shape(&inner.expression),
+        _ => ArgumentShape::Other,
     }
 }
 
@@ -542,6 +650,70 @@ mod tests {
             })
             .expect("emit call site in pump");
         assert!(!call.callee_is_locally_bound());
+    }
+
+    /// Argument shapes: literals (with `undefined` and a plain template
+    /// string) carry text, uppercase-initial names and member chains are
+    /// consts, lowercase identifiers stay identifiers, spreads and
+    /// arbitrary expressions are opaque.
+    #[test]
+    fn call_arguments_are_classified_by_shape() {
+        let source = "function pump(x: number, xs: number[]) {\n\
+             f(1, -2, \"s\", `t`, true, null, undefined, Color.Red, MAX, x, g(), ...xs);\n\
+             }\n";
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::m")
+            .unwrap()
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        let text = |t: &str| t.to_owned();
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![
+                ArgumentShape::Literal { text: text("1") },
+                ArgumentShape::Literal { text: text("-2") },
+                ArgumentShape::Literal {
+                    text: text("\"s\"")
+                },
+                ArgumentShape::Literal {
+                    text: text("\"t\"")
+                },
+                ArgumentShape::Literal { text: text("true") },
+                ArgumentShape::Literal { text: text("null") },
+                ArgumentShape::Literal {
+                    text: text("undefined")
+                },
+                ArgumentShape::Const {
+                    text: text("Color.Red")
+                },
+                ArgumentShape::Const { text: text("MAX") },
+                ArgumentShape::Identifier { text: text("x") },
+                ArgumentShape::Other,
+                ArgumentShape::Spread,
+            ],
+        );
+    }
+
+    /// The function-shape signature carries one slot per declared
+    /// parameter, positionally: a destructuring pattern is a nameless
+    /// slot rather than several misaligned ones, and a rest parameter
+    /// is a slot of its own.
+    #[test]
+    fn function_shapes_carry_positional_parameter_slots() {
+        let source = "function pump(a: number, {b, c}: Opts, ...rest: number[]) {}\n";
+        let functions = extract_function_shapes_with_module(source, Dialect::Ts, "src::m").unwrap();
+        let signature = functions[0].signature_shape().expect("signature extracted");
+        let names: Vec<Option<&str>> = signature
+            .params
+            .iter()
+            .map(|p| {
+                p.name
+                    .known_value()
+                    .and_then(Option::as_ref)
+                    .map(String::as_str)
+            })
+            .collect();
+        assert_eq!(names, [Some("a"), None, Some("rest")]);
     }
 
     #[test]
