@@ -447,19 +447,14 @@ fn collapse_chains(candidates: &[CandidateEntry]) -> Vec<Chain> {
             continue;
         }
         // Post-order walk: children (deeper members) come before their
-        // caller, which is the inline-safe order.
+        // caller, which is the inline-safe order. Recursion rather than
+        // an explicit revisit-flag stack on purpose: a single wedged
+        // branch in a flag-driven loop spins while *allocating*, which
+        // is how a mutated build once took a CI runner down with it —
+        // a wedged recursion just overflows its own stack and dies
+        // contained. Depth is bounded by the cluster's own size.
         let mut members: Vec<usize> = Vec::new();
-        let mut stack = vec![(root, false)];
-        while let Some((idx, expanded)) = stack.pop() {
-            if expanded {
-                members.push(idx);
-                continue;
-            }
-            stack.push((idx, true));
-            for &child in &children[idx] {
-                stack.push((child, false));
-            }
-        }
+        emit_post_order(root, &children, &mut members);
         chains.push(Chain {
             sink: entry.caller.clone(),
             function_count: members.len(),
@@ -484,6 +479,14 @@ fn collapse_chains(candidates: &[CandidateEntry]) -> Vec<Chain> {
             .then_with(|| a.sink.qualified_name.cmp(&b.sink.qualified_name))
     });
     chains
+}
+
+/// Append `idx`'s subtree to `members`, every child before its caller.
+fn emit_post_order(idx: usize, children: &[Vec<usize>], members: &mut Vec<usize>) {
+    for &child in &children[idx] {
+        emit_post_order(child, children, members);
+    }
+    members.push(idx);
 }
 
 /// The single-caller population before thresholds, plus what the
