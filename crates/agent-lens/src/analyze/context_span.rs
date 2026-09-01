@@ -198,7 +198,7 @@ impl ContextSpanAnalyzer {
     ) -> Result<String, ContextSpanAnalyzerError> {
         let path = path.as_ref();
         let mut graph = if self.entry_globs.is_empty() {
-            build_graph(path, GraphPolicy::CONTEXT_SPAN)?
+            build_graph(path, GraphPolicy::CONTEXT_SPAN, &self.path_filter)?
         } else {
             build_ts_graph_from_entry_globs(path, &self.entry_globs)?
         };

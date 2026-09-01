@@ -15,7 +15,7 @@ path = "src/main.rs"
 agent-hooks = { path = "../agent-hooks", version = "0.6.0" }
 clap = { workspace = true }
 globset = "0.4"
-ignore = "0.4"
+ignore = { workspace = true }
 lens-domain = { path = "../lens-domain", version = "0.6.0" }
 lens-golang = { path = "../lens-golang", version = "0.6.0" }
 lens-py = { path = "../lens-py", version = "0.6.0" }

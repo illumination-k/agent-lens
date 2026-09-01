@@ -40,6 +40,7 @@ use lens_domain::{
 use super::call_graph::{CallGraph, CallGraphBuilder};
 use super::diff::{DiffScope, LineRange};
 use super::module_graph::{GraphPolicy, ModuleGraph};
+use super::path_filter::AnalyzePathFilter;
 use super::roots::AnalyzeRoots;
 use super::{AnalyzerError, SourceLang, dispatch_lens};
 use std::path::PathBuf;
@@ -70,9 +71,14 @@ impl SourceKey {
 /// build the same graph exactly when both halves agree.
 pub(crate) type CallGraphKey = (CallGraphBuilder, AnalyzeRoots);
 
-/// Identity of one assembled module graph: the crate root plus the
-/// policy it was built under.
-pub(crate) type ModuleGraphKey = (PathBuf, GraphPolicy);
+/// Identity of one assembled module graph: the crate root, the policy it
+/// was built under, and the path filter it was walked with.
+///
+/// The filter is part of the identity because it now shapes the walk, not
+/// just the report: two analyzers in one profile that exclude different
+/// trees do not see the same graph, and sharing one between them would
+/// hand the second whichever exclusion the first happened to run with.
+pub(crate) type ModuleGraphKey = (PathBuf, GraphPolicy, AnalyzePathFilter);
 
 /// The memoized fact tables. One instance lives for one
 /// [`AnalysisIndexScope`]; every table maps an identity key to the

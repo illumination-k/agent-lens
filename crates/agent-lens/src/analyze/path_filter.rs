@@ -110,6 +110,17 @@ impl CompiledPathFilter {
     }
 }
 
+/// The walk-time view of this filter, for the adapters that discover
+/// modules by walking a directory rather than by following declarations.
+///
+/// Same decision as [`CompiledPathFilter::includes_path`], reached before
+/// the file is opened instead of after the module tree is built.
+impl lens_domain::SourceFilter for CompiledPathFilter {
+    fn includes(&self, path: &Path) -> bool {
+        self.includes_path(path)
+    }
+}
+
 fn add_exclude_pattern(builder: &mut GlobSetBuilder, pattern: &str) -> Result<(), PathFilterError> {
     let glob = Glob::new(pattern).map_err(|source| PathFilterError::InvalidExcludePattern {
         pattern: pattern.to_owned(),
