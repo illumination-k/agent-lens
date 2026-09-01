@@ -706,7 +706,10 @@ mod tests {
     #[test]
     fn constant_text_is_the_verbatim_text_of_constant_shapes_only() {
         assert_eq!(
-            ArgumentShape::Literal { text: "1".to_owned() }.constant_text(),
+            ArgumentShape::Literal {
+                text: "1".to_owned()
+            }
+            .constant_text(),
             Some("1"),
         );
         assert_eq!(
@@ -717,7 +720,10 @@ mod tests {
             Some("Color::Red"),
         );
         assert_eq!(
-            ArgumentShape::Identifier { text: "x".to_owned() }.constant_text(),
+            ArgumentShape::Identifier {
+                text: "x".to_owned()
+            }
+            .constant_text(),
             None,
         );
         assert_eq!(ArgumentShape::Spread.constant_text(), None);
@@ -725,7 +731,9 @@ mod tests {
         assert_eq!(
             ArgumentShape::Keyword {
                 name: "mode".to_owned(),
-                value: Box::new(ArgumentShape::Literal { text: "1".to_owned() }),
+                value: Box::new(ArgumentShape::Literal {
+                    text: "1".to_owned()
+                }),
             }
             .constant_text(),
             None,

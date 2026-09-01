@@ -558,9 +558,11 @@ impl InboundSites {
 }
 
 /// One parameter's aggregate over the analyzable production sites.
+/// Provided-site counts are implicit: every analyzable site records
+/// exactly one outcome per slot, so `analyzable - omitted` sites
+/// provided a value.
 #[derive(Debug, Default)]
 struct SlotAggregate {
-    provided: usize,
     omitted: usize,
     non_constant: usize,
     values: BTreeSet<String>,
@@ -717,13 +719,9 @@ impl Collected {
                         aggregate.lines.push(site.line);
                         match value {
                             SlotValue::Constant(text) => {
-                                aggregate.provided += 1;
                                 aggregate.values.insert(text);
                             }
-                            SlotValue::NonConstant => {
-                                aggregate.provided += 1;
-                                aggregate.non_constant += 1;
-                            }
+                            SlotValue::NonConstant => aggregate.non_constant += 1,
                             SlotValue::Omitted => aggregate.omitted += 1,
                         }
                     }
@@ -1827,13 +1825,19 @@ mod tests {
         assert!(md.contains(", +1 test site(s)"), "got: {md}");
         assert!(md.contains(", raw refs="), "got: {md}");
         assert!(md.contains("visible outside its module"), "got: {md}");
-        assert!(md.contains("its bare name is written elsewhere"), "got: {md}");
+        assert!(
+            md.contains("its bare name is written elsewhere"),
+            "got: {md}"
+        );
         // The dead row carries the caveat separator with the text.
         let dead_line = md
             .lines()
             .find(|l| l.contains("parameter `dead`"))
             .expect("dead row rendered");
-        assert!(dead_line.contains(" — visible outside its module"), "got: {dead_line}");
+        assert!(
+            dead_line.contains(" — visible outside its module"),
+            "got: {dead_line}"
+        );
     }
 
     #[test]
@@ -1885,8 +1889,8 @@ mod tests {
             generics: SyntaxFact::Unknown,
             bounds: SyntaxFact::Unknown,
         };
-        let function = |name: &str, line: usize, signature: SyntaxFact<SignatureShape>| {
-            FunctionShape {
+        let function =
+            |name: &str, line: usize, signature: SyntaxFact<SignatureShape>| FunctionShape {
                 display_name: name.to_owned(),
                 qualified_name: SyntaxFact::Known(format!("m::{name}")),
                 module_path: SyntaxFact::Known("m".to_owned()),
@@ -1903,8 +1907,7 @@ mod tests {
                     end_line: line,
                 },
                 is_test: false,
-            }
-        };
+            };
         let call = CallShape {
             caller_qualified_name: SyntaxFact::Known(Some("m::caller".to_owned())),
             caller_module: SyntaxFact::Known("m".to_owned()),
