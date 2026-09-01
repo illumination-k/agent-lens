@@ -289,6 +289,56 @@ pub struct BodyShape {
     pub tree: TreeNode,
 }
 
+/// Syntactic shape of one argument at a call site.
+///
+/// Adapters classify each argument expression during the same parse
+/// that reads the callee, so this costs no extra pass. The kinds are
+/// deliberately coarse: what the constant-argument analyzer needs is
+/// "does the same text denote the same value at every call site", and
+/// only [`Self::Literal`] and [`Self::Const`] can answer yes — an
+/// identifier names a different binding per caller scope, and anything
+/// else is an arbitrary expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgumentShape {
+    /// A literal token (`1`, `"x"`, `true`, `nil`, `None`), carried as
+    /// its normalized source text.
+    Literal { text: String },
+    /// An expression the language anchors to one global value wherever
+    /// the same text is written: a multi-segment path (`Color::Red`),
+    /// or a name the language's own naming convention reserves for
+    /// types, variants, and constants (uppercase-initial). Weaker than
+    /// a literal — an alias or shadow can break the "same text, same
+    /// value" claim — but each adapter only emits it where the
+    /// convention holds.
+    Const { text: String },
+    /// A bare identifier: a local, a parameter — a different binding at
+    /// every call site, so never evidence of a constant argument.
+    Identifier { text: String },
+    /// A named argument (Python `f(x=1)`), carrying the shape of its
+    /// value. Position does not line up with the parameter list; the
+    /// name does.
+    Keyword {
+        name: String,
+        value: Box<ArgumentShape>,
+    },
+    /// A spread/unpacking/variadic argument (`...xs`, `*args`,
+    /// `**kwargs`, `xs...`): positions after it cannot be lined up.
+    Spread,
+    /// Anything else (a call, arithmetic, a closure, a struct literal).
+    Other,
+}
+
+impl ArgumentShape {
+    /// The text under which this argument can claim "the same value at
+    /// every site", or `None` for shapes that cannot make that claim.
+    pub fn constant_text(&self) -> Option<&str> {
+        match self {
+            Self::Literal { text } | Self::Const { text } => Some(text),
+            _ => None,
+        }
+    }
+}
+
 /// Neutral representation of a call expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallShape {
@@ -298,6 +348,9 @@ pub struct CallShape {
     pub callee_display_name: SyntaxFact<Option<String>>,
     pub callee_path_segments: SyntaxFact<Vec<String>>,
     pub receiver_expr_kind: SyntaxFact<ReceiverExprKind>,
+    /// The argument expressions at this call site, in source order.
+    /// `Unknown` for an adapter that does not extract them.
+    pub arguments: SyntaxFact<Vec<ArgumentShape>>,
     /// Whether the callee name is bound in the caller's own local scope
     /// — a closure or nested function assigned to a local name, or a
     /// function-typed parameter. Such a call targets the local binding,
@@ -554,6 +607,7 @@ mod tests {
                 "parse".to_owned(),
             ]),
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::Expression),
+            arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
@@ -646,6 +700,46 @@ mod tests {
         ));
     }
 
+    /// Only literals and const-like paths can claim "same text, same
+    /// value" — and the claim carries the verbatim text, since it is
+    /// what the analyzer compares across call sites.
+    #[test]
+    fn constant_text_is_the_verbatim_text_of_constant_shapes_only() {
+        assert_eq!(
+            ArgumentShape::Literal {
+                text: "1".to_owned()
+            }
+            .constant_text(),
+            Some("1"),
+        );
+        assert_eq!(
+            ArgumentShape::Const {
+                text: "Color::Red".to_owned()
+            }
+            .constant_text(),
+            Some("Color::Red"),
+        );
+        assert_eq!(
+            ArgumentShape::Identifier {
+                text: "x".to_owned()
+            }
+            .constant_text(),
+            None,
+        );
+        assert_eq!(ArgumentShape::Spread.constant_text(), None);
+        assert_eq!(ArgumentShape::Other.constant_text(), None);
+        assert_eq!(
+            ArgumentShape::Keyword {
+                name: "mode".to_owned(),
+                value: Box::new(ArgumentShape::Literal {
+                    text: "1".to_owned()
+                }),
+            }
+            .constant_text(),
+            None,
+        );
+    }
+
     fn call_shape() -> CallShape {
         CallShape {
             caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),
@@ -654,6 +748,7 @@ mod tests {
             callee_display_name: SyntaxFact::Known(Some("emit".to_owned())),
             callee_path_segments: SyntaxFact::Known(vec!["emit".to_owned()]),
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),

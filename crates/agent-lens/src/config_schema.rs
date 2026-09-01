@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 26] = [
+const TOOL_ORDER: [ToolName; 27] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -38,6 +38,7 @@ const TOOL_ORDER: [ToolName; 26] = [
     ToolName::Layers,
     ToolName::SingleImpl,
     ToolName::SingleUse,
+    ToolName::Parameters,
     ToolName::TestOnly,
     ToolName::Untested,
     ToolName::Unreachable,
@@ -84,7 +85,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, risk, search, similarity, single-impl, single-use, test-only, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, parameters, risk, search, similarity, single-impl, single-use, test-only, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -485,6 +486,20 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap each markdown candidate list to the top N rows.",
             },
         ],
+        ToolName::Parameters => &[
+            Field {
+                key: "min-call-sites",
+                ty: "int",
+                presence: "default: 2",
+                desc: "Minimum resolved production call sites a parameter needs before \"always the same value\" is reported. A single-caller function's arguments are single-use's finding, not this one's.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap each markdown finding list to the top N rows.",
+            },
+        ],
         ToolName::SingleImpl => &[Field {
             key: "top",
             ty: "int",
@@ -797,9 +812,10 @@ mod tests {
     use crate::config::{
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
         ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
-        GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, Profile,
-        RiskOptions, SearchOptions, SimilarityOptions, SingleImplOptions, SingleUseOptions,
-        TestOnlyOptions, UnreachableOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
+        GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions,
+        ParametersOptions, Profile, RiskOptions, SearchOptions, SimilarityOptions,
+        SingleImplOptions, SingleUseOptions, TestOnlyOptions, UnreachableOptions, UntestedOptions,
+        VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -838,6 +854,7 @@ mod tests {
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
         assert_tool_parity::<SingleImplOptions>(ToolName::SingleImpl);
         assert_tool_parity::<SingleUseOptions>(ToolName::SingleUse);
+        assert_tool_parity::<ParametersOptions>(ToolName::Parameters);
         assert_tool_parity::<TestOnlyOptions>(ToolName::TestOnly);
         assert_tool_parity::<UnreachableOptions>(ToolName::Unreachable);
         assert_tool_parity::<UntestedOptions>(ToolName::Untested);

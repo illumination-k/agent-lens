@@ -17,9 +17,9 @@
 use std::collections::HashSet;
 
 use lens_domain::{
-    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, OwnerKind,
-    OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
-    VisibilityShape, callee_names_local_binding, qualify_module, starts_uppercase,
+    ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus,
+    OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan,
+    SyntaxFact, VisibilityShape, callee_names_local_binding, qualify_module, starts_uppercase,
 };
 use tree_sitter::Node;
 
@@ -303,6 +303,10 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
             facts.path_segments.as_deref(),
             &ctx.locally_bound,
         );
+        let arguments = node
+            .child_by_field_name("arguments")
+            .map(|args| argument_shapes(args, ctx.source, ctx.namespace_aliases))
+            .unwrap_or_default();
         out.push(CallShape {
             caller_qualified_name: SyntaxFact::Known(Some(ctx.caller_qualified_name.to_owned())),
             caller_module: SyntaxFact::Known(ctx.module.to_owned()),
@@ -312,6 +316,7 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
                 .path_segments
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             receiver_expr_kind: SyntaxFact::Known(facts.receiver),
+            arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(locally_bound),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: ctx.imports.to_vec(),
@@ -331,6 +336,91 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
             continue;
         }
         visit_calls(child, ctx, out);
+    }
+}
+
+/// Classify the arguments of one `argument_list`.
+fn argument_shapes(
+    args: Node<'_>,
+    source: &[u8],
+    namespace_aliases: &HashSet<String>,
+) -> Vec<ArgumentShape> {
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .map(|arg| argument_shape(arg, source, namespace_aliases))
+        .collect()
+}
+
+/// Classify one call argument. Literals (`nil`, `true`, `iota`
+/// included) carry their source text; an uppercase-initial identifier
+/// (`DefaultTimeout`) or a selector rooted at an import alias or an
+/// uppercase name (`pkg.Const`, `Color.Red`) gets the weaker
+/// [`ArgumentShape::Const`] — Go's export convention keeps locals
+/// lowercase, and a namespace alias anchors the selector to one
+/// package, so the same text denotes the same value.
+fn argument_shape(
+    arg: Node<'_>,
+    source: &[u8],
+    namespace_aliases: &HashSet<String>,
+) -> ArgumentShape {
+    let text = || node_str(arg, source).unwrap_or_default().to_owned();
+    match arg.kind() {
+        "int_literal"
+        | "float_literal"
+        | "imaginary_literal"
+        | "rune_literal"
+        | "interpreted_string_literal"
+        | "raw_string_literal"
+        | "true"
+        | "false"
+        | "nil"
+        | "iota" => ArgumentShape::Literal { text: text() },
+        // `xs...` — the spread the variadic slot receives.
+        "variadic_argument" => ArgumentShape::Spread,
+        "unary_expression" => {
+            let negated_literal = arg
+                .child_by_field_name("operator")
+                .is_some_and(|op| op.kind() == "-")
+                && arg.child_by_field_name("operand").is_some_and(|operand| {
+                    matches!(
+                        operand.kind(),
+                        "int_literal" | "float_literal" | "imaginary_literal" | "rune_literal"
+                    )
+                });
+            if negated_literal {
+                ArgumentShape::Literal { text: text() }
+            } else {
+                ArgumentShape::Other
+            }
+        }
+        "identifier" => {
+            let text = text();
+            if starts_uppercase(&text) {
+                ArgumentShape::Const { text }
+            } else {
+                ArgumentShape::Identifier { text }
+            }
+        }
+        "selector_expression" => match expression_path(arg, source) {
+            Some(segments)
+                if segments.first().is_some_and(|first| {
+                    namespace_aliases.contains(first) || starts_uppercase(first)
+                }) =>
+            {
+                ArgumentShape::Const {
+                    text: segments.join("."),
+                }
+            }
+            _ => ArgumentShape::Other,
+        },
+        "parenthesized_expression" => {
+            let mut cursor = arg.walk();
+            let inner = arg.named_children(&mut cursor).next();
+            inner.map_or(ArgumentShape::Other, |inner| {
+                argument_shape(inner, source, namespace_aliases)
+            })
+        }
+        _ => ArgumentShape::Other,
     }
 }
 
@@ -524,6 +614,69 @@ mod tests {
 
     fn calls(src: &str, module: &str) -> Vec<CallShape> {
         extract_call_shapes_with_module(src, module).unwrap()
+    }
+
+    /// The non-constant boundary of the classifier: negation of
+    /// anything but a literal and a selector on a lowercase local stay
+    /// opaque, while parens peel to the value inside.
+    #[rstest]
+    #[case::negated_identifier("func a(x int) { f(-x) }", ArgumentShape::Other)]
+    #[case::lowercase_selector("func a(obj *T) { f(obj.field) }", ArgumentShape::Other)]
+    #[case::parenthesised_identifier(
+        "func a(x int) { f((x)) }",
+        ArgumentShape::Identifier { text: "x".to_owned() }
+    )]
+    fn argument_shape_edge_cases(#[case] body: &str, #[case] expected: ArgumentShape) {
+        let call = calls(&format!("package p\n\n{body}\n"), "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![expected],
+        );
+    }
+
+    /// Argument shapes: literals (`nil` and a negative number included)
+    /// carry source text, uppercase identifiers and alias-rooted
+    /// selectors are consts, lowercase identifiers stay identifiers, a
+    /// trailing `xs...` is a spread, and arbitrary expressions are
+    /// opaque.
+    #[test]
+    fn call_arguments_are_classified_by_shape() {
+        let src = concat!(
+            "package p\n\n",
+            "import \"github.com/x/proj/helper\"\n\n",
+            "func caller(x int, xs []int) {\n",
+            "  f(1, -2, \"s\", nil, true, MaxRetries, helper.Limit, x, g(), xs...)\n",
+            "}\n",
+        );
+        let call = calls(src, "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        let text = |t: &str| t.to_owned();
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![
+                ArgumentShape::Literal { text: text("1") },
+                ArgumentShape::Literal { text: text("-2") },
+                ArgumentShape::Literal {
+                    text: text("\"s\"")
+                },
+                ArgumentShape::Literal { text: text("nil") },
+                ArgumentShape::Literal { text: text("true") },
+                ArgumentShape::Const {
+                    text: text("MaxRetries")
+                },
+                ArgumentShape::Const {
+                    text: text("helper.Limit")
+                },
+                ArgumentShape::Identifier { text: text("x") },
+                ArgumentShape::Other,
+                ArgumentShape::Spread,
+            ],
+        );
     }
 
     #[test]

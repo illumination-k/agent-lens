@@ -100,7 +100,7 @@ fn function_def_from(
 /// each other rather than being skewed by the implicit first argument.
 /// Type annotations are flattened to their head identifiers, mirroring
 /// how the Rust adapter reduces types to path segments.
-fn signature_info(func: &StmtFunctionDef, is_method: bool) -> FunctionSignature {
+pub(crate) fn signature_info(func: &StmtFunctionDef, is_method: bool) -> FunctionSignature {
     let params = &func.parameters;
     let mut parameter_names = Vec::new();
     let mut parameter_type_paths = Vec::new();

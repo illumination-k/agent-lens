@@ -61,6 +61,7 @@ pub use crate::analyze::hotspot::HotspotOptions;
 pub use crate::analyze::hubs::HubsOptions;
 pub use crate::analyze::impact::ImpactOptions;
 pub use crate::analyze::layers::LayersOptions;
+pub use crate::analyze::parameters::ParametersOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
@@ -162,6 +163,8 @@ pub struct Profile {
     pub impact: Option<ImpactOptions>,
     #[serde(default)]
     pub layers: Option<LayersOptions>,
+    #[serde(default)]
+    pub parameters: Option<ParametersOptions>,
     #[serde(default)]
     pub graph_query: Option<GraphQueryOptions>,
     #[serde(default)]
@@ -357,6 +360,7 @@ pub enum ToolName {
     Hubs,
     Impact,
     Layers,
+    Parameters,
     Risk,
     Search,
     Similarity,
@@ -389,6 +393,7 @@ impl ToolName {
             Self::Hubs => "hubs",
             Self::Impact => "impact",
             Self::Layers => "layers",
+            Self::Parameters => "parameters",
             Self::Risk => "risk",
             Self::Search => "search",
             Self::Similarity => "similarity",

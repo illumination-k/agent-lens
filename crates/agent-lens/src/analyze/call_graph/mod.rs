@@ -55,9 +55,9 @@ pub(crate) struct CallGraph {
 }
 
 impl CallGraph {
-    pub(crate) fn build(files: Vec<FileGraphInput>) -> Self {
+    pub(crate) fn build(files: Vec<FileGraphInput>, argument_facts: bool) -> Self {
         let mut nodes = build_nodes(&files);
-        let (mut edges, module_summary) = build_edges(&files, &nodes);
+        let (mut edges, module_summary) = build_edges(&files, &nodes, argument_facts);
         apply_static_degrees(&mut nodes, &edges);
         edges.sort_by(|a, b| {
             a.from
@@ -178,6 +178,7 @@ pub(crate) struct CallGraphBuilder {
     exclude_tests: bool,
     delegation_facts: bool,
     interface_facts: bool,
+    argument_facts: bool,
     path_filter: AnalyzePathFilter,
 }
 
@@ -188,6 +189,7 @@ impl CallGraphBuilder {
             exclude_tests: false,
             delegation_facts: false,
             interface_facts: false,
+            argument_facts: false,
             path_filter: AnalyzePathFilter::new(),
         }
     }
@@ -206,6 +208,16 @@ impl CallGraphBuilder {
     /// analyzer reads the result.
     pub(crate) fn with_interface_facts(mut self, interface_facts: bool) -> Self {
         self.interface_facts = interface_facts;
+        self
+    }
+
+    /// Attach per-call-site [`model::CallSiteFacts`] to every edge. Off
+    /// by default: the adapters extract argument shapes during their one
+    /// parse either way, but copying them onto edges holds every
+    /// argument list of the workspace in the assembled graph, and only
+    /// the parameters analyzer reads them.
+    pub(crate) fn with_argument_facts(mut self, argument_facts: bool) -> Self {
+        self.argument_facts = argument_facts;
         self
     }
 
@@ -318,7 +330,7 @@ impl CallGraphBuilder {
             .into_iter()
             .flatten()
             .collect();
-        Ok(CallGraph::build(files))
+        Ok(CallGraph::build(files, self.argument_facts))
     }
 
     /// Hand every source file the graph would scan to `visit`, as its
@@ -700,6 +712,27 @@ fn build_nodes(files: &[FileGraphInput]) -> Vec<CallGraphNode> {
                 is_test: f.is_test || file.path_is_test,
                 visibility: NodeVisibility::from_shape(&f.visibility),
                 param_count: f.signature_shape().map(|s| s.parameter_count()),
+                param_names: f.signature_shape().map(|s| {
+                    s.params
+                        .iter()
+                        .map(|p| p.name.known_value().cloned().flatten())
+                        .collect()
+                }),
+                has_receiver: f
+                    .signature_shape()
+                    .and_then(|s| {
+                        s.receiver_shape()
+                            .map(|shape| shape != lens_domain::ReceiverShape::None)
+                    })
+                    .or_else(|| {
+                        // The Go adapter records the owner but leaves the
+                        // receiver fact unknown: a method owner *is* the
+                        // receiver there, and a known absence of an owner
+                        // is a known absence of a receiver.
+                        f.owner.known_value().map(|owner| {
+                            matches!(owner, Some(o) if o.kind == lens_domain::OwnerKind::Receiver)
+                        })
+                    }),
                 attributes: f.attributes.known_value().cloned(),
                 weights: NodeWeights {
                     loc: f.line_count(),
@@ -819,6 +852,7 @@ impl<'a> WrapperIndex<'a> {
 fn build_edges(
     files: &[FileGraphInput],
     nodes: &[CallGraphNode],
+    argument_facts: bool,
 ) -> (Vec<CallGraphEdge>, Vec<ModuleResolutionSummary>) {
     let resolver = Resolver::new(nodes);
     let caller_index = CallerIndex::new(nodes);
@@ -859,10 +893,18 @@ fn build_edges(
                 call_count: 0,
                 call_lines: Vec::new(),
                 weights: EdgeWeights::default(),
+                call_sites: Vec::new(),
             });
             entry.call_count += 1;
             entry.weights.call_count += 1;
             entry.call_lines.push(site.line);
+            if argument_facts && let Some(arguments) = site.arguments.known_value() {
+                entry.call_sites.push(model::CallSiteFacts {
+                    line: site.line,
+                    has_receiver_expression: site.has_receiver_expression(),
+                    arguments: arguments.clone(),
+                });
+            }
             // Call sites can reach the same aggregation key through
             // different heuristics (`helper()` lexically and
             // `crate::helper()` via path suffix). Keep the most direct

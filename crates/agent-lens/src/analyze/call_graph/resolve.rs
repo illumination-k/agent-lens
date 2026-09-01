@@ -335,7 +335,7 @@ pub(crate) fn lexical_candidates(site: &CallShape) -> Vec<String> {
     match segments[0] {
         "crate" => candidates.push(callee_path.to_owned()),
         "self" => {
-            if let Some(path) = prefix_with_tail(module_segments(module), &segments, 1) {
+            if let Some(path) = prefix_with_tail(module_segments(module), &segments) {
                 candidates.push(path);
             }
         }
@@ -361,7 +361,6 @@ pub(crate) fn lexical_candidates(site: &CallShape) -> Vec<String> {
                 && let Some(path) = prefix_with_tail(
                     alias_target.split("::").map(ToOwned::to_owned).collect(),
                     &segments,
-                    1,
                 )
             {
                 candidates.push(path);
@@ -394,15 +393,16 @@ fn module_segments(module: &str) -> Vec<String> {
     module.split("::").map(ToOwned::to_owned).collect()
 }
 
-fn prefix_with_tail(
-    mut prefix: Vec<String>,
-    segments: &[&str],
-    tail_start: usize,
-) -> Option<String> {
-    if tail_start > segments.len() {
+/// Join `prefix` with everything past `segments`' first element — the
+/// `self` keyword or alias already accounted for by `prefix`. (Every
+/// caller skipped exactly one segment, so the old `tail_start`
+/// parameter was `analyze parameters`' first constant-argument finding
+/// about its own sources.)
+fn prefix_with_tail(mut prefix: Vec<String>, segments: &[&str]) -> Option<String> {
+    if segments.is_empty() {
         return None;
     }
-    prefix.extend(segments.iter().skip(tail_start).map(|s| (*s).to_owned()));
+    prefix.extend(segments.iter().skip(1).map(|s| (*s).to_owned()));
     Some(prefix.join("::"))
 }
 
@@ -472,6 +472,7 @@ mod tests {
             caller_qualified_name: SyntaxFact::Known(Some("crate::m::caller".to_owned())),
             caller_owner: SyntaxFact::Known(Some("S".to_owned())),
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
+            arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
             lexical_resolution: lens_domain::LexicalResolutionStatus::NotAttempted,
             visible_imports: vec![
@@ -505,7 +506,7 @@ mod tests {
     #[test]
     fn lexical_path_helpers_handle_boundaries() {
         assert_eq!(
-            prefix_with_tail(vec!["crate".to_owned(), "m".to_owned()], &["self"], 1).as_deref(),
+            prefix_with_tail(vec!["crate".to_owned(), "m".to_owned()], &["self"]).as_deref(),
             Some("crate::m"),
         );
         assert_eq!(resolve_super_path("crate", &["super", "parse"]), None);
@@ -538,6 +539,8 @@ mod tests {
             is_test: false,
             visibility: NodeVisibility::Unknown,
             param_count: None,
+            param_names: None,
+            has_receiver: None,
             attributes: None,
             weights: NodeWeights::default(),
             outgoing_calls: ResolutionCallCounts::default(),

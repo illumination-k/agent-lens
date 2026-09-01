@@ -192,6 +192,7 @@ mod tests {
     use crate::analyze::hubs::{HubsAnalyzer, HubsOptions};
     use crate::analyze::impact::{ImpactAnalyzer, ImpactOptions};
     use crate::analyze::layers::{LayersAnalyzer, LayersOptions};
+    use crate::analyze::parameters::{ParametersAnalyzer, ParametersOptions};
     use crate::analyze::risk::{RiskAnalyzer, RiskOptions};
     use crate::analyze::similarity::{SimilarityAnalyzer, SimilarityOptions};
     use crate::analyze::single_impl::{SingleImplAnalyzer, SingleImplOptions};
@@ -360,6 +361,14 @@ mod tests {
         risk_options_reach_the_analyzer: RiskAnalyzer,
         RiskOptions { top: Some(3), since: Some("90.days.ago".to_owned()) },
         |a| a.with_top(Some(3)).with_since_opt(Some("90.days.ago".to_owned()))
+    );
+    assert_options_reach_the_analyzer!(
+        parameters_options_reach_the_analyzer: ParametersAnalyzer,
+        ParametersOptions {
+            top: Some(3),
+            min_call_sites: Some(4),
+        },
+        |a| a.with_top(Some(3)).with_min_call_sites(Some(4))
     );
     assert_options_reach_the_analyzer!(
         single_impl_options_reach_the_analyzer: SingleImplAnalyzer,

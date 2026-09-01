@@ -35,6 +35,7 @@ pub mod layers;
 mod module_graph;
 pub(crate) mod module_label;
 mod options;
+pub mod parameters;
 mod path_filter;
 pub mod risk;
 mod roots;
@@ -76,6 +77,7 @@ pub use hubs::HubsAnalyzer;
 pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
 pub use index::{AnalysisIndex, AnalysisIndexScope};
 pub use layers::LayersAnalyzer;
+pub use parameters::ParametersAnalyzer;
 pub use risk::{RiskAnalyzer, RiskError};
 pub use search::{DEFAULT_SEARCH_LIMIT, FuzzyMode, RankMode, SearchAnalyzer};
 

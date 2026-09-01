@@ -16,13 +16,16 @@
 use std::collections::HashSet;
 
 use lens_domain::{
-    BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus, LineIndex,
-    OwnerKind, OwnerShape, ReceiverExprKind, SourceSpan, SyntaxFact, callee_names_local_binding,
-    qualify_module, starts_uppercase,
+    ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus,
+    LineIndex, OwnerKind, OwnerShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
+    callee_names_local_binding, qualify_module, starts_uppercase,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
-use ruff_python_ast::{Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport};
+use ruff_python_ast::{
+    Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport, UnaryOp,
+};
 use ruff_python_parser::parse_module;
+use ruff_text_size::Ranged;
 
 use crate::parser::{PythonParseError, function_body_tree};
 use crate::walk::{FnSite, walk_module_fns};
@@ -72,6 +75,7 @@ pub fn extract_call_shapes_with_module(
     walk_module_fns(&parsed.body, &mut |site| {
         collect_calls_in_function(
             &site,
+            source,
             module,
             &imports,
             &namespace_aliases,
@@ -101,7 +105,10 @@ fn function_shape(site: &FnSite<'_>, module: &str, lines: &LineIndex) -> Functio
         // Export status is not extracted yet, so stay honest
         // with `Unknown` instead of hardcoding `Unexported`.
         visibility: SyntaxFact::Unknown,
-        signature: SyntaxFact::Unknown,
+        signature: SyntaxFact::Known(SignatureShape::from(crate::parser::signature_info(
+            func,
+            site.owner.is_some(),
+        ))),
         doc: crate::parser::docstring_text(func),
         // Decorators are not extracted yet; `Unknown` keeps a
         // framework-registered function from reading as unannotated.
@@ -116,6 +123,7 @@ fn function_shape(site: &FnSite<'_>, module: &str, lines: &LineIndex) -> Functio
 
 fn collect_calls_in_function(
     site: &FnSite<'_>,
+    source: &str,
     module: &str,
     imports: &[ImportShape],
     namespace_aliases: &HashSet<String>,
@@ -129,6 +137,7 @@ fn collect_calls_in_function(
     };
     let locally_bound = local_callable_bindings(site.func);
     let mut visitor = FunctionBodyCallVisitor {
+        source,
         module,
         caller_qualified_name: caller_qualified,
         caller_owner: site.owner.map(ToOwned::to_owned),
@@ -224,6 +233,7 @@ impl<'ast> Visitor<'ast> for LocalBindingCollector<'_> {
 }
 
 struct FunctionBodyCallVisitor<'a> {
+    source: &'a str,
     module: &'a str,
     caller_qualified_name: String,
     caller_owner: Option<String>,
@@ -258,6 +268,24 @@ impl FunctionBodyCallVisitor<'_> {
             facts.path_segments.as_deref(),
             &self.locally_bound,
         );
+        // Positional arguments first, then keywords — the order Python
+        // syntax itself enforces at a call site.
+        let mut arguments: Vec<ArgumentShape> = call
+            .arguments
+            .args
+            .iter()
+            .map(|arg| argument_shape(self.source, arg))
+            .collect();
+        arguments.extend(call.arguments.keywords.iter().map(|keyword| {
+            match keyword.arg.as_ref() {
+                Some(name) => ArgumentShape::Keyword {
+                    name: name.as_str().to_owned(),
+                    value: Box::new(argument_shape(self.source, &keyword.value)),
+                },
+                // `**kwargs` unpacking: no positions line up past it.
+                None => ArgumentShape::Spread,
+            }
+        }));
         CallShape {
             caller_qualified_name: SyntaxFact::Known(Some(self.caller_qualified_name.clone())),
             caller_module: SyntaxFact::Known(self.module.to_owned()),
@@ -267,11 +295,56 @@ impl FunctionBodyCallVisitor<'_> {
                 .path_segments
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             receiver_expr_kind: SyntaxFact::Known(facts.receiver),
+            arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: self.imports.to_vec(),
             line,
         }
+    }
+}
+
+/// Classify one call argument. Literals (`None`, `True`, `...`, and
+/// f-strings without substitutions included) carry their source text;
+/// an uppercase-initial name or attribute chain (`Color.RED`,
+/// `DEFAULTS`) gets the weaker [`ArgumentShape::Const`] on the same
+/// naming convention the callee classifier above already trusts —
+/// Python locals are lowercase by convention, so the same uppercase
+/// text denotes the same module-level thing.
+fn argument_shape(source: &str, expr: &Expr) -> ArgumentShape {
+    let literal = || ArgumentShape::Literal {
+        text: source[expr.range()].to_owned(),
+    };
+    match expr {
+        Expr::NumberLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BytesLiteral(_)
+        | Expr::BooleanLiteral(_)
+        | Expr::NoneLiteral(_)
+        | Expr::EllipsisLiteral(_) => literal(),
+        Expr::UnaryOp(unary)
+            if unary.op == UnaryOp::USub && matches!(&*unary.operand, Expr::NumberLiteral(_)) =>
+        {
+            literal()
+        }
+        Expr::Name(name) => {
+            let text = name.id.to_string();
+            if starts_uppercase(&text) {
+                ArgumentShape::Const { text }
+            } else {
+                ArgumentShape::Identifier { text }
+            }
+        }
+        Expr::Attribute(_) => match expression_path(expr) {
+            Some(segments) if segments.first().is_some_and(|s| starts_uppercase(s)) => {
+                ArgumentShape::Const {
+                    text: segments.join("."),
+                }
+            }
+            _ => ArgumentShape::Other,
+        },
+        Expr::Starred(_) => ArgumentShape::Spread,
+        _ => ArgumentShape::Other,
     }
 }
 
@@ -518,6 +591,75 @@ mod tests {
                 (Some("helper".to_owned()), false),
             ]
         );
+    }
+
+    /// The non-constant boundary of the classifier: negation of
+    /// anything but a number literal and an attribute chain on a
+    /// lowercase local stay opaque.
+    #[rstest]
+    #[case::negated_identifier("def a(x):\n    f(-x)\n", ArgumentShape::Other)]
+    #[case::lowercase_attribute("def a(obj):\n    f(obj.attr)\n", ArgumentShape::Other)]
+    fn argument_shape_edge_cases(#[case] src: &str, #[case] expected: ArgumentShape) {
+        let call = calls(src, "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![expected],
+        );
+    }
+
+    /// Argument shapes: literals (`None`, `True`, a negative number)
+    /// carry source text, uppercase names and attribute chains are
+    /// consts, keywords carry their name and value shape, and `*`/`**`
+    /// unpacking is a spread.
+    #[test]
+    fn call_arguments_are_classified_by_shape() {
+        let src = "def caller(x, xs, kw):\n    f(1, -2, \"s\", None, True, Color.RED, MAX, x, g(), *xs, mode=\"w\", **kw)\n";
+        let call = calls(src, "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("f"))
+            .expect("f call site");
+        let text = |t: &str| t.to_owned();
+        assert_eq!(
+            call.arguments.known_value().cloned().expect("known"),
+            vec![
+                ArgumentShape::Literal { text: text("1") },
+                ArgumentShape::Literal { text: text("-2") },
+                ArgumentShape::Literal {
+                    text: text("\"s\"")
+                },
+                ArgumentShape::Literal { text: text("None") },
+                ArgumentShape::Literal { text: text("True") },
+                ArgumentShape::Const {
+                    text: text("Color.RED")
+                },
+                ArgumentShape::Const { text: text("MAX") },
+                ArgumentShape::Identifier { text: text("x") },
+                ArgumentShape::Other,
+                ArgumentShape::Spread,
+                ArgumentShape::Keyword {
+                    name: text("mode"),
+                    value: Box::new(ArgumentShape::Literal {
+                        text: text("\"w\"")
+                    }),
+                },
+                ArgumentShape::Spread,
+            ],
+        );
+    }
+
+    /// The function-shape signature carries the declared parameters —
+    /// what the parameters analyzer lines call-site arguments up
+    /// against — with `self` projected as the receiver, not a slot.
+    #[test]
+    fn function_shapes_carry_parameter_names() {
+        let src = "class S:\n    def run(self, a, b=1):\n        return a\n";
+        let funcs = shapes(src, "m");
+        let signature = funcs[0].signature_shape().expect("signature extracted");
+        let names: Vec<&str> = signature.parameter_names().collect();
+        assert_eq!(names, ["a", "b"]);
     }
 
     #[test]
