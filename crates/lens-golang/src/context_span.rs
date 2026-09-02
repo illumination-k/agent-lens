@@ -35,7 +35,10 @@ mod tests {
     fn build_context_span_report(
         root: &std::path::Path,
     ) -> Result<lens_domain::ContextSpanReport, CouplingError> {
-        Ok(extract_context_spans(&build_module_tree(root)?))
+        Ok(extract_context_spans(&build_module_tree(
+            root,
+            &lens_domain::IncludeAll,
+        )?))
     }
 
     fn write(root: &std::path::Path, rel: &str, contents: &str) {

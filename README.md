@@ -169,7 +169,8 @@ Conventions that hold across analyzers:
 
 - Analyzer commands share `PATH...`, `--format json|md`, `--only-tests`,
   `--exclude-tests`, and repeatable `--exclude GLOB`. Directory walks follow
-  `.gitignore`.
+  `.gitignore` and do not descend symlinked directories, so a linked build
+  output or virtualenv never joins the corpus.
 - `--top N` caps the Markdown ranking; JSON always carries the full result.
   `cycles` rejects it — a truncated cycle list reads as the whole list.
 - Every analyzer takes multiple `PATH`s except `coupling`, `context-span`, and

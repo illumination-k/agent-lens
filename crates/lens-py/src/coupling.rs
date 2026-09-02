@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
+use lens_domain::{CouplingEdge, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension};
 use ruff_python_ast::visitor::{Visitor, walk_stmt};
 use ruff_python_ast::{Stmt, StmtImport, StmtImportFrom};
 use ruff_python_parser::{ParseError, parse_module};
@@ -48,9 +48,15 @@ pub struct PythonModule {
 
 /// Build Python modules from `root`.
 ///
-/// * `root` as file: one module named `crate`.
-/// * `root` as directory: every `.py` file recursively, rooted at `crate`.
-pub fn build_module_tree(root: &Path) -> Result<Vec<PythonModule>, CouplingError> {
+/// * `root` as file: one module named `crate`. `filter` does not apply —
+///   an explicitly named root is the caller's own choice, not something
+///   the walk found.
+/// * `root` as directory: every `.py` file the walk reaches and `filter`
+///   keeps, rooted at `crate`.
+pub fn build_module_tree(
+    root: &Path,
+    filter: &dyn SourceFilter,
+) -> Result<Vec<PythonModule>, CouplingError> {
     if root.is_file() {
         if root.extension().and_then(std::ffi::OsStr::to_str) != Some("py") {
             return Err(CouplingError::UnsupportedRoot {
@@ -65,8 +71,11 @@ pub fn build_module_tree(root: &Path) -> Result<Vec<PythonModule>, CouplingError
         });
     }
 
-    let mut files = Vec::new();
-    collect_py_files(root, &mut files)?;
+    let mut files =
+        collect_files_with_extension(root, "py", filter).map_err(|source| CouplingError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
     files.sort();
 
     let mut out = Vec::with_capacity(files.len());
@@ -93,25 +102,6 @@ pub fn build_module_tree(root: &Path) -> Result<Vec<PythonModule>, CouplingError
         }
     }
     Ok(out)
-}
-
-fn collect_py_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), CouplingError> {
-    for entry in std::fs::read_dir(dir).map_err(|source| CouplingError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| CouplingError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_py_files(&path, out)?;
-        } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("py") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn parse_one(file: &Path, path: ModulePath) -> Result<PythonModule, CouplingError> {
@@ -339,7 +329,7 @@ fn resolve_from_base(current: &str, level: u32, module: Option<&str>) -> Option<
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
+    use lens_domain::{CouplingEdge, EdgeKind, IncludeAll, ModulePath};
     use rstest::rstest;
 
     use super::{build_module_tree, extract_edges, resolve_module};
@@ -378,6 +368,45 @@ mod tests {
         );
     }
 
+    /// A directory symlink is a link, not a subtree. For Python the
+    /// usual offender is a `.venv` (or a linked site-packages) parked
+    /// inside the tree, which a `Path::is_dir` recursion would pull every
+    /// installed distribution out of.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_is_not_walked_into() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("m.py"), "import os\n").expect("write m");
+        std::fs::create_dir(outside.path().join("site")).expect("mkdir site");
+        std::fs::write(outside.path().join("site/dep.py"), "x = 1\n").expect("write dep");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("venv")).expect("symlink");
+
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
+        let paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["crate::m"], "walked through a symlink");
+    }
+
+    /// The filter decides before the file is opened, which is what makes
+    /// `--exclude` cheap rather than merely tidy.
+    #[test]
+    fn filter_keeps_excluded_files_out_of_the_tree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("keep.py"), "x = 1\n").expect("write keep");
+        std::fs::write(root.path().join("drop.py"), "y = 2\n").expect("write drop");
+
+        struct SkipDrop;
+        impl lens_domain::SourceFilter for SkipDrop {
+            fn includes(&self, path: &std::path::Path) -> bool {
+                path.file_name().is_none_or(|n| n != "drop.py")
+            }
+        }
+
+        let modules = build_module_tree(root.path(), &SkipDrop).expect("tree");
+        let paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["crate::keep"]);
+    }
+
     /// A walked file that fails to parse drops out of the module tree
     /// with a warning while the rest of the package still builds
     /// (issue #494); an explicit single-file root keeps the hard error.
@@ -389,7 +418,8 @@ mod tests {
         let broken = root.path().join("broken.py");
         std::fs::write(&broken, "def ??? broken\n").expect("write broken");
 
-        let modules = build_module_tree(root.path()).expect("bad file must not fail the tree");
+        let modules =
+            build_module_tree(root.path(), &IncludeAll).expect("bad file must not fail the tree");
         let paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
         assert!(paths.contains(&"crate::a"), "got {paths:?}");
         assert!(paths.contains(&"crate::main"), "got {paths:?}");
@@ -405,7 +435,7 @@ mod tests {
             "edges between parseable files survive: {edges:?}",
         );
 
-        let err = build_module_tree(&broken).unwrap_err();
+        let err = build_module_tree(&broken, &IncludeAll).unwrap_err();
         assert!(matches!(err, super::CouplingError::Parse { .. }), "{err:?}",);
     }
 
@@ -419,7 +449,7 @@ mod tests {
         std::fs::write(root.path().join("main.py"), "import a\nfrom pkg import b\n")
             .expect("write main");
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let mut edges = extract_edges(&modules);
         edges.sort_by(|l, r| {
             (&l.from, &l.to, &l.symbol, l.kind).cmp(&(&r.from, &r.to, &r.symbol, r.kind))
@@ -448,7 +478,7 @@ mod tests {
         )
         .expect("mod");
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
 
         assert!(edges.contains(&e("crate::pkg::sub::mod", "crate::pkg::util", "util")));
@@ -460,7 +490,7 @@ mod tests {
         let txt = root.path().join("note.txt");
         std::fs::write(&txt, "hello").expect("write");
 
-        let err = build_module_tree(&txt).expect_err("must reject non .py root");
+        let err = build_module_tree(&txt, &IncludeAll).expect_err("must reject non .py root");
         assert!(matches!(err, super::CouplingError::UnsupportedRoot { .. }));
     }
 
@@ -479,7 +509,7 @@ mod tests {
         )
         .expect("mod");
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
 
         assert!(edges.contains(&e("crate::pkg::sub::mod", "crate::util", "util")));
@@ -500,7 +530,7 @@ mod tests {
         )
         .expect("mod");
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
 
         assert!(!edges.contains(&e("crate::pkg::sub::mod", "crate::util", "util")));
@@ -527,7 +557,7 @@ mod tests {
         )
         .expect("module");
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
 
         assert!(edges.contains(&e("crate::a::b::c::d::e", "crate::a::b::c::util", "util")));

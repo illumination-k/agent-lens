@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ignore = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -15,3 +16,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }
+tempfile = { workspace = true }

@@ -225,7 +225,7 @@ impl CommunitiesAnalyzer {
         path: impl AsRef<Path>,
         format: OutputFormat,
     ) -> Result<String, CrateAnalyzerError> {
-        let mut graph = build_graph(path.as_ref(), GraphPolicy::COUPLING)?;
+        let mut graph = build_graph(path.as_ref(), GraphPolicy::COUPLING, &self.path_filter)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: BTreeSet<&ModulePath> = graph.modules.iter().map(|m| &m.path).collect();
@@ -889,7 +889,7 @@ mod tests {
     fn a_module_holding_submodules_is_declared_in_itself() {
         let dir = tempfile::tempdir().unwrap();
         let lib = planted_crate(dir.path());
-        let graph = build_graph(&lib, GraphPolicy::COUPLING).unwrap();
+        let graph = build_graph(&lib, GraphPolicy::COUPLING, &AnalyzePathFilter::new()).unwrap();
         let member = Membership::new(&graph, Granularity::File);
 
         assert_eq!(

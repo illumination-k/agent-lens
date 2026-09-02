@@ -94,6 +94,7 @@ pub mod method_names;
 pub mod naming;
 pub mod risk;
 pub mod search;
+pub mod source_walk;
 pub mod syntax;
 pub mod tree;
 pub mod tsed;
@@ -146,6 +147,7 @@ pub use search::{
     Bm25Options, FuzzyOptions, IndexOptions, SearchDocument, SearchField, SearchHit, SearchIndex,
     TermScore,
 };
+pub use source_walk::{IncludeAll, SourceFilter, collect_files_with_extension};
 pub use syntax::{
     ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, InterfaceMethodShape,
     InterfaceShape, LexicalResolutionStatus, OwnerKind, OwnerShape, ParameterShape,

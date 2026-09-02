@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
+use lens_domain::{CouplingEdge, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension};
 use tree_sitter::Node;
 
 use crate::module_path::package_segments;
@@ -69,11 +69,16 @@ pub struct GoPackage {
 ///
 /// * `root` as `.go` file: one package named `crate` whose directory is
 ///   the file itself. No local imports can be resolved (the module
-///   prefix is unknown).
-/// * `root` as directory: every `.go` file recursively, grouped by its
-///   parent directory. The first `go.mod` discovered at or above `root`
-///   provides the module prefix used to recognise local imports.
-pub fn build_module_tree(root: &Path) -> Result<Vec<GoPackage>, CouplingError> {
+///   prefix is unknown). `filter` does not apply — an explicitly named
+///   root is the caller's own choice, not something the walk found.
+/// * `root` as directory: every `.go` file the walk reaches and `filter`
+///   keeps, grouped by its parent directory. The first `go.mod`
+///   discovered at or above `root` provides the module prefix used to
+///   recognise local imports.
+pub fn build_module_tree(
+    root: &Path,
+    filter: &dyn SourceFilter,
+) -> Result<Vec<GoPackage>, CouplingError> {
     if root.is_file() {
         if root.extension().and_then(std::ffi::OsStr::to_str) != Some("go") {
             return Err(CouplingError::UnsupportedRoot {
@@ -93,8 +98,11 @@ pub fn build_module_tree(root: &Path) -> Result<Vec<GoPackage>, CouplingError> {
         });
     }
 
-    let mut files = Vec::new();
-    collect_go_files(root, &mut files)?;
+    let mut files =
+        collect_files_with_extension(root, "go", filter).map_err(|source| CouplingError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
     files.sort();
 
     let mut by_dir: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
@@ -173,25 +181,6 @@ pub fn extract_edges(packages: &[GoPackage]) -> Vec<CouplingEdge> {
         }
     }
     edges
-}
-
-fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), CouplingError> {
-    for entry in std::fs::read_dir(dir).map_err(|source| CouplingError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| CouplingError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_go_files(&path, out)?;
-        } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("go") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Name a discovered package directory after its location below the
@@ -362,6 +351,8 @@ fn parse_module_directive(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use lens_domain::IncludeAll;
+
     use super::*;
 
     fn write(root: &Path, rel: &str, contents: &str) -> PathBuf {
@@ -382,6 +373,70 @@ mod tests {
         }
     }
 
+    /// A directory symlink is a link, not a subtree, and the walk must
+    /// treat it as one.
+    ///
+    /// This is the whole reason the adapter stopped hand-rolling its
+    /// recursion: `Path::is_dir` follows symlinks, so a build system that
+    /// parks convenience links in the repo root (Bazel's `bazel-*`, into
+    /// an output base carrying the toolchain's own sources) silently
+    /// multiplied a module tree by two orders of magnitude.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_is_not_walked_into() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        write(root.path(), "go.mod", "module example.com/p\n");
+        write(root.path(), "pkg/a.go", "package pkg\n");
+        write(outside.path(), "vendored/v.go", "package vendored\n");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).expect("symlink");
+
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
+        let paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["crate::pkg"], "walked through a symlink");
+    }
+
+    /// The filter decides before the file is opened, which is what makes
+    /// `--exclude` cheap rather than merely tidy.
+    #[test]
+    fn filter_keeps_excluded_files_out_of_the_tree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(root.path(), "go.mod", "module example.com/p\n");
+        write(root.path(), "keep/a.go", "package keep\n");
+        write(root.path(), "drop/b.go", "package drop\n");
+
+        struct SkipDrop;
+        impl lens_domain::SourceFilter for SkipDrop {
+            fn includes(&self, path: &Path) -> bool {
+                !path.components().any(|c| c.as_os_str() == "drop")
+            }
+        }
+
+        let modules = build_module_tree(root.path(), &SkipDrop).expect("tree");
+        let paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["crate::keep"]);
+    }
+
+    /// Walking through `ignore` means a Go package is discovered under
+    /// the same version-control rules every file-scoped analyzer already
+    /// applies: hidden directories are skipped always, and `.gitignore`
+    /// applies inside a repository (`ignore` requires the `.git` marker
+    /// before it reads one, so a bare directory keeps everything).
+    #[test]
+    fn hidden_and_gitignored_packages_are_skipped_inside_a_repository() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(root.path().join(".git")).expect("git marker");
+        write(root.path(), "go.mod", "module example.com/p\n");
+        write(root.path(), ".gitignore", "generated/\n");
+        write(root.path(), "pkg/a.go", "package pkg\n");
+        write(root.path(), "generated/g.go", "package generated\n");
+        write(root.path(), ".hidden/h.go", "package hidden\n");
+
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
+        let paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["crate::pkg"]);
+    }
+
     #[test]
     fn extracts_local_imports_under_module_prefix() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -397,7 +452,7 @@ mod tests {
             "package util\n\nfunc Run() {}\n",
         );
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let mut edges = extract_edges(&modules);
         edges.sort_by(|l, r| (&l.from, &l.to, &l.symbol).cmp(&(&r.from, &r.to, &r.symbol)));
 
@@ -435,7 +490,8 @@ mod tests {
             "package util\nfunc !!! {",
         );
 
-        let modules = build_module_tree(root.path()).expect("bad file must not fail the tree");
+        let modules =
+            build_module_tree(root.path(), &IncludeAll).expect("bad file must not fail the tree");
         assert!(
             modules
                 .iter()
@@ -449,7 +505,8 @@ mod tests {
             "edges from parseable files survive",
         );
 
-        let err = build_module_tree(&broken).expect_err("explicit file root keeps the hard error");
+        let err = build_module_tree(&broken, &IncludeAll)
+            .expect_err("explicit file root keeps the hard error");
         assert!(matches!(err, CouplingError::Parse { .. }), "{err:?}");
     }
 
@@ -506,7 +563,7 @@ mod tests {
             "package main\n\nimport (\n    \"fmt\"\n    \"os\"\n    \"github.com/foo/bar\"\n)\n\nfunc main() { fmt.Println(os.Args, bar.Stuff) }\n",
         );
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
         assert!(
             edges.is_empty(),
@@ -527,7 +584,7 @@ mod tests {
         write(root.path(), "pkg/bar/bar.go", "package bar\n");
         write(root.path(), "pkg/baz/baz.go", "package baz\n");
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
         let mut targets: Vec<&str> = edges
             .iter()
@@ -558,7 +615,7 @@ mod tests {
         );
         write(root.path(), "pkg/dep/dep.go", "package dep\n\nvar X = 1\n");
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let util = modules
             .iter()
             .find(|m| m.path.as_str() == "crate::pkg::util")
@@ -589,7 +646,7 @@ mod tests {
     fn rejects_non_go_file_root() {
         let root = tempfile::tempdir().expect("tempdir");
         let txt = write(root.path(), "note.txt", "hi");
-        let err = build_module_tree(&txt).expect_err("must reject non-.go root");
+        let err = build_module_tree(&txt, &IncludeAll).expect_err("must reject non-.go root");
         assert!(matches!(err, CouplingError::UnsupportedRoot { .. }));
     }
 
@@ -602,7 +659,7 @@ mod tests {
             "package main\n\nimport \"github.com/x/proj/pkg/util\"\n\nfunc main() { util.Run() }\n",
         );
 
-        let modules = build_module_tree(&go).expect("tree");
+        let modules = build_module_tree(&go, &IncludeAll).expect("tree");
         assert_eq!(modules.len(), 1);
         // No go.mod, no other packages — the import target isn't local.
         assert!(extract_edges(&modules).is_empty());
@@ -641,7 +698,7 @@ mod tests {
             "package util\n\nfunc Run() {}\n",
         );
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
         assert!(
             edges
@@ -678,7 +735,7 @@ mod tests {
             "package util\n\nimport \"github.com/x/proj\"\n\nvar _ = proj.Helper\n",
         );
 
-        let modules = build_module_tree(root.path()).expect("tree");
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
         let edges = extract_edges(&modules);
         assert!(
             edges

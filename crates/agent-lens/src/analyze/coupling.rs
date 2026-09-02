@@ -130,7 +130,7 @@ impl CouplingAnalyzer {
         path: impl AsRef<Path>,
         format: OutputFormat,
     ) -> Result<String, CouplingAnalyzerError> {
-        let mut graph = build_graph(path.as_ref(), GraphPolicy::COUPLING)?;
+        let mut graph = build_graph(path.as_ref(), GraphPolicy::COUPLING, &self.path_filter)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: std::collections::HashSet<&ModulePath> =
@@ -168,7 +168,7 @@ pub(crate) struct LabeledReport {
 /// is folded into `None` because "this directory isn't the kind of root
 /// we analyze" is not an error worth surfacing at session start.
 pub(crate) fn report_for_path(path: &Path) -> Result<Option<LabeledReport>, CouplingAnalyzerError> {
-    let graph = match build_graph(path, GraphPolicy::COUPLING) {
+    let graph = match build_graph(path, GraphPolicy::COUPLING, &AnalyzePathFilter::new()) {
         Ok(graph) => graph,
         Err(CouplingAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
         Err(e) => return Err(e),
@@ -946,6 +946,115 @@ mod tests {
             assert_ne!(e["from"], "generated");
             assert_ne!(e["to"], "generated");
         }
+    }
+
+    /// A Go exclude glob is matched against the package's files, not its
+    /// directory.
+    ///
+    /// A Go module is the one place where a module's `file` is a
+    /// directory, so filtering the finished module list compared a
+    /// directory path against a glob written for files: `vendor/dep/**`
+    /// needs a component after `dep/`, so the package survived an
+    /// exclusion that every file in it matched. Filtering during the walk
+    /// asks about the files, which is what the pattern was written for.
+    #[test]
+    fn go_exclude_pattern_matching_only_a_packages_files_still_drops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(dir.path(), "main.go", "package main\n\nfunc main() {}\n");
+        write_file(dir.path(), "vendor/dep/dep.go", "package dep\n");
+
+        let json = CouplingAnalyzer::new()
+            .with_exclude_patterns(vec!["vendor/dep/**".to_owned()])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let modules: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(modules.contains(&"github.com/x/proj"), "got {modules:?}");
+        assert!(
+            !modules.contains(&"github.com/x/proj/vendor/dep"),
+            "got {modules:?}",
+        );
+    }
+
+    /// `--exclude-tests` reaches Go test files, which it did not before.
+    ///
+    /// Filtering the finished module list could only ask whether a
+    /// *package directory* looked like a test, so `foo_test.go` sitting
+    /// beside production code was always parsed and its imports always
+    /// counted — a package's fan-out included dependencies only its tests
+    /// had. The walk asks per file, which is the granularity Go puts
+    /// tests at.
+    #[test]
+    fn go_exclude_tests_drops_test_files_beside_production_code() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(dir.path(), "pkg/impl.go", "package pkg\n\nfunc Run() {}\n");
+        write_file(
+            dir.path(),
+            "pkg/impl_test.go",
+            concat!(
+                "package pkg\n\n",
+                "import \"github.com/x/proj/testutil\"\n\n",
+                "func TestRun(t *testing.T) { testutil.Helper() }\n",
+            ),
+        );
+        write_file(
+            dir.path(),
+            "testutil/util.go",
+            "package testutil\n\nfunc Helper() {}\n",
+        );
+
+        let edges = |analyzer: CouplingAnalyzer| {
+            let json = analyzer.analyze(dir.path(), OutputFormat::Json).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            parsed["edge_count"].as_u64().unwrap()
+        };
+        assert_eq!(
+            edges(CouplingAnalyzer::new()),
+            1,
+            "the test file's import is an edge"
+        );
+        assert_eq!(
+            edges(CouplingAnalyzer::new().with_exclude_tests(true)),
+            0,
+            "excluding tests must drop the edge only a test file created",
+        );
+    }
+
+    /// Two exclusions of the same root must not share one cached graph.
+    ///
+    /// Before the filter reached the walk, the graph was filter-independent
+    /// and the [`AnalysisIndex`] key did not need to carry it. It does now:
+    /// without that, whichever analyzer in a profile ran first would decide
+    /// what every later one could see.
+    ///
+    /// [`AnalysisIndex`]: super::index::AnalysisIndex
+    #[test]
+    fn differently_excluded_runs_do_not_share_a_cached_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(dir.path(), "main.go", "package main\n\nfunc main() {}\n");
+        write_file(dir.path(), "vendor/dep/dep.go", "package dep\n");
+
+        let _scope = crate::analyze::index::AnalysisIndexScope::activate();
+        let count = |analyzer: CouplingAnalyzer| {
+            let json = analyzer.analyze(dir.path(), OutputFormat::Json).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            parsed["module_count"].as_u64().unwrap()
+        };
+        let excluded =
+            count(CouplingAnalyzer::new().with_exclude_patterns(vec!["vendor/**".to_owned()]));
+        let everything = count(CouplingAnalyzer::new());
+        assert!(
+            everything > excluded,
+            "the second run reused the first run's exclusion: {everything} vs {excluded}",
+        );
     }
 
     #[test]
