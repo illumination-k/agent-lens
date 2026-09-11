@@ -11,7 +11,7 @@ workspace = true
 lens-domain = { path = "../lens-domain", version = "0.6.1" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 # Pinned to the crates.io release: Go 1.27's `new(expr)` does not parse
 # until upstream tree-sitter-go covers it (issue #494). Such a file is
 # warned about and skipped rather than failing the run.
