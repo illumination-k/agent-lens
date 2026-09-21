@@ -21,7 +21,7 @@ pub(super) struct Report<'a> {
     /// Input path: a single source file, or the root directory walked.
     root: String,
     /// Body-scoring algorithm used: `tsed` or `token`. Surfaced because
-    /// the two methods are not on the same score scale.
+    /// different methods are not on the same score scale.
     method: &'static str,
     /// Comparison unit: `functions`, `types`, or `blocks`.
     target: &'static str,
@@ -866,6 +866,7 @@ mod tests {
             is_test: false,
             kind: None,
             implements: None,
+            lang: crate::analyze::SourceLang::Rust,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,

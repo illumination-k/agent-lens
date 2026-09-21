@@ -4,8 +4,10 @@ use lens_domain::{
     FunctionDef, FunctionSignature, LanguageParseError, LanguageParser, LineIndex, ReceiverShape,
     TreeNode, identifier_tokens, qualify as qualify_name,
 };
-use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
-use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
+use ruff_python_ast::visitor::{
+    Visitor, walk_elif_else_clause, walk_except_handler, walk_expr, walk_match_case, walk_stmt,
+};
+use ruff_python_ast::{ElifElseClause, ExceptHandler, Expr, MatchCase, Stmt, StmtFunctionDef};
 use ruff_python_parser::{ParseError, parse_module};
 
 use crate::walk::walk_module_fns;
@@ -286,7 +288,20 @@ impl<'a> Visitor<'a> for TreeBuilder {
         let label = stmt_label(stmt);
         let value = stmt_value(stmt);
         self.enter(label, value);
-        walk_stmt(self, stmt);
+        match stmt {
+            // `walk_stmt` inlines the `elif` / `else` clauses rather than
+            // routing them through `visit_elif_else_clause` (and visits
+            // each clause test twice while at it), so walk them here to
+            // get the clause nodes.
+            Stmt::If(if_stmt) => {
+                self.visit_expr(&if_stmt.test);
+                self.visit_body(&if_stmt.body);
+                for clause in &if_stmt.elif_else_clauses {
+                    self.visit_elif_else_clause(clause);
+                }
+            }
+            _ => walk_stmt(self, stmt),
+        }
         self.leave();
     }
 
@@ -295,6 +310,36 @@ impl<'a> Visitor<'a> for TreeBuilder {
         let value = expr_value(expr);
         self.enter(label, &value);
         walk_expr(self, expr);
+        self.leave();
+    }
+
+    // Clause containers get a node of their own. ruff represents an
+    // `elif` / `else` clause, an `except` handler, and a `match` case
+    // as neither statement nor expression, so without these the
+    // clause's statements would flatten into the parent's children,
+    // and `if c: a; b` would lower identically to `if c: a else: b`.
+    // Dependence analysis in particular needs the arms told apart, so
+    // an assignment in one does not shadow the other.
+    fn visit_elif_else_clause(&mut self, clause: &'a ElifElseClause) {
+        let label = if clause.test.is_some() {
+            "Elif"
+        } else {
+            "Else"
+        };
+        self.enter(label, "");
+        walk_elif_else_clause(self, clause);
+        self.leave();
+    }
+
+    fn visit_except_handler(&mut self, handler: &'a ExceptHandler) {
+        self.enter("ExceptHandler", "");
+        walk_except_handler(self, handler);
+        self.leave();
+    }
+
+    fn visit_match_case(&mut self, case: &'a MatchCase) {
+        self.enter("MatchCase", "");
+        walk_match_case(self, case);
         self.leave();
     }
 }

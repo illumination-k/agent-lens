@@ -240,6 +240,34 @@ name on several unrelated types. Names a project might plausibly own stay out:
 dropping them costs real edges, and the resolver's true positives come almost
 entirely from workspace-specific names.
 
+## DependenceVocabulary
+
+`analyze similarity --method pdg` scores a program dependence graph built from
+the same body tree the other methods compare, so no adapter emits a second
+lowering. What each adapter owns is the meaning of its own labels, stated
+once through `lens_domain::DependenceVocabulary`:
+
+- `role(node)` classifies one node as a `Reference` (a read of the named
+  local), a `Binding` (the names it binds and which children are the binding
+  patterns rather than reads), a `StatementList` (a block whose children are
+  each one statement), or `Plain` structure;
+- `is_statement(node)` marks a statement standing outside any list — an
+  `else if`, a braceless body, a Python suite member — so grammars without a
+  block node still get one node per statement;
+- `is_loop(node)` marks the constructs whose nested lists flow back to their
+  own start;
+- `kind(node)` is the coarse statement category the kernel's structure half
+  starts from; the default drops a parenthesised label qualifier
+  (`CallPath(name)` → `CallPath`).
+
+Graph construction — reaching definitions in statement order, branch
+merging, loop back-edges, the entry node parameters are bound at — and the
+Weisfeiler-Lehman kernel are language-neutral and live in `lens_domain::pdg`.
+The vocabularies are `lens_rust::RustVocabulary`, `lens_ts::TsVocabulary`,
+`lens_py::PythonVocabulary`, and `lens_golang::GoVocabulary`; each documents
+what its lowering cannot see (macro arguments, TypeScript assignment
+targets).
+
 ## Adapter migration
 
 Current migration state:

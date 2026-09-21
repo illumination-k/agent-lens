@@ -147,9 +147,9 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             },
             Field {
                 key: "method",
-                ty: "\"tsed\" or \"token\"",
+                ty: "\"tsed\", \"token\" or \"pdg\"",
                 presence: "optional",
-                desc: "Body-scoring algorithm: tsed (tree-edit distance, default) or token (k-gram overlap).",
+                desc: "Body-scoring algorithm: tsed (tree-edit distance, default), token (k-gram overlap) or pdg (dependence-graph kernel; invariant to statement order and local names).",
             },
             Field {
                 key: "target",

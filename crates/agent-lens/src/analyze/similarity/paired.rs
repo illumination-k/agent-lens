@@ -203,6 +203,7 @@ mod tests {
             is_test: false,
             kind: None,
             implements: None,
+            lang: crate::analyze::SourceLang::Rust,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,

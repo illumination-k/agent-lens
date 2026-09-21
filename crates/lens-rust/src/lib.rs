@@ -15,6 +15,7 @@ mod cohesion;
 mod common;
 mod complexity;
 mod coupling;
+mod dependence;
 mod method_names;
 mod parser;
 #[cfg(test)]
@@ -32,6 +33,7 @@ pub use call_index::{
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use coupling::{CouplingError, CrateModule, build_module_tree, extract_edges};
+pub use dependence::RustVocabulary;
 pub use lens_domain::WrapperFinding;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use parser::{

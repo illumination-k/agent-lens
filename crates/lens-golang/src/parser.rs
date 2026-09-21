@@ -485,6 +485,14 @@ fn node_value(node: Node<'_>, source: &[u8]) -> String {
         "function_declaration" | "method_declaration" => {
             function_name_text(node, source).unwrap_or("").to_owned()
         }
+        // `=` versus `+=` and friends: the operator is an anonymous
+        // token, so it would otherwise leave no trace in the tree, and
+        // dependence analysis needs to know whether the left side is
+        // read as well as written.
+        "assignment_statement" => node
+            .child_by_field_name("operator")
+            .map(|operator| node_text_or_empty(operator, source))
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }

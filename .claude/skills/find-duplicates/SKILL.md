@@ -67,6 +67,35 @@ agent-lens analyze similarity <path> --format md --sweep 0.6,0.75,0.85
 
 This clusters once at the lowest rung (`0.6`) and tags each cluster with the highest rung at which its complete-link structure survives. A cluster tagged `[survives ≥0.85]` is a near-verbatim clone (extract now); `[survives ≥0.6]` is a structural parallel that needs a shared abstraction rather than a literal extraction. `--sweep` conflicts with `--threshold` (it replaces the single cut). Reach for it when the default run reports _nothing_ between two files you suspect are duplicated — the looser pairs only show up at the lower rungs.
 
+## Finding semantic clones (`--method pdg`)
+
+The default score is a tree-edit distance, so it reads a body as the order its
+statements were written in: two functions that compute the same thing with
+independent statements shuffled, the locals renamed, or a value threaded
+through a differently named temporary score low. `--method pdg` scores the
+body's program dependence graph instead — one node per statement, edges for
+"this statement decides whether that one runs" and "this statement binds a
+name that one reads":
+
+```bash
+agent-lens analyze similarity <path> --method pdg --format md
+```
+
+Reordering independent statements and renaming locals leave the graph alone,
+so such pairs score `1.0` here. Reach for it when the default report misses a
+pair you know is the same computation, or to confirm that a high TSED pair is
+the same _logic_ and not just the same shape: half the score is the wiring,
+half is the statements themselves, so a body with the same statement kinds and
+dependences but different statements bottoms out at `0.5`. Scores are not
+comparable across methods, and `--method token` is the cheap third option
+(token k-gram overlap) for very large corpora.
+
+Two blind spots to read around. Anything an adapter lowers to an opaque leaf
+(a Rust macro invocation, a closure body in TypeScript) hides the names it
+reads, so a body that is mostly `println!` / `format!` arguments has fewer
+dependences than it should. And the TypeScript lowering keeps only the
+right-hand side of `x = …`, so plain reassignment is a read, never a binding.
+
 ## Finding siblings that drifted apart (`--paired-by`)
 
 Everything above answers "what is still similar?". That question has a

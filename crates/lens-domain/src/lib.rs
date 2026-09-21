@@ -70,6 +70,12 @@
 //!   language builtin, and reachability analysis consults the third to
 //!   tell a harmless annotation from one that can register a definition
 //!   with machinery no call site names.
+//! * [`pdg`] — program dependence graphs over the body tree (statements
+//!   as nodes, control and data dependences as edges) and the
+//!   Weisfeiler-Lehman similarity `similarity --method pdg` scores them
+//!   with. Adapters describe their label vocabulary through
+//!   [`DependenceVocabulary`]; graph construction and the kernel live
+//!   here.
 //! * [`wrapper`] — thin-wrapper finding shape. Adapters decide what
 //!   counts as a trivial adapter in their grammar; the result type is
 //!   shared so `agent-lens` can dispatch on language without per-adapter
@@ -92,6 +98,7 @@ pub mod line_index;
 pub mod lsh;
 pub mod method_names;
 pub mod naming;
+pub mod pdg;
 pub mod risk;
 pub mod search;
 pub mod source_walk;
@@ -142,6 +149,10 @@ pub use line_index::LineIndex;
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use method_names::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
 pub use naming::{identifier_tokens, path_segments, qualify, qualify_module, starts_uppercase};
+pub use pdg::{
+    DependenceEdge, DependenceKind, DependenceRole, DependenceVocabulary, Pdg, PdgFeatures,
+    PdgNode, PdgOptions, WL_ITERATIONS, build_pdg, pdg_similarity,
+};
 pub use risk::{FileCentrality, RiskEntry, compute_risk};
 pub use search::{
     Bm25Options, FuzzyOptions, IndexOptions, SearchDocument, SearchField, SearchHit, SearchIndex,
