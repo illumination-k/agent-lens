@@ -255,6 +255,39 @@ mod tests {
     }
 
     #[test]
+    fn plain_reassignment_binds_without_reading() {
+        let pdg = pdg_of(
+            "fn f() -> i32 {
+                let mut x = 0;
+                x = next();
+                x
+            }",
+        );
+        assert_eq!(edges(&pdg, DependenceKind::Data), vec![(2, 3)]);
+    }
+
+    #[test]
+    fn an_if_body_flows_once() {
+        // Only a loop body reaches its own start: the later assignment
+        // in the branch must not feed the earlier read.
+        let pdg = pdg_of(
+            "fn f(c: bool) -> i32 {
+                let mut b = 0;
+                if c {
+                    let a = f(b);
+                    b = g(a);
+                }
+                b
+            }",
+        );
+        // 1 let b, 2 if, 3 let a, 4 b = g(a), 5 b.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![(0, 2), (1, 3), (1, 5), (3, 4), (4, 5)]
+        );
+    }
+
+    #[test]
     fn while_header_reads_the_body_assignment() {
         let pdg = pdg_of(
             "fn f(n: i32) -> i32 {

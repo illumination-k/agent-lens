@@ -253,6 +253,87 @@ func f(xs []int) int {
     }
 
     #[test]
+    fn plain_reassignment_binds_without_reading() {
+        let pdg = pdg_of(
+            "package p
+
+func f() int {
+	x := 0
+	x = next()
+	return x
+}
+",
+        );
+        assert_eq!(edges(&pdg, DependenceKind::Data), vec![(2, 3)]);
+    }
+
+    #[test]
+    fn a_range_without_a_binding_reads_its_range() {
+        let pdg = pdg_of(
+            "package p
+
+func f(xs []int) int {
+	total := 0
+	for range xs {
+		total++
+	}
+	return len(xs) + total
+}
+",
+        );
+        // 1 total :=, 2 for, 3 total++, 4 return.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![(0, 2), (0, 4), (1, 3), (1, 4), (3, 3), (3, 4)]
+        );
+    }
+
+    #[test]
+    fn a_post_statement_binds_the_loop_variable() {
+        let pdg = pdg_of(
+            "package p
+
+func f(n int) int {
+	i := 0
+	for ; i < n; i++ {
+	}
+	return i
+}
+",
+        );
+        // 1 i :=, 2 for (reads i in its condition and post statement,
+        // and binds it in the post statement), 3 return. The loop's
+        // own binding is what the return sees: a statement's bindings
+        // replace the earlier ones, and only nested lists merge.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![(0, 2), (1, 2), (2, 2), (2, 3)]
+        );
+    }
+
+    #[test]
+    fn an_if_body_flows_once() {
+        let pdg = pdg_of(
+            "package p
+
+func f(c bool) int {
+	b := 0
+	if c {
+		a := f(b)
+		b = g(a)
+	}
+	return b
+}
+",
+        );
+        // 1 b :=, 2 if, 3 a :=, 4 b =, 5 return.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![(0, 2), (1, 3), (1, 5), (3, 4), (4, 5)]
+        );
+    }
+
+    #[test]
     fn a_selector_mutation_reads_its_base() {
         let pdg = pdg_of(
             "package p

@@ -666,6 +666,11 @@ mod tests {
             match node.label.as_str() {
                 "Block" => DependenceRole::StatementList,
                 "Ref" => DependenceRole::Reference(&node.value),
+                // A read with the name in the label, the way the Rust
+                // adapter spells `Path(x)`.
+                label if label.starts_with("Ref(") && label.ends_with(')') => {
+                    DependenceRole::Reference(&label[4..label.len() - 1])
+                }
                 "Let" => DependenceRole::Binding {
                     names: vec![&node.value],
                     targets: vec![0],
@@ -693,6 +698,11 @@ mod tests {
 
     fn r(name: &str) -> TreeNode {
         TreeNode::new("Ref", name)
+    }
+
+    /// A read carrying its name in the label rather than the value.
+    fn rl(name: &str) -> TreeNode {
+        TreeNode::leaf(format!("Ref({name})"))
     }
 
     fn pat(name: &str) -> TreeNode {
@@ -887,6 +897,93 @@ mod tests {
         // ...but the callee still tells the fingerprints apart.
         let other = graph(&block(vec![call("k", vec![r("b")])]), &["x"]);
         assert_ne!(pdg.nodes[3].fingerprint, other.nodes[1].fingerprint);
+    }
+
+    #[test]
+    fn a_label_carried_local_name_is_canonicalised() {
+        // The names differ only in the label of the read, which a
+        // rename-invariant fingerprint must see through — but only for
+        // a name the body binds.
+        let named = |name: &str| {
+            block(vec![
+                let_(name, call("f", vec![rl("x")])),
+                call("g", vec![rl(name)]),
+            ])
+        };
+        let invariant = similarity(&named("a"), &named("b"), &["x"], PdgOptions::default());
+        assert!((invariant - 1.0).abs() < 1e-9, "got {invariant}");
+        let literal = similarity(
+            &named("a"),
+            &named("b"),
+            &["x"],
+            PdgOptions {
+                compare_values: true,
+            },
+        );
+        assert!(literal < 1.0, "got {literal}");
+    }
+
+    #[test]
+    fn binding_targets_shape_the_fingerprint() {
+        // Same binding construct, different pattern shape: a tuple
+        // pattern is structure the fingerprint keeps, even though the
+        // names inside it are not.
+        let plain = block(vec![let_("a", call("f", vec![]))]);
+        let tuple = block(vec![TreeNode::with_children(
+            "Let",
+            "a",
+            vec![
+                TreeNode::with_children("PatTuple", "", vec![pat("a"), pat("b")]),
+                call("f", vec![]),
+            ],
+        )]);
+        let plain = graph(&plain, &[]);
+        let tuple = graph(&tuple, &[]);
+        assert_ne!(plain.nodes[1].fingerprint, tuple.nodes[1].fingerprint);
+    }
+
+    #[test]
+    fn a_plain_sibling_splits_a_run_of_loose_statements() {
+        // Two loose statements with an expression between them are two
+        // lists, so the second does not read what the first bound.
+        let body = block(vec![if_(
+            r("c"),
+            vec![TreeNode::with_children(
+                "Suite",
+                "",
+                vec![
+                    stmt(set("x", call("f", vec![]))),
+                    r("c"),
+                    stmt(call("g", vec![r("x")])),
+                ],
+            )],
+        )]);
+        let pdg = graph(&body, &["c"]);
+        assert_eq!(control(&pdg), vec![(0, 1), (1, 2), (1, 3)]);
+        assert_eq!(data(&pdg), vec![(0, 1)]);
+    }
+
+    /// A vocabulary that leaves `is_statement` at its default.
+    struct ListsOnly;
+
+    impl DependenceVocabulary for ListsOnly {
+        fn role<'a>(&self, node: &'a TreeNode) -> DependenceRole<'a> {
+            Toy.role(node)
+        }
+
+        fn is_loop(&self, node: &TreeNode) -> bool {
+            Toy.is_loop(node)
+        }
+    }
+
+    #[test]
+    fn is_statement_defaults_to_false() {
+        // Without the override the `Stmt` wrapper is plain structure,
+        // so the binding inside it folds into the `if` statement.
+        let body = block(vec![if_(r("c"), vec![stmt(let_("y", r("c")))])]);
+        let pdg = build_pdg(&body, &["c"], &ListsOnly, PdgOptions::default());
+        assert_eq!(pdg.statement_count(), 1);
+        assert_eq!(data(&pdg), vec![(0, 1)]);
     }
 
     #[test]

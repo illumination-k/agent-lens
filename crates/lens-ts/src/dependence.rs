@@ -147,6 +147,43 @@ mod tests {
     }
 
     #[test]
+    fn a_declaration_inside_a_block_is_its_own_statement() {
+        let pdg = pdg_of(
+            "function f(c: boolean): void {
+                if (c) {
+                    const x = next();
+                    use(x);
+                }
+            }",
+        );
+        assert_eq!(pdg.statement_count(), 3);
+        assert_eq!(
+            edges(&pdg, DependenceKind::Control),
+            vec![(0, 1), (1, 2), (1, 3)]
+        );
+        assert_eq!(edges(&pdg, DependenceKind::Data), vec![(0, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn an_if_body_flows_once() {
+        let pdg = pdg_of(
+            "function f(c: boolean, b: number): number {
+                if (c) {
+                    const a = f(b);
+                    const b2 = g(a);
+                    b = b2;
+                }
+                return b;
+            }",
+        );
+        // 1 if, 2 const a, 3 const b2, 4 b = b2, 5 return.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![(0, 1), (0, 2), (0, 5), (2, 3), (3, 4)]
+        );
+    }
+
+    #[test]
     fn a_for_initialiser_feeds_the_header_and_body() {
         let pdg = pdg_of(
             "function f(n: number): number {

@@ -272,6 +272,53 @@ mod tests {
     }
 
     #[test]
+    fn annotated_and_for_targets_bind_only_the_target() {
+        let pdg = pdg_of(
+            "def f(x, xs):
+    y: int = x
+    w = x
+    for i in xs:
+        y += i
+    return w + y + len(xs)
+",
+        );
+        // 1 y: int = x, 2 w = x, 3 for, 4 y += i, 5 return.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (0, 5),
+                (1, 4),
+                (1, 5),
+                (2, 5),
+                (3, 4),
+                (4, 4),
+                (4, 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_if_body_flows_once() {
+        let pdg = pdg_of(
+            "def f(c):
+    b = 0
+    if c:
+        a = f(b)
+        b = g(a)
+    return b
+",
+        );
+        // 1 b = 0, 2 if, 3 a = f(b), 4 b = g(a), 5 return.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![(0, 2), (1, 3), (1, 5), (3, 4), (4, 5)]
+        );
+    }
+
+    #[test]
     fn with_binds_its_as_target() {
         let pdg = pdg_of(
             "def f(path):
