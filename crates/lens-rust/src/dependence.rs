@@ -8,8 +8,11 @@
 //! single-segment, lowercase-initial `Path(...)`. Multi-segment paths
 //! are items, uppercase-initial ones are unit variants and constants;
 //! neither is a local. Bindings are the pattern positions of `let`,
-//! `for`, `if let` / `while let`, match arms, and closure parameters,
-//! plus `=` and the compound-assignment operators on a bare path.
+//! `for`, `if let` / `while let`, and match arms, plus `=` and the
+//! compound-assignment operators on a bare path. Closure parameters
+//! need no rule: a pattern is never a `Path(...)` read, and a closure
+//! body's reads are attributed to the enclosing statement, outer name
+//! or not.
 //!
 //! Macro invocations are opaque leaves in the lowering, so a local read
 //! only inside `println!` / `format!` / `vec!` arguments is invisible
@@ -51,20 +54,6 @@ impl DependenceVocabulary for RustVocabulary {
                 },
                 // `x.field = …`, `xs[i] = …`: the base is read, not rebound.
                 None => DependenceRole::Plain,
-            },
-            // Closure parameters are scoped to the closure, which is
-            // part of the statement it sits in: skipping the patterns
-            // keeps them out of the reads, and binding nothing keeps
-            // them from shadowing the outer name for later statements.
-            "Closure" => DependenceRole::Binding {
-                names: Vec::new(),
-                targets: node
-                    .children
-                    .iter()
-                    .enumerate()
-                    .take_while(|(_, child)| child.label.starts_with("Pat"))
-                    .map(|(index, _)| index)
-                    .collect(),
             },
             _ => match compound_assignment_target(node) {
                 Some(name) => DependenceRole::Binding {

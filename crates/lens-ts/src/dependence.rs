@@ -166,20 +166,22 @@ mod tests {
 
     #[test]
     fn an_if_body_flows_once() {
+        // Only a loop body reaches its own start: the later declaration
+        // in the branch must not feed the earlier read of its name.
         let pdg = pdg_of(
-            "function f(c: boolean, b: number): number {
+            "function f(c: boolean): number {
                 if (c) {
-                    const a = f(b);
-                    const b2 = g(a);
-                    b = b2;
+                    const a = f(d);
+                    const d = g(a);
+                    return d;
                 }
-                return b;
+                return 0;
             }",
         );
-        // 1 if, 2 const a, 3 const b2, 4 b = b2, 5 return.
+        // 1 if, 2 const a, 3 const d, 4 return d, 5 return 0.
         assert_eq!(
             edges(&pdg, DependenceKind::Data),
-            vec![(0, 1), (0, 2), (0, 5), (2, 3), (3, 4)]
+            vec![(0, 1), (2, 3), (3, 4)]
         );
     }
 

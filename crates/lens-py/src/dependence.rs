@@ -56,9 +56,15 @@ impl DependenceVocabulary for PythonVocabulary {
             "Name" => DependenceRole::Reference(&node.value),
             // Value first, then every target: `a = b = value`.
             "Assign" => binding_over(node, |index, child| index >= 1 && is_name_pattern(child)),
-            // `x += 1` reads what it writes, so the target stays walked.
+            // `x += 1` reads what it writes, so the target stays walked;
+            // `obj.attr += 1` mutates and binds nothing.
             "AugAssign" => DependenceRole::Binding {
-                names: node.children.last().map(pattern_names).unwrap_or_default(),
+                names: node
+                    .children
+                    .last()
+                    .filter(|target| is_name_pattern(target))
+                    .map(pattern_names)
+                    .unwrap_or_default(),
                 targets: Vec::new(),
             },
             // Value, annotation, target; `x: int` alone has no value
@@ -315,6 +321,24 @@ mod tests {
         assert_eq!(
             edges(&pdg, DependenceKind::Data),
             vec![(0, 2), (1, 3), (1, 5), (3, 4), (4, 5)]
+        );
+    }
+
+    #[test]
+    fn an_attribute_augmented_assignment_binds_nothing() {
+        let pdg = pdg_of(
+            "def f(self, v):
+    total = 0
+    self.total += v
+    return total + self.total
+",
+        );
+        // 1 total = 0, 2 self.total += v, 3 return: the mutation reads
+        // `self` and `v` from the entry and binds neither `self` nor a
+        // local `total`.
+        assert_eq!(
+            edges(&pdg, DependenceKind::Data),
+            vec![(0, 2), (0, 3), (1, 3)]
         );
     }
 
