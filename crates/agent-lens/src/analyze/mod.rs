@@ -47,6 +47,7 @@ pub mod single_use;
 mod source_files;
 mod static_file_graph;
 pub mod test_only;
+pub mod test_redundancy;
 pub mod unreachable;
 pub mod untested;
 pub mod visibility;
@@ -93,6 +94,7 @@ pub use similarity::{
 pub use single_impl::SingleImplAnalyzer;
 pub use single_use::SingleUseAnalyzer;
 pub use test_only::TestOnlyAnalyzer;
+pub use test_redundancy::TestRedundancyAnalyzer;
 pub use unreachable::{Tier as UnreachableTier, UnreachableAnalyzer};
 pub use untested::UntestedAnalyzer;
 pub use visibility::VisibilityAnalyzer;

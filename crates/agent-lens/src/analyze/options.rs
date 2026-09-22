@@ -198,6 +198,7 @@ mod tests {
     use crate::analyze::single_impl::{SingleImplAnalyzer, SingleImplOptions};
     use crate::analyze::single_use::{SingleUseAnalyzer, SingleUseOptions};
     use crate::analyze::test_only::{TestOnlyAnalyzer, TestOnlyOptions};
+    use crate::analyze::test_redundancy::{TestRedundancyAnalyzer, TestRedundancyOptions};
     use crate::analyze::unreachable::{Tier, UnreachableAnalyzer, UnreachableOptions};
     use crate::analyze::untested::{UntestedAnalyzer, UntestedOptions};
     use crate::analyze::visibility::{VisibilityAnalyzer, VisibilityOptions};
@@ -532,6 +533,34 @@ mod tests {
         assert_ne!(
             format!("{via_options:?}"),
             format!("{:?}", SimilarityAnalyzer::new()),
+        );
+    }
+
+    /// `test-redundancy` hand-writes its options for the same reason
+    /// similarity does, so it needs the same guard that every field
+    /// still reaches the builder.
+    #[test]
+    fn test_redundancy_options_reach_the_analyzer() {
+        let opts = TestRedundancyOptions {
+            top: Some(3),
+            threshold: 0.6,
+            method: crate::analyze::SimilarityMethod::Pdg,
+            min_lines: Some(9),
+            min_body_nodes: Some(12),
+            no_reach_guard: true,
+        };
+        let via_options = TestRedundancyAnalyzer::new().with_options(opts);
+        let via_builders = TestRedundancyAnalyzer::new()
+            .with_threshold(0.6)
+            .with_method(crate::analyze::SimilarityMethod::Pdg)
+            .with_min_lines_opt(Some(9))
+            .with_min_body_nodes_opt(Some(12))
+            .with_reach_guard(false)
+            .with_top(Some(3));
+        assert_eq!(format!("{via_options:?}"), format!("{via_builders:?}"));
+        assert_ne!(
+            format!("{via_options:?}"),
+            format!("{:?}", TestRedundancyAnalyzer::new()),
         );
     }
 

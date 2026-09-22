@@ -168,7 +168,7 @@ pub enum SimilarityMethod {
 }
 
 impl SimilarityMethod {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Tsed => "tsed",
             Self::Token => "token",
@@ -984,6 +984,162 @@ impl SimilarityAnalyzer {
             }
         }
     }
+
+    /// Run the corpus → candidate → score pipeline and stop there,
+    /// handing back the units and every pair that cleared the
+    /// threshold.
+    ///
+    /// The seam exists for `analyze test-redundancy`, which needs the
+    /// same scored graph but replaces clustering with its own selection
+    /// pass. Everything up to and including scoring is identical to
+    /// [`Self::find_clusters`]; the diff gate is not applied, because
+    /// the consumer has no `--diff-only` mode and a half-filtered
+    /// redundancy graph would name representatives that the run never
+    /// looked at.
+    pub(crate) fn scored_corpus(
+        &self,
+        roots: &AnalyzeRoots,
+    ) -> Result<ScoredCorpus, AnalyzerError> {
+        self.validate_score_cuts()?;
+        let started = Instant::now();
+        let min_lines = self.resolved_min_lines();
+        let corpus = collect_corpus(
+            roots,
+            &self.filter.path_filter(),
+            self.selection,
+            self.target,
+            min_lines,
+        )?;
+        let threshold = self.cluster_threshold();
+        let profiles = self.tree_profiles(&corpus, min_lines);
+        let candidates = candidate_pairs(
+            &corpus,
+            min_lines,
+            &profiles,
+            self.target.weights().body_candidate_threshold(threshold),
+            &self.tsed_options(),
+            self.method,
+            self.allow_lsh(),
+        );
+        enforce_candidate_pair_limit(
+            candidates.eligible_function_count,
+            candidates.pairs.len(),
+            MAX_CANDIDATE_PAIRS,
+            min_lines,
+            candidates.strategy.as_str(),
+        )?;
+        let scored = self.score_pairs(&corpus, &profiles, &candidates.pairs, threshold);
+        let value_profiles = value_profiles_for(&corpus, &scored.pairs);
+        let pairs = scored
+            .pairs
+            .iter()
+            .map(|pair| ScoredUnitPair {
+                i: pair.i,
+                j: pair.j,
+                similarity: pair.components.similarity,
+                value_similarity: value_profiles
+                    .get(&pair.i)
+                    .zip(value_profiles.get(&pair.j))
+                    .map_or(0.0, |(a, b)| token::token_similarity(a, b)),
+            })
+            .collect();
+        let units = corpus
+            .iter()
+            .map(|unit| ScoredUnit {
+                rel_path: unit.rel_path.clone(),
+                name: unit.name().to_owned(),
+                start_line: unit.start_line(),
+                end_line: unit.end_line(),
+                line_count: unit.line_count(),
+                body_node_count: tree_size(unit.body_tree()),
+            })
+            .collect();
+        debug!(
+            target: PROFILE_TARGET,
+            path = %roots.display(),
+            unit_count = corpus.len(),
+            matched_pair_count = scored.pairs.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "similarity scored corpus finished"
+        );
+        Ok(ScoredCorpus { units, pairs })
+    }
+}
+
+/// Token profiles that compare identifiers and literals, built only for
+/// the units a reported pair actually names.
+///
+/// The value reading is a second opinion on pairs the run already kept,
+/// so building it over the whole corpus would tokenize thousands of
+/// bodies to answer a question asked about a handful.
+fn value_profiles_for(corpus: &[OwnedUnit], pairs: &[ScoredPair]) -> HashMap<usize, TokenProfile> {
+    let mut wanted: Vec<usize> = pairs.iter().flat_map(|pair| [pair.i, pair.j]).collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    wanted
+        .into_par_iter()
+        .filter_map(|i| {
+            let profile = TokenProfile::from_tree(corpus.get(i)?.body_tree(), true);
+            Some((i, profile))
+        })
+        .collect()
+}
+
+fn tree_size(tree: &lens_domain::TreeNode) -> usize {
+    1 + tree.children.iter().map(tree_size).sum::<usize>()
+}
+
+/// One unit of a scored corpus, flattened for a consumer outside this
+/// module. Carries locations rather than the parse-bound [`OwnedUnit`],
+/// which borrows the corpus that produced it.
+#[derive(Debug, Clone)]
+pub(crate) struct ScoredUnit {
+    /// Display path, relative to the walk root.
+    pub(crate) rel_path: String,
+    pub(crate) name: String,
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) line_count: usize,
+    /// Nodes in the body tree — how much of the body the analyzer can
+    /// actually see, which is not what `line_count` measures.
+    ///
+    /// The two come apart wherever an adapter keeps a construct opaque.
+    /// The Rust adapter lowers a macro statement to one leaf labelled
+    /// with the macro's path, so `assert_eq!(index.line(offset), want)`
+    /// is a two-node body however long the line is, and a `#[rstest]`
+    /// signature can carry it well past any `--min-lines` floor.
+    pub(crate) body_node_count: usize,
+}
+
+/// One scored pair, under both readings of the same two bodies.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScoredUnitPair {
+    pub(crate) i: usize,
+    pub(crate) j: usize,
+    /// Score from the configured [`SimilarityMethod`]. Under the
+    /// function defaults it compares structure and discounts renames, so
+    /// two bodies differing only in their literals still score near 1.
+    pub(crate) similarity: f64,
+    /// The same bodies as token multisets, compared with each node's
+    /// *value* as well as its label — what the language's adapter
+    /// recorded as the text of that node. Well below `similarity` means
+    /// the pair shares a shape but not the things it names.
+    ///
+    /// What a value is differs by adapter, and the Rust one is the
+    /// narrowest: it records identifiers and paths, but labels a literal
+    /// by kind (`Int`, `Str`) and keeps its text out of the tree. Two
+    /// Rust bodies that differ only in their numbers therefore score 1
+    /// here.
+    pub(crate) value_similarity: f64,
+}
+
+/// Units plus the pairs among them that cleared the threshold — a
+/// sparse similarity graph, not a dense matrix: candidate generation
+/// never enumerated the pairs that are obviously far apart.
+#[derive(Debug)]
+pub(crate) struct ScoredCorpus {
+    pub(crate) units: Vec<ScoredUnit>,
+    pub(crate) pairs: Vec<ScoredUnitPair>,
 }
 
 fn build_tree_profiles(
