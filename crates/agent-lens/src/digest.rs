@@ -303,6 +303,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::SingleUse => single_use(report, base),
         ToolName::Parameters => parameters(report, base),
         ToolName::TestOnly => test_only(report, base),
+        ToolName::TestRedundancy => test_redundancy(report, base),
         ToolName::Untested => untested(report, base),
         ToolName::Unreachable => unreachable(report, base),
         ToolName::Visibility => visibility(report, base),
@@ -662,6 +663,72 @@ fn test_only(report: &Value, base: &Path) -> Extraction {
         "test-only function",
         "test-only functions",
     )
+}
+
+/// Foldable tests counted per file, plus the suite-level redundancy
+/// figure.
+///
+/// Counts the members, never the representatives: a group's
+/// representative is the test being *kept*, so crediting its file with
+/// a finding would point an agent at the one test the report is not
+/// asking anyone to touch. Guard-held members are left out for the same
+/// reason — the report already decided they stay.
+fn test_redundancy(report: &Value, base: &Path) -> Extraction {
+    Extraction {
+        files: foldable_tests_by_file(report, base),
+        corpus: redundancy_headline(report).into_iter().collect(),
+    }
+}
+
+/// One row per file holding a test the report offers as foldable.
+fn foldable_tests_by_file(report: &Value, base: &Path) -> Vec<FileFinding> {
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut per_file: HashMap<PathBuf, u64> = HashMap::new();
+    let members = arr(report, "groups")
+        .iter()
+        .flat_map(|group| arr(group, "members"))
+        .filter(|member| member.get("folds") == Some(&Value::Bool(true)));
+    for member in members {
+        let Some(file) = str_of(member, "file") else {
+            continue;
+        };
+        let path = from_base(base, file);
+        if !per_file.contains_key(&path) {
+            order.push(path.clone());
+        }
+        *per_file.entry(path).or_insert(0) += 1;
+    }
+    order
+        .into_iter()
+        .map(|path| {
+            let count = per_file[&path];
+            FileFinding {
+                headline: format!(
+                    "{} foldable",
+                    counted(count, "near-copy test", "near-copy tests"),
+                ),
+                path,
+            }
+        })
+        .collect()
+}
+
+fn redundancy_headline(report: &Value) -> Option<String> {
+    let summary = report.get("summary")?;
+    let foldable = u64_of(summary, "foldable_count")?;
+    if foldable == 0 {
+        return None;
+    }
+    let score = f64_of(summary, "redundancy_score").unwrap_or(0.0);
+    Some(format!(
+        "{} foldable into {} (suite redundancy {score:.2})",
+        counted(foldable, "near-copy test", "near-copy tests"),
+        counted(
+            u64_of(summary, "group_count").unwrap_or(0),
+            "group",
+            "groups",
+        ),
+    ))
 }
 
 /// Chains grouped by terminus file — the terminus is where the work
@@ -1266,7 +1333,7 @@ mod tests {
     use super::*;
 
     /// Every tool the digest folds, for shape-robustness sweeps.
-    const FOLDED: [ToolName; 19] = [
+    const FOLDED: [ToolName; 20] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Similarity,
@@ -1275,6 +1342,7 @@ mod tests {
         ToolName::Hotspot,
         ToolName::Risk,
         ToolName::Hubs,
+        ToolName::TestRedundancy,
         ToolName::Untested,
         ToolName::Unreachable,
         ToolName::Visibility,
@@ -1423,6 +1491,61 @@ mod tests {
                 ("/repo/src/one.rs", "1 inline candidate (`only`)"),
             ],
         );
+    }
+
+    /// Only the members offered as foldable are findings. A
+    /// representative is the test being kept, and a member the guard
+    /// held back has already been decided against folding, so crediting
+    /// either file would point an agent at a test nobody asked it to
+    /// touch.
+    #[test]
+    fn test_redundancy_counts_only_the_foldable_members_per_file() {
+        let report = json!({
+            "groups": [
+                {
+                    "representative": { "file": "keep.rs", "name": "kept" },
+                    "members": [
+                        { "file": "many.rs", "name": "a", "folds": true },
+                        { "file": "many.rs", "name": "b", "folds": true },
+                        { "file": "held.rs", "name": "c", "folds": false },
+                    ],
+                },
+                {
+                    "representative": { "file": "keep.rs", "name": "other" },
+                    "members": [{ "file": "one.rs", "name": "d", "folds": true }],
+                },
+            ],
+            "summary": {
+                "foldable_count": 3,
+                "group_count": 2,
+                "redundancy_score": 0.42,
+            },
+        });
+        let extraction = test_redundancy(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [
+                ("/repo/src/many.rs", "2 near-copy tests foldable"),
+                ("/repo/src/one.rs", "1 near-copy test foldable"),
+            ],
+        );
+        assert_eq!(
+            extraction.corpus,
+            ["3 near-copy tests foldable into 2 groups (suite redundancy 0.42)"],
+        );
+    }
+
+    /// A run that found groups but can fold none of them has no headline
+    /// to contribute.
+    #[test]
+    fn test_redundancy_headline_is_absent_when_nothing_folds() {
+        let report = json!({
+            "groups": [],
+            "summary": { "foldable_count": 0, "group_count": 0, "redundancy_score": 0.1 },
+        });
+        let extraction = test_redundancy(&report, &base());
+        assert!(extraction.files.is_empty());
+        assert!(extraction.corpus.is_empty());
     }
 
     #[test]

@@ -9,8 +9,8 @@ use agent_lens::analyze::{
     FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HiddenCouplingAnalyzer,
     HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat,
     ParametersAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer, SingleImplAnalyzer,
-    SingleUseAnalyzer, TestOnlyAnalyzer, UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer,
-    WrapperAnalyzer,
+    SingleUseAnalyzer, TestOnlyAnalyzer, TestRedundancyAnalyzer, UnreachableAnalyzer,
+    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -21,7 +21,8 @@ use super::args::{
     AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs,
     AnalyzeParametersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs,
     AnalyzeSimilarityArgs, AnalyzeSingleImplArgs, AnalyzeSingleUseArgs, AnalyzeTestOnlyArgs,
-    AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeTestRedundancyArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
+    AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -146,6 +147,12 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.test_only.clone().unwrap_or_default(),
         }),
+        config::ToolName::TestRedundancy => {
+            AnalyzeCommand::TestRedundancy(AnalyzeTestRedundancyArgs {
+                common,
+                opts: profile.test_redundancy.clone().unwrap_or_default(),
+            })
+        }
         config::ToolName::Layers => AnalyzeCommand::Layers(AnalyzeLayersArgs {
             common,
             opts: profile.layers.clone().unwrap_or_default(),
@@ -254,6 +261,7 @@ impl_with_analyze_path_args!(
     SingleImplAnalyzer,
     SingleUseAnalyzer,
     TestOnlyAnalyzer,
+    TestRedundancyAnalyzer,
     UnreachableAnalyzer,
     UntestedAnalyzer,
     VisibilityAnalyzer,
@@ -349,6 +357,7 @@ impl AnalyzeCommand {
                 SingleImpl => SingleImplAnalyzer,
                 SingleUse => SingleUseAnalyzer,
                 TestOnly => TestOnlyAnalyzer,
+                TestRedundancy => TestRedundancyAnalyzer,
                 Unreachable => UnreachableAnalyzer,
                 Untested => UntestedAnalyzer,
                 Visibility => VisibilityAnalyzer,

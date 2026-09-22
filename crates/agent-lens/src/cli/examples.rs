@@ -31,6 +31,7 @@ Pick an analyzer by question:
     is this body just a forwarder?        analyze wrapper
     is one caller all this function has?  analyze single-use
     is one value all this param gets?     analyze parameters
+    did I write this test twice?          analyze test-redundancy
     is one impl all this trait has?       analyze single-impl
     how many hops before real work?       analyze delegation
     does this type do too many things?    analyze cohesion
@@ -186,6 +187,14 @@ Examples:
 
     agent-lens analyze single-use src/ --format md
     agent-lens analyze single-use src/ --max-loc 12 --max-cyclomatic 4 --format md
+";
+
+pub const TEST_REDUNDANCY: &str = "\
+Examples:
+
+    agent-lens analyze test-redundancy crates/ --format md
+    agent-lens analyze test-redundancy crates/ --threshold 0.9 --top 10 --format md
+    agent-lens analyze test-redundancy crates/ --method pdg --no-reach-guard
 ";
 
 pub const PARAMETERS: &str = "\

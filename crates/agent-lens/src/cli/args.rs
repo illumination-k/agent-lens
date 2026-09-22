@@ -23,6 +23,7 @@ use agent_lens::analyze::similarity::SimilarityOptions;
 use agent_lens::analyze::single_impl::SingleImplOptions;
 use agent_lens::analyze::single_use::SingleUseOptions;
 use agent_lens::analyze::test_only::TestOnlyOptions;
+use agent_lens::analyze::test_redundancy::TestRedundancyOptions;
 use agent_lens::analyze::unreachable::UnreachableOptions;
 use agent_lens::analyze::untested::UntestedOptions;
 use agent_lens::analyze::visibility::VisibilityOptions;
@@ -966,6 +967,35 @@ pub(super) enum AnalyzeCommand {
     /// section at `--top` (default 20).
     #[command(name = "test-only", after_long_help = examples::TEST_ONLY)]
     TestOnly(AnalyzeTestOnlyArgs),
+    /// Report tests that are near-copies of each other, and which one
+    /// of each set to keep.
+    ///
+    /// Scores test bodies against each other exactly as `analyze
+    /// similarity` does, then runs a greedy dominating-set pass over
+    /// the result: the test that makes the most others redundant is the
+    /// one to keep, and the rest are its near-copies. Modelled on
+    /// similarity-based test-suite minimization (LTM), without the
+    /// language-model embeddings or the genetic search — candidate
+    /// generation already hands the selection a sparse graph, where
+    /// greedy is both cheaper and deterministic. Each group carries a
+    /// verdict from how far the bodies agree once each node's recorded
+    /// value counts and not just its label: `duplicate` when nothing
+    /// the parser can see separates the copies, `parameterize` when
+    /// they share a shape but name different things, which is one table
+    /// test rather than a deletion. The call graph then subtracts what
+    /// it can disprove, in two directions — a pair whose tests reach no
+    /// production function in common is not a pair, and a test that is
+    /// the sole static caller of something is never offered as
+    /// foldable; `--no-reach-guard` skips the graph build and both
+    /// checks. A body smaller than `--min-body-nodes` is skipped
+    /// outright, because a Rust test that is one unexpanded
+    /// `assert_eq!` has the same two-node body as every other such
+    /// test. Structural, not behavioural: matching bodies are not
+    /// matching assertions, so the report names candidates and never
+    /// blesses a deletion. JSON is the default; `--format md` caps the
+    /// group list at `--top` (default 20).
+    #[command(name = "test-redundancy", after_long_help = examples::TEST_REDUNDANCY)]
+    TestRedundancy(AnalyzeTestRedundancyArgs),
     /// Report production functions with no static call path from any
     /// test function.
     ///
@@ -1282,6 +1312,14 @@ pub(super) struct AnalyzeParametersArgs {
     pub(super) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(super) opts: ParametersOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeTestRedundancyArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: TestRedundancyOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1955,6 +1993,49 @@ mod tests {
         assert_eq!(args.opts.max_loc, Some(12));
         assert_eq!(args.opts.max_cyclomatic, Some(4));
         assert_eq!(args.opts.top, Some(10));
+    }
+
+    #[test]
+    fn parses_analyze_test_redundancy_with_its_cuts() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "test-redundancy",
+            "crates",
+            "--threshold",
+            "0.9",
+            "--method",
+            "pdg",
+            "--min-body-nodes",
+            "12",
+            "--no-reach-guard",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::TestRedundancy(args)) = cli.command else {
+            panic!("expected analyze test-redundancy");
+        };
+        assert_eq!(args.opts.threshold, 0.9);
+        assert_eq!(args.opts.method, SimilarityMethod::Pdg);
+        assert_eq!(args.opts.min_body_nodes, Some(12));
+        assert!(args.opts.no_reach_guard);
+    }
+
+    /// The defaults the analyzer documents are the defaults clap parses.
+    #[test]
+    fn analyze_test_redundancy_defaults_match_the_analyzer() {
+        let cli = Cli::try_parse_from(["agent-lens", "analyze", "test-redundancy", "crates"])
+            .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::TestRedundancy(args)) = cli.command else {
+            panic!("expected analyze test-redundancy");
+        };
+        assert_eq!(
+            args.opts.threshold,
+            agent_lens::analyze::test_redundancy::DEFAULT_THRESHOLD,
+        );
+        assert_eq!(args.opts.min_body_nodes, None);
+        assert!(!args.opts.no_reach_guard);
     }
 
     #[test]

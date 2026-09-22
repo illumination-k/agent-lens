@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 27] = [
+const TOOL_ORDER: [ToolName; 28] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -40,6 +40,7 @@ const TOOL_ORDER: [ToolName; 27] = [
     ToolName::SingleUse,
     ToolName::Parameters,
     ToolName::TestOnly,
+    ToolName::TestRedundancy,
     ToolName::Untested,
     ToolName::Unreachable,
     ToolName::Visibility,
@@ -85,7 +86,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, parameters, risk, search, similarity, single-impl, single-use, test-only, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, parameters, risk, search, similarity, single-impl, single-use, test-only, test-redundancy, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -500,6 +501,44 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap each markdown finding list to the top N rows.",
             },
         ],
+        ToolName::TestRedundancy => &[
+            Field {
+                key: "threshold",
+                ty: "float",
+                presence: "default: 0.85",
+                desc: "Similarity at or above which two test bodies are near-copies. Held at the `similarity` default so a group here is a cluster that report would also show.",
+            },
+            Field {
+                key: "method",
+                ty: "\"tsed\", \"token\" or \"pdg\"",
+                presence: "default: tsed",
+                desc: "Body-scoring algorithm, as `similarity`'s. `pdg` reads dependence structure, so a copied test whose arrange step moved still scores as a copy.",
+            },
+            Field {
+                key: "min-lines",
+                ty: "int",
+                presence: "default: 5",
+                desc: "Minimum source line count for a test to be considered.",
+            },
+            Field {
+                key: "min-body-nodes",
+                ty: "int",
+                presence: "default: 8",
+                desc: "Minimum body-tree nodes a test needs before it is eligible. Guards against bodies the parser keeps opaque — a Rust test whose whole body is one unexpanded `assert_eq!` is a two-node tree, identical to every other such test however different the assertion, and its `#[rstest]` signature carries it past any `min-lines` floor.",
+            },
+            Field {
+                key: "no-reach-guard",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Offer a test as foldable even when the call graph shows it is the only one with a resolved path to some production function. Skips building the graph.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown group list to the top N groups.",
+            },
+        ],
         ToolName::SingleImpl => &[Field {
             key: "top",
             ty: "int",
@@ -814,8 +853,8 @@ mod tests {
         ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
         GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions,
         ParametersOptions, Profile, RiskOptions, SearchOptions, SimilarityOptions,
-        SingleImplOptions, SingleUseOptions, TestOnlyOptions, UnreachableOptions, UntestedOptions,
-        VisibilityOptions, WrapperOptions,
+        SingleImplOptions, SingleUseOptions, TestOnlyOptions, TestRedundancyOptions,
+        UnreachableOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -856,6 +895,7 @@ mod tests {
         assert_tool_parity::<SingleUseOptions>(ToolName::SingleUse);
         assert_tool_parity::<ParametersOptions>(ToolName::Parameters);
         assert_tool_parity::<TestOnlyOptions>(ToolName::TestOnly);
+        assert_tool_parity::<TestRedundancyOptions>(ToolName::TestRedundancy);
         assert_tool_parity::<UnreachableOptions>(ToolName::Unreachable);
         assert_tool_parity::<UntestedOptions>(ToolName::Untested);
         assert_tool_parity::<VisibilityOptions>(ToolName::Visibility);

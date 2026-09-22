@@ -171,7 +171,7 @@ top = 10
 path = "crates/agent-lens"
 format = "md"
 only-tests = true
-tools = ["similarity", "complexity", "cohesion"]
+tools = ["similarity", "complexity", "cohesion", "test-redundancy"]
 
 [profile.self-tests.similarity]
 top = 20
@@ -180,6 +180,15 @@ top = 20
 # which is what CLAUDE.md asks new tests to be written as.
 threshold = 0.85
 min-lines = 6
+
+# The other half of the same question. `similarity` reports which test
+# bodies are alike; this one picks which of each set to keep, and holds
+# back a test the call graph shows is the only static caller of
+# something. `only-tests = true` above already narrows the walk, and the
+# analyzer keeps test functions regardless, so the corpus is the same
+# either way.
+[profile.self-tests.test-redundancy]
+top = 15
 
 [profile.self-tests.complexity]
 top = 10

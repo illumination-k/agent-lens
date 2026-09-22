@@ -147,6 +147,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::SingleImpl
         | ToolName::SingleUse
         | ToolName::TestOnly
+        | ToolName::TestRedundancy
         | ToolName::Unreachable
         | ToolName::Untested
         | ToolName::Visibility
@@ -597,6 +598,7 @@ mod tests {
     #[case(ToolName::Parameters)]
     #[case(ToolName::Risk)]
     #[case(ToolName::Unreachable)]
+    #[case(ToolName::TestRedundancy)]
     #[case(ToolName::Untested)]
     #[case(ToolName::Visibility)]
     #[case(ToolName::Wrapper)]
