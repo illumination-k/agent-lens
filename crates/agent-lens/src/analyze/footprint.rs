@@ -35,7 +35,7 @@
 //!
 //! * `schema_version: 1` — initial shape.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -617,7 +617,7 @@ impl Report {
         if let Some((graph, walked)) = graph {
             let touched = touched_nodes(graph, &files);
             uncalled_additions = uncalled(graph, &files, &touched);
-            drop_referenced(&mut uncalled_additions, walked);
+            drop_referenced(&mut uncalled_additions, walked, &TestSpans::of(graph));
             // A trait method's callers are invisible, so its closure is
             // itself alone and it would read as scatter every time.
             let judged: BTreeMap<(usize, usize), usize> = touched
@@ -741,24 +741,14 @@ fn touched_nodes(graph: &CallGraph, files: &[FileFootprint]) -> BTreeMap<(usize,
     out
 }
 
-/// The graph node for `row`: same start line, else the only node whose
-/// local name matches and whose span holds the row's start.
+/// The graph node for `row`. The graph is built from the same adapter
+/// facts as the complexity units, so a function starts on the same line
+/// in both.
 fn node_for(graph: &CallGraph, candidates: &[usize], row: &FunctionRow) -> Option<usize> {
-    let by_line = candidates
+    candidates
         .iter()
         .copied()
-        .find(|&idx| graph.nodes[idx].start_line == row.start_line);
-    by_line.or_else(|| {
-        let last = row.name.rsplit("::").next().unwrap_or(&row.name);
-        let mut hits = candidates.iter().copied().filter(|&idx| {
-            let node = &graph.nodes[idx];
-            node.name == last
-                && node.start_line <= row.start_line
-                && row.start_line <= node.end_line
-        });
-        let first = hits.next()?;
-        hits.next().is_none().then_some(first)
-    })
+        .find(|&idx| graph.nodes[idx].start_line == row.start_line)
 }
 
 /// Added, non-test, non-trait functions with no resolved or ambiguous
@@ -769,7 +759,7 @@ fn uncalled(
     touched: &BTreeMap<(usize, usize), usize>,
 ) -> Vec<UncalledRow> {
     let index_by_id = graph.node_index_by_id();
-    let mut prod_callers: HashMap<usize, usize> = HashMap::new();
+    let mut prod_called: HashSet<usize> = HashSet::new();
     let mut test_callers: HashMap<usize, BTreeSet<usize>> = HashMap::new();
     for edge in &graph.edges {
         let from = edge.from.as_deref().and_then(|id| index_by_id.get(id));
@@ -786,7 +776,9 @@ fn uncalled(
                 }
                 // An unattributed call site (module-level code, a
                 // closure the adapter could not place) still calls it.
-                _ => *prod_callers.entry(to).or_default() += 1,
+                _ => {
+                    prod_called.insert(to);
+                }
             }
         }
     }
@@ -797,7 +789,7 @@ fn uncalled(
         if row.change != ChangeKind::Added || !may_need_a_caller(node) {
             continue;
         }
-        if prod_callers.contains_key(&node_idx) {
+        if prod_called.contains(&node_idx) {
             continue;
         }
         out.push(UncalledRow {
@@ -818,7 +810,11 @@ fn uncalled(
 /// cheap check that sees them is the name itself. Common names are then
 /// never reported, which trades recall for a list worth reading. One
 /// pass over the sources, and none when there is nothing to check.
-fn drop_referenced(rows: &mut Vec<UncalledRow>, walked: &HashMap<PathBuf, String>) {
+fn drop_referenced(
+    rows: &mut Vec<UncalledRow>,
+    walked: &HashMap<PathBuf, String>,
+    tests: &TestSpans<'_>,
+) {
     if rows.is_empty() {
         return;
     }
@@ -841,13 +837,38 @@ fn drop_referenced(rows: &mut Vec<UncalledRow>, walked: &HashMap<PathBuf, String
         }
     }
     rows.retain(|row| {
+        // Its own definition names it, and so does every test that
+        // calls it — which `test_callers` already reports.
         let own = |&(file, line): &(&str, usize)| {
-            file == row.file && (row.line..=row.end_line).contains(&line)
+            (file == row.file && (row.line..=row.end_line).contains(&line))
+                || tests.contains(file, line)
         };
         sites
             .get(&bare(&row.name))
             .is_none_or(|found| found.iter().all(own))
     });
+}
+
+/// Line spans of the test functions the graph found, per file.
+struct TestSpans<'g>(HashMap<&'g str, Vec<(usize, usize)>>);
+
+impl<'g> TestSpans<'g> {
+    fn of(graph: &'g CallGraph) -> Self {
+        let mut spans: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+        for node in graph.nodes.iter().filter(|node| node.is_test) {
+            spans
+                .entry(node.file.as_str())
+                .or_default()
+                .push((node.start_line, node.end_line));
+        }
+        Self(spans)
+    }
+
+    fn contains(&self, file: &str, line: usize) -> bool {
+        self.0
+            .get(file)
+            .is_some_and(|spans| spans.iter().any(|&(s, e)| (s..=e).contains(&line)))
+    }
 }
 
 /// Whether "nothing calls it" means anything for this node. Tests,
@@ -972,20 +993,22 @@ fn components(parent: &mut [usize]) -> Vec<Vec<usize>> {
     groups.into_values().collect()
 }
 
-fn find(parent: &mut [usize], mut x: usize) -> usize {
-    while parent[x] != x {
-        parent[x] = parent[parent[x]];
-        x = parent[x];
+/// The root of `x`'s tree, compressing the path on the way back.
+fn find(parent: &mut [usize], x: usize) -> usize {
+    let up = parent[x];
+    if up == x {
+        return x;
     }
-    x
+    let root = find(parent, up);
+    parent[x] = root;
+    root
 }
 
+/// Join the trees of `a` and `b`. Which root survives does not matter:
+/// [`components`] lists members in index order either way.
 fn union(parent: &mut [usize], a: usize, b: usize) {
     let (ra, rb) = (find(parent, a), find(parent, b));
-    if ra != rb {
-        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-        parent[hi] = lo;
-    }
+    parent[rb] = ra;
 }
 
 /// Cognitive complexity a newly added function has to reach before it
@@ -1364,6 +1387,219 @@ fn unused_helper() -> i32 {
             report["summary"]["functions_modified"], 3,
             "still touched: {report}"
         );
+    }
+
+    #[test]
+    fn size_figures_add_up_and_non_source_files_are_skipped() {
+        let dir = fixture();
+        write_file(dir.path(), "NOTES.md", "not source\n");
+        let report = json(&FootprintAnalyzer::new(), dir.path());
+        let s = &report["summary"];
+        assert_eq!(s["skipped_file_count"], 1, "NOTES.md: {report}");
+        assert_eq!(s["functions_touched"], 6);
+        let files = report["files"].as_array().unwrap();
+        let sum = |key: &str| files.iter().map(|f| f[key].as_u64().unwrap()).sum::<u64>();
+        assert_eq!(s["lines_added"].as_u64().unwrap(), sum("lines_added"));
+        assert_eq!(s["lines_deleted"].as_u64().unwrap(), sum("lines_deleted"));
+        let (added, deleted) = (sum("lines_added") as f64, sum("lines_deleted") as f64);
+        assert!(deleted > 0.0);
+        assert_eq!(s["add_delete_ratio"].as_f64().unwrap(), added / deleted);
+    }
+
+    #[test]
+    fn a_pure_addition_has_no_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        write_file(dir.path(), "a.rs", "fn a() {}\n");
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        write_file(dir.path(), "b.rs", "fn b() {}\n");
+        let report = json(&FootprintAnalyzer::new(), dir.path());
+        assert_eq!(report["summary"]["lines_added"], 1);
+        assert!(
+            report["summary"].get("add_delete_ratio").is_none(),
+            "{report}"
+        );
+        let md = FootprintAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("(added/deleted n/a)"), "{md}");
+    }
+
+    /// Four files, a call chain `top -> mid -> leaf`, and two loners.
+    /// Editing `top`, `leaf` and both loners: at depth 2 `leaf`'s callers
+    /// reach `top`, so those two are one cluster and the loners stray; at
+    /// depth 1 they do not, every cluster is a singleton, and a tie for
+    /// the largest leaves nothing outside.
+    #[rstest]
+    #[case::depth_two(2, &["lone", "lone2"])]
+    #[case::depth_one(1, &[])]
+    fn callers_within_depth_join_edits_across_files(#[case] depth: usize, #[case] want: &[&str]) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run_git(root, &["init", "-q"]);
+        write_file(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write_file(
+            root,
+            "src/lib.rs",
+            "pub mod a;\npub mod b;\npub mod c;\npub mod d;\npub mod e;\n",
+        );
+        let files = [
+            (
+                "src/a.rs",
+                "pub fn top() -> i32 {\n    crate::b::mid() + 1\n}\n",
+            ),
+            (
+                "src/b.rs",
+                "pub fn mid() -> i32 {\n    crate::c::leaf() + 1\n}\n",
+            ),
+            ("src/c.rs", "pub fn leaf() -> i32 {\n    1\n}\n"),
+            ("src/d.rs", "pub fn lone() -> i32 {\n    1\n}\n"),
+            ("src/e.rs", "pub fn lone2() -> i32 {\n    1\n}\n"),
+        ];
+        for (path, text) in files {
+            write_file(root, path, text);
+        }
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "init"]);
+        for (path, text) in files {
+            if path != "src/b.rs" {
+                write_file(root, path, &text.replace("1\n}", "2\n}"));
+            }
+        }
+        let report = json(&FootprintAnalyzer::new().with_depth(Some(depth)), root);
+        assert_eq!(report["summary"]["functions_modified"], 4, "{report}");
+        assert_eq!(names(&report, "outside_closure"), want, "{report}");
+    }
+
+    #[test]
+    fn only_the_analyzed_subtree_is_read() {
+        let dir = fixture();
+        write_file(dir.path(), "tools/x.rs", "pub fn x() -> i32 {\n    1\n}\n");
+        write_file(
+            dir.path(),
+            "tools/gone.rs",
+            "pub fn gone() -> i32 {\n    1\n}\n",
+        );
+        run_git(dir.path(), &["add", "tools"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "tools"]);
+        write_file(dir.path(), "tools/x.rs", "pub fn x() -> i32 {\n    2\n}\n");
+        std::fs::remove_file(dir.path().join("tools/gone.rs")).unwrap();
+
+        let whole = json(&FootprintAnalyzer::new(), dir.path());
+        assert_eq!(whole["summary"]["file_count"], 5, "{whole}");
+        let src = json(&FootprintAnalyzer::new(), &dir.path().join("src"));
+        assert_eq!(src["summary"]["file_count"], 3, "{src}");
+        assert_eq!(
+            src["summary"]["skipped_file_count"], 0,
+            "tools/ is not diffed: {src}"
+        );
+        assert_eq!(src["summary"]["functions_deleted"], 0, "{src}");
+    }
+
+    #[test]
+    fn a_deleted_test_file_follows_the_test_filter() {
+        let dir = fixture();
+        write_file(
+            dir.path(),
+            "tests/it.rs",
+            "#[test]\nfn t() {\n    assert_eq!(1, 1);\n}\n",
+        );
+        run_git(dir.path(), &["add", "tests"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "tests"]);
+        std::fs::remove_file(dir.path().join("tests/it.rs")).unwrap();
+        let with = json(&FootprintAnalyzer::new(), dir.path());
+        assert_eq!(with["summary"]["functions_deleted"], 1, "{with}");
+        let without = json(
+            &FootprintAnalyzer::new().with_exclude_tests(true),
+            dir.path(),
+        );
+        assert_eq!(without["summary"]["functions_deleted"], 0, "{without}");
+    }
+
+    #[test]
+    fn uncalled_additions_skip_tests_self_calls_and_named_functions() {
+        let dir = fixture();
+        let extra = "
+fn recurse(n: i32) -> i32 {
+    if n > 0 { recurse(n - 1) } else { 0 }
+}
+
+fn test_only_helper() -> i32 {
+    3
+}
+
+// named_in_a_comment stays for the next change.
+fn named_in_a_comment() -> i32 {
+    4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brand_new_test() {
+        let got = test_only_helper();
+        assert_eq!(got, 3);
+    }
+}
+";
+        write_file(dir.path(), "src/lib.rs", &format!("{LIB_AFTER}{extra}"));
+        let report = json(&FootprintAnalyzer::new(), dir.path());
+        assert_eq!(
+            names(&report, "uncalled_additions"),
+            [
+                "extra_thing",
+                "recurse",
+                "test_only_helper",
+                "unused_helper"
+            ],
+            "a self-call is not a caller; a test is not listed; a name elsewhere is a reference",
+        );
+        let only_tested = report["uncalled_additions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "test_only_helper")
+            .unwrap();
+        assert_eq!(only_tested["test_callers"], 1, "{report}");
+        let md = FootprintAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("`test_only_helper` (called only by 1 test(s))"),
+            "{md}"
+        );
+        assert!(md.contains("`recurse`\n"), "{md}");
+    }
+
+    #[test]
+    fn markdown_shows_the_cluster_line_only_with_clusters() {
+        let dir = fixture();
+        let md = FootprintAnalyzer::new()
+            .with_top(Some(2))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("3 cluster(s) of overlapping blast radius at depth 2; 2 function(s) outside the main one"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("more"),
+            "exactly `--top` rows hide nothing: {md}"
+        );
+
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "edit"]);
+        let clean = FootprintAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(!clean.contains("cluster(s)"), "{clean}");
     }
 
     #[test]

@@ -1029,6 +1029,152 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
         assert_eq!(session_delta(dir.path(), "s").unwrap(), None);
     }
 
+    const HUBS: &str = "\
+pub fn shared(n: i32) -> i32 { n + 1 }
+pub fn shared2(n: i32) -> i32 { n + 2 }
+pub fn plain(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }
+pub fn a1() -> i32 { shared(1) + shared2(1) }
+pub fn a2() -> i32 { shared(2) + shared2(2) }
+pub fn a3() -> i32 { shared(3) + shared2(3) }
+pub fn a4() -> i32 { shared(4) + shared2(4) }
+pub fn a5() -> i32 { shared(5) + shared2(5) }
+";
+
+    fn hub_repo() -> tempfile::TempDir {
+        let dir = repo();
+        write_file(dir.path(), "src/lib.rs", "pub mod hubs;\n");
+        write_file(dir.path(), "src/hubs.rs", HUBS);
+        dir
+    }
+
+    fn delta_after(dir: &Path, path: &str, text: &str) -> Option<Delta> {
+        take_snapshot(dir, "s").unwrap();
+        write_file(dir, path, text);
+        session_delta(dir, "s").unwrap()
+    }
+
+    #[test]
+    fn snapshot_ids_keep_dashes_and_underscores() {
+        let dir = repo();
+        let path = snapshot_path(dir.path(), "a-b_c.d");
+        assert_eq!(path.file_name().unwrap(), "session-a-b_c_d.json");
+    }
+
+    #[test]
+    fn a_change_that_worsens_nothing_is_silent() {
+        let dir = hub_repo();
+        let text = HUBS.replace("if n > 0 { 1 }", "if n > 1 { 1 }");
+        assert_eq!(delta_after(dir.path(), "src/hubs.rs", &text), None);
+    }
+
+    #[test]
+    fn every_edited_hub_is_listed_and_only_those() {
+        let dir = hub_repo();
+        let text = HUBS
+            .replace("n + 1 }", "n + 10 }")
+            .replace("n + 2 }", "n + 20 }");
+        let delta = delta_after(dir.path(), "src/hubs.rs", &text).unwrap();
+        assert!(
+            delta.report.contains("## Hubs edited (2)"),
+            "{}",
+            delta.report
+        );
+        assert!(
+            delta.report.contains("`demo::hubs::shared` ("),
+            "{}",
+            delta.report
+        );
+        assert!(
+            delta.report.contains("`demo::hubs::shared2` ("),
+            "{}",
+            delta.report
+        );
+        assert!(
+            delta.report.contains("2 function(s) touched"),
+            "{}",
+            delta.report
+        );
+    }
+
+    #[rstest::rstest]
+    // rose, but stays under the floor.
+    #[case::under_the_floor("if n > 0 { if n > 1 { 1 } else { 0 } } else { 0 }", None)]
+    // cog 2 -> 8: at the floor.
+    #[case::at_the_floor(
+        "if n > 0 { if n > 1 { if n > 2 { return 3; } } } if n > 5 { return 5; } if n > 6 { return 6; } 0",
+        Some("`plain` cog 2→8 (+6, modified)")
+    )]
+    fn complexity_is_reported_from_the_floor_up(#[case] body: &str, #[case] want: Option<&str>) {
+        let dir = hub_repo();
+        let text = HUBS.replace("if n > 0 { 1 } else { 0 }", body);
+        let delta = delta_after(dir.path(), "src/hubs.rs", &text);
+        match want {
+            None => assert_eq!(delta, None),
+            Some(row) => {
+                let report = delta.unwrap().report;
+                assert!(report.contains(row), "{report}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_added_in_the_session_is_compared_from_nothing() {
+        let dir = repo();
+        let delta = delta_after(
+            dir.path(),
+            "src/fresh.rs",
+            &format!("pub fn fresh(xs: &[i32]) -> i32 {{\n{COMPLEX_BODY}}}\n"),
+        )
+        .unwrap();
+        assert!(
+            delta.report.contains("`fresh` cog 0→18 (+18, added)"),
+            "{}",
+            delta.report
+        );
+    }
+
+    #[test]
+    fn a_deleted_file_counts_its_functions_and_hubs() {
+        let dir = hub_repo();
+        take_snapshot(dir.path(), "s").unwrap();
+        std::fs::remove_file(dir.path().join("src/hubs.rs")).unwrap();
+        write_file(dir.path(), "src/lib.rs", "pub fn only() {}\n");
+        let report = session_delta(dir.path(), "s").unwrap().unwrap().report;
+        assert!(
+            report.contains("Since session start: 2 file(s) changed, 9 function(s) touched."),
+            "{report}"
+        );
+        assert!(report.contains("`demo::hubs::shared` ("), "{report}");
+        assert!(report.contains(") deleted"), "{report}");
+    }
+
+    #[test]
+    fn a_duplicate_that_predates_the_session_is_not_new() {
+        let dir = repo();
+        let pair = format!(
+            "pub fn left(xs: &[i32]) -> i32 {{\n{COMPLEX_BODY}}}\n\npub fn right(xs: &[i32]) -> i32 {{\n{COMPLEX_BODY}}}\n"
+        );
+        write_file(dir.path(), "src/pair.rs", &pair);
+        let edited = pair.replacen("acc -= 1;", "acc -= 2;", 1);
+        let delta = delta_after(dir.path(), "src/pair.rs", &edited);
+        assert!(
+            delta
+                .as_ref()
+                .is_none_or(|d| !d.report.contains("near-duplicates")),
+            "{delta:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_snapshot_is_an_error() {
+        let dir = repo();
+        std::fs::create_dir_all(snapshot_path(dir.path(), "s")).unwrap();
+        assert!(matches!(
+            session_delta(dir.path(), "s"),
+            Err(CheckpointError::Read { .. })
+        ));
+    }
+
     #[test]
     fn qualified_names_match_on_a_segment_boundary() {
         assert!(qualified_matches("demo::Owner::run", "Owner::run"));

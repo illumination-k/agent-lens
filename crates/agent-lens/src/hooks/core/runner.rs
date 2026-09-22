@@ -469,7 +469,9 @@ pub(crate) mod session_start_conformance {
         let dir = tempfile::tempdir().unwrap();
         crate::test_support::init_checkpoint_fixture(dir.path());
         let input = input(dir.path());
-        let path = crate::hooks::core::checkpoint::snapshot_path(dir.path(), E::session_id(&input));
+        // Both test contexts carry the id `sess`.
+        let path = crate::hooks::core::checkpoint::snapshot_path(dir.path(), "sess");
+        assert_eq!(E::session_id(&input), "sess");
         let out = super::SnapshotHook::<E>::new().handle(input).unwrap();
         assert_eq!(
             serde_json::to_value(&out).unwrap(),
@@ -559,5 +561,29 @@ pub(crate) mod stop_conformance {
         );
         assert!(advisory.get("decision").is_none(), "got {advisory}");
         assert!(advisory["systemMessage"].is_string(), "got {advisory}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::post_tool_use::ClaudeCodePostToolUse;
+    use crate::hooks::session_start::ClaudeCodeSessionStart;
+    use crate::hooks::stop::ClaudeCodeStop;
+
+    #[test]
+    fn checkpoint_hooks_debug_as_themselves() {
+        assert_eq!(
+            format!("{:?}", FootprintHook::<ClaudeCodePostToolUse>::new()),
+            "FootprintHook"
+        );
+        assert_eq!(
+            format!("{:?}", SnapshotHook::<ClaudeCodeSessionStart>::new()),
+            "SnapshotHook"
+        );
+        assert_eq!(
+            format!("{:?}", DeltaHook::<ClaudeCodeStop>::new().with_block(false)),
+            "DeltaHook { block: false }"
+        );
     }
 }
