@@ -1356,8 +1356,14 @@ fn unused_helper() -> i32 {
         );
         let report = json(&FootprintAnalyzer::new(), dir.path());
         let outside = names(&report, "outside_closure");
-        assert!(!outside.iter().any(|n| n.ends_with("fmt")), "got {outside:?}");
-        assert_eq!(report["summary"]["functions_modified"], 3, "still touched: {report}");
+        assert!(
+            !outside.iter().any(|n| n.ends_with("fmt")),
+            "got {outside:?}"
+        );
+        assert_eq!(
+            report["summary"]["functions_modified"], 3,
+            "still touched: {report}"
+        );
     }
 
     #[test]

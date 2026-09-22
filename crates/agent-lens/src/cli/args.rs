@@ -409,8 +409,8 @@ pub(super) enum CodexHookCommand {
     ///
     /// The merge is conservative: existing keys and comments are
     /// preserved, and `[[hooks.SessionStart]]`, `[[hooks.PreToolUse]]`,
-    /// and `[[hooks.PostToolUse]]` blocks are appended only for handlers
-    /// that aren't already wired up. Re-running the
+    /// `[[hooks.PostToolUse]]`, and `[[hooks.Stop]]` blocks are appended
+    /// only for handlers that aren't already wired up. Re-running the
     /// command is a no-op once every handler is installed.
     #[command(after_long_help = examples::CODEX_HOOK_SETUP)]
     Setup(CodexSetupArgs),
