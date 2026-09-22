@@ -1294,6 +1294,10 @@ fn unused_helper() -> i32 {
         write_file(dir.path(), "src/far.rs", "\n");
         let report = json(&FootprintAnalyzer::new(), dir.path());
         assert_eq!(report["summary"]["functions_deleted"], 1);
+        assert_eq!(
+            report["summary"]["functions_touched"], 6,
+            "3 added, 2 modified, 1 deleted"
+        );
         let far = report["files"]
             .as_array()
             .unwrap()
@@ -1600,6 +1604,28 @@ mod tests {
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert!(!clean.contains("cluster(s)"), "{clean}");
+    }
+
+    /// The graph half on its own, before the name check: a production
+    /// caller rules a function out, a test caller does not. Through the
+    /// whole report the name check would hide the difference, since a
+    /// production call names its callee too.
+    #[test]
+    fn uncalled_reads_production_callers_from_the_graph() {
+        let dir = fixture();
+        let roots = AnalyzeRoots::from(dir.path());
+        let analyzer = FootprintAnalyzer::new();
+        let report = analyzer.measure(&roots).unwrap();
+        let graph = analyzer.builder.build(&roots).unwrap();
+        let touched = touched_nodes(&graph, &report.files);
+        let rows = uncalled(&graph, &report.files, &touched);
+        let mut names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["extra_thing", "unused_helper"],
+            "`helper` is called by `other`"
+        );
     }
 
     #[test]
