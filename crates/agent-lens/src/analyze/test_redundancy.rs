@@ -521,12 +521,11 @@ struct ReachGuard<'a> {
     test_nodes: Vec<usize>,
     node_of_unit: HashMap<usize, usize>,
     /// Production nodes each located test reaches.
+    ///
+    /// A test missing from this map is one the graph did not hold at the
+    /// corpus's own location for it. Both readers treat that as "the
+    /// guard has nothing to say" rather than as a clean bill.
     reach: HashMap<usize, BTreeSet<usize>>,
-    /// Tests the graph could not locate — a language it does not model,
-    /// an unparsed file, a body it does not hold as a function. The guard
-    /// has nothing to say about these, so they are counted rather than
-    /// silently treated as clean.
-    unmatched_count: usize,
 }
 
 impl<'a> ReachGuard<'a> {
@@ -551,7 +550,6 @@ impl<'a> ReachGuard<'a> {
 
         let mut node_of_unit = HashMap::new();
         let mut reach = HashMap::new();
-        let mut unmatched_count = 0usize;
         for (unit, neighbors) in adjacency.iter().enumerate() {
             if neighbors.is_empty() {
                 continue;
@@ -561,7 +559,6 @@ impl<'a> ReachGuard<'a> {
             };
             let Some(&node) = node_by_location.get(&(shape.rel_path.as_str(), shape.start_line))
             else {
-                unmatched_count += 1;
                 continue;
             };
             node_of_unit.insert(unit, node);
@@ -573,7 +570,6 @@ impl<'a> ReachGuard<'a> {
             test_nodes,
             node_of_unit,
             reach,
-            unmatched_count,
         }
     }
 
@@ -679,7 +675,6 @@ impl Report {
             scored,
             adjacency,
             groups: &views,
-            guard,
             unrelated_pair_count,
             opaque_body_test_count,
         });
@@ -856,10 +851,6 @@ struct Summary {
     foldable_count: usize,
     /// Of those, how many the guard held back.
     reach_guarded_count: usize,
-    /// Tests with a near-copy that the call graph could not locate, so
-    /// the guard could not rule on them. Non-zero means `foldable_count`
-    /// counts rows nothing checked.
-    graph_unmatched_test_count: usize,
     /// Near-copy pairs dropped before selection because the call graph
     /// showed the two tests exercise no production function in common.
     /// This is the noise floor of body scoring on a test suite, measured:
@@ -888,7 +879,6 @@ struct SummaryInputs<'a> {
     scored: &'a ScoredCorpus,
     adjacency: &'a [Vec<Neighbor>],
     groups: &'a [GroupView],
-    guard: Option<&'a ReachGuard<'a>>,
     unrelated_pair_count: usize,
     opaque_body_test_count: usize,
 }
@@ -899,7 +889,6 @@ impl Summary {
             scored,
             adjacency,
             groups,
-            guard,
             unrelated_pair_count,
             opaque_body_test_count,
         } = inputs;
@@ -911,7 +900,6 @@ impl Summary {
             redundant_test_count,
             foldable_count,
             reach_guarded_count: redundant_test_count - foldable_count,
-            graph_unmatched_test_count: guard.map_or(0, |guard| guard.unmatched_count),
             unrelated_pair_count,
             opaque_body_test_count,
             redundancy_score: redundancy_score(adjacency),
@@ -1025,18 +1013,11 @@ fn write_calibration(out: &mut String, report: &Report) {
 }
 
 fn guard_suffix(report: &Report, summary: &Summary) -> String {
-    if !report.reach_guard {
-        return " (reach guard off)".to_owned();
+    if report.reach_guard {
+        format!(", {} held by unique reach", summary.reach_guarded_count)
+    } else {
+        " (reach guard off)".to_owned()
     }
-    let mut suffix = format!(", {} held by unique reach", summary.reach_guarded_count);
-    if summary.graph_unmatched_test_count > 0 {
-        let _ = write!(
-            suffix,
-            ", {} not found in the call graph",
-            summary.graph_unmatched_test_count,
-        );
-    }
-    suffix
 }
 
 fn member_line(member: &MemberView) -> String {
@@ -1388,8 +1369,322 @@ mod tests {
         let graph = adjacency(&scored, 0);
         let groups = select_groups(&scored, &graph.adjacency);
         assert_eq!(groups.len(), 2);
+        // The first of each pair in location order keeps its group.
+        let representatives: Vec<usize> = groups.iter().map(|g| g.representative).collect();
+        assert_eq!(representatives, [0, 2]);
         assert_eq!(groups[0].members.len(), 1);
         assert_eq!(groups[1].members.len(), 1);
+    }
+
+    /// Every builder has to reach the analyzer's state: a setter that
+    /// quietly returned a fresh default would leave the whole run on its
+    /// defaults with no flag appearing to have been ignored.
+    #[rstest]
+    #[case::only_tests(TestRedundancyAnalyzer::new().with_only_tests(true))]
+    #[case::exclude_tests(TestRedundancyAnalyzer::new().with_exclude_tests(true))]
+    #[case::exclude(TestRedundancyAnalyzer::new().with_exclude_patterns(vec!["x".to_owned()]))]
+    #[case::threshold(TestRedundancyAnalyzer::new().with_threshold(0.5))]
+    #[case::method(TestRedundancyAnalyzer::new().with_method(SimilarityMethod::Pdg))]
+    #[case::min_lines(TestRedundancyAnalyzer::new().with_min_lines_opt(Some(9)))]
+    #[case::min_body_nodes(TestRedundancyAnalyzer::new().with_min_body_nodes_opt(Some(9)))]
+    #[case::top(TestRedundancyAnalyzer::new().with_top(Some(3)))]
+    #[case::reach_guard(TestRedundancyAnalyzer::new().with_reach_guard(false))]
+    fn every_builder_changes_the_analyzer(#[case] built: TestRedundancyAnalyzer) {
+        assert_ne!(
+            format!("{built:?}"),
+            format!("{:?}", TestRedundancyAnalyzer::new()),
+        );
+    }
+
+    /// The corpus is test functions. Two production functions that are
+    /// near-copies of each other are `analyze similarity`'s finding, and
+    /// this report must not restate it.
+    #[test]
+    fn production_near_copies_are_not_this_reports_business() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "pub fn shared(a: u32, b: u32) -> u32 {{ a + b }}\n\
+                 pub fn first_copy() -> u32 {{\n{}}}\n\
+                 pub fn second_copy() -> u32 {{\n{}}}\n",
+                production_body(1),
+                production_body(2),
+            ),
+        );
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+        assert_eq!(report["summary"]["test_function_count"], 0);
+        assert_eq!(report["summary"]["group_count"], 0);
+    }
+
+    fn production_body(seed: u32) -> String {
+        format!(
+            "let first = {seed};\n\
+             let second = first + 1;\n\
+             let total = shared(first, second);\n\
+             let doubled = total * 2;\n\
+             doubled + total\n"
+        )
+    }
+
+    /// The guard only speaks where it has something to compare. A test
+    /// the graph resolved no call for reaches nothing, which is silence,
+    /// not a disproof — pruning on it would drop every pair involving a
+    /// test that calls only through std.
+    #[test]
+    fn a_test_with_no_resolved_calls_is_not_pruned_as_unrelated() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "pub fn shared(a: u32, b: u32) -> u32 {{ a + b }}\n\
+                 #[cfg(test)]\nmod tests {{\nuse super::*;\n\
+                 #[test]\nfn calls_production() {{\n{}}}\n\
+                 #[test]\nfn calls_only_std() {{\n{}}}\n\
+                 }}\n",
+                test_body("shared", 1),
+                std_only_body(),
+            ),
+        );
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+        assert_eq!(report["summary"]["group_count"], 1, "report: {report}");
+        assert_eq!(report["summary"]["unrelated_pair_count"], 0);
+    }
+
+    /// Every pruned edge is seen from both ends, so the reported count is
+    /// pairs and not endpoints.
+    #[test]
+    fn unrelated_pairs_are_counted_once_each() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "pub fn left(a: u32, b: u32) -> u32 {{ a + b }}\n\
+                 pub fn right(a: u32, b: u32) -> u32 {{ a * b }}\n\
+                 #[cfg(test)]\nmod tests {{\nuse super::*;\n\
+                 #[test]\nfn left_one() {{\n{}}}\n\
+                 #[test]\nfn left_two() {{\n{}}}\n\
+                 #[test]\nfn right_one() {{\n{}}}\n\
+                 }}\n",
+                test_body("left", 1),
+                test_body("left", 2),
+                test_body("right", 3),
+            ),
+        );
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+        // right_one pairs with both left tests; neither pair survives.
+        assert_eq!(
+            report["summary"]["unrelated_pair_count"], 2,
+            "report: {report}"
+        );
+        assert_eq!(report["summary"]["group_count"], 1);
+    }
+
+    /// Markdown carries the three things the JSON summary says and the
+    /// terminal reader acts on: the verdict, the guard's posture, and
+    /// what a held member would cost to fold.
+    #[test]
+    fn markdown_names_the_verdict_the_guard_and_what_it_held() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "pub fn shared(a: u32, b: u32) -> u32 {{ a + b }}\n\
+                 pub fn only_here(a: u32, b: u32) -> u32 {{ shared(a, b) }}\n\
+                 #[cfg(test)]\nmod tests {{\nuse super::*;\n\
+                 #[test]\nfn plain_one() {{\n{}}}\n\
+                 #[test]\nfn plain_two() {{\n{}}}\n\
+                 #[test]\nfn also_covers_only_here() {{\n{}}}\n\
+                 }}\n",
+                test_body("shared", 1),
+                test_body("shared", 2),
+                test_body("only_here", 3),
+            ),
+        );
+
+        let md = analyze_md(dir.path(), TestRedundancyAnalyzer::new());
+        assert!(
+            md.contains("duplicate") || md.contains("parameterize"),
+            "{md}"
+        );
+        assert!(md.contains("1 held by unique reach"), "{md}");
+        assert!(
+            md.contains("held: sole static caller of 1 function (crate::only_here)"),
+            "{md}",
+        );
+
+        // With the guard off there is nothing held, and the header says
+        // why rather than reporting a zero.
+        let unguarded = analyze_md(
+            dir.path(),
+            TestRedundancyAnalyzer::new().with_reach_guard(false),
+        );
+        assert!(unguarded.contains("(reach guard off)"), "{unguarded}");
+        assert!(!unguarded.contains("held by unique reach"), "{unguarded}");
+    }
+
+    /// `--top` says so when it is hiding groups, and stays quiet when it
+    /// is not.
+    #[rstest]
+    #[case::caps(Some(1), true)]
+    #[case::covers_everything(Some(50), false)]
+    #[case::unset(None, false)]
+    fn markdown_announces_a_cap_only_when_it_hides_something(
+        #[case] top: Option<usize>,
+        #[case] expect_notice: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/a.rs", &two_group_source("alpha"));
+        write_file(dir.path(), "src/b.rs", &two_group_source("beta"));
+
+        let md = analyze_md(dir.path(), TestRedundancyAnalyzer::new().with_top(top));
+        assert_eq!(md.contains("Showing the"), expect_notice, "{md}");
+    }
+
+    /// Two near-copies of one target, in their own module, so two files
+    /// make two groups.
+    fn two_group_source(target: &str) -> String {
+        format!(
+            "pub fn {target}(a: u32, b: u32) -> u32 {{ a + b }}\n\
+             #[cfg(test)]\nmod tests {{\nuse super::*;\n\
+             #[test]\nfn one() {{\n{}}}\n\
+             #[test]\nfn two() {{\n{}}}\n\
+             }}\n",
+            test_body(target, 1),
+            test_body(target, 2),
+        )
+    }
+
+    /// Same shape as a near-copy, but every call goes to std, so the
+    /// graph resolves none of them and the test reaches nothing.
+    fn std_only_body() -> String {
+        "let first = 1;\n\
+         let second = first + 1;\n\
+         let total = first.max(second);\n\
+         let doubled = total * 2;\n\
+         assert!(doubled >= total);\n"
+            .to_owned()
+    }
+
+    /// The calibration lines appear when there is something to
+    /// calibrate, and not otherwise. A run that reports no group is
+    /// exactly when they are read, so they are not gated on having one.
+    #[rstest]
+    #[case::nothing_dropped(false)]
+    #[case::both_cuts_fired(true)]
+    fn markdown_states_a_cut_only_when_that_cut_dropped_something(#[case] dropping: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let source = if dropping {
+            format!(
+                // Two macro-only bodies for the body-tree cut, and two
+                // near-copies of different functions for the guard.
+                "pub fn left(a: u32, b: u32) -> u32 {{ a + b }}\n\
+                 pub fn right(a: u32, b: u32) -> u32 {{ a * b }}\n\
+                 #[cfg(test)]\nmod tests {{\nuse super::*;\n\
+                 #[test]\nfn macro_left(\n) \n{{\n\nassert_eq!(left(1, 1), 2);\n\n}}\n\
+                 #[test]\nfn macro_right(\n) \n{{\n\nassert_eq!(right(1, 1), 1);\n\n}}\n\
+                 #[test]\nfn exercises_left() {{\n{}}}\n\
+                 #[test]\nfn exercises_right() {{\n{}}}\n\
+                 }}\n",
+                test_body("left", 1),
+                test_body("right", 1),
+            )
+        } else {
+            one_target_source()
+        };
+        write_file(dir.path(), "src/lib.rs", &source);
+
+        let md = analyze_md(
+            dir.path(),
+            TestRedundancyAnalyzer::new().with_threshold(0.7),
+        );
+        assert_eq!(md.contains("test(s) skipped"), dropping, "{md}");
+        assert_eq!(md.contains("pair(s) dropped"), dropping, "{md}");
+    }
+
+    /// The suite figure is LTM's: mean of each test's squared similarity
+    /// to its nearest surviving near-copy.
+    #[rstest]
+    #[case::two_linked(&[&[0.5][..], &[0.5][..]], 0.25)]
+    #[case::one_isolated(&[&[0.5][..], &[][..]], 0.125)]
+    #[case::empty(&[], 0.0)]
+    fn redundancy_score_is_the_mean_squared_nearest(
+        #[case] similarities: &[&[f64]],
+        #[case] expected: f64,
+    ) {
+        let adjacency: Vec<Vec<Neighbor>> = similarities
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|&similarity| Neighbor {
+                        unit: 0,
+                        similarity,
+                        value_similarity: similarity,
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!((redundancy_score(&adjacency) - expected).abs() < 1e-12);
+    }
+
+    /// Ties fall to source location, not to whatever order the walk
+    /// happened to produce — the property that makes two runs diffable.
+    #[test]
+    fn ties_are_broken_by_location_not_corpus_order() {
+        let scored = corpus(vec![unit("b.rs", 1), unit("a.rs", 1)], &[(0, 1)]);
+        let graph = adjacency(&scored, 0);
+        let groups = select_groups(&scored, &graph.adjacency);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].representative, 1, "a.rs sorts before b.rs");
+    }
+
+    /// A test whose only near-copy was already folded into someone else
+    /// covers nobody, so it is not a group of its own.
+    #[test]
+    fn a_test_left_over_with_nothing_to_cover_is_not_a_group() {
+        // 0-1, 0-2, 2-3: picking 0 covers 1 and 2, leaving 3 with only a
+        // covered neighbour.
+        let units = vec![
+            unit("a.rs", 1),
+            unit("a.rs", 20),
+            unit("a.rs", 40),
+            unit("a.rs", 60),
+        ];
+        let scored = corpus(units, &[(0, 1), (0, 2), (2, 3)]);
+        let graph = adjacency(&scored, 0);
+        let groups = select_groups(&scored, &graph.adjacency);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].representative, 0);
+        assert_eq!(groups[0].members.len(), 2);
+    }
+
+    /// A pair is only a pair when both sides have a body worth scoring,
+    /// and the side that fell short is what gets counted.
+    #[test]
+    fn a_pair_needs_both_sides_visible() {
+        let mut units = vec![unit("a.rs", 1), unit("a.rs", 20)];
+        units[1].body_node_count = 2;
+        let scored = corpus(units, &[(0, 1)]);
+        let graph = adjacency(&scored, 8);
+        assert!(graph.adjacency.iter().all(Vec::is_empty));
+        assert_eq!(graph.opaque_body_test_count, 1);
+    }
+
+    /// A pair naming a unit the corpus does not hold is ignored, not
+    /// indexed with.
+    #[test]
+    fn a_pair_outside_the_corpus_is_ignored() {
+        let scored = corpus(vec![unit("a.rs", 1), unit("a.rs", 20)], &[(0, 9), (9, 1)]);
+        let graph = adjacency(&scored, 0);
+        assert!(graph.adjacency.iter().all(Vec::is_empty));
+        assert_eq!(graph.opaque_body_test_count, 0);
     }
 
     fn unit(file: &str, start_line: usize) -> ScoredUnit {
