@@ -265,9 +265,9 @@ impl CandidatePairStrategy {
 ///
 /// The TSED-only cheap filters (size / label / arity / shingle bounds)
 /// prune pairs that cannot reach `threshold` under tree-edit distance.
-/// They are unsound for [`SimilarityMethod::Token`], whose score is not
-/// bounded by those quantities, so the token method skips them and scores
-/// every enumerated pair.
+/// They are unsound for the other methods, whose scores are not bounded
+/// by those quantities, so those methods skip them and score every
+/// enumerated pair (see [`SimilarityMethod::uses_tree_filters`]).
 pub(super) fn candidate_pairs(
     corpus: &[OwnedUnit],
     min_lines: usize,
@@ -302,13 +302,10 @@ pub(super) fn candidate_pairs(
                 Some((a, b))
             })
             .filter(|(i, j)| same_test_class(corpus, *i, *j));
-        match method {
-            SimilarityMethod::Tsed => {
-                filter_size_compatible_pairs(lsh_pairs, profiles, threshold, opts)
-            }
-            SimilarityMethod::Token => {
-                (lsh_pairs.collect::<Vec<_>>(), CheapFilterCounts::default())
-            }
+        if method.uses_tree_filters() {
+            filter_size_compatible_pairs(lsh_pairs, profiles, threshold, opts)
+        } else {
+            (lsh_pairs.collect::<Vec<_>>(), CheapFilterCounts::default())
         }
     } else {
         let cartesian = eligible_indices
@@ -316,13 +313,10 @@ pub(super) fn candidate_pairs(
             .enumerate()
             .flat_map(|(pos, &i)| eligible_indices[pos + 1..].iter().map(move |&j| (i, j)))
             .filter(|(i, j)| same_test_class(corpus, *i, *j));
-        match method {
-            SimilarityMethod::Tsed => {
-                filter_tsed_compatible_pairs(cartesian, profiles, threshold, opts)
-            }
-            SimilarityMethod::Token => {
-                (cartesian.collect::<Vec<_>>(), CheapFilterCounts::default())
-            }
+        if method.uses_tree_filters() {
+            filter_tsed_compatible_pairs(cartesian, profiles, threshold, opts)
+        } else {
+            (cartesian.collect::<Vec<_>>(), CheapFilterCounts::default())
         }
     };
     CandidatePairs {
@@ -570,6 +564,7 @@ mod tests {
             is_test,
             kind: None,
             implements: None,
+            lang: crate::analyze::SourceLang::Rust,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,
@@ -597,6 +592,7 @@ mod tests {
             is_test: false,
             kind: None,
             implements: None,
+            lang: crate::analyze::SourceLang::Rust,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: "f".to_owned(),
                 start_line,
@@ -673,6 +669,7 @@ mod tests {
             is_test: false,
             kind: None,
             implements: None,
+            lang: crate::analyze::SourceLang::Rust,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line: 1,

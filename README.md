@@ -118,6 +118,9 @@ representative invocations:
 agent-lens analyze similarity crates/lens-rust/src
 agent-lens analyze similarity crates/lens-rust/src --format md --top 10 --min-score 0.9
 
+# Semantic clones: same statements and dependences, whatever the order or the local names
+agent-lens analyze similarity crates --format md --method pdg
+
 # Duplicated type definitions, or copy-pasted fragments inside function bodies
 agent-lens analyze similarity crates --format md --target types
 agent-lens analyze similarity crates --format md --target blocks
@@ -339,7 +342,7 @@ ordinary CLI contract: errors exit non-zero.
 | Subcommand        | What it surfaces                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `search`          | Functions ranked by BM25F relevance to a query over weighted fields (name, path, signature, doc, body), with identifier-aware tokenization and trigram expansion for near-miss terms. `--rank graph` folds in call-graph importance.                                                                                                                                                                                                            |
-| `similarity`      | Near-duplicate pairs (normalised-AST TSED via APTED, complete-link clusters). `--target` picks functions (default), type definitions compared on member shape, or statement blocks inside bodies — the copy-paste whole-definition comparison cannot see.                                                                                                                                                                                       |
+| `similarity`      | Near-duplicate pairs (normalised-AST TSED via APTED, complete-link clusters). `--target` picks functions (default), type definitions compared on member shape, or statement blocks inside bodies — the copy-paste whole-definition comparison cannot see. `--method` swaps the body score: token k-gram overlap, or a program-dependence-graph kernel that ignores statement order and local names.                                             |
 | `wrapper`         | Functions whose body is a forwarding call modulo `?`, `.unwrap()`, `.into()`, `.await`, …; Go interface-satisfying wrappers are annotated since deleting them isn't the fix.                                                                                                                                                                                                                                                                    |
 | `delegation`      | Chains of forwarding-only functions (`api::save -> service::save -> repo::save`), with the terminus doing the work as the headline and a per-module delegator roll-up. Language-mandated hops are marked.                                                                                                                                                                                                                                       |
 | `single-use`      | Functions with exactly one resolved production caller, small and simple enough (`--max-loc`, `--max-cyclomatic`) to inline into it — caveated where the claim is weaker (a raw-name scan catches callers hidden in macro bodies), with a calibration section for setting the thresholds per repository, and collapsible chains where candidates fold into one sink.                                                                             |
@@ -427,7 +430,7 @@ crates/
 │                  # call-graph passes, profile runner, baselines, skills
 ├── agent-hooks/   # Claude Code & Codex hook protocol schemas + Hook trait
 ├── lens-domain/   # language-neutral primitives and metric machinery
-│                  # (TreeNode, APTED, TSED, LCOM, IFC, Maintainability Index)
+│                  # (TreeNode, APTED, TSED, PDG kernel, LCOM, IFC, Maintainability Index)
 ├── lens-rust/     # syn-based Rust adapter
 ├── lens-ts/       # oxc-based TypeScript / JavaScript adapter
 ├── lens-py/       # ruff_python_parser-based Python adapter

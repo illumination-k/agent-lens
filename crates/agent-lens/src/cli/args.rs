@@ -1603,21 +1603,23 @@ mod tests {
         assert!(args.opts.doc_overlap);
     }
 
-    #[test]
-    fn parses_analyze_similarity_method() {
+    #[rstest]
+    #[case::token("token", SimilarityMethod::Token)]
+    #[case::pdg("pdg", SimilarityMethod::Pdg)]
+    fn parses_analyze_similarity_method(#[case] flag: &str, #[case] expected: SimilarityMethod) {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
             "similarity",
             "src/lib.rs",
             "--method",
-            "token",
+            flag,
         ])
         .expect("clean parse");
         let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
             panic!("expected analyze similarity");
         };
-        assert_eq!(args.opts.method, SimilarityMethod::Token);
+        assert_eq!(args.opts.method, expected);
     }
 
     #[test]

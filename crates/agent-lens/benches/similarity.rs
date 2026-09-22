@@ -13,6 +13,7 @@ fn bench_similarity(c: &mut Criterion) {
     let types = types_bench_corpus(32, 16);
     let analyzer = SimilarityAnalyzer::new();
     let token_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Token);
+    let pdg_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Pdg);
     let types_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Types);
     let blocks_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Blocks);
 
@@ -84,6 +85,16 @@ fn bench_similarity(c: &mut Criterion) {
     c.bench_function("similarity_token_directory_lsh_dense_1024_functions", |b| {
         b.iter(|| {
             let report = match token_analyzer.analyze(large_dense.path(), OutputFormat::Json) {
+                Ok(report) => report,
+                Err(err) => panic!("similarity benchmark failed: {err}"),
+            };
+            std::hint::black_box(report.len());
+        });
+    });
+
+    c.bench_function("similarity_pdg_directory_lsh_dense_1024_functions", |b| {
+        b.iter(|| {
+            let report = match pdg_analyzer.analyze(large_dense.path(), OutputFormat::Json) {
                 Ok(report) => report,
                 Err(err) => panic!("similarity benchmark failed: {err}"),
             };

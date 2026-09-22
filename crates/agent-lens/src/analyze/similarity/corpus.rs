@@ -10,8 +10,8 @@ use super::PROFILE_TARGET;
 use super::SimilarityTarget;
 use super::extract::{extract_functions, extract_statement_seqs, extract_types};
 use crate::analyze::{
-    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, SourceFile, collect_source_files, read_source,
-    skip_parse_error_if_walked,
+    AnalyzePathFilter, AnalyzeRoots, AnalyzerError, SourceFile, SourceLang, collect_source_files,
+    read_source, skip_parse_error_if_walked,
 };
 
 /// A single comparison unit plus the file it originated from. The corpus
@@ -37,6 +37,10 @@ pub(super) struct OwnedUnit {
     /// the same trait name share their signature by construction, so
     /// scoring drops the signature component for such pairs.
     pub(super) implements: Option<String>,
+    /// Language the unit was parsed from. Dependence-graph scoring
+    /// reads the body tree through the vocabulary this language's
+    /// adapter owns.
+    pub(super) lang: SourceLang,
     pub(super) shape: FunctionShape,
 }
 
@@ -152,6 +156,7 @@ fn collect_file(
                     is_test,
                     kind: None,
                     implements: def.implements.clone(),
+                    lang,
                     shape: FunctionShape::from(def),
                 })
             })
@@ -172,6 +177,7 @@ fn collect_file(
                     is_test,
                     kind: Some(type_shape.kind_label),
                     implements: None,
+                    lang,
                     shape: type_shape.into_function_shape(),
                 })
             })
@@ -199,6 +205,7 @@ fn collect_file(
                 is_test: window.is_test,
                 kind: None,
                 implements: None,
+                lang,
                 shape: window.into_function_shape(),
             })
             .collect()

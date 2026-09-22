@@ -26,6 +26,7 @@ mod corpus;
 mod doc;
 mod extract;
 mod paired;
+mod pdg;
 mod report;
 mod token;
 
@@ -37,6 +38,7 @@ use candidates::{CheapFilter, tsed_upper_bound_filter};
 use corpus::{OwnedUnit, collect_corpus};
 pub use paired::PairKey;
 use paired::{PairedCandidate, name_matched_pairs};
+use pdg::PdgProfile;
 use report::{
     ClusterView, PairedReport, PairedReportInputs, Report, ScoredMatch, build_drift_groups,
     format_markdown, format_paired_markdown,
@@ -141,9 +143,10 @@ impl FunctionSelection {
 
 /// Algorithm used to score how similar two function bodies are.
 ///
-/// Both methods feed the same `0.8 * body + 0.2 * signature` blend and
-/// the same clustering, so only the body score differs. The choice is a
-/// recall/speed vs precision trade-off, not a different report shape.
+/// Every method feeds the same `0.8 * body + 0.2 * signature` blend and
+/// the same clustering, so only the body score differs. The choice is
+/// about what counts as "the same body" — its syntax tree, its token
+/// stream, or its dependence structure — not a different report shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SimilarityMethod {
@@ -155,6 +158,13 @@ pub enum SimilarityMethod {
     /// Cheaper than TSED and more tolerant of reordered code, at the
     /// cost of some precision.
     Token,
+    /// Weisfeiler-Lehman kernel over the body's program dependence
+    /// graph: statements as nodes, control and data dependences as
+    /// edges. Invariant to reordering independent statements and to
+    /// renaming locals, so it finds the semantic clone a tree-edit
+    /// distance scores low on; a body with the same statements wired
+    /// differently scores lower than TSED would give it.
+    Pdg,
 }
 
 impl SimilarityMethod {
@@ -162,7 +172,16 @@ impl SimilarityMethod {
         match self {
             Self::Tsed => "tsed",
             Self::Token => "token",
+            Self::Pdg => "pdg",
         }
+    }
+
+    /// Whether the TSED cheap candidate filters (size / label / arity /
+    /// shingle bounds on the tree-edit distance) are sound for this
+    /// method's score. Only TSED's own score is bounded by them; the
+    /// other methods must score every enumerated pair.
+    pub(super) fn uses_tree_filters(self) -> bool {
+        matches!(self, Self::Tsed)
     }
 }
 
@@ -344,7 +363,11 @@ pub struct SimilarityOptions {
     /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
     /// distance over the body AST. `token` compares preorder token
     /// k-gram multisets — faster and more tolerant of reordered code,
-    /// but less precise. Scores from the two methods are not directly
+    /// but less precise. `pdg` compares program dependence graphs
+    /// (statements wired by control and data dependence) with a
+    /// Weisfeiler-Lehman kernel — invariant to statement reordering
+    /// and local renaming, so it finds semantic clones the tree shape
+    /// hides. Scores from different methods are not directly
     /// comparable.
     #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
     pub method: SimilarityMethod,
@@ -698,10 +721,7 @@ impl SimilarityAnalyzer {
             key.as_str(),
         )?;
 
-        let profiles = match self.method {
-            SimilarityMethod::Tsed => build_tree_profiles(corpus, min_lines, self.allow_lsh()),
-            SimilarityMethod::Token => Vec::new(),
-        };
+        let profiles = self.tree_profiles(corpus, min_lines);
         let index_pairs: Vec<(usize, usize)> = matched.iter().map(|c| (c.i, c.j)).collect();
         // Threshold 0 keeps every scored pair: in this mode the cut
         // labels drift instead of filtering the report.
@@ -782,8 +802,8 @@ impl SimilarityAnalyzer {
             .collect()
     }
 
-    /// Pairwise scoring over the corpus (TSED or token, per
-    /// [`SimilarityMethod`]), then complete-link clustering. Inlined
+    /// Pairwise scoring over the corpus (per [`SimilarityMethod`]),
+    /// then complete-link clustering. Inlined
     /// rather than calling [`lens_domain::find_similar_pair_indices`] +
     /// [`lens_domain::cluster_similar_pairs`] in two passes so the per-pair
     /// `--diff-only` filter sees the file/line metadata that domain doesn't
@@ -796,12 +816,7 @@ impl SimilarityAnalyzer {
         let threshold = self.cluster_threshold();
         let min_lines = self.resolved_min_lines();
         let changed_by_file = self.changed_ranges_for_run(corpus);
-        // TSED scoring and its cheap candidate filters both run off the
-        // tree profiles; the token method needs neither, so skip the work.
-        let profiles = match self.method {
-            SimilarityMethod::Tsed => build_tree_profiles(corpus, min_lines, self.allow_lsh()),
-            SimilarityMethod::Token => Vec::new(),
-        };
+        let profiles = self.tree_profiles(corpus, min_lines);
         let candidate_started = Instant::now();
         let candidate_threshold = self.target.weights().body_candidate_threshold(threshold);
         let mut candidates = candidate_pairs(
@@ -919,9 +934,22 @@ impl SimilarityAnalyzer {
         opts
     }
 
+    /// TSED scoring and its cheap candidate filters both run off the
+    /// tree profiles; the other methods need neither, so they skip the
+    /// work and get an empty slice.
+    fn tree_profiles(&self, corpus: &[OwnedUnit], min_lines: usize) -> Vec<TreeProfile> {
+        if self.method.uses_tree_filters() {
+            build_tree_profiles(corpus, min_lines, self.allow_lsh())
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Score `pairs` with the configured [`SimilarityMethod`]. TSED reads
-    /// the prebuilt tree `profiles`; the token method builds its own
-    /// flattened token profiles, which `profiles` does not carry.
+    /// the prebuilt tree `profiles`; the token and dependence-graph
+    /// methods build their own per-unit profiles, which `profiles` does
+    /// not carry, and score every pair through the same body/signature
+    /// blend.
     fn score_pairs(
         &self,
         corpus: &[OwnedUnit],
@@ -931,13 +959,28 @@ impl SimilarityAnalyzer {
     ) -> ScoreStats {
         let weights = self.target.weights();
         let opts = self.tsed_options();
+        let compare_values = opts.apted.compare_values;
         match self.method {
             SimilarityMethod::Tsed => {
                 score_candidate_pairs(corpus, profiles, pairs, threshold, &opts, weights)
             }
             SimilarityMethod::Token => {
-                let token_profiles = build_token_profiles(corpus, opts.apted.compare_values);
-                score_token_candidate_pairs(corpus, &token_profiles, pairs, threshold, weights)
+                let token_profiles = build_token_profiles(corpus, compare_values);
+                score_profile_pairs(corpus, pairs, threshold, weights, |i, j| {
+                    Some(token::token_similarity(
+                        token_profiles.get(i)?,
+                        token_profiles.get(j)?,
+                    ))
+                })
+            }
+            SimilarityMethod::Pdg => {
+                let pdg_profiles = build_pdg_profiles(corpus, compare_values);
+                score_profile_pairs(corpus, pairs, threshold, weights, |i, j| {
+                    Some(pdg::pdg_similarity(
+                        pdg_profiles.get(i)?,
+                        pdg_profiles.get(j)?,
+                    ))
+                })
             }
         }
     }
@@ -967,6 +1010,13 @@ fn build_token_profiles(corpus: &[OwnedUnit], compare_values: bool) -> Vec<Token
     corpus
         .par_iter()
         .map(|f| TokenProfile::from_tree(f.body_tree(), compare_values))
+        .collect()
+}
+
+fn build_pdg_profiles(corpus: &[OwnedUnit], compare_values: bool) -> Vec<PdgProfile> {
+    corpus
+        .par_iter()
+        .map(|f| PdgProfile::from_unit(f, compare_values))
         .collect()
 }
 
@@ -1225,17 +1275,23 @@ fn bare_method_name(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
 }
 
-fn score_token_candidate_pairs(
+/// Score `pairs` for a method whose body score comes from precomputed
+/// per-unit profiles: `body_similarity(i, j)` is the method's own
+/// comparison, and everything around it — the signature component, the
+/// same-trait exemption, the blend — is shared with TSED scoring.
+fn score_profile_pairs(
     corpus: &[OwnedUnit],
-    token_profiles: &[TokenProfile],
     pairs: &[(usize, usize)],
     threshold: f64,
     weights: ScoreWeights,
+    body_similarity: impl Fn(usize, usize) -> Option<f64> + Sync,
 ) -> ScoreStats {
     pairs
         .par_iter()
         .fold(ScoreStats::default, |mut stats, &(i, j)| {
-            if let Some(score) = score_token_candidate_pair(corpus, token_profiles, i, j, weights) {
+            if let Some(score) = body_similarity(i, j)
+                .and_then(|body| score_profile_pair(corpus, i, j, body, weights))
+            {
                 stats.record(score, threshold);
             }
             stats
@@ -1244,16 +1300,15 @@ fn score_token_candidate_pairs(
         .sorted()
 }
 
-fn score_token_candidate_pair(
+fn score_profile_pair(
     corpus: &[OwnedUnit],
-    token_profiles: &[TokenProfile],
     i: usize,
     j: usize,
+    body_similarity: f64,
     weights: ScoreWeights,
 ) -> Option<PairScore> {
     let a = corpus.get(i)?;
     let b = corpus.get(j)?;
-    let body_similarity = token::token_similarity(token_profiles.get(i)?, token_profiles.get(j)?);
     let signature = signature_components(a.signature(), b.signature());
     let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
     let same_trait = same_trait_pair(a, b);
@@ -1718,6 +1773,7 @@ fn delta(xs: &[i32]) -> i32 {
             is_test: false,
             kind: None,
             implements: None,
+            lang: crate::analyze::SourceLang::Rust,
             shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                 name: name.to_owned(),
                 start_line,
@@ -2061,6 +2117,7 @@ fn delta(xs: &[i32]) -> i32 {
                 is_test: false,
                 kind: None,
                 implements: None,
+                lang: crate::analyze::SourceLang::Rust,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "left".to_owned(),
                     start_line: 1,
@@ -2086,6 +2143,7 @@ fn delta(xs: &[i32]) -> i32 {
                 is_test: false,
                 kind: None,
                 implements: None,
+                lang: crate::analyze::SourceLang::Rust,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "right".to_owned(),
                     start_line: 7,
@@ -3337,6 +3395,14 @@ fn beta(x: i32) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&token).unwrap();
         assert_eq!(parsed["method"], "token");
+
+        let pdg = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_method(SimilarityMethod::Pdg)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pdg).unwrap();
+        assert_eq!(parsed["method"], "pdg");
     }
 
     /// The token method must surface the same near-duplicate pair the
@@ -3388,20 +3454,133 @@ def beta(ys):
         assert_report(&out);
     }
 
-    #[test]
-    fn token_method_markdown_header_names_the_method() {
+    #[rstest]
+    #[case::token(SimilarityMethod::Token, "token method")]
+    #[case::pdg(SimilarityMethod::Pdg, "pdg method")]
+    fn markdown_header_names_the_method(#[case] method: SimilarityMethod, #[case] label: &str) {
         let dir = tempfile::tempdir().unwrap();
         let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
         let md = SimilarityAnalyzer::new()
             .with_threshold(0.5)
-            .with_method(SimilarityMethod::Token)
+            .with_method(method)
             .analyze(&file, OutputFormat::Md)
             .unwrap();
-        assert!(md.contains("token method"), "got: {md}");
+        assert!(md.contains(label), "got: {md}");
+    }
+
+    /// The dependence-graph method must surface the same near-duplicate
+    /// pair the other methods do, through every language's vocabulary.
+    #[rstest]
+    #[case::rust("lib.rs", PAIRED_FUNCTIONS)]
+    #[case::python(
+        "lib.py",
+        "
+def alpha(xs):
+    total = 0
+    for x in xs:
+        total += x
+    return total
+
+def beta(ys):
+    sum_ = 0
+    for y in ys:
+        sum_ += y
+    return sum_
+"
+    )]
+    #[case::typescript(
+        "lib.ts",
+        "
+export function alpha(xs: number[]): number {
+    let total = 0;
+    for (const x of xs) {
+        total = total + x;
+    }
+    return total;
+}
+
+export function beta(ys: number[]): number {
+    let sum = 0;
+    for (const y of ys) {
+        sum = sum + y;
+    }
+    return sum;
+}
+"
+    )]
+    #[case::go(
+        "lib.go",
+        "package lib
+
+func alpha(xs []int) int {
+	total := 0
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+func beta(ys []int) int {
+	sum := 0
+	for _, y := range ys {
+		sum += y
+	}
+	return sum
+}
+"
+    )]
+    fn pdg_method_reports_paired_functions(#[case] file_name: &str, #[case] src: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), file_name, src);
+        let out = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_method(SimilarityMethod::Pdg)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        assert_json_pair_report(&out);
+    }
+
+    /// The reason the method exists: two bodies that compute the same
+    /// thing with independent statements written in a different order
+    /// have the same dependence graph, while the tree-edit distance
+    /// charges every moved statement.
+    #[test]
+    fn pdg_method_is_invariant_to_reordering_independent_statements() {
+        let src = "
+fn alpha(items: &[i32], scale: i32) -> i32 {
+    let total: i32 = items.iter().sum();
+    let count = items.len() as i32;
+    let offset = scale * 2;
+    let mean = total / count;
+    mean + offset
+}
+fn beta(items: &[i32], scale: i32) -> i32 {
+    let offset = scale * 2;
+    let count = items.len() as i32;
+    let total: i32 = items.iter().sum();
+    let mean = total / count;
+    mean + offset
+}
+";
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", src);
+        let body_score = |method: SimilarityMethod| -> Option<f64> {
+            let out = SimilarityAnalyzer::new()
+                .with_threshold(0.5)
+                .with_method(method)
+                .analyze(&file, OutputFormat::Json)
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+            parsed["clusters"][0]["pairs"][0]["body_similarity"].as_f64()
+        };
+        let pdg = body_score(SimilarityMethod::Pdg).expect("pdg cluster");
+        let tsed = body_score(SimilarityMethod::Tsed).expect("tsed cluster");
+        assert!((pdg - 1.0).abs() < 1e-9, "pdg={pdg}");
+        assert!(tsed < pdg, "tsed={tsed} pdg={pdg}");
     }
 
     #[test]
-    fn score_token_candidate_pair_combines_body_and_signature_scores() {
+    fn score_profile_pair_combines_body_and_signature_scores() {
         let corpus = vec![
             OwnedUnit {
                 file: PathBuf::from("lib.rs"),
@@ -3409,6 +3588,7 @@ def beta(ys):
                 is_test: false,
                 kind: None,
                 implements: None,
+                lang: crate::analyze::SourceLang::Rust,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "left".to_owned(),
                     start_line: 1,
@@ -3442,6 +3622,7 @@ def beta(ys):
                 is_test: false,
                 kind: None,
                 implements: None,
+                lang: crate::analyze::SourceLang::Rust,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: "right".to_owned(),
                     start_line: 7,
@@ -3472,11 +3653,11 @@ def beta(ys):
         ];
         let token_profiles = build_token_profiles(&corpus, false);
 
-        let score = score_token_candidate_pair(
+        let score = score_profile_pair(
             &corpus,
-            &token_profiles,
             0,
             1,
+            token::token_similarity(&token_profiles[0], &token_profiles[1]),
             SimilarityTarget::Functions.weights(),
         )
         .unwrap();
@@ -3496,7 +3677,7 @@ def beta(ys):
     }
 
     #[test]
-    fn score_token_candidate_pair_weights_a_partial_body_overlap() {
+    fn score_profile_pair_weights_a_partial_body_overlap() {
         // Bodies overlap only partially, so `body_similarity` lands
         // strictly between 0 and 1 — the case that pins down the body
         // weight as a multiplier rather than any other operator.
@@ -3518,6 +3699,7 @@ def beta(ys):
                 is_test: false,
                 kind: None,
                 implements: None,
+                lang: crate::analyze::SourceLang::Rust,
                 shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
                     name: name.to_owned(),
                     start_line: 1,
@@ -3533,11 +3715,11 @@ def beta(ys):
         let corpus = vec![function("left", "Let"), function("right", "Call")];
         let token_profiles = build_token_profiles(&corpus, false);
 
-        let score = score_token_candidate_pair(
+        let score = score_profile_pair(
             &corpus,
-            &token_profiles,
             0,
             1,
+            token::token_similarity(&token_profiles[0], &token_profiles[1]),
             SimilarityTarget::Functions.weights(),
         )
         .unwrap();
