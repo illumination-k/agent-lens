@@ -22,6 +22,10 @@ impl HookEnvelope for ClaudeCodePostToolUse {
         prepare_edited_sources(input)
     }
 
+    fn cwd(input: &Self::Input) -> &std::path::Path {
+        &input.context.cwd
+    }
+
     fn wrap_report(report: String) -> Self::Output {
         PostToolUseOutput::with_system_message(report)
     }
@@ -31,6 +35,8 @@ impl HookEnvelope for ClaudeCodePostToolUse {
 pub type SimilarityHook = crate::hooks::core::SimilarityHook<ClaudeCodePostToolUse>;
 /// Claude Code `wrapper` PostToolUse hook handler.
 pub type WrapperHook = crate::hooks::core::WrapperHook<ClaudeCodePostToolUse>;
+/// Claude Code `footprint` PostToolUse hook handler.
+pub type FootprintHook = crate::hooks::core::FootprintHook<ClaudeCodePostToolUse>;
 /// Re-exported for compatibility with earlier per-handler error aliases.
 pub type SimilarityError = crate::hooks::core::HookError;
 /// Re-exported for compatibility with earlier per-handler error aliases.
@@ -449,5 +455,88 @@ fn alpha(xs: &[i32]) -> i32 {
         );
         let err = hook.handle(input).unwrap_err();
         assert!(matches!(err, WrapperError::Io { .. }));
+    }
+
+    // -- footprint ---------------------------------------------------
+
+    /// A committed checkpoint fixture turned into a forwarder, plus an
+    /// untouched second file that gets its own edit.
+    fn footprint_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        crate::test_support::init_checkpoint_fixture(dir.path());
+        write_file(
+            dir.path(),
+            "src/other.rs",
+            "pub fn o() -> i32 {\n    1\n}\n",
+        );
+        crate::test_support::run_git(dir.path(), &["init", "-q"]);
+        crate::test_support::run_git(dir.path(), &["add", "."]);
+        crate::test_support::run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        crate::test_support::regress_checkpoint_fixture(dir.path());
+        dir
+    }
+
+    fn footprint_for(cwd: &std::path::Path, file: &str) -> PostToolUseOutput {
+        let input = payload(
+            cwd.to_path_buf(),
+            "Edit",
+            json!({ "file_path": cwd.join(file).to_string_lossy() }),
+        );
+        FootprintHook::new().handle(input).unwrap()
+    }
+
+    #[test]
+    fn footprint_reports_flags_in_the_edited_file() {
+        let dir = footprint_repo();
+        let out = footprint_for(dir.path(), "src/lib.rs");
+        let msg = out
+            .common
+            .system_message
+            .expect("the new wrapper is flagged");
+        assert!(
+            msg.starts_with("# agent-lens footprint: flags in the file(s) just edited\n"),
+            "{msg}"
+        );
+        assert!(msg.contains("## New wrappers (1)"), "{msg}");
+        assert!(msg.contains("`outer` -> `inner`"), "{msg}");
+        assert!(
+            !msg.contains(&dir.path().display().to_string()),
+            "no absolute root: {msg}"
+        );
+    }
+
+    #[test]
+    fn footprint_stays_silent_about_other_files() {
+        let dir = footprint_repo();
+        write_file(
+            dir.path(),
+            "src/other.rs",
+            "pub fn o() -> i32 {\n    2\n}\n",
+        );
+        assert_eq!(
+            footprint_for(dir.path(), "src/other.rs"),
+            PostToolUseOutput::default()
+        );
+    }
+
+    #[test]
+    fn footprint_ignores_non_editing_tools_and_non_git_trees() {
+        let dir = footprint_repo();
+        let read = payload(
+            dir.path().to_path_buf(),
+            "Read",
+            json!({ "file_path": "src/lib.rs" }),
+        );
+        assert_eq!(
+            FootprintHook::new().handle(read).unwrap(),
+            PostToolUseOutput::default()
+        );
+
+        let loose = tempfile::tempdir().unwrap();
+        crate::test_support::init_checkpoint_fixture(loose.path());
+        assert_eq!(
+            footprint_for(loose.path(), "src/lib.rs"),
+            PostToolUseOutput::default()
+        );
     }
 }

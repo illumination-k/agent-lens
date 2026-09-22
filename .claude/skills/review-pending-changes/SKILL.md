@@ -51,6 +51,14 @@ agent-lens analyze change-entropy . --diff-only --format md
 
 It reports files touched, modules spanned, and the scatter percentile against this repo's own commits. A high percentile spanning several unrelated modules is the case for splitting the commit; one file carrying most of the changed lines is a focused change however many files it touched. Unlike the analyzers above it reads every file type, so `.toml`, `.md` and CI config count.
 
+Then the same question at function level, also from the repository root — did the edit stay on task, and what did it leave behind:
+
+```bash
+agent-lens analyze footprint . --format md
+```
+
+It counts the functions the diff touched and flags four things: touched functions outside the change's impact closure (their callers share nothing with the rest of the edit — the drive-by edit), complexity increases, functions turned into forwarders, and added functions nothing calls outside tests. Untracked files count as added, so new files the edit created are in scope.
+
 If a report is empty, skip it silently — empty diff-only output is the success case.
 
 ### 3. Crate / entry-level coupling (no `--diff-only`)

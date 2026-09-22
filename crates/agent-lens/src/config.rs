@@ -56,6 +56,7 @@ pub use crate::analyze::complexity::ComplexityOptions;
 pub use crate::analyze::context_span::ContextSpanOptions;
 pub use crate::analyze::coupling::CouplingOptions;
 pub use crate::analyze::delegation::DelegationOptions;
+pub use crate::analyze::footprint::FootprintOptions;
 pub use crate::analyze::graph_query::GraphQueryOptions;
 pub use crate::analyze::hotspot::HotspotOptions;
 pub use crate::analyze::hubs::HubsOptions;
@@ -162,6 +163,8 @@ pub struct Profile {
     pub hubs: Option<HubsOptions>,
     #[serde(default)]
     pub impact: Option<ImpactOptions>,
+    #[serde(default)]
+    pub footprint: Option<FootprintOptions>,
     #[serde(default)]
     pub layers: Option<LayersOptions>,
     #[serde(default)]
@@ -356,6 +359,7 @@ pub enum ToolName {
     ContextSpan,
     Cycles,
     Delegation,
+    Footprint,
     FunctionGraph,
     GraphQuery,
     HiddenCoupling,
@@ -390,6 +394,7 @@ impl ToolName {
             Self::ContextSpan => "context-span",
             Self::Cycles => "cycles",
             Self::Delegation => "delegation",
+            Self::Footprint => "footprint",
             Self::FunctionGraph => "function-graph",
             Self::GraphQuery => "graph-query",
             Self::HiddenCoupling => "hidden-coupling",

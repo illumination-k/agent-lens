@@ -28,6 +28,10 @@ impl HookEnvelope for ClaudeCodePreToolUse {
         prepare_edited_sources(input)
     }
 
+    fn cwd(input: &Self::Input) -> &std::path::Path {
+        &input.context.cwd
+    }
+
     fn wrap_report(report: String) -> Self::Output {
         PreToolUseOutput::with_system_message(report)
     }

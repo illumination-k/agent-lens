@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use super::index::AnalysisIndex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LineRange {
     pub start: usize,
     pub end: usize,
@@ -37,6 +38,36 @@ pub enum DiffScope {
     /// and handed to git unparsed, so every spelling git accepts
     /// (`HEAD~1..HEAD`, `main...topic`, a bare commit) works here.
     Range(String),
+    /// Lines a caller already knows changed, with no git involved. The
+    /// session checkpoint compares against a snapshot it took itself,
+    /// not against any commit, and hands the analyzers the result
+    /// through the same gate the git scopes use.
+    Lines(ChangedLines),
+}
+
+/// An explicit changed-lines map for [`DiffScope::Lines`], keyed by
+/// canonical absolute path so a lookup agrees with however the walk
+/// spelled the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ChangedLines(Arc<BTreeMap<PathBuf, Vec<LineRange>>>);
+
+impl ChangedLines {
+    /// Build the map. A path that cannot be canonicalized (it no longer
+    /// exists) is kept as given: it can then only match a lookup that
+    /// spells it the same way, which is the most a missing file allows.
+    pub fn new(entries: impl IntoIterator<Item = (PathBuf, Vec<LineRange>)>) -> Self {
+        let mut map: BTreeMap<PathBuf, Vec<LineRange>> = BTreeMap::new();
+        for (path, ranges) in entries {
+            let key = path.canonicalize().unwrap_or(path);
+            map.entry(key).or_default().extend(ranges);
+        }
+        Self(Arc::new(map))
+    }
+
+    fn ranges_for(&self, path: &Path) -> Vec<LineRange> {
+        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.0.get(&key).cloned().unwrap_or_default()
+    }
 }
 
 impl DiffScope {
@@ -102,6 +133,9 @@ pub fn changed_line_ranges(path: &Path, scope: &DiffScope) -> Vec<LineRange> {
     if !scope.is_enabled() {
         return Vec::new();
     }
+    if let DiffScope::Lines(lines) = scope {
+        return lines.ranges_for(path);
+    }
     if let Some(index) = AnalysisIndex::active()
         && let Some(ranges) = indexed_changed_line_ranges(&index, path, scope)
     {
@@ -155,7 +189,7 @@ fn repo_root_for(dir: &Path) -> Option<PathBuf> {
 /// for the same reason the per-file invocation's do.
 fn diff_repository(root: &Path, scope: &DiffScope) -> HashMap<PathBuf, Vec<LineRange>> {
     let range = match scope {
-        DiffScope::Disabled => return HashMap::new(),
+        DiffScope::Disabled | DiffScope::Lines(_) => return HashMap::new(),
         DiffScope::WorkingTree => None,
         DiffScope::Range(range) => Some(range.as_str()),
     };
@@ -207,7 +241,7 @@ fn diff_repository(root: &Path, scope: &DiffScope) -> HashMap<PathBuf, Vec<LineR
 
 fn per_file_changed_line_ranges(path: &Path, scope: &DiffScope) -> Vec<LineRange> {
     let range = match scope {
-        DiffScope::Disabled => return Vec::new(),
+        DiffScope::Disabled | DiffScope::Lines(_) => return Vec::new(),
         DiffScope::WorkingTree => None,
         DiffScope::Range(range) => Some(range.as_str()),
     };
@@ -303,16 +337,7 @@ fn parse_unified_zero_by_file(diff: &str) -> HashMap<String, Vec<LineRange>> {
 /// spelling (that file then reads as unchanged, the same degraded
 /// answer a failed per-file diff gives).
 fn diff_target_path(target: &str) -> Option<String> {
-    let target = target.trim_end();
-    let unquoted = if target.starts_with('"') {
-        unquote_c_style(target)?
-    } else {
-        target.to_owned()
-    };
-    if unquoted == "/dev/null" {
-        return None;
-    }
-    unquoted.strip_prefix("b/").map(str::to_owned)
+    diff_side_path(target, "b/")
 }
 
 /// Undo git's `core.quotePath` C-style quoting: surrounding quotes,
@@ -344,6 +369,201 @@ fn unquote_c_style(quoted: &str) -> Option<String> {
         }
     }
     String::from_utf8(bytes).ok()
+}
+
+/// One file's side of a two-sided `git diff -U0`: which lines left, which
+/// arrived, and under which names. What `analyze footprint` reads, where
+/// the post-image ranges the other analyzers gate on are only half the
+/// question — a deleted function has no post-image line to overlap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FileDiff {
+    /// Repository-relative pre-image path; `None` for an added file.
+    pub(crate) old_path: Option<String>,
+    /// Repository-relative post-image path; `None` for a deleted file.
+    pub(crate) new_path: Option<String>,
+    /// Pre-image line ranges the diff removed or rewrote.
+    pub(crate) removed: Vec<LineRange>,
+    /// Post-image line ranges the diff added or rewrote.
+    pub(crate) added: Vec<LineRange>,
+    pub(crate) added_lines: usize,
+    pub(crate) deleted_lines: usize,
+}
+
+/// Run `git diff -U0 -M` for `scope` under `root`, limited to
+/// `pathspecs` (empty means the whole tree), and split it per file with
+/// both sides of every hunk. Unlike [`changed_line_ranges`], a git
+/// failure is an error: the caller's whole report is this diff, and an
+/// empty one would read as "nothing changed".
+pub(crate) fn diff_files(
+    root: &Path,
+    scope: &DiffScope,
+    pathspecs: &[String],
+) -> Result<Vec<FileDiff>, String> {
+    let range = match scope {
+        DiffScope::Disabled | DiffScope::Lines(_) => return Ok(Vec::new()),
+        DiffScope::WorkingTree => None,
+        DiffScope::Range(range) => Some(range.as_str()),
+    };
+    let mut cmd = Command::new("git");
+    // Prefixes and colour are forced for the same reason
+    // `diff_repository` forces them: the parser keys off `a/` / `b/`.
+    cmd.args([
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--unified=0",
+        "-M",
+    ]);
+    if let Some(range) = range {
+        cmd.arg(range);
+    }
+    cmd.arg("--");
+    if pathspecs.is_empty() {
+        cmd.arg(".");
+    } else {
+        cmd.args(pathspecs);
+    }
+    cmd.current_dir(root);
+    let output = cmd
+        .output()
+        .map_err(|source| format!("could not run `git diff`: {source}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(parse_file_diffs(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Untracked, non-ignored files under `pathspecs`, as whole-file
+/// additions. `git diff` never shows them, so a working-tree footprint
+/// that stopped at the diff would miss every file the edit created —
+/// which is where an over-edit's scaffolding usually lands. A file that
+/// is not UTF-8 text is skipped.
+pub(crate) fn untracked_file_diffs(
+    root: &Path,
+    pathspecs: &[String],
+) -> Result<Vec<FileDiff>, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["ls-files", "--others", "--exclude-standard", "-z", "--"]);
+    if pathspecs.is_empty() {
+        cmd.arg(".");
+    } else {
+        cmd.args(pathspecs);
+    }
+    cmd.current_dir(root);
+    let output = cmd
+        .output()
+        .map_err(|source| format!("could not run `git ls-files`: {source}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    Ok(listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(root.join(path)).ok()?;
+            let lines = text.lines().count();
+            Some(FileDiff {
+                old_path: None,
+                new_path: Some(path.to_owned()),
+                removed: Vec::new(),
+                added: side_range((1, lines)).into_iter().collect(),
+                added_lines: lines,
+                deleted_lines: 0,
+            })
+        })
+        .collect())
+}
+
+/// Split a `-U0` diff into [`FileDiff`]s. A file with no hunk (a pure
+/// rename, a mode change, a binary file) still appears, with empty
+/// ranges and zero counts.
+fn parse_file_diffs(diff: &str) -> Vec<FileDiff> {
+    let mut out: Vec<FileDiff> = Vec::new();
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            out.push(FileDiff::default());
+        } else if let Some(current) = out.last_mut() {
+            fold_diff_line(current, line);
+        }
+    }
+    out
+}
+
+/// The per-file header lines [`fold_diff_line`] reads a path from.
+const PATH_HEADERS: [&str; 4] = ["--- ", "+++ ", "rename from ", "rename to "];
+
+/// Fold one line of a file's section into `file`: a header naming
+/// either side, or a hunk header. Body lines are skipped — under `-U0`
+/// the hunk header already carries every count.
+fn fold_diff_line(file: &mut FileDiff, line: &str) {
+    if let Some((old, new)) = parse_hunk_sides(line) {
+        file.deleted_lines += old.1;
+        file.added_lines += new.1;
+        file.removed.extend(side_range(old));
+        file.added.extend(side_range(new));
+        return;
+    }
+    let Some((header, rest)) = PATH_HEADERS
+        .into_iter()
+        .find_map(|header| Some((header, line.strip_prefix(header)?)))
+    else {
+        return;
+    };
+    match header {
+        "--- " => file.old_path = diff_side_path(rest, "a/"),
+        "+++ " => file.new_path = diff_side_path(rest, "b/"),
+        "rename from " => file.old_path = unquote_path(rest),
+        _ => file.new_path = unquote_path(rest),
+    }
+}
+
+/// `(start, count)` for both sides of a `@@ -a,b +c,d @@` header.
+fn parse_hunk_sides(line: &str) -> Option<((usize, usize), (usize, usize))> {
+    let header = line.strip_prefix("@@")?.split("@@").next()?;
+    let mut parts = header.split_whitespace();
+    let old = parse_side(parts.next()?.strip_prefix('-')?)?;
+    let new = parse_side(parts.next()?.strip_prefix('+')?)?;
+    Some((old, new))
+}
+
+fn parse_side(coords: &str) -> Option<(usize, usize)> {
+    let mut parts = coords.split(',');
+    let start = parts.next()?.parse::<usize>().ok()?;
+    let count = match parts.next() {
+        Some(count) => count.parse::<usize>().ok()?,
+        None => 1,
+    };
+    Some((start, count))
+}
+
+fn side_range((start, count): (usize, usize)) -> Option<LineRange> {
+    (count > 0).then(|| LineRange {
+        start,
+        end: start + count - 1,
+    })
+}
+
+/// The repository-relative path one side of a file header names:
+/// `prefix` is `a/` for `--- ` and `b/` for `+++ `.
+fn diff_side_path(target: &str, prefix: &str) -> Option<String> {
+    let unquoted = unquote_path(target)?;
+    if unquoted == "/dev/null" {
+        return None;
+    }
+    unquoted.strip_prefix(prefix).map(str::to_owned)
+}
+
+/// A header path with git's C-style quoting undone, if it was quoted.
+fn unquote_path(target: &str) -> Option<String> {
+    let target = target.trim_end();
+    if target.starts_with('"') {
+        unquote_c_style(target)
+    } else {
+        Some(target.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -616,5 +836,110 @@ diff --git a/old.rs b/new.rs
         let got = DiffScope::new(diff_only, diff_range.map(str::to_owned));
         assert_eq!(got, want);
         assert_eq!(got.is_enabled(), want != DiffScope::Disabled);
+    }
+
+    #[test]
+    fn parses_both_sides_of_every_file() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -3,2 +3,0 @@
+-x
+-y
+@@ -9 +7,3 @@
+-z
++a
++b
++c
+diff --git a/gone.rs b/gone.rs
+--- a/gone.rs
++++ /dev/null
+@@ -1,4 +0,0 @@
+-x
+diff --git a/new.rs b/new.rs
+--- /dev/null
++++ b/new.rs
+@@ -0,0 +1,2 @@
++x
+diff --git a/old.rs b/moved.rs
+similarity index 100%
+rename from old.rs
+rename to moved.rs
+";
+        let got = parse_file_diffs(diff);
+        assert_eq!(got.len(), 4, "got {got:?}");
+        assert_eq!(
+            got[0],
+            FileDiff {
+                old_path: Some("src/a.rs".to_owned()),
+                new_path: Some("src/a.rs".to_owned()),
+                removed: vec![
+                    LineRange { start: 3, end: 4 },
+                    LineRange { start: 9, end: 9 }
+                ],
+                added: vec![LineRange { start: 7, end: 9 }],
+                added_lines: 3,
+                deleted_lines: 3,
+            }
+        );
+        assert_eq!(got[1].new_path, None, "a deletion has no post-image");
+        assert_eq!(got[1].deleted_lines, 4);
+        assert_eq!(got[2].old_path, None, "an addition has no pre-image");
+        assert_eq!(got[2].added, vec![LineRange { start: 1, end: 2 }]);
+        assert_eq!(got[3].old_path.as_deref(), Some("old.rs"));
+        assert_eq!(got[3].new_path.as_deref(), Some("moved.rs"));
+        assert_eq!((got[3].added_lines, got[3].deleted_lines), (0, 0));
+    }
+
+    #[test]
+    fn diff_files_and_untracked_files_read_the_working_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run_git(root, &["init", "-q"]);
+        crate::test_support::write_file(root, "a.rs", "fn a() {}\nfn b() {}\n");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "init"]);
+        crate::test_support::write_file(root, "a.rs", "fn a() {}\nfn b() { 1; }\nfn c() {}\n");
+        crate::test_support::write_file(root, "fresh.rs", "fn f() {}\n");
+
+        let diffs = diff_files(root, &DiffScope::WorkingTree, &[]).unwrap();
+        assert_eq!(diffs.len(), 1, "untracked files are not in `git diff`");
+        assert_eq!(diffs[0].new_path.as_deref(), Some("a.rs"));
+        assert_eq!((diffs[0].added_lines, diffs[0].deleted_lines), (2, 1));
+
+        let untracked = untracked_file_diffs(root, &[]).unwrap();
+        assert_eq!(untracked.len(), 1);
+        assert_eq!(untracked[0].new_path.as_deref(), Some("fresh.rs"));
+        assert_eq!(untracked[0].added_lines, 1);
+
+        assert!(
+            diff_files(root, &DiffScope::Disabled, &[])
+                .unwrap()
+                .is_empty()
+        );
+        let err = diff_files(root, &DiffScope::Range("no-such-rev..HEAD".to_owned()), &[]);
+        assert!(
+            err.is_err(),
+            "an unresolvable range is an error, not an empty diff"
+        );
+    }
+
+    #[test]
+    fn explicit_lines_answer_without_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = crate::test_support::write_file(dir.path(), "a.rs", "fn a() {}\n");
+        let lines = ChangedLines::new([(file.clone(), vec![LineRange { start: 1, end: 1 }])]);
+        let scope = DiffScope::Lines(lines);
+        assert!(scope.is_enabled());
+        assert_eq!(
+            changed_line_ranges(&file, &scope),
+            vec![LineRange { start: 1, end: 1 }]
+        );
+        // A different spelling of the same file still matches.
+        let spelled = dir.path().join(".").join("a.rs");
+        assert_eq!(changed_line_ranges(&spelled, &scope).len(), 1);
+        let other = crate::test_support::write_file(dir.path(), "b.rs", "fn b() {}\n");
+        assert!(changed_line_ranges(&other, &scope).is_empty());
     }
 }

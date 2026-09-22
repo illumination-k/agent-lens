@@ -184,6 +184,7 @@ mod tests {
     use crate::analyze::context_span::{ContextSpanAnalyzer, ContextSpanOptions};
     use crate::analyze::coupling::{CouplingAnalyzer, CouplingOptions};
     use crate::analyze::delegation::{DelegationAnalyzer, DelegationOptions};
+    use crate::analyze::footprint::{FootprintAnalyzer, FootprintOptions};
     use crate::analyze::graph_query::{
         GraphDirection, GraphQueryAnalyzer, GraphQueryKind, GraphQueryOptions,
     };
@@ -336,6 +337,11 @@ mod tests {
         |a| a.with_top(Some(3)).with_since_opt(Some("90.days.ago".to_owned()))
     );
     assert_options_reach_the_analyzer!(
+        footprint_options_reach_the_analyzer: FootprintAnalyzer,
+        FootprintOptions { top: Some(3), diff_only: true, diff_range: None, depth: Some(4) },
+        |a| a.with_top(Some(3)).with_depth(Some(4))
+    );
+    assert_options_reach_the_analyzer!(
         hubs_options_reach_the_analyzer: HubsAnalyzer,
         HubsOptions { top: Some(3) },
         |a| a.with_top(Some(3))
@@ -454,6 +460,10 @@ mod tests {
     assert_diff_range_reaches_the_analyzer!(
         delegation_diff_range_reaches_the_analyzer: DelegationAnalyzer,
         DelegationOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
+        footprint_diff_range_reaches_the_analyzer: FootprintAnalyzer,
+        FootprintOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
     );
     assert_diff_range_reaches_the_analyzer!(
         impact_diff_range_reaches_the_analyzer: ImpactAnalyzer,

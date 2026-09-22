@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 28] = [
+const TOOL_ORDER: [ToolName; 29] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -35,6 +35,7 @@ const TOOL_ORDER: [ToolName; 28] = [
     ToolName::HiddenCoupling,
     ToolName::Hubs,
     ToolName::Impact,
+    ToolName::Footprint,
     ToolName::Layers,
     ToolName::SingleImpl,
     ToolName::SingleUse,
@@ -86,7 +87,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, parameters, risk, search, similarity, single-impl, single-use, test-only, test-redundancy, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, footprint, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, parameters, risk, search, similarity, single-impl, single-use, test-only, test-redundancy, unreachable, untested, visibility, wrapper.",
     },
     Field {
         key: "format",
@@ -459,6 +460,32 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "string",
                 presence: "optional",
                 desc: "Seed the query from the given git revision range (`HEAD~1..HEAD`) instead of the working-tree diff. Ignored when function is set.",
+            },
+        ],
+        ToolName::Footprint => &[
+            Field {
+                key: "depth",
+                ty: "int",
+                presence: "default: 2",
+                desc: "Caller hops the scatter check walks from each touched function. Two touched functions belong together when their capped caller closures intersect.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap each markdown list to the top N rows.",
+            },
+            Field {
+                key: "diff-only",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Measure the unstaged working-tree diff. This is also what an unset scope reads: there is no footprint without a diff.",
+            },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Measure the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
             },
         ],
         ToolName::Layers => &[Field {
@@ -851,8 +878,8 @@ mod tests {
     use crate::config::{
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
         ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
-        GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions,
-        ParametersOptions, Profile, RiskOptions, SearchOptions, SimilarityOptions,
+        FootprintOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
+        LayersOptions, ParametersOptions, Profile, RiskOptions, SearchOptions, SimilarityOptions,
         SingleImplOptions, SingleUseOptions, TestOnlyOptions, TestRedundancyOptions,
         UnreachableOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
     };
@@ -890,6 +917,7 @@ mod tests {
         assert_tool_parity::<RiskOptions>(ToolName::Risk);
         assert_tool_parity::<HubsOptions>(ToolName::Hubs);
         assert_tool_parity::<ImpactOptions>(ToolName::Impact);
+        assert_tool_parity::<FootprintOptions>(ToolName::Footprint);
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
         assert_tool_parity::<SingleImplOptions>(ToolName::SingleImpl);
         assert_tool_parity::<SingleUseOptions>(ToolName::SingleUse);

@@ -40,6 +40,7 @@ Pick an analyzer by question:
     how much must I read to edit this?    analyze context-span
     which functions are load-bearing?     analyze hubs
     what breaks if I change this?         analyze impact
+    did my diff sprawl or leave debris?   analyze footprint
     which level does this code sit on?    analyze layers
     what has no test path guarding it?    analyze untested
     what do only tests keep alive?        analyze test-only
@@ -187,6 +188,14 @@ Examples:
 
     agent-lens analyze single-use src/ --format md
     agent-lens analyze single-use src/ --max-loc 12 --max-cyclomatic 4 --format md
+";
+
+pub const FOOTPRINT: &str = "\
+Examples:
+
+    agent-lens analyze footprint . --format md
+    agent-lens analyze footprint crates/ --diff-range main...HEAD --format md
+    agent-lens analyze footprint . --depth 3 --exclude-tests
 ";
 
 pub const TEST_REDUNDANCY: &str = "\

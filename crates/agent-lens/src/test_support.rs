@@ -131,3 +131,28 @@ pub fn nest(n: i32) -> i32 {
     run_git(dir, &["add", "."]);
     run_git(dir, &["commit", "-q", "-m", "initial"]);
 }
+
+/// A one-file Rust crate for the session-checkpoint hooks: `outer` does
+/// real work before calling `inner`. [`regress_checkpoint_fixture`]
+/// turns it into a forwarder — one regression, a new wrapper.
+pub fn init_checkpoint_fixture(dir: &Path) {
+    write_file(
+        dir,
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write_file(
+        dir,
+        "src/lib.rs",
+        "fn inner(x: i32) -> i32 {\n    x * 2 + 1\n}\n\npub fn outer(x: i32) -> i32 {\n    let y = x + 1;\n    inner(y)\n}\n",
+    );
+}
+
+/// Make [`init_checkpoint_fixture`]'s `outer` a forwarding-only wrapper.
+pub fn regress_checkpoint_fixture(dir: &Path) {
+    write_file(
+        dir,
+        "src/lib.rs",
+        "fn inner(x: i32) -> i32 {\n    x * 2 + 1\n}\n\npub fn outer(x: i32) -> i32 {\n    inner(x)\n}\n",
+    );
+}

@@ -26,8 +26,8 @@ pub use pre_tool_use::{
 pub use session_start::{
     SessionStartHookSpecificOutput, SessionStartInput, SessionStartOutput, SessionStartSource,
 };
-pub use stop::{StopInput, StopOutput};
-pub use subagent_stop::{SubagentStopInput, SubagentStopOutput};
+pub use stop::{StopDecision, StopInput, StopOutput};
+pub use subagent_stop::{SubagentStopDecision, SubagentStopInput, SubagentStopOutput};
 pub use user_prompt_submit::{
     UserPromptSubmitHookSpecificOutput, UserPromptSubmitInput, UserPromptSubmitOutput,
 };

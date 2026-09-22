@@ -190,6 +190,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         ),
         (profile.hubs.is_some(), config::ToolName::Hubs),
         (profile.impact.is_some(), config::ToolName::Impact),
+        (profile.footprint.is_some(), config::ToolName::Footprint),
         (profile.layers.is_some(), config::ToolName::Layers),
         (profile.parameters.is_some(), config::ToolName::Parameters),
         (

@@ -32,8 +32,8 @@ use args::{
 };
 use baseline::run_baseline;
 use hooks::{
-    run_codex_post_tool_use, run_codex_pre_tool_use, run_codex_session_start, run_post_tool_use,
-    run_pre_tool_use, run_session_start,
+    run_codex_post_tool_use, run_codex_pre_tool_use, run_codex_session_start, run_codex_stop,
+    run_post_tool_use, run_pre_tool_use, run_session_start, run_stop, run_subagent_stop,
 };
 use profile::run_profile;
 use setup::{run_codex_hook_setup, run_hook_setup};
@@ -71,6 +71,8 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Hook(HookCommand::SessionStart(sub)) => run_session_start(sub).map(succeeded),
         Command::Hook(HookCommand::PreToolUse(sub)) => run_pre_tool_use(sub).map(succeeded),
         Command::Hook(HookCommand::PostToolUse(sub)) => run_post_tool_use(sub).map(succeeded),
+        Command::Hook(HookCommand::Stop(sub)) => run_stop(sub).map(succeeded),
+        Command::Hook(HookCommand::SubagentStop(sub)) => run_subagent_stop(sub).map(succeeded),
         Command::Hook(HookCommand::Setup(args)) => run_hook_setup(args).map(succeeded),
         Command::CodexHook(CodexHookCommand::SessionStart(sub)) => {
             run_codex_session_start(sub).map(succeeded)
@@ -81,6 +83,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::CodexHook(CodexHookCommand::PostToolUse(sub)) => {
             run_codex_post_tool_use(sub).map(succeeded)
         }
+        Command::CodexHook(CodexHookCommand::Stop(sub)) => run_codex_stop(sub).map(succeeded),
         Command::CodexHook(CodexHookCommand::Setup(args)) => {
             run_codex_hook_setup(args).map(succeeded)
         }

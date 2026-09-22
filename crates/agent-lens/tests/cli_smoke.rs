@@ -645,6 +645,9 @@ fn top_bounds_the_markdown_report(#[case] args: &[&str], #[case] expected: &str)
     &["codex-hook", "post-tool-use", "similarity"],
     "codex post-tool-use",
 )]
+#[case::claude_stop(&["hook", "stop", "delta"], "stop")]
+#[case::claude_subagent_stop(&["hook", "subagent-stop", "delta"], "subagent-stop")]
+#[case::codex_stop(&["codex-hook", "stop", "delta"], "codex stop")]
 fn invalid_hook_payload_is_reported_in_the_hook_response(
     #[case] args: &[&str],
     #[case] event: &str,
@@ -669,6 +672,66 @@ fn invalid_hook_payload_is_reported_in_the_hook_response(
         report.contains(&format!("agent-lens {event} hook failed")),
         "got: {report}",
     );
+}
+
+/// The checkpoint end to end through the binary: a snapshot at session
+/// start, silence while nothing changed, and the regression handed back
+/// as the reason to keep going once something got worse.
+#[test]
+fn session_checkpoint_blocks_a_stop_on_a_new_regression() {
+    let dir = tempfile::tempdir().unwrap();
+    agent_lens::test_support::init_checkpoint_fixture(dir.path());
+    let cwd = dir.path().to_string_lossy().replace('\\', "\\\\");
+    let context = format!(r#""session_id":"smoke","transcript_path":"/tmp/t","cwd":"{cwd}""#);
+
+    let start = format!(r#"{{{context},"hook_event_name":"SessionStart","source":"startup"}}"#);
+    let output = agent_lens(
+        &["hook", "session-start", "snapshot"],
+        dir.path(),
+        Some(&start),
+    );
+    assert_eq!(stdout_json(&output), serde_json::json!({}));
+
+    let stop = format!(r#"{{{context},"hook_event_name":"Stop"}}"#);
+    let output = agent_lens(&["hook", "stop", "delta"], dir.path(), Some(&stop));
+    assert_eq!(stdout_json(&output), serde_json::json!({}));
+
+    agent_lens::test_support::regress_checkpoint_fixture(dir.path());
+    let json = stdout_json(&agent_lens(
+        &["hook", "stop", "delta"],
+        dir.path(),
+        Some(&stop),
+    ));
+    assert_eq!(json["decision"], "block", "got {json}");
+    let reason = json["reason"].as_str().unwrap();
+    assert!(reason.contains("## New wrappers (1)"), "got {reason}");
+}
+
+#[test]
+fn analyze_footprint_reports_the_pending_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    agent_lens::test_support::init_checkpoint_fixture(dir.path());
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+    agent_lens::test_support::regress_checkpoint_fixture(dir.path());
+
+    let json = stdout_json(&agent_lens(
+        &["analyze", "footprint", "."],
+        dir.path(),
+        None,
+    ));
+    assert_eq!(json["summary"]["functions_modified"], 1, "got {json}");
+    assert_eq!(json["new_wrappers"][0]["name"], "outer", "got {json}");
+
+    let output = agent_lens(
+        &["analyze", "footprint", ".", "--format", "md"],
+        dir.path(),
+        None,
+    );
+    assert!(output.status.success());
+    let md = String::from_utf8(output.stdout).unwrap();
+    assert!(md.contains("## New wrappers (1)"), "got {md}");
 }
 
 #[test]

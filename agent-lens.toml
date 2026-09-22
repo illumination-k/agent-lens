@@ -284,6 +284,7 @@ tools = [
   "cohesion",
   "delegation",
   "change-entropy",
+  "footprint",
 ]
 
 [profile.changes.similarity]
@@ -319,6 +320,15 @@ top = 10
 #
 #     agent-lens analyze change-entropy . --diff-only --format md
 [profile.changes.change-entropy]
+diff-only = true
+top = 15
+
+# The pending edit read at function level: functions touched, edits
+# outside the change's impact closure, complexity deltas, new
+# forwarders, and added functions nothing calls. Untracked files count,
+# so a new module the edit created is in scope. Every flag it raises on
+# the pending edit is one to fix or explain before committing.
+[profile.changes.footprint]
 diff-only = true
 top = 15
 

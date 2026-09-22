@@ -166,6 +166,9 @@ agent-lens analyze hidden-coupling . --min-support 5 --format md
 agent-lens analyze similarity src/foo.rs --diff-only
 agent-lens analyze complexity src/foo.rs --diff-range main...HEAD
 
+# The pending diff as a whole: how far it sprawled, and what it left behind
+agent-lens analyze footprint . --format md
+
 # Path filters work everywhere; several trees form one corpus, so a duplicate
 # or call edge spanning them is visible where per-tree runs would miss it
 agent-lens analyze similarity packages cli web/src --format md --exclude-tests
@@ -184,7 +187,8 @@ Conventions that hold across analyzers:
   `communities`, which grow one module graph from one entry point.
 - `--diff-only` and `--diff-range` conflict (they name different diffs). On
   `impact` the diff is the seed rather than a gate, so only `--diff-range`
-  applies.
+  applies; on `footprint` the diff is the subject, and an unset scope reads
+  the working tree.
 
 `search` complements `grep` rather than replacing it: reach for `search` when
 you can only describe the thing, and switch to `grep` once you have a name.
@@ -265,11 +269,13 @@ under `skipped` with a reason rather than silently dropped.
 
 ### As a Claude Code hook
 
-Wire `agent-lens` into Claude Code at three event points: a one-shot
+Wire `agent-lens` into Claude Code at five event points: a one-shot
 `SessionStart` summary of the repo's hotspots, a `PreToolUse` heads-up about
-complex / low-cohesion code the agent is about to edit, and a `PostToolUse`
+complex / low-cohesion code the agent is about to edit, a `PostToolUse`
 follow-up flagging duplicated or forwarding-only functions in the file just
-changed.
+changed and where the pending diff sprawled, and a session checkpoint: a
+snapshot at `SessionStart`, compared at every `Stop` / `SubagentStop` so the
+agent hears what got worse over the session before it hands control back.
 
 ```bash
 agent-lens hook setup                 # project scope: ./.claude/settings.json
@@ -297,16 +303,16 @@ and re-running is a no-op.
 
 ### Command surface
 
-| Command tree | Commands                                                                                                                                                                                                                                                                                                                                                                             |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `hook`       | `setup`, `session-start summary`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`                                                                                                                                                                                                                                            |
-| `codex-hook` | same handlers as `hook`, speaking Codex's protocol                                                                                                                                                                                                                                                                                                                                   |
-| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `single-use`, `parameters`, `single-impl`, `test-only`, `test-redundancy`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                                                                                                        |
-| `baseline`   | `create <profile>` — snapshot a profile's metrics; `compare <profile> <SNAPSHOT> [--update]` — gate a fresh run against one                                                                                                                                                                                                                                                          |
-| `skills`     | `list`, `install` — the bundled Claude Code skills                                                                                                                                                                                                                                                                                                                                   |
-| `config`     | `schema` — print the `agent-lens.toml` reference                                                                                                                                                                                                                                                                                                                                     |
-| `help`       | `help [--md]` — print the command reference, optionally as one Markdown document                                                                                                                                                                                                                                                                                                     |
+| Command tree | Commands                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `session-start snapshot`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`, `post-tool-use footprint`, `stop delta`, `subagent-stop delta`                                                                                                                                                               |
+| `codex-hook` | same handlers as `hook` (Codex has no `SubagentStop`), speaking Codex's protocol                                                                                                                                                                                                                                                                                                                  |
+| `analyze`    | `search`, `similarity`, `wrapper`, `delegation`, `single-use`, `parameters`, `single-impl`, `test-only`, `test-redundancy`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `footprint`, `layers`, `unreachable`, `untested`, `visibility`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                                                                                                                     |
+| `baseline`   | `create <profile>` — snapshot a profile's metrics; `compare <profile> <SNAPSHOT> [--update]` — gate a fresh run against one                                                                                                                                                                                                                                                                       |
+| `skills`     | `list`, `install` — the bundled Claude Code skills                                                                                                                                                                                                                                                                                                                                                |
+| `config`     | `schema` — print the `agent-lens.toml` reference                                                                                                                                                                                                                                                                                                                                                  |
+| `help`       | `help [--md]` — print the command reference, optionally as one Markdown document                                                                                                                                                                                                                                                                                                                  |
 
 `agent-lens --help` opens with a question-to-analyzer routing table ("what
 breaks if I change this?" → `analyze impact`), and each subcommand's `--help`
@@ -321,19 +327,36 @@ conflicting local edit (otherwise conflicts are reported and left untouched).
 
 ### Hook handlers
 
-| Event          | Handler      | What it does                                                                         |
-| -------------- | ------------ | ------------------------------------------------------------------------------------ |
-| `SessionStart` | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                |
-| `PreToolUse`   | `complexity` | Flags functions in the file about to be edited whose complexity crosses a threshold. |
-| `PreToolUse`   | `cohesion`   | Flags cohesion units in the file about to be edited whose LCOM4 is greater than 1.   |
-| `PostToolUse`  | `similarity` | Reports near-duplicate function pairs in the file just edited.                       |
-| `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                           |
+| Event          | Handler      | What it does                                                                            |
+| -------------- | ------------ | --------------------------------------------------------------------------------------- |
+| `SessionStart` | `summary`    | Injects a one-shot hotspot + coupling thumbnail into the new session.                   |
+| `PreToolUse`   | `complexity` | Flags functions in the file about to be edited whose complexity crosses a threshold.    |
+| `PreToolUse`   | `cohesion`   | Flags cohesion units in the file about to be edited whose LCOM4 is greater than 1.      |
+| `PostToolUse`  | `similarity` | Reports near-duplicate function pairs in the file just edited.                          |
+| `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                              |
+| `PostToolUse`  | `footprint`  | Reports the pending diff's `analyze footprint` flags that land in the file just edited. |
+| `SessionStart` | `snapshot`   | Records the session checkpoint `stop delta` compares against; injects nothing.          |
+| `Stop`         | `delta`      | Reports only what got worse since the snapshot; a new regression blocks the stop once.  |
+| `SubagentStop` | `delta`      | The same checkpoint when a sub-agent finishes.                                          |
 
-The `codex-hook` tree ships the same five handlers; the `PreToolUse` /
-`PostToolUse` ones run across every file the `apply_patch` touches. Schemas
-for the remaining events (`UserPromptSubmit`, `Stop`, `SubagentStop`, Codex's
-`PermissionRequest`) live in the `agent-hooks` crate with no handler wired
-yet, so a new handler is a domain-logic change rather than a schema change.
+The `codex-hook` tree ships the same handlers except `subagent-stop`, which
+Codex has no event for; the `PreToolUse` / `PostToolUse` ones run across every
+file the `apply_patch` touches. Schemas for the remaining events
+(`UserPromptSubmit`, Codex's `PermissionRequest`) live in the `agent-hooks`
+crate with no handler wired yet, so a new handler is a domain-logic change
+rather than a schema change.
+
+The checkpoint snapshot lives at
+`<repo-root>/target/agent-lens/session-<id>.json` (a `.gitignore` beside it
+keeps it out of `git status`) and covers production sources under the
+session's directory. A stop recomputes only what the session could have
+changed and lists regressions only — new near-duplicate pairs, functions at or
+above cognitive 8 that got more complex, new forwarding-only wrappers, newly
+unreachable functions, edited high-fan-in functions — and stays silent when
+there are none. Only a stop's `decision: "block"` reason reaches the model, so
+a regression no earlier stop reported blocks once; a repeat, or a stop that is
+already that continuation, is only a `systemMessage`. `stop delta --no-block`
+never blocks.
 
 Hook handlers are advisory — never a gate on the agent's tool call. A handler
 that fails still answers in the agent's response schema (prefixed with
@@ -366,6 +389,7 @@ ordinary CLI contract: errors exit non-zero.
 | `unreachable`     | Functions no entry point reaches, in confidence tiers (`confirmed` / `likely` / `unknown`); sound in the "confirmed ⇒ really dead" direction only, with deletable islands and a deletion order.                                                                                                                                                                                                                                                 |
 | `visibility`      | `pub` / exported functions whose callers all sit inside a narrower scope, with the declaration that would still compile and the caller evidence.                                                                                                                                                                                                                                                                                                |
 | `impact`          | Blast radius of a change: transitive callers of the seeds (working-tree diff or `--function`), plus reachable tests as a verification checklist.                                                                                                                                                                                                                                                                                                |
+| `footprint`       | The pending diff as a whole: functions touched (body text changed), added/deleted lines, cognitive complexity before and after, functions it turned into forwarders, added functions nothing calls outside tests, and touched functions whose blast radius shares nothing with the rest of the change — edits outside its impact closure. Untracked files count as added.                                                                       |
 | `graph-query`     | One canned call-graph traversal per run: `callers`, `callees`, `neighborhood`, or the shortest `path` between two symbols.                                                                                                                                                                                                                                                                                                                      |
 | `context-span`    | Per-module transitive dependency closure: how many files an agent must read to reason about a module.                                                                                                                                                                                                                                                                                                                                           |
 | `hotspot`         | Files ranked by `commits × cognitive_max` over an optional `--since` window — where churn and complexity overlap.                                                                                                                                                                                                                                                                                                                               |
