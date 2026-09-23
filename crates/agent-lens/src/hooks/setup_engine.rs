@@ -37,12 +37,65 @@ pub(crate) const STOP_EVENT: &str = "Stop";
 pub(crate) const SUBAGENT_STOP_EVENT: &str = "SubagentStop";
 
 /// Per-event metadata driving the merge loop: which key under `hooks.`
-/// the event lives at, the matcher written for a fresh block, and the
-/// handler commands the setup may install there.
+/// the event lives at, the matcher written for a fresh block, the
+/// handler commands the setup may install there, and the commands that
+/// must be installed whenever one of them is (the stop `delta` handlers
+/// compare against the snapshot `session-start snapshot` records).
 pub struct EventBlock {
     pub event: &'static str,
     pub matcher: &'static str,
     pub commands: &'static [&'static str],
+    pub requires: &'static [&'static str],
+}
+
+/// Which handlers a setup run installs, as `--only` / `--skip`
+/// selectors.
+///
+/// A selector names one handler by its hook id — the command's
+/// subcommand path joined with `:`, e.g. `post-tool-use:similarity` —
+/// or every handler of one hook event by the id's first segment, e.g.
+/// `post-tool-use`. An empty `only` selects everything; `skip` is
+/// applied after it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookSelection {
+    pub only: Vec<String>,
+    pub skip: Vec<String>,
+}
+
+impl HookSelection {
+    fn selects(&self, id: &str) -> bool {
+        (self.only.is_empty() || self.only.iter().any(|sel| selector_matches(sel, id)))
+            && !self.skips(id)
+    }
+
+    fn skips(&self, id: &str) -> bool {
+        self.skip.iter().any(|sel| selector_matches(sel, id))
+    }
+}
+
+/// The hook id of an installed command: everything after the binary and
+/// its `hook` / `codex-hook` subcommand, joined with `:`.
+pub fn hook_id(command: &str) -> String {
+    command
+        .split_whitespace()
+        .skip(2)
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Every hook id `F` can install, in install order.
+pub fn hook_ids<F: ConfigFormat>() -> Vec<String> {
+    F::EVENTS
+        .iter()
+        .flat_map(|block| block.commands.iter().map(|cmd| hook_id(cmd)))
+        .collect()
+}
+
+fn selector_matches(selector: &str, id: &str) -> bool {
+    id == selector
+        || id
+            .strip_prefix(selector)
+            .is_some_and(|rest| rest.starts_with(':'))
 }
 
 /// Anything that can go wrong while planning or applying a setup.
@@ -73,6 +126,15 @@ pub enum SetupError {
     /// wrong type for us to merge into safely.
     #[error("{path:?} has an unexpected shape at .{field}")]
     UnexpectedShape { path: PathBuf, field: String },
+    /// An `--only` / `--skip` selector that names no handler.
+    #[error("unknown hook {selector:?}; expected one of: {}", known.join(", "))]
+    UnknownHook {
+        selector: String,
+        known: Vec<String>,
+    },
+    /// A selected handler depends on one the selection skips.
+    #[error("hook {hook:?} requires {required:?}, which is skipped")]
+    MissingRequirement { hook: String, required: String },
 }
 
 impl SetupError {
@@ -235,13 +297,19 @@ pub fn resolve_path<F: ConfigFormat>(
 /// A missing or empty file produces a plan that creates one. A file that
 /// doesn't parse, or with an unexpected shape along the `hooks.<event>`
 /// path, is reported as an error so the user can inspect it before we
-/// clobber anything.
-pub fn plan<F: ConfigFormat>(path: PathBuf) -> Result<SetupPlan<F::Payload>, SetupError> {
+/// clobber anything. Only the handlers `selection` picks (plus whatever
+/// they require) are installed; handlers already in the file are left
+/// alone either way.
+pub fn plan<F: ConfigFormat>(
+    path: PathBuf,
+    selection: &HookSelection,
+) -> Result<SetupPlan<F::Payload>, SetupError> {
+    let wanted = selected_commands::<F>(selection)?;
     let before = read_existing_text(&path)?
         .map(|text| F::read_payload(&path, &text))
         .transpose()?;
     let mut document = F::to_document(&path, before.as_ref())?;
-    let added_commands = merge_hook_commands::<F>(&path, &mut document)?;
+    let added_commands = merge_hook_commands::<F>(&path, &mut document, &wanted)?;
     Ok(SetupPlan {
         path,
         before,
@@ -260,11 +328,13 @@ pub fn apply<F: ConfigFormat>(plan: &SetupPlan<F::Payload>) -> Result<(), SetupE
 /// The merge itself: for each event, install the commands that aren't
 /// already wired up anywhere under that event (modulo trailing arguments
 /// and binary path — see [`has_command_prefix`]) as one fresh matcher
-/// group. Returns the commands that were added; an empty result means the
-/// document was left untouched.
+/// group. Only commands in `wanted` are considered. Returns the commands
+/// that were added; an empty result means the document was left
+/// untouched.
 fn merge_hook_commands<F: ConfigFormat>(
     path: &Path,
     document: &mut F::Document,
+    wanted: &[&str],
 ) -> Result<Vec<String>, SetupError> {
     let mut added: Vec<String> = Vec::new();
     for block in F::EVENTS {
@@ -272,6 +342,7 @@ fn merge_hook_commands<F: ConfigFormat>(
         let missing: Vec<String> = block
             .commands
             .iter()
+            .filter(|cmd| wanted.contains(cmd))
             .filter(|cmd| !installed.iter().any(|seen| has_command_prefix(seen, cmd)))
             .map(|s| (*s).to_string())
             .collect();
@@ -282,6 +353,72 @@ fn merge_hook_commands<F: ConfigFormat>(
         added.extend(missing);
     }
     Ok(added)
+}
+
+/// Resolve `selection` against `F`'s handlers: reject a selector that
+/// names nothing, then pull in every requirement of a selected handler.
+/// A requirement the selection explicitly skips is an error rather than
+/// a silently broken install.
+fn selected_commands<F: ConfigFormat>(
+    selection: &HookSelection,
+) -> Result<Vec<&'static str>, SetupError> {
+    reject_unknown_selectors::<F>(selection)?;
+    let mut wanted: Vec<&'static str> = Vec::new();
+    for block in F::EVENTS {
+        let picked: Vec<&'static str> = block
+            .commands
+            .iter()
+            .copied()
+            .filter(|cmd| selection.selects(&hook_id(cmd)))
+            .collect();
+        let Some(first) = picked.first() else {
+            continue;
+        };
+        push_requirements(block, first, selection, &mut wanted)?;
+        wanted.extend(picked);
+    }
+    Ok(wanted)
+}
+
+/// Queue `block`'s requirements ahead of its selected handler `picked`,
+/// once each.
+fn push_requirements(
+    block: &EventBlock,
+    picked: &str,
+    selection: &HookSelection,
+    wanted: &mut Vec<&'static str>,
+) -> Result<(), SetupError> {
+    for required in block.requires {
+        let required_id = hook_id(required);
+        if selection.skips(&required_id) {
+            return Err(SetupError::MissingRequirement {
+                hook: hook_id(picked),
+                required: required_id,
+            });
+        }
+        if !wanted.contains(required) {
+            wanted.push(required);
+        }
+    }
+    Ok(())
+}
+
+/// Fail on the first `--only` / `--skip` selector that names none of
+/// `F`'s handlers, listing the ones it could have named.
+fn reject_unknown_selectors<F: ConfigFormat>(selection: &HookSelection) -> Result<(), SetupError> {
+    let known = hook_ids::<F>();
+    match selection
+        .only
+        .iter()
+        .chain(&selection.skip)
+        .find(|sel| !known.iter().any(|id| selector_matches(sel, id)))
+    {
+        Some(selector) => Err(SetupError::UnknownHook {
+            selector: selector.clone(),
+            known,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Read the current contents of a config file, treating a missing or
@@ -377,7 +514,12 @@ pub(crate) mod conformance {
 
     use tempfile::TempDir;
 
-    use super::{ConfigFormat, SetupError, SetupScope, apply, plan, resolve_path};
+    use super::{ConfigFormat, HookSelection, SetupError, SetupScope, apply, resolve_path};
+
+    /// Plan with the default selection: every handler.
+    fn plan<F: ConfigFormat>(path: PathBuf) -> Result<super::SetupPlan<F::Payload>, SetupError> {
+        super::plan::<F>(path, &HookSelection::default())
+    }
 
     /// Every command the format's events would install, in the order
     /// [`plan`] queues them.

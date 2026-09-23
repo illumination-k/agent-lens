@@ -97,26 +97,31 @@ impl ConfigFormat for CodexConfig {
             event: SESSION_START_EVENT,
             matcher: SESSION_START_MATCHER,
             commands: SESSION_START_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: PRE_TOOL_USE_EVENT,
             matcher: PRE_TOOL_USE_MATCHER,
             commands: PRE_TOOL_USE_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: POST_TOOL_USE_EVENT,
             matcher: POST_TOOL_USE_MATCHER,
             commands: POST_TOOL_USE_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: SESSION_START_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: SNAPSHOT_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: STOP_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: STOP_COMMANDS,
+            requires: SNAPSHOT_COMMANDS,
         },
     ];
 
@@ -230,7 +235,7 @@ mod tests {
     use crate::hooks::setup_engine::{self, conformance};
 
     fn plan(path: PathBuf) -> Result<setup_engine::SetupPlan<String>, SetupError> {
-        setup_engine::plan::<CodexConfig>(path)
+        setup_engine::plan::<CodexConfig>(path, &setup_engine::HookSelection::default())
     }
 
     fn apply(plan: &setup_engine::SetupPlan<String>) -> Result<(), SetupError> {

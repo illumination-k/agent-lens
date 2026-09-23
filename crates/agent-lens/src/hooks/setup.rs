@@ -94,31 +94,37 @@ impl ConfigFormat for ClaudeSettings {
             event: SESSION_START_EVENT,
             matcher: SESSION_START_MATCHER,
             commands: SESSION_START_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: PRE_TOOL_USE_EVENT,
             matcher: PRE_TOOL_USE_MATCHER,
             commands: PRE_TOOL_USE_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: POST_TOOL_USE_EVENT,
             matcher: POST_TOOL_USE_MATCHER,
             commands: POST_TOOL_USE_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: SESSION_START_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: SNAPSHOT_COMMANDS,
+            requires: &[],
         },
         EventBlock {
             event: STOP_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: STOP_COMMANDS,
+            requires: SNAPSHOT_COMMANDS,
         },
         EventBlock {
             event: SUBAGENT_STOP_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: SUBAGENT_STOP_COMMANDS,
+            requires: SNAPSHOT_COMMANDS,
         },
     ];
 
@@ -225,7 +231,7 @@ mod tests {
     use crate::hooks::setup_engine::{self, conformance};
 
     fn plan(path: PathBuf) -> Result<setup_engine::SetupPlan<Value>, SetupError> {
-        setup_engine::plan::<ClaudeSettings>(path)
+        setup_engine::plan::<ClaudeSettings>(path, &setup_engine::HookSelection::default())
     }
 
     fn apply(plan: &setup_engine::SetupPlan<Value>) -> Result<(), SetupError> {
@@ -521,6 +527,110 @@ mod tests {
     fn queues_exactly(#[case] existing: Value, #[case] expected: &[&str]) {
         let text = serde_json::to_string_pretty(&existing).unwrap();
         conformance::queues_exactly::<ClaudeSettings>(&text, expected);
+    }
+
+    fn selection(only: &[&str], skip: &[&str]) -> setup_engine::HookSelection {
+        setup_engine::HookSelection {
+            only: only.iter().map(|s| (*s).to_string()).collect(),
+            skip: skip.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    /// `--only` / `--skip` narrow what a fresh file receives. A stop
+    /// `delta` pulls in the snapshot it compares against, and a bare
+    /// event selector never matches a longer event sharing its prefix
+    /// (`stop` vs `subagent-stop`).
+    #[rstest]
+    #[case::only_one(&["post-tool-use:wrapper"], &[], &["agent-lens hook post-tool-use wrapper"])]
+    #[case::only_event(
+        &["pre-tool-use"],
+        &[],
+        &["agent-lens hook pre-tool-use complexity", "agent-lens hook pre-tool-use cohesion"]
+    )]
+    #[case::stop_pulls_snapshot(
+        &["stop"],
+        &[],
+        &["agent-lens hook session-start snapshot", "agent-lens hook stop delta"]
+    )]
+    #[case::only_then_skip(
+        &["post-tool-use"],
+        &["post-tool-use:footprint"],
+        &["agent-lens hook post-tool-use similarity", "agent-lens hook post-tool-use wrapper"]
+    )]
+    #[case::skip_checkpoint(
+        &[],
+        &["session-start:snapshot", "stop", "subagent-stop"],
+        &[
+            "agent-lens hook session-start summary",
+            "agent-lens hook pre-tool-use complexity",
+            "agent-lens hook pre-tool-use cohesion",
+            "agent-lens hook post-tool-use similarity",
+            "agent-lens hook post-tool-use wrapper",
+            "agent-lens hook post-tool-use footprint",
+        ]
+    )]
+    fn selection_narrows_the_install(
+        #[case] only: &[&str],
+        #[case] skip: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let dir = TempDir::new().unwrap();
+        let plan = setup_engine::plan::<ClaudeSettings>(
+            dir.path().join("settings.json"),
+            &selection(only, skip),
+        )
+        .unwrap();
+        assert_eq!(plan.added_commands, expected);
+    }
+
+    #[rstest]
+    #[case::unknown_only(&["nope"], &[])]
+    #[case::unknown_skip(&[], &["post-tool-use:nope"])]
+    // A selector is a whole id segment, never a string prefix.
+    #[case::partial_segment(&["post"], &[])]
+    fn unknown_selector_is_rejected(#[case] only: &[&str], #[case] skip: &[&str]) {
+        let dir = TempDir::new().unwrap();
+        let err = setup_engine::plan::<ClaudeSettings>(
+            dir.path().join("settings.json"),
+            &selection(only, skip),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, SetupError::UnknownHook { known, .. } if known.len() == 9),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
+    fn skipping_a_requirement_of_a_selected_hook_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let err = setup_engine::plan::<ClaudeSettings>(
+            dir.path().join("settings.json"),
+            &selection(&["subagent-stop"], &["session-start"]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SetupError::MissingRequirement { hook, required }
+                    if hook == "subagent-stop:delta" && required == "session-start:snapshot"
+            ),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
+    fn selection_leaves_already_installed_hooks_alone() {
+        // Narrowing a re-run must not remove what an earlier full setup
+        // wrote; it only limits what gets added.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        apply(&plan(path.clone()).unwrap()).unwrap();
+
+        let narrowed =
+            setup_engine::plan::<ClaudeSettings>(path, &selection(&["stop"], &[])).unwrap();
+        assert!(!narrowed.changed());
+        assert!(narrowed.added_commands.is_empty());
     }
 
     #[test]
