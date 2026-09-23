@@ -17,6 +17,7 @@ pub mod pre_tool_use;
 pub mod session_start;
 pub mod setup;
 pub mod setup_engine;
+pub mod stop;
 
 use std::path::Path;
 

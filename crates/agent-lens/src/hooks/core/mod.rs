@@ -6,9 +6,11 @@
 //! formatting) so each agent's hook module is just a thin trait
 //! implementation that wires up the engine-specific input/output shapes.
 
+pub mod checkpoint;
 pub mod cohesion;
 pub mod complexity;
 pub mod error;
+pub mod footprint;
 pub mod runner;
 pub mod session_summary;
 pub mod similarity;
@@ -16,8 +18,8 @@ pub mod wrapper;
 
 pub use error::{HookError, ReadEditedSourceError};
 pub use runner::{
-    CohesionHook, ComplexityHook, HookEnvelope, SessionStartEnvelope, SimilarityHook, SummaryHook,
-    WrapperHook,
+    CohesionHook, ComplexityHook, DeltaHook, FootprintHook, HookEnvelope, SessionStartEnvelope,
+    SimilarityHook, SnapshotHook, StopEnvelope, SummaryHook, WrapperHook,
 };
 
 use std::path::Path;

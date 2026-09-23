@@ -37,6 +37,10 @@ impl SessionStartEnvelope for CodexSessionStart {
         &input.context.cwd
     }
 
+    fn session_id(input: &Self::Input) -> &str {
+        &input.context.session_id
+    }
+
     fn wrap_summary(body: String) -> Self::Output {
         SessionStartOutput {
             hook_specific_output: Some(SessionStartHookSpecificOutput {
@@ -50,6 +54,8 @@ impl SessionStartEnvelope for CodexSessionStart {
 
 /// Codex SessionStart handler that emits a hotspot + coupling summary.
 pub type SummaryHook = crate::hooks::core::SummaryHook<CodexSessionStart>;
+/// Codex SessionStart handler that records the session checkpoint.
+pub type SnapshotHook = crate::hooks::core::SnapshotHook<CodexSessionStart>;
 
 #[cfg(test)]
 mod tests {
@@ -76,6 +82,9 @@ mod tests {
     )]
     #[case::injects_summary(
         conformance::injects_summary_via_additional_context::<CodexSessionStart, fn(&Path) -> SessionStartInput>
+    )]
+    #[case::records_snapshot(
+        conformance::snapshot_is_recorded_silently::<CodexSessionStart, fn(&Path) -> SessionStartInput>
     )]
     fn envelope_contract(#[case] assertion: fn(fn(&Path) -> SessionStartInput)) {
         assertion(input);

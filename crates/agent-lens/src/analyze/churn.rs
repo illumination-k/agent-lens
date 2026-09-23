@@ -274,7 +274,7 @@ impl ChurnScope {
         scope: &DiffScope,
     ) -> Result<Vec<FileChange>, ChurnError> {
         let range = match scope {
-            DiffScope::Disabled => return Ok(Vec::new()),
+            DiffScope::Disabled | DiffScope::Lines(_) => return Ok(Vec::new()),
             DiffScope::WorkingTree => None,
             DiffScope::Range(range) => Some(range.as_str()),
         };

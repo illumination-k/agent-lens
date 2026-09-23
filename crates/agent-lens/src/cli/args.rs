@@ -11,6 +11,7 @@ use agent_lens::analyze::complexity::ComplexityOptions;
 use agent_lens::analyze::context_span::ContextSpanOptions;
 use agent_lens::analyze::coupling::CouplingOptions;
 use agent_lens::analyze::delegation::DelegationOptions;
+use agent_lens::analyze::footprint::FootprintOptions;
 use agent_lens::analyze::graph_query::GraphQueryOptions;
 use agent_lens::analyze::hotspot::HotspotOptions;
 use agent_lens::analyze::hubs::HubsOptions;
@@ -261,6 +262,12 @@ pub(super) enum HookCommand {
     /// Handle a `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(PostToolUseCommand),
+    /// Handle a `Stop` event.
+    #[command(subcommand)]
+    Stop(StopCommand),
+    /// Handle a `SubagentStop` event.
+    #[command(subcommand)]
+    SubagentStop(StopCommand),
     /// Wire `agent-lens`'s hook handlers into a Claude Code
     /// `settings.json`.
     ///
@@ -294,6 +301,19 @@ pub(super) enum SessionStartCommand {
     /// crate) are silently omitted; if neither applies, the hook
     /// returns a no-op and Claude Code starts unchanged.
     Summary,
+    /// Record the session checkpoint snapshot that `stop delta`
+    /// compares against.
+    ///
+    /// Hashes every production source file under `cwd` and records its
+    /// per-function cognitive complexity and body hash, its
+    /// forwarding-only wrappers, and — from whole-tree runs — the
+    /// near-duplicate pairs, the confirmed/likely unreachable functions
+    /// and the call-graph hubs. Writes
+    /// `<repo-root>/target/agent-lens/session-<id>.json` (with a
+    /// `.gitignore` beside it) and injects nothing. A snapshot that
+    /// already exists for the session — a resume or a compaction — is
+    /// kept, so the baseline stays the session's start.
+    Snapshot,
 }
 
 #[derive(Debug, Subcommand)]
@@ -332,6 +352,42 @@ pub(super) enum PostToolUseCommand {
     /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
     /// extension are ignored silently.
     Wrapper,
+    /// Report the pending diff's footprint flags that land in the file
+    /// that was just edited.
+    ///
+    /// Runs `analyze footprint` over the working-tree diff under `cwd`
+    /// (untracked files count as added) and keeps only the rows in the
+    /// edited file: functions outside the change's impact closure,
+    /// complexity increases, new wrappers, and added functions nothing
+    /// calls. Silent outside a git working tree and when nothing in the
+    /// file is flagged.
+    Footprint,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum StopCommand {
+    /// Report what got worse since the session's `snapshot`, and
+    /// nothing when nothing did.
+    ///
+    /// Recomputes only what the session could have changed: function
+    /// facts and wrappers for files whose content hash moved, duplicate
+    /// pairs scored for the added or modified functions against the
+    /// whole tree, and whole-tree unreachable and hub runs. Reports new
+    /// near-duplicate pairs, functions at or above cognitive 8 that got
+    /// more complex, new forwarding-only wrappers, newly unreachable
+    /// functions, and edited hubs. A regression no earlier stop reported
+    /// blocks the stop once, handing the report to the agent as the
+    /// reason to keep going; a repeat, or a stop that is already that
+    /// continuation, is only a message. Silent without a snapshot.
+    Delta(DeltaArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct DeltaArgs {
+    /// Never block: report regressions as a message only, which the
+    /// agent does not read.
+    #[arg(long)]
+    pub(super) no_block: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -345,13 +401,16 @@ pub(super) enum CodexHookCommand {
     /// Handle a Codex `PostToolUse` event.
     #[command(subcommand)]
     PostToolUse(CodexPostToolUseCommand),
+    /// Handle a Codex `Stop` event.
+    #[command(subcommand)]
+    Stop(StopCommand),
     /// Wire `agent-lens`'s Codex hook handlers into a Codex
     /// `config.toml`.
     ///
     /// The merge is conservative: existing keys and comments are
     /// preserved, and `[[hooks.SessionStart]]`, `[[hooks.PreToolUse]]`,
-    /// and `[[hooks.PostToolUse]]` blocks are appended only for handlers
-    /// that aren't already wired up. Re-running the
+    /// `[[hooks.PostToolUse]]`, and `[[hooks.Stop]]` blocks are appended
+    /// only for handlers that aren't already wired up. Re-running the
     /// command is a no-op once every handler is installed.
     #[command(after_long_help = examples::CODEX_HOOK_SETUP)]
     Setup(CodexSetupArgs),
@@ -387,6 +446,14 @@ pub(super) enum CodexPostToolUseCommand {
     /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
     /// extension are ignored silently.
     Wrapper,
+    /// Report the pending diff's footprint flags that land in the files
+    /// Codex's `apply_patch` just touched.
+    ///
+    /// Runs `analyze footprint` over the working-tree diff under `cwd`
+    /// (untracked files count as added) and keeps only the rows in the
+    /// patched files. Silent outside a git working tree and when nothing
+    /// in them is flagged.
+    Footprint,
 }
 
 #[derive(Debug, Subcommand)]
@@ -423,6 +490,19 @@ pub(super) enum CodexSessionStartCommand {
     /// crate) are silently omitted; if neither applies, the hook
     /// returns a no-op and Codex starts unchanged.
     Summary,
+    /// Record the session checkpoint snapshot that `stop delta`
+    /// compares against.
+    ///
+    /// Hashes every production source file under `cwd` and records its
+    /// per-function cognitive complexity and body hash, its
+    /// forwarding-only wrappers, and — from whole-tree runs — the
+    /// near-duplicate pairs, the confirmed/likely unreachable functions
+    /// and the call-graph hubs. Writes
+    /// `<repo-root>/target/agent-lens/session-<id>.json` (with a
+    /// `.gitignore` beside it) and injects nothing. A snapshot that
+    /// already exists for the session — a resume or a compaction — is
+    /// kept, so the baseline stays the session's start.
+    Snapshot,
 }
 
 #[derive(Debug, Subcommand)]
@@ -655,6 +735,28 @@ pub(super) enum AnalyzeCommand {
     /// (default 20).
     #[command(after_long_help = examples::IMPACT)]
     Impact(AnalyzeImpactArgs),
+    /// Report the shape of the pending diff: how many functions it
+    /// touched, which edits sit outside its impact closure, and what it
+    /// left behind.
+    ///
+    /// Reads the diff once, both sides — the index against the working
+    /// tree by default (the same `git diff` every `--diff-only` reads),
+    /// or the two sides of `--diff-range`. A function counts as touched
+    /// when its body text changed; reindents and line shifts do not.
+    /// Reports added and deleted lines and their ratio; the cognitive
+    /// complexity of every touched function before and after; functions
+    /// the diff turned into forwarding-only wrappers; added functions
+    /// with no resolved or ambiguous caller outside tests (and how many
+    /// tests call them — code written only for its test); and scatter:
+    /// touched functions are grouped by overlapping blast radius (their
+    /// callers within `--depth` hops, default 2), and the ones outside
+    /// the largest group are listed as outside the change's impact
+    /// closure. The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go); other files count toward
+    /// `skipped_file_count` only. JSON is the default; `--format md`
+    /// caps each list at `--top` (default 15).
+    #[command(after_long_help = examples::FOOTPRINT)]
+    Footprint(AnalyzeFootprintArgs),
     /// Report an inferred layer map: what level each function and module
     /// sits on, which modules are mutually dependent, and which
     /// cross-module calls skip a level.
@@ -1216,6 +1318,14 @@ pub(super) struct AnalyzeHubsArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(super) struct AnalyzeFootprintArgs {
+    #[command(flatten)]
+    pub(super) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(super) opts: FootprintOptions,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(super) struct AnalyzeImpactArgs {
     #[command(flatten)]
     pub(super) common: AnalyzeCommonArgs,
@@ -1474,6 +1584,49 @@ mod tests {
         |c: &Command| matches!(
             c,
             Command::CodexHook(CodexHookCommand::SessionStart(CodexSessionStartCommand::Summary)),
+        ),
+    )]
+    #[case::hook_session_start_snapshot(
+        &["agent-lens", "hook", "session-start", "snapshot"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::SessionStart(SessionStartCommand::Snapshot))),
+    )]
+    #[case::hook_post_tool_use_footprint(
+        &["agent-lens", "hook", "post-tool-use", "footprint"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Footprint))),
+    )]
+    #[case::hook_stop_delta(
+        &["agent-lens", "hook", "stop", "delta"],
+        |c: &Command| matches!(
+            c,
+            Command::Hook(HookCommand::Stop(StopCommand::Delta(DeltaArgs { no_block: false }))),
+        ),
+    )]
+    #[case::hook_subagent_stop_delta_no_block(
+        &["agent-lens", "hook", "subagent-stop", "delta", "--no-block"],
+        |c: &Command| matches!(
+            c,
+            Command::Hook(HookCommand::SubagentStop(StopCommand::Delta(DeltaArgs { no_block: true }))),
+        ),
+    )]
+    #[case::codex_hook_session_start_snapshot(
+        &["agent-lens", "codex-hook", "session-start", "snapshot"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::SessionStart(CodexSessionStartCommand::Snapshot)),
+        ),
+    )]
+    #[case::codex_hook_post_tool_use_footprint(
+        &["agent-lens", "codex-hook", "post-tool-use", "footprint"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::PostToolUse(CodexPostToolUseCommand::Footprint)),
+        ),
+    )]
+    #[case::codex_hook_stop_delta(
+        &["agent-lens", "codex-hook", "stop", "delta"],
+        |c: &Command| matches!(
+            c,
+            Command::CodexHook(CodexHookCommand::Stop(StopCommand::Delta(DeltaArgs { no_block: false }))),
         ),
     )]
     fn parses_hook_subcommand(#[case] argv: &[&str], #[case] expected: fn(&Command) -> bool) {
@@ -1993,6 +2146,42 @@ mod tests {
         assert_eq!(args.opts.max_loc, Some(12));
         assert_eq!(args.opts.max_cyclomatic, Some(4));
         assert_eq!(args.opts.top, Some(10));
+    }
+
+    #[test]
+    fn parses_analyze_footprint_with_its_flags() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "footprint",
+            ".",
+            "--diff-range",
+            "main...HEAD",
+            "--depth",
+            "3",
+            "--top",
+            "5",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Footprint(args)) = cli.command else {
+            panic!("expected analyze footprint");
+        };
+        assert_eq!(args.opts.diff_range.as_deref(), Some("main...HEAD"));
+        assert_eq!(args.opts.depth, Some(3));
+        assert_eq!(args.opts.top, Some(5));
+        assert!(
+            Cli::try_parse_from([
+                "agent-lens",
+                "analyze",
+                "footprint",
+                ".",
+                "--diff-only",
+                "--diff-range",
+                "HEAD~1..HEAD",
+            ])
+            .is_err(),
+            "the two diff flags conflict",
+        );
     }
 
     #[test]

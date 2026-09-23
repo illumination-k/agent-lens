@@ -23,7 +23,7 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::hooks::setup_engine::{
     ConfigFormat, EventBlock, POST_TOOL_USE_EVENT, PRE_TOOL_USE_EVENT, SESSION_START_EVENT,
-    SetupError,
+    STOP_EVENT, SetupError,
 };
 
 const CONFIG_RELATIVE: &str = ".codex/config.toml";
@@ -41,6 +41,7 @@ pub const POST_TOOL_USE_MATCHER: &str = APPLY_PATCH_MATCHER;
 pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
     "agent-lens codex-hook post-tool-use similarity",
     "agent-lens codex-hook post-tool-use wrapper",
+    "agent-lens codex-hook post-tool-use footprint",
 ];
 
 /// Regex Codex matches the about-to-run tool name against. The pre-edit
@@ -62,6 +63,17 @@ pub const SESSION_START_MATCHER: &str = "^(startup|resume)$";
 
 /// Commands the setup writes into `[[hooks.SessionStart.hooks]]`.
 pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens codex-hook session-start summary"];
+
+/// Matcher for the checkpoint's blocks: every SessionStart source (an
+/// existing snapshot is kept on resume, so firing there is a no-op), and
+/// every stop.
+pub const CHECKPOINT_MATCHER: &str = "";
+
+/// Commands the setup writes into the checkpoint's SessionStart block.
+pub const SNAPSHOT_COMMANDS: &[&str] = &["agent-lens codex-hook session-start snapshot"];
+
+/// Commands the setup writes into `[[hooks.Stop.hooks]]`.
+pub const STOP_COMMANDS: &[&str] = &["agent-lens codex-hook stop delta"];
 
 const APPLY_PATCH_MATCHER: &str = "^apply_patch$";
 
@@ -95,6 +107,16 @@ impl ConfigFormat for CodexConfig {
             event: POST_TOOL_USE_EVENT,
             matcher: POST_TOOL_USE_MATCHER,
             commands: POST_TOOL_USE_COMMANDS,
+        },
+        EventBlock {
+            event: SESSION_START_EVENT,
+            matcher: CHECKPOINT_MATCHER,
+            commands: SNAPSHOT_COMMANDS,
+        },
+        EventBlock {
+            event: STOP_EVENT,
+            matcher: CHECKPOINT_MATCHER,
+            commands: STOP_COMMANDS,
         },
     ];
 
@@ -266,7 +288,9 @@ mod tests {
             plan.added_commands.len(),
             SESSION_START_COMMANDS.len()
                 + PRE_TOOL_USE_COMMANDS.len()
-                + POST_TOOL_USE_COMMANDS.len(),
+                + POST_TOOL_USE_COMMANDS.len()
+                + SNAPSHOT_COMMANDS.len()
+                + STOP_COMMANDS.len(),
         );
 
         let doc = parse(&plan.after);
@@ -278,17 +302,16 @@ mod tests {
             ),
             ("PreToolUse", PRE_TOOL_USE_MATCHER, PRE_TOOL_USE_COMMANDS),
             ("PostToolUse", POST_TOOL_USE_MATCHER, POST_TOOL_USE_COMMANDS),
+            ("Stop", CHECKPOINT_MATCHER, STOP_COMMANDS),
         ] {
             let groups = doc["hooks"][event].as_array_of_tables().unwrap();
-            assert_eq!(
-                groups.len(),
-                1,
-                "all {event} handlers go under one matcher group",
-            );
-            assert_eq!(groups.get(0).unwrap()["matcher"].as_str().unwrap(), matcher);
-            let handlers = groups.get(0).unwrap()["hooks"]
-                .as_array_of_tables()
-                .unwrap();
+            // SessionStart carries a second group: the checkpoint
+            // snapshot fires on every source, the summary on two.
+            let group = groups
+                .iter()
+                .find(|g| g["matcher"].as_str() == Some(matcher))
+                .unwrap_or_else(|| panic!("no {event} group under {matcher:?}"));
+            let handlers = group["hooks"].as_array_of_tables().unwrap();
             assert_eq!(handlers.len(), expected_commands.len());
             for (handler, expected) in handlers.iter().zip(expected_commands.iter()) {
                 assert_eq!(handler["type"].as_str().unwrap(), "command");
@@ -378,7 +401,12 @@ matcher = \"\"
 type = \"command\"
 command = \"agent-lens codex-hook post-tool-use similarity\"
 ",
-        &["agent-lens codex-hook post-tool-use wrapper"]
+        &[
+            "agent-lens codex-hook post-tool-use wrapper",
+            "agent-lens codex-hook post-tool-use footprint",
+            "agent-lens codex-hook session-start snapshot",
+            "agent-lens codex-hook stop delta",
+        ]
     )]
     // User-added flags on an installed command must not trigger a
     // reinstall of the bare form.
@@ -390,6 +418,16 @@ matcher = \"^(startup|resume)$\"
 [[hooks.SessionStart.hooks]]
 type = \"command\"
 command = \"agent-lens codex-hook session-start summary --quiet\"
+
+[[hooks.SessionStart.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook session-start snapshot\"
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook stop delta --no-block\"
 
 [[hooks.PreToolUse]]
 matcher = \"^apply_patch$\"
@@ -412,6 +450,10 @@ command = \"agent-lens codex-hook post-tool-use similarity --threshold 0.9\"
 [[hooks.PostToolUse.hooks]]
 type = \"command\"
 command = \"agent-lens codex-hook post-tool-use wrapper\"
+
+[[hooks.PostToolUse.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook post-tool-use footprint\"
 ",
         &[]
     )]

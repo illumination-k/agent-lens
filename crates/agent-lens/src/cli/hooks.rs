@@ -26,25 +26,31 @@ use agent_hooks::Hook;
 use agent_hooks::claude_code::ClaudeCodeHookInput;
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::hooks::codex::post_tool_use::{
-    CodexPostToolUse, SimilarityHook as CodexSimilarityHook, WrapperHook as CodexWrapperHook,
+    CodexPostToolUse, FootprintHook as CodexFootprintHook, SimilarityHook as CodexSimilarityHook,
+    WrapperHook as CodexWrapperHook,
 };
 use agent_lens::hooks::codex::pre_tool_use::{
     CodexPreToolUse, CohesionHook as CodexPreCohesionHook, ComplexityHook as CodexPreComplexityHook,
 };
 use agent_lens::hooks::codex::session_start::{
-    CodexSessionStart, SummaryHook as CodexSessionStartSummaryHook,
+    CodexSessionStart, SnapshotHook as CodexSnapshotHook,
+    SummaryHook as CodexSessionStartSummaryHook,
 };
-use agent_lens::hooks::core::{HookEnvelope, SessionStartEnvelope};
-use agent_lens::hooks::post_tool_use::{ClaudeCodePostToolUse, SimilarityHook, WrapperHook};
+use agent_lens::hooks::codex::stop::CodexStop;
+use agent_lens::hooks::core::{DeltaHook, HookEnvelope, SessionStartEnvelope, StopEnvelope};
+use agent_lens::hooks::post_tool_use::{
+    ClaudeCodePostToolUse, FootprintHook, SimilarityHook, WrapperHook,
+};
 use agent_lens::hooks::pre_tool_use::{ClaudeCodePreToolUse, CohesionHook, ComplexityHook};
 use agent_lens::hooks::session_start::{
-    ClaudeCodeSessionStart, SummaryHook as SessionStartSummaryHook,
+    ClaudeCodeSessionStart, SnapshotHook, SummaryHook as SessionStartSummaryHook,
 };
+use agent_lens::hooks::stop::{ClaudeCodeStop, ClaudeCodeSubagentStop};
 use tracing::error;
 
 use super::args::{
     CodexPostToolUseCommand, CodexPreToolUseCommand, CodexSessionStartCommand, PostToolUseCommand,
-    PreToolUseCommand, SessionStartCommand,
+    PreToolUseCommand, SessionStartCommand, StopCommand,
 };
 use super::write_stdout_json;
 
@@ -61,6 +67,7 @@ pub(super) fn run_session_start(
             })?;
             match cmd {
                 SessionStartCommand::Summary => Ok(SessionStartSummaryHook::new().handle(input)?),
+                SessionStartCommand::Snapshot => Ok(SnapshotHook::new().handle(input)?),
             }
         },
     )
@@ -88,8 +95,53 @@ pub(super) fn run_post_tool_use(cmd: PostToolUseCommand) -> Result<(), Box<dyn s
         Ok(match cmd {
             PostToolUseCommand::Similarity => SimilarityHook::new().handle(input)?,
             PostToolUseCommand::Wrapper => WrapperHook::new().handle(input)?,
+            PostToolUseCommand::Footprint => FootprintHook::new().handle(input)?,
         })
     })
+}
+
+pub(super) fn run_stop(cmd: StopCommand) -> Result<(), Box<dyn std::error::Error>> {
+    run_delta::<ClaudeCodeStop, _>("stop", "Stop", cmd, |payload| match payload {
+        ClaudeCodeHookInput::Stop(input) => Some(input),
+        _ => None,
+    })
+}
+
+pub(super) fn run_subagent_stop(cmd: StopCommand) -> Result<(), Box<dyn std::error::Error>> {
+    run_delta::<ClaudeCodeSubagentStop, _>("subagent-stop", "SubagentStop", cmd, |payload| {
+        match payload {
+            ClaudeCodeHookInput::SubagentStop(input) => Some(input),
+            _ => None,
+        }
+    })
+}
+
+pub(super) fn run_codex_stop(cmd: StopCommand) -> Result<(), Box<dyn std::error::Error>> {
+    run_delta::<CodexStop, _>("codex stop", "Codex Stop", cmd, |payload| match payload {
+        CodexHookInput::Stop(input) => Some(input),
+        _ => None,
+    })
+}
+
+/// The one shape every stop handler shares: narrow the payload, run the
+/// checkpoint, and report a failure as a non-blocking message.
+fn run_delta<E: StopEnvelope, I: serde::de::DeserializeOwned>(
+    label: &str,
+    event: &str,
+    cmd: StopCommand,
+    narrow: impl FnOnce(I) -> Option<E::Input>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let StopCommand::Delta(args) = cmd;
+    run_hook(
+        label,
+        |msg| E::wrap_delta(msg, false),
+        || {
+            let input = expect_event(event, narrow)?;
+            Ok(DeltaHook::<E>::new()
+                .with_block(!args.no_block)
+                .handle(input)?)
+        },
+    )
 }
 
 pub(super) fn run_codex_session_start(
@@ -107,6 +159,7 @@ pub(super) fn run_codex_session_start(
                 CodexSessionStartCommand::Summary => {
                     Ok(CodexSessionStartSummaryHook::new().handle(input)?)
                 }
+                CodexSessionStartCommand::Snapshot => Ok(CodexSnapshotHook::new().handle(input)?),
             }
         },
     )
@@ -138,6 +191,7 @@ pub(super) fn run_codex_post_tool_use(
         Ok(match cmd {
             CodexPostToolUseCommand::Similarity => CodexSimilarityHook::new().handle(input)?,
             CodexPostToolUseCommand::Wrapper => CodexWrapperHook::new().handle(input)?,
+            CodexPostToolUseCommand::Footprint => CodexFootprintHook::new().handle(input)?,
         })
     })
 }

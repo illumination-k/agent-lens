@@ -36,6 +36,8 @@ pub enum HookError {
     /// are added.
     #[error("failed to parse source: {0}")]
     Parse(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("footprint failed: {0}")]
+    Footprint(#[from] crate::analyze::FootprintError),
 }
 
 impl From<ReadEditedSourceError> for HookError {

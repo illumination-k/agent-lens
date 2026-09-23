@@ -6,23 +6,23 @@ use std::path::PathBuf;
 use agent_lens::analyze::{
     ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer,
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
-    FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer, HiddenCouplingAnalyzer,
-    HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, OutputFormat,
-    ParametersAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer, SingleImplAnalyzer,
-    SingleUseAnalyzer, TestOnlyAnalyzer, TestRedundancyAnalyzer, UnreachableAnalyzer,
-    UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    FootprintAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
+    HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
+    OutputFormat, ParametersAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
+    SingleImplAnalyzer, SingleUseAnalyzer, TestOnlyAnalyzer, TestRedundancyAnalyzer,
+    UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeChangeEntropyArgs, AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand,
     AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
-    AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeGraphQueryArgs, AnalyzeHiddenCouplingArgs,
-    AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs,
-    AnalyzeParametersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs,
-    AnalyzeSimilarityArgs, AnalyzeSingleImplArgs, AnalyzeSingleUseArgs, AnalyzeTestOnlyArgs,
-    AnalyzeTestRedundancyArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs, AnalyzeVisibilityArgs,
-    AnalyzeWrapperArgs,
+    AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeFootprintArgs, AnalyzeGraphQueryArgs,
+    AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
+    AnalyzeLayersArgs, AnalyzeParametersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs,
+    AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeSingleImplArgs, AnalyzeSingleUseArgs,
+    AnalyzeTestOnlyArgs, AnalyzeTestRedundancyArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs,
+    AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -130,6 +130,10 @@ pub(super) fn build_analyze_command(
         config::ToolName::Impact => AnalyzeCommand::Impact(AnalyzeImpactArgs {
             common,
             opts: profile.impact.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Footprint => AnalyzeCommand::Footprint(AnalyzeFootprintArgs {
+            common,
+            opts: profile.footprint.clone().unwrap_or_default(),
         }),
         config::ToolName::SingleImpl => AnalyzeCommand::SingleImpl(AnalyzeSingleImplArgs {
             common,
@@ -254,6 +258,7 @@ impl_with_analyze_path_args!(
     HiddenCouplingAnalyzer,
     HotspotAnalyzer,
     HubsAnalyzer,
+    FootprintAnalyzer,
     ImpactAnalyzer,
     LayersAnalyzer,
     ParametersAnalyzer,
@@ -349,6 +354,7 @@ impl AnalyzeCommand {
                 HiddenCoupling => HiddenCouplingAnalyzer,
                 Hotspot => HotspotAnalyzer,
                 Hubs => HubsAnalyzer,
+                Footprint => FootprintAnalyzer,
                 Impact => ImpactAnalyzer,
                 Layers => LayersAnalyzer,
                 Parameters => ParametersAnalyzer,

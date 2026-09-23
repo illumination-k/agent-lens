@@ -139,6 +139,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::GraphQuery
         | ToolName::HiddenCoupling
         | ToolName::Hubs
+        | ToolName::Footprint
         | ToolName::Impact
         | ToolName::Layers
         | ToolName::Parameters
@@ -594,6 +595,7 @@ mod tests {
     #[case(ToolName::GraphQuery)]
     #[case(ToolName::Hubs)]
     #[case(ToolName::Impact)]
+    #[case(ToolName::Footprint)]
     #[case(ToolName::Layers)]
     #[case(ToolName::Parameters)]
     #[case(ToolName::Risk)]

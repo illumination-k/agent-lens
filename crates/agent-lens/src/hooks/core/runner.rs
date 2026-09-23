@@ -13,8 +13,10 @@ use std::path::Path;
 
 use agent_hooks::Hook;
 
+use crate::hooks::core::checkpoint::{CheckpointError, session_delta, take_snapshot};
 use crate::hooks::core::cohesion::CohesionCore;
 use crate::hooks::core::complexity::ComplexityCore;
+use crate::hooks::core::footprint::FootprintCore;
 use crate::hooks::core::session_summary::{SessionSummaryError, render_summary};
 use crate::hooks::core::similarity::SimilarityCore;
 use crate::hooks::core::wrapper::WrapperCore;
@@ -37,6 +39,11 @@ pub trait HookEnvelope {
     /// analysed. Returning an empty list means "out of scope" and short
     /// circuits to `Self::Output::default()`.
     fn prepare_sources(input: &Self::Input) -> Result<Vec<EditedSource>, ReadEditedSourceError>;
+
+    /// Working directory the session is anchored at. Hooks that look
+    /// past the edited files — the footprint of the whole pending diff —
+    /// start from here.
+    fn cwd(input: &Self::Input) -> &Path;
 
     /// Wrap a non-empty report string in the envelope shape this agent
     /// uses (e.g. Claude Code's `systemMessage`, Codex's
@@ -153,6 +160,51 @@ impl<E: HookEnvelope> CoreHook<SimilarityCore, E> {
     }
 }
 
+/// Pending-diff footprint hook generic over the engine envelope.
+///
+/// Not a [`HookCore`]: the report is about the whole diff under the
+/// session's directory, so the core needs the cwd as well as the edited
+/// files, which only narrow what gets reported.
+pub struct FootprintHook<E: HookEnvelope> {
+    core: FootprintCore,
+    _envelope: PhantomData<fn() -> E>,
+}
+
+impl<E: HookEnvelope> FootprintHook<E> {
+    pub fn new() -> Self {
+        Self {
+            core: FootprintCore,
+            _envelope: PhantomData,
+        }
+    }
+}
+
+impl<E: HookEnvelope> Default for FootprintHook<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E: HookEnvelope> std::fmt::Debug for FootprintHook<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FootprintHook").finish()
+    }
+}
+
+impl<E: HookEnvelope> Hook for FootprintHook<E> {
+    type Input = E::Input;
+    type Output = E::Output;
+    type Error = HookError;
+
+    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
+        let sources = E::prepare_sources(&input)?;
+        match self.core.run(E::cwd(&input), &sources)? {
+            Some(report) => Ok(E::wrap_report(report)),
+            None => Ok(E::Output::default()),
+        }
+    }
+}
+
 /// Engine-specific glue between an agent's SessionStart payload and the
 /// engine-agnostic summary renderer.
 ///
@@ -168,6 +220,9 @@ pub trait SessionStartEnvelope {
 
     /// Working directory the session is anchored at.
     fn cwd(input: &Self::Input) -> &Path;
+
+    /// The agent's id for the session, which names its checkpoint.
+    fn session_id(input: &Self::Input) -> &str;
 
     /// Wrap a rendered summary body in the envelope shape this agent
     /// uses (both agents inject via `additionalContext` today, but the
@@ -222,6 +277,119 @@ impl<E: SessionStartEnvelope> Hook for SummaryHook<E> {
             Some(body) => Ok(E::wrap_summary(body)),
             None => Ok(E::Output::default()),
         }
+    }
+}
+
+/// SessionStart hook that records the session checkpoint snapshot.
+///
+/// Silent by design: the snapshot is for the stop hooks to compare
+/// against, and the session's context has no use for "a file was
+/// written". A snapshot that already exists (a resumed session) is kept.
+pub struct SnapshotHook<E: SessionStartEnvelope> {
+    _envelope: PhantomData<fn() -> E>,
+}
+
+impl<E: SessionStartEnvelope> SnapshotHook<E> {
+    pub fn new() -> Self {
+        Self {
+            _envelope: PhantomData,
+        }
+    }
+}
+
+impl<E: SessionStartEnvelope> Default for SnapshotHook<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E: SessionStartEnvelope> std::fmt::Debug for SnapshotHook<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotHook").finish()
+    }
+}
+
+impl<E: SessionStartEnvelope> Hook for SnapshotHook<E> {
+    type Input = E::Input;
+    type Output = E::Output;
+    type Error = CheckpointError;
+
+    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
+        take_snapshot(E::cwd(&input), E::session_id(&input))?;
+        Ok(E::Output::default())
+    }
+}
+
+/// Engine-specific glue between a Stop / SubagentStop payload and the
+/// session checkpoint.
+pub trait StopEnvelope {
+    type Input: serde::de::DeserializeOwned;
+    /// `Default` is the "nothing got worse" response.
+    type Output: serde::Serialize + Default;
+
+    fn cwd(input: &Self::Input) -> &Path;
+    fn session_id(input: &Self::Input) -> &str;
+    /// Whether this stop is already the continuation a previous stop
+    /// hook forced. Blocking again would loop.
+    fn stop_hook_active(input: &Self::Input) -> bool;
+
+    /// Hand the report back. With `block`, the agent is kept going with
+    /// the report as the reason it reads; without, the report is only a
+    /// message.
+    fn wrap_delta(report: String, block: bool) -> Self::Output;
+}
+
+/// Stop / SubagentStop hook that reports what got worse since the
+/// session's snapshot.
+///
+/// Blocks — hands the report to the agent as a reason to keep going —
+/// only when a finding is new since the last stop and this stop is not
+/// itself a forced continuation; otherwise the report is a message.
+/// `with_block(false)` never blocks.
+pub struct DeltaHook<E: StopEnvelope> {
+    block: bool,
+    _envelope: PhantomData<fn() -> E>,
+}
+
+impl<E: StopEnvelope> DeltaHook<E> {
+    pub fn new() -> Self {
+        Self {
+            block: true,
+            _envelope: PhantomData,
+        }
+    }
+
+    pub fn with_block(mut self, block: bool) -> Self {
+        self.block = block;
+        self
+    }
+}
+
+impl<E: StopEnvelope> Default for DeltaHook<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E: StopEnvelope> std::fmt::Debug for DeltaHook<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeltaHook")
+            .field("block", &self.block)
+            .finish()
+    }
+}
+
+impl<E: StopEnvelope> Hook for DeltaHook<E> {
+    type Input = E::Input;
+    type Output = E::Output;
+    type Error = CheckpointError;
+
+    fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
+        let Some(delta) = session_delta(E::cwd(&input), E::session_id(&input))? else {
+            return Ok(E::Output::default());
+        };
+        let block = self.block && delta.new_findings > 0 && !E::stop_hook_active(&input);
+        Ok(E::wrap_delta(delta.report, block))
     }
 }
 
@@ -289,5 +457,133 @@ pub(crate) mod session_start_conformance {
         assert!(body.starts_with("# agent-lens session-start"), "got {body}");
         assert!(body.contains("## Hotspots"), "want hotspot: {body}");
         assert!(body.contains("## Coupling"), "want coupling: {body}");
+    }
+
+    /// The snapshot hook writes the checkpoint under the session's id
+    /// and injects nothing.
+    pub(crate) fn snapshot_is_recorded_silently<E, F>(input: F)
+    where
+        E: SessionStartEnvelope,
+        F: FnOnce(&Path) -> E::Input,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        crate::test_support::init_checkpoint_fixture(dir.path());
+        let input = input(dir.path());
+        // Both test contexts carry the id `sess`.
+        let path = crate::hooks::core::checkpoint::snapshot_path(dir.path(), "sess");
+        assert_eq!(E::session_id(&input), "sess");
+        let out = super::SnapshotHook::<E>::new().handle(input).unwrap();
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            serde_json::to_value(E::Output::default()).unwrap(),
+        );
+        assert!(path.is_file(), "no snapshot at {}", path.display());
+    }
+}
+
+/// The engine-agnostic half of every [`StopEnvelope`] test suite:
+/// [`DeltaHook`] decides when to block, the envelope only how. Checked
+/// on the serialized output, which is what the agent reads.
+#[cfg(test)]
+pub(crate) mod stop_conformance {
+    use std::path::Path;
+
+    use agent_hooks::Hook as _;
+    use serde_json::Value;
+
+    use super::{DeltaHook, StopEnvelope};
+    use crate::hooks::core::checkpoint::take_snapshot;
+    use crate::test_support::{init_checkpoint_fixture, regress_checkpoint_fixture};
+
+    fn run<E: StopEnvelope>(hook: &DeltaHook<E>, input: E::Input) -> Value {
+        serde_json::to_value(hook.handle(input).unwrap()).unwrap()
+    }
+
+    /// A new regression blocks, with the report as the reason; the same
+    /// regression at the next stop is only a message.
+    pub(crate) fn blocks_once_then_messages<E, F>(input: F)
+    where
+        E: StopEnvelope,
+        F: Fn(&Path, &str, bool) -> E::Input,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        init_checkpoint_fixture(dir.path());
+        let hook = DeltaHook::<E>::new();
+        assert_eq!(
+            run(&hook, input(dir.path(), "s", false)),
+            serde_json::to_value(E::Output::default()).unwrap(),
+            "no snapshot, no opinion",
+        );
+        take_snapshot(dir.path(), "s").unwrap();
+        assert_eq!(
+            run(&hook, input(dir.path(), "s", false)),
+            serde_json::to_value(E::Output::default()).unwrap(),
+            "nothing changed, nothing to say",
+        );
+        regress_checkpoint_fixture(dir.path());
+
+        let first = run(&hook, input(dir.path(), "s", false));
+        assert_eq!(first["decision"], "block", "got {first}");
+        let reason = first["reason"].as_str().unwrap();
+        assert!(reason.contains("## New wrappers (1)"), "got {reason}");
+        assert!(reason.contains("`outer` (modified)"), "got {reason}");
+
+        let second = run(&hook, input(dir.path(), "s", false));
+        assert!(second.get("decision").is_none(), "got {second}");
+        assert!(
+            second["systemMessage"]
+                .as_str()
+                .is_some_and(|m| m.contains("`outer`")),
+            "got {second}",
+        );
+    }
+
+    /// A stop that is already a forced continuation never blocks, and
+    /// neither does a hook built with `with_block(false)`.
+    pub(crate) fn never_blocks_a_continuation_or_when_told_not_to<E, F>(input: F)
+    where
+        E: StopEnvelope,
+        F: Fn(&Path, &str, bool) -> E::Input,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        init_checkpoint_fixture(dir.path());
+        take_snapshot(dir.path(), "a").unwrap();
+        take_snapshot(dir.path(), "b").unwrap();
+        regress_checkpoint_fixture(dir.path());
+
+        let active = run(&DeltaHook::<E>::new(), input(dir.path(), "a", true));
+        assert!(active.get("decision").is_none(), "got {active}");
+        assert!(active["systemMessage"].is_string(), "got {active}");
+
+        let advisory = run(
+            &DeltaHook::<E>::new().with_block(false),
+            input(dir.path(), "b", false),
+        );
+        assert!(advisory.get("decision").is_none(), "got {advisory}");
+        assert!(advisory["systemMessage"].is_string(), "got {advisory}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::post_tool_use::ClaudeCodePostToolUse;
+    use crate::hooks::session_start::ClaudeCodeSessionStart;
+    use crate::hooks::stop::ClaudeCodeStop;
+
+    #[test]
+    fn checkpoint_hooks_debug_as_themselves() {
+        assert_eq!(
+            format!("{:?}", FootprintHook::<ClaudeCodePostToolUse>::new()),
+            "FootprintHook"
+        );
+        assert_eq!(
+            format!("{:?}", SnapshotHook::<ClaudeCodeSessionStart>::new()),
+            "SnapshotHook"
+        );
+        assert_eq!(
+            format!("{:?}", DeltaHook::<ClaudeCodeStop>::new().with_block(false)),
+            "DeltaHook { block: false }"
+        );
     }
 }

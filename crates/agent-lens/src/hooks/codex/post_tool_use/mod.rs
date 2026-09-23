@@ -23,6 +23,10 @@ impl HookEnvelope for CodexPostToolUse {
         prepare_edited_sources(input)
     }
 
+    fn cwd(input: &Self::Input) -> &std::path::Path {
+        &input.context.cwd
+    }
+
     fn wrap_report(report: String) -> Self::Output {
         PostToolUseOutput {
             hook_specific_output: Some(PostToolUseHookSpecificOutput {
@@ -38,6 +42,8 @@ impl HookEnvelope for CodexPostToolUse {
 pub type SimilarityHook = crate::hooks::core::SimilarityHook<CodexPostToolUse>;
 /// Codex `wrapper` PostToolUse hook handler.
 pub type WrapperHook = crate::hooks::core::WrapperHook<CodexPostToolUse>;
+/// Codex `footprint` PostToolUse hook handler.
+pub type FootprintHook = crate::hooks::core::FootprintHook<CodexPostToolUse>;
 /// Re-exported for compatibility with earlier per-handler error aliases.
 pub type SimilarityError = crate::hooks::core::HookError;
 /// Re-exported for compatibility with earlier per-handler error aliases.

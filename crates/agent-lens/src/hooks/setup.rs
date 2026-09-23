@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 
 use crate::hooks::setup_engine::{
     ConfigFormat, EventBlock, POST_TOOL_USE_EVENT, PRE_TOOL_USE_EVENT, SESSION_START_EVENT,
-    SetupError,
+    STOP_EVENT, SUBAGENT_STOP_EVENT, SetupError,
 };
 
 const SETTINGS_RELATIVE: &str = ".claude/settings.json";
@@ -31,6 +31,7 @@ pub const POST_TOOL_USE_MATCHER: &str = EDITING_TOOL_MATCHER;
 pub const POST_TOOL_USE_COMMANDS: &[&str] = &[
     "agent-lens hook post-tool-use similarity",
     "agent-lens hook post-tool-use wrapper",
+    "agent-lens hook post-tool-use footprint",
 ];
 
 /// Tool matcher used for the PreToolUse block. Mirrors the
@@ -55,6 +56,21 @@ pub const SESSION_START_MATCHER: &str = "startup|resume";
 
 /// Commands the setup writes into `hooks.SessionStart`.
 pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens hook session-start summary"];
+
+/// Matcher for the checkpoint snapshot's SessionStart block: every
+/// source. The stop hooks compare against the snapshot of whatever
+/// session is running, `clear` included; on a resume or a compaction the
+/// existing snapshot is kept, so firing there is a cheap no-op.
+pub const CHECKPOINT_MATCHER: &str = "";
+
+/// Commands the setup writes into the checkpoint's SessionStart block.
+pub const SNAPSHOT_COMMANDS: &[&str] = &["agent-lens hook session-start snapshot"];
+
+/// Commands the setup writes into `hooks.Stop`.
+pub const STOP_COMMANDS: &[&str] = &["agent-lens hook stop delta"];
+
+/// Commands the setup writes into `hooks.SubagentStop`.
+pub const SUBAGENT_STOP_COMMANDS: &[&str] = &["agent-lens hook subagent-stop delta"];
 
 const EDITING_TOOL_MATCHER: &str = "Edit|Write|MultiEdit";
 
@@ -88,6 +104,21 @@ impl ConfigFormat for ClaudeSettings {
             event: POST_TOOL_USE_EVENT,
             matcher: POST_TOOL_USE_MATCHER,
             commands: POST_TOOL_USE_COMMANDS,
+        },
+        EventBlock {
+            event: SESSION_START_EVENT,
+            matcher: CHECKPOINT_MATCHER,
+            commands: SNAPSHOT_COMMANDS,
+        },
+        EventBlock {
+            event: STOP_EVENT,
+            matcher: CHECKPOINT_MATCHER,
+            commands: STOP_COMMANDS,
+        },
+        EventBlock {
+            event: SUBAGENT_STOP_EVENT,
+            matcher: CHECKPOINT_MATCHER,
+            commands: SUBAGENT_STOP_COMMANDS,
         },
     ];
 
@@ -251,18 +282,29 @@ mod tests {
             plan.added_commands.len(),
             SESSION_START_COMMANDS.len()
                 + PRE_TOOL_USE_COMMANDS.len()
-                + POST_TOOL_USE_COMMANDS.len(),
+                + POST_TOOL_USE_COMMANDS.len()
+                + SNAPSHOT_COMMANDS.len()
+                + STOP_COMMANDS.len()
+                + SUBAGENT_STOP_COMMANDS.len(),
         );
         assert_eq!(
             plan.after,
             json!({
                 "hooks": {
-                    "SessionStart": [{
-                        "matcher": SESSION_START_MATCHER,
-                        "hooks": [
-                            {"type": "command", "command": "agent-lens hook session-start summary"},
-                        ],
-                    }],
+                    "SessionStart": [
+                        {
+                            "matcher": SESSION_START_MATCHER,
+                            "hooks": [
+                                {"type": "command", "command": "agent-lens hook session-start summary"},
+                            ],
+                        },
+                        {
+                            "matcher": CHECKPOINT_MATCHER,
+                            "hooks": [
+                                {"type": "command", "command": "agent-lens hook session-start snapshot"},
+                            ],
+                        },
+                    ],
                     "PreToolUse": [{
                         "matcher": PRE_TOOL_USE_MATCHER,
                         "hooks": [
@@ -275,6 +317,19 @@ mod tests {
                         "hooks": [
                             {"type": "command", "command": "agent-lens hook post-tool-use similarity"},
                             {"type": "command", "command": "agent-lens hook post-tool-use wrapper"},
+                            {"type": "command", "command": "agent-lens hook post-tool-use footprint"},
+                        ],
+                    }],
+                    "Stop": [{
+                        "matcher": CHECKPOINT_MATCHER,
+                        "hooks": [
+                            {"type": "command", "command": "agent-lens hook stop delta"},
+                        ],
+                    }],
+                    "SubagentStop": [{
+                        "matcher": CHECKPOINT_MATCHER,
+                        "hooks": [
+                            {"type": "command", "command": "agent-lens hook subagent-stop delta"},
                         ],
                     }],
                 }
@@ -309,11 +364,15 @@ mod tests {
                 "agent-lens hook session-start summary".to_string(),
                 "agent-lens hook pre-tool-use complexity".to_string(),
                 "agent-lens hook pre-tool-use cohesion".to_string(),
+                "agent-lens hook post-tool-use footprint".to_string(),
+                "agent-lens hook session-start snapshot".to_string(),
+                "agent-lens hook stop delta".to_string(),
+                "agent-lens hook subagent-stop delta".to_string(),
             ],
         );
         assert!(plan.changed());
         let session_start = plan.after["hooks"]["SessionStart"].as_array().unwrap();
-        assert_eq!(session_start.len(), 1);
+        assert_eq!(session_start.len(), 2);
         assert_eq!(session_start[0]["matcher"], SESSION_START_MATCHER);
         let pre_tool_use = plan.after["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 1);
@@ -396,7 +455,13 @@ mod tests {
                 }],
             },
         }),
-        &["agent-lens hook post-tool-use wrapper"]
+        &[
+            "agent-lens hook post-tool-use wrapper",
+            "agent-lens hook post-tool-use footprint",
+            "agent-lens hook session-start snapshot",
+            "agent-lens hook stop delta",
+            "agent-lens hook subagent-stop delta",
+        ]
     )]
     // User-added flags on an installed command must not trigger a
     // reinstall of the bare form.
@@ -407,6 +472,17 @@ mod tests {
                     "matcher": SESSION_START_MATCHER,
                     "hooks": [
                         {"type": "command", "command": "agent-lens hook session-start summary --quiet"},
+                        {"type": "command", "command": "agent-lens hook session-start snapshot"},
+                    ],
+                }],
+                "Stop": [{
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook stop delta --no-block"},
+                    ],
+                }],
+                "SubagentStop": [{
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook subagent-stop delta"},
                     ],
                 }],
                 "PreToolUse": [{
@@ -421,6 +497,7 @@ mod tests {
                     "hooks": [
                         {"type": "command", "command": "agent-lens hook post-tool-use similarity --threshold 0.9"},
                         {"type": "command", "command": "agent-lens hook post-tool-use wrapper"},
+                        {"type": "command", "command": "agent-lens hook post-tool-use footprint"},
                     ],
                 }],
             },
@@ -469,6 +546,7 @@ mod tests {
                     "hooks": [
                         {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook post-tool-use similarity"},
                         {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook post-tool-use wrapper"},
+                        {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/target/debug/agent-lens hook post-tool-use footprint"},
                     ],
                 }],
             },
@@ -478,7 +556,12 @@ mod tests {
         let plan = plan(path).unwrap();
         assert_eq!(
             plan.added_commands,
-            vec!["agent-lens hook session-start summary".to_string()],
+            vec![
+                "agent-lens hook session-start summary".to_string(),
+                "agent-lens hook session-start snapshot".to_string(),
+                "agent-lens hook stop delta".to_string(),
+                "agent-lens hook subagent-stop delta".to_string(),
+            ],
             "path-qualified pre/post handlers must not be reinstalled",
         );
         let pre = plan.after["hooks"]["PreToolUse"].as_array().unwrap();

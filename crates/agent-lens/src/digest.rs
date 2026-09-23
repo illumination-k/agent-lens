@@ -315,7 +315,11 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::ContextSpan => context_span(report),
         ToolName::Cycles => cycles(report),
         ToolName::Layers => layers(report),
-        ToolName::FunctionGraph | ToolName::GraphQuery | ToolName::Impact | ToolName::Search => {
+        ToolName::Footprint
+        | ToolName::FunctionGraph
+        | ToolName::GraphQuery
+        | ToolName::Impact
+        | ToolName::Search => {
             return None;
         }
     })

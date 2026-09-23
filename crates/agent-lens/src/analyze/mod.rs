@@ -23,7 +23,9 @@ pub mod delegation;
 mod diff;
 mod error_from;
 mod export_lang;
+pub mod footprint;
 mod format;
+pub(crate) mod function_delta;
 pub mod function_graph;
 pub mod graph_query;
 pub mod hidden_coupling;
@@ -66,6 +68,7 @@ pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
 pub use cycles::CyclesAnalyzer;
 pub use delegation::DelegationAnalyzer;
+pub use footprint::{DEFAULT_FOOTPRINT_DEPTH, FootprintAnalyzer, FootprintError};
 pub use format::ConfidenceDeduper;
 pub use function_graph::FunctionGraphAnalyzer;
 pub use graph_query::{
@@ -102,7 +105,9 @@ pub use wrapper::WrapperAnalyzer;
 
 pub use crate_root::resolve_crate_root;
 pub(crate) use diff::overlaps_any;
-pub use diff::{DiffScope, LineRange, changed_line_ranges, parse_diff_range, validate_diff_range};
+pub use diff::{
+    ChangedLines, DiffScope, LineRange, changed_line_ranges, parse_diff_range, validate_diff_range,
+};
 pub(crate) use format::format_optional_f64;
 pub use path_filter::{AnalyzePathFilter, CompiledPathFilter, PathFilterError};
 pub use roots::AnalyzeRoots;
