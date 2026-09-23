@@ -30,7 +30,7 @@ use agent_lens::analyze::untested::UntestedOptions;
 use agent_lens::analyze::visibility::VisibilityOptions;
 use agent_lens::analyze::wrapper::WrapperOptions;
 use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
-use agent_lens::hooks::setup_engine::SetupScope;
+use agent_lens::hooks::setup_engine::{HookSelection, SetupScope};
 use agent_lens::skills;
 use clap::{Args, Parser, Subcommand};
 
@@ -289,6 +289,33 @@ pub(super) struct SetupArgs {
     /// Show the resulting JSON without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
+    #[command(flatten)]
+    pub(super) selection: HookSelectionArgs,
+}
+
+/// `--only` / `--skip`, shared by both setup commands.
+#[derive(Debug, Args)]
+pub(super) struct HookSelectionArgs {
+    /// Install only these handlers. A value is a hook id such as
+    /// `post-tool-use:similarity`, or a bare event such as
+    /// `post-tool-use` for all of its handlers. Repeatable and
+    /// comma-separated. A stop `delta` handler also installs
+    /// `session-start:snapshot`, which it compares against.
+    #[arg(long, value_name = "HOOK", value_delimiter = ',')]
+    pub(super) only: Vec<String>,
+    /// Leave these handlers out, in the same form as `--only`. Applied
+    /// after `--only`.
+    #[arg(long, value_name = "HOOK", value_delimiter = ',')]
+    pub(super) skip: Vec<String>,
+}
+
+impl HookSelectionArgs {
+    pub(super) fn into_selection(self) -> HookSelection {
+        HookSelection {
+            only: self.only,
+            skip: self.skip,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -427,6 +454,8 @@ pub(super) struct CodexSetupArgs {
     /// Show the resulting TOML without touching disk.
     #[arg(long)]
     pub(super) dry_run: bool,
+    #[command(flatten)]
+    pub(super) selection: HookSelectionArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1667,6 +1696,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_hook_setup_selection_repeated_and_comma_separated() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "hook",
+            "setup",
+            "--only",
+            "pre-tool-use,post-tool-use:wrapper",
+            "--only",
+            "stop",
+            "--skip",
+            "pre-tool-use:cohesion",
+        ])
+        .expect("clean parse");
+        let Command::Hook(HookCommand::Setup(args)) = cli.command else {
+            panic!("expected hook setup");
+        };
+        assert_eq!(
+            args.selection.into_selection(),
+            HookSelection {
+                only: vec![
+                    "pre-tool-use".into(),
+                    "post-tool-use:wrapper".into(),
+                    "stop".into()
+                ],
+                skip: vec!["pre-tool-use:cohesion".into()],
+            },
+        );
+    }
+
+    #[test]
     fn parses_codex_hook_setup_defaults_to_user_scope() {
         let cli = Cli::try_parse_from(["agent-lens", "codex-hook", "setup"]).expect("clean parse");
         let Command::CodexHook(CodexHookCommand::Setup(args)) = cli.command else {
@@ -1674,6 +1733,7 @@ mod tests {
         };
         assert_eq!(args.scope, SetupScope::User);
         assert!(!args.dry_run);
+        assert_eq!(args.selection.into_selection(), HookSelection::default());
     }
 
     #[test]

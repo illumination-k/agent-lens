@@ -11,7 +11,9 @@ use std::path::Path;
 
 use agent_lens::hooks::codex::setup::CodexConfig;
 use agent_lens::hooks::setup::ClaudeSettings;
-use agent_lens::hooks::setup_engine::{self, ConfigFormat, SetupScope, SetupSummary};
+use agent_lens::hooks::setup_engine::{
+    self, ConfigFormat, HookSelection, SetupScope, SetupSummary,
+};
 use tracing::info;
 
 use super::args::{CodexSetupArgs, SetupArgs};
@@ -19,7 +21,12 @@ use super::write_stdout_json;
 
 pub(super) fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    run_setup::<ClaudeSettings>(args.scope, args.dry_run, &cwd)
+    run_setup::<ClaudeSettings>(
+        args.scope,
+        args.dry_run,
+        &args.selection.into_selection(),
+        &cwd,
+    )
 }
 
 pub(super) fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -28,7 +35,12 @@ pub(super) fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn s
     // anchor at the working-tree root rather than wherever the command
     // happens to run from.
     let project_root = agent_lens::paths::git_repo_root(&cwd).unwrap_or(cwd);
-    run_setup::<CodexConfig>(args.scope, args.dry_run, &project_root)
+    run_setup::<CodexConfig>(
+        args.scope,
+        args.dry_run,
+        &args.selection.into_selection(),
+        &project_root,
+    )
 }
 
 /// Plan the merge for one config format, apply it unless this is a dry
@@ -36,10 +48,11 @@ pub(super) fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn s
 fn run_setup<F: ConfigFormat>(
     scope: SetupScope,
     dry_run: bool,
+    selection: &HookSelection,
     project_root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = setup_engine::resolve_path::<F>(scope, project_root)?;
-    let plan = setup_engine::plan::<F>(path)?;
+    let plan = setup_engine::plan::<F>(path, selection)?;
     let wrote = apply_setup_plan(dry_run, &plan, F::FILE_LABEL, || {
         setup_engine::apply::<F>(&plan)
     })?;

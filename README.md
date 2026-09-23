@@ -281,10 +281,15 @@ agent hears what got worse over the session before it hands control back.
 agent-lens hook setup                 # project scope: ./.claude/settings.json
 agent-lens hook setup --scope user    # user scope: $HOME/.claude/settings.json
 agent-lens hook setup --dry-run       # preview the exact block without writing
+agent-lens hook setup --only pre-tool-use,stop       # just these handlers
+agent-lens hook setup --skip post-tool-use:footprint # everything but this one
 ```
 
 The merge is conservative: existing entries are preserved, missing handlers
 are appended, and re-running is a no-op once everything is installed.
+`--only` / `--skip` take a hook id (`post-tool-use:similarity`) or a bare event
+(`post-tool-use`); an unknown one is rejected with the valid list. Selecting a
+stop `delta` also installs the `session-start:snapshot` it compares against.
 
 ### As a Codex hook
 
@@ -296,10 +301,11 @@ separate `codex-hook` command tree with the same handlers:
 agent-lens codex-hook setup                    # user scope: $HOME/.codex/config.toml
 agent-lens codex-hook setup --scope project    # <repo-root>/.codex/config.toml
 agent-lens codex-hook setup --dry-run          # preview without writing
+agent-lens codex-hook setup --skip session-start:summary
 ```
 
-The same conservative merge applies: existing keys and comments are preserved
-and re-running is a no-op.
+The same conservative merge and `--only` / `--skip` selection apply: existing
+keys and comments are preserved and re-running is a no-op.
 
 ### Command surface
 
