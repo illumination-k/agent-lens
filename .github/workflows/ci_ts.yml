@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "web/**"
+      - "integrations/opencode/**"
       - "mise.ts.toml"
       - "mise.base.toml"
       - ".github/workflows/ci_ts.yml"
   pull_request:
     paths:
       - "web/**"
+      - "integrations/opencode/**"
       - "mise.ts.toml"
       - "mise.base.toml"
       - ".github/workflows/ci_ts.yml"

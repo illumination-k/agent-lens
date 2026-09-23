@@ -47,6 +47,30 @@ depends = ["install:ts"]
 
 run = "pnpm --dir web run build"
 
+# The opencode plugin is a single dependency-free file that opencode loads
+# as-is, so it has no package of its own: it borrows the web toolchain for
+# formatting, linting, and type-checking, and its tests run on `node --test`
+# (Node strips the types natively).
+[tasks."fmt:opencode"]
+description = "Format the opencode plugin with oxfmt"
+depends = ["install:ts"]
+dir = "integrations/opencode"
+run = "../../web/node_modules/.bin/oxfmt --write ."
+
+[tasks."lint:opencode"]
+description = "Lint and type-check the opencode plugin"
+depends = ["install:ts"]
+dir = "integrations/opencode"
+run = [
+  "../../web/node_modules/.bin/oxfmt --check .",
+  "../../web/node_modules/.bin/oxlint -c ../../web/oxlint.config.ts .",
+  "../../web/node_modules/.bin/tsc --noEmit -p tsconfig.json",
+]
+
+[tasks."test:opencode"]
+description = "Run the opencode plugin tests"
+run = "node --test integrations/opencode/agent-lens.test.ts"
+
 [tasks."ci:ts"]
 description = "Run TypeScript lint, type-check, test, and build tasks"
-depends = ["lint:ts", "test:ts", "build:ts"]
+depends = ["lint:ts", "test:ts", "build:ts", "lint:opencode", "test:opencode"]
