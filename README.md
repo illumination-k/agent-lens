@@ -14,7 +14,7 @@ catalogue in short form, plus a live
 for `analyze function-graph` JSON.
 
 `agent-lens` is a single-binary Rust CLI that bundles two things coding agents
-(Claude Code, Codex, …) need but usually don't get:
+(Claude Code, Codex, opencode, …) need but usually don't get:
 
 1. **Hooks** — handlers that speak each agent's stdin/stdout hook protocol, so
    the agent can be nudged with feedback the moment it finishes editing a file.
@@ -307,6 +307,36 @@ agent-lens codex-hook setup --skip session-start:summary
 The same conservative merge and `--only` / `--skip` selection apply: existing
 keys and comments are preserved and re-running is a no-op.
 
+### As an opencode plugin
+
+opencode takes plugins rather than stdin hooks, so
+[`integrations/opencode/agent-lens.ts`](integrations/opencode/agent-lens.ts)
+bridges its plugin events onto the `hook` / `codex-hook` handlers above. It is
+one dependency-free file; drop it into `.opencode/plugins/` (project) or
+`~/.config/opencode/plugins/` (user):
+
+```bash
+mkdir -p .opencode/plugins
+curl -fsSL -o .opencode/plugins/agent-lens.ts \
+  https://raw.githubusercontent.com/illumination-k/agent-lens/main/integrations/opencode/agent-lens.ts
+```
+
+| opencode                         | handlers                                                        |
+| -------------------------------- | --------------------------------------------------------------- |
+| first system prompt of a session | `session-start snapshot`, then `summary` appended to the prompt |
+| `write` / `edit`                 | `hook pre-tool-use *`, `hook post-tool-use *`                   |
+| `apply_patch`                    | `codex-hook pre-tool-use *`, `codex-hook post-tool-use *`       |
+| `session.idle`                   | `hook stop delta`                                               |
+
+opencode cannot inject context before a tool runs, so the pre-edit report is
+taken before the edit lands and appended to the tool output together with the
+post-edit one. It cannot veto going idle either, so a blocking stop resumes the
+session with the regression report as the next prompt, and a non-blocking one
+is a toast. Subagent (child) sessions get the per-edit reports only.
+`AGENT_LENS_BIN` points the plugin at a binary other than `agent-lens` on
+`PATH`, and `AGENT_LENS_OPENCODE_SKIP` takes the same hook ids / bare events as
+`--skip` (`post-tool-use:footprint,stop`).
+
 ### Command surface
 
 | Command tree | Commands                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -480,6 +510,9 @@ crates/
 Adapters translate a language's AST into the neutral primitives and nothing
 else; `agent-lens` owns everything that needs a whole corpus rather than one
 AST (the call graph, git-churn joins, report rendering, the CLI itself).
+
+`integrations/opencode/` holds the opencode plugin, a single file opencode
+loads as-is; it borrows the `web/` toolchain for lint and type-check.
 
 `web/` is a separate pnpm workspace: the TanStack Start site deployed to
 GitHub Pages, holding the landing page and the static function-graph viewer.
