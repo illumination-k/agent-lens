@@ -1900,6 +1900,38 @@ fn delta(xs: &[i32]) -> i32 {
         assert_eq!(filter, expected);
     }
 
+    /// The value bound prunes strictly below the threshold: one value
+    /// swap in a 4-node body bounds TSED at exactly 0.75, which a 0.75
+    /// threshold must keep.
+    #[rstest]
+    #[case::at_threshold(0.75, None)]
+    #[case::above_threshold(0.76, Some(CheapFilter::LabelValueMultiset))]
+    fn label_value_filter_keeps_pairs_whose_bound_meets_threshold(
+        #[case] threshold: f64,
+        #[case] expected: Option<CheapFilter>,
+    ) {
+        let body = |last: &str| {
+            lens_domain::TreeNode::with_children(
+                "Block",
+                "",
+                vec![
+                    lens_domain::TreeNode::new("Ident", "x"),
+                    lens_domain::TreeNode::new("Ident", "y"),
+                    lens_domain::TreeNode::new("Ident", last),
+                ],
+            )
+        };
+        let (a, b) = (body("z"), body("w"));
+        let profiles = vec![TreeProfile::from_tree(&a), TreeProfile::from_tree(&b)];
+        let mut opts = TSEDOptions::default();
+        opts.apted.compare_values = true;
+        opts.apted.rename_cost = 1.0;
+
+        let filter = tsed_upper_bound_filter(&profiles, 0, 1, threshold, &opts);
+
+        assert_eq!(filter, expected);
+    }
+
     #[test]
     fn cheap_filters_prune_structurally_unreachable_pairs() {
         let a = lens_domain::TreeNode::with_children(

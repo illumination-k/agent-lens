@@ -855,6 +855,43 @@ mod tests {
         );
         assert!(candidates.pairs.is_empty(), "{:?}", candidates.pairs.len());
         assert_eq!(candidates.value_filtered_count, 200 * 199 / 2);
+        assert_eq!(candidates.total_len(), 200 * 199 / 2);
+    }
+
+    /// Same labels and root arity, different preorder: only the shingle
+    /// bound rejects the pair, and its counter must record it.
+    #[test]
+    fn shingle_filter_counts_pairs_it_drops() {
+        let leaf = lens_domain::TreeNode::leaf;
+        let node = |label, children| lens_domain::TreeNode::with_children(label, "", children);
+        let corpus = vec![
+            owned_function_with_tree(
+                "a",
+                node("Block", vec![node("A", vec![leaf("B")]), leaf("C")]),
+            ),
+            owned_function_with_tree(
+                "b",
+                node("Block", vec![leaf("A"), node("C", vec![leaf("B")])]),
+            ),
+        ];
+        let profiles: Vec<_> = corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
+            .collect();
+
+        let candidates = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.99,
+            &lens_domain::TSEDOptions::default(),
+            SimilarityMethod::Tsed,
+            true,
+        );
+
+        assert!(candidates.pairs.is_empty());
+        assert_eq!(candidates.shingle_filtered_count, 1);
+        assert_eq!(candidates.total_len(), 1);
     }
 
     #[test]
