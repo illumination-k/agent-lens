@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use lens_domain::{
     CandidateStrategy, TSEDOptions, collect_subtree_sizes, lsh_candidate_pairs_for_trees,
 };
+use rayon::prelude::*;
 
 use super::{OwnedUnit, SimilarityMethod};
 
@@ -20,6 +21,10 @@ pub(super) struct TreeProfile {
 #[derive(Debug)]
 struct TreeFilterProfile {
     label_counts: HashMap<u64, usize>,
+    /// Multiset of `(label, value)` pairs. The label-only multiset is
+    /// blind to what a node names; under `compare_values` a node only
+    /// matches for free when both agree, so this is the tighter bound.
+    label_value_counts: HashMap<u64, usize>,
     preorder_shingles: HashMap<u64, usize>,
     child_sizes: Vec<usize>,
     root_arity: usize,
@@ -129,6 +134,8 @@ impl TreeFilterProfile {
             *label_counts.entry(label).or_insert(0) += 1;
         }
         let preorder_shingles = shingle_counts(&labels, PREORDER_SHINGLE_WIDTH);
+        let mut label_value_counts = HashMap::new();
+        count_label_value_pairs(tree, &mut label_value_counts);
         let child_sizes = tree
             .children
             .iter()
@@ -140,6 +147,7 @@ impl TreeFilterProfile {
             .collect();
         Self {
             label_counts,
+            label_value_counts,
             preorder_shingles,
             child_sizes,
             root_arity: tree.children.len(),
@@ -153,6 +161,16 @@ fn collect_preorder_label_hashes(tree: &lens_domain::TreeNode, out: &mut Vec<u64
     out.push(label_fingerprint(&tree.label));
     for child in &tree.children {
         collect_preorder_label_hashes(child, out);
+    }
+}
+
+fn count_label_value_pairs(tree: &lens_domain::TreeNode, out: &mut HashMap<u64, usize>) {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tree.label.hash(&mut hasher);
+    tree.value.hash(&mut hasher);
+    *out.entry(hasher.finish()).or_insert(0) += 1;
+    for child in &tree.children {
+        count_label_value_pairs(child, out);
     }
 }
 
@@ -188,6 +206,9 @@ pub(super) struct CandidatePairs {
     pub eligible_function_count: usize,
     pub size_filtered_count: usize,
     pub label_filtered_count: usize,
+    /// Pairs dropped by the `(label, value)` multiset bound. Only ever
+    /// non-zero when values are compared (`--target blocks`).
+    pub value_filtered_count: usize,
     pub arity_filtered_count: usize,
     pub shingle_filtered_count: usize,
     /// Pairs dropped because the two units cover overlapping source
@@ -202,6 +223,7 @@ impl CandidatePairs {
         self.pairs.len()
             + self.size_filtered_count
             + self.label_filtered_count
+            + self.value_filtered_count
             + self.arity_filtered_count
             + self.shingle_filtered_count
             + self.overlap_filtered_count
@@ -239,6 +261,7 @@ fn units_overlap(a: &OwnedUnit, b: &OwnedUnit) -> bool {
 struct CheapFilterCounts {
     size: usize,
     label: usize,
+    value: usize,
     arity: usize,
     shingle: usize,
 }
@@ -303,7 +326,7 @@ pub(super) fn candidate_pairs(
             })
             .filter(|(i, j)| same_test_class(corpus, *i, *j));
         if method.uses_tree_filters() {
-            filter_size_compatible_pairs(lsh_pairs, profiles, threshold, opts)
+            filter_tsed_compatible_pairs(lsh_pairs, profiles, threshold, opts)
         } else {
             (lsh_pairs.collect::<Vec<_>>(), CheapFilterCounts::default())
         }
@@ -325,6 +348,7 @@ pub(super) fn candidate_pairs(
         size_filtered_count: filter_counts.size,
         overlap_filtered_count: 0,
         label_filtered_count: filter_counts.label,
+        value_filtered_count: filter_counts.value,
         arity_filtered_count: filter_counts.arity,
         shingle_filtered_count: filter_counts.shingle,
         strategy: if use_lsh {
@@ -359,45 +383,27 @@ fn strategy_uses_lsh(strategy: &CandidateStrategy, eligible_count: usize) -> boo
         .is_some_and(|min_n| eligible_count >= min_n)
 }
 
-fn filter_size_compatible_pairs(
-    pairs: impl IntoIterator<Item = (usize, usize)>,
-    profiles: &[TreeProfile],
-    threshold: f64,
-    opts: &TSEDOptions,
-) -> (Vec<(usize, usize)>, CheapFilterCounts) {
-    let mut out = Vec::new();
-    let mut counts = CheapFilterCounts::default();
-    for (i, j) in pairs {
-        let Some(profile_a) = profiles.get(i) else {
-            continue;
-        };
-        let Some(profile_b) = profiles.get(j) else {
-            continue;
-        };
-        if tsed_upper_bound(profile_a, profile_b, 0.0, opts.size_penalty) < threshold {
-            counts.size += 1;
-        } else {
-            out.push((i, j));
-        }
-    }
-    (out, counts)
-}
-
 fn filter_tsed_compatible_pairs(
     pairs: impl IntoIterator<Item = (usize, usize)>,
     profiles: &[TreeProfile],
     threshold: f64,
     opts: &TSEDOptions,
 ) -> (Vec<(usize, usize)>, CheapFilterCounts) {
+    let pairs: Vec<_> = pairs.into_iter().collect();
+    let verdicts: Vec<_> = pairs
+        .par_iter()
+        .map(|&(i, j)| tsed_upper_bound_filter(profiles, i, j, threshold, opts))
+        .collect();
     let mut out = Vec::new();
     let mut counts = CheapFilterCounts::default();
-    for (i, j) in pairs {
-        match tsed_upper_bound_filter(profiles, i, j, threshold, opts) {
+    for (pair, verdict) in pairs.into_iter().zip(verdicts) {
+        match verdict {
             Some(CheapFilter::Size) => counts.size += 1,
             Some(CheapFilter::LabelMultiset) => counts.label += 1,
+            Some(CheapFilter::LabelValueMultiset) => counts.value += 1,
             Some(CheapFilter::RootChildArity) => counts.arity += 1,
             Some(CheapFilter::PreorderShingle) => counts.shingle += 1,
-            None => out.push((i, j)),
+            None => out.push(pair),
         }
     }
     (out, counts)
@@ -407,6 +413,7 @@ fn filter_tsed_compatible_pairs(
 pub(super) enum CheapFilter {
     Size,
     LabelMultiset,
+    LabelValueMultiset,
     RootChildArity,
     PreorderShingle,
 }
@@ -423,9 +430,15 @@ pub(super) fn tsed_upper_bound_filter(
     if tsed_upper_bound(profile_a, profile_b, 0.0, opts.size_penalty) < threshold {
         return Some(CheapFilter::Size);
     }
-    let label_distance = label_multiset_distance_lower_bound(profile_a, profile_b, opts);
+    let label_distance = label_multiset_distance_lower_bound(profile_a, profile_b, opts, false);
     if tsed_upper_bound(profile_a, profile_b, label_distance, opts.size_penalty) < threshold {
         return Some(CheapFilter::LabelMultiset);
+    }
+    if opts.apted.compare_values {
+        let value_distance = label_multiset_distance_lower_bound(profile_a, profile_b, opts, true);
+        if tsed_upper_bound(profile_a, profile_b, value_distance, opts.size_penalty) < threshold {
+            return Some(CheapFilter::LabelValueMultiset);
+        }
     }
     let arity_distance = root_child_arity_distance_lower_bound(profile_a, profile_b, opts);
     if tsed_upper_bound(profile_a, profile_b, arity_distance, opts.size_penalty) < threshold {
@@ -458,10 +471,16 @@ fn tsed_upper_bound(
     (base * penalty).clamp(0.0, 1.0)
 }
 
+/// Lower bound on the edit distance from the multiset L1 over node
+/// labels, or over `(label, value)` pairs when `with_values` is set.
+/// The value-aware form is sound only when the distance charges a value
+/// mismatch (`compare_values`): then a node pair costs nothing exactly
+/// when both label and value agree.
 fn label_multiset_distance_lower_bound(
     a: &TreeProfile,
     b: &TreeProfile,
     opts: &TSEDOptions,
+    with_values: bool,
 ) -> f64 {
     let Some(filter_a) = &a.filters else {
         return 0.0;
@@ -469,8 +488,12 @@ fn label_multiset_distance_lower_bound(
     let Some(filter_b) = &b.filters else {
         return 0.0;
     };
-    let l1 = multiset_l1(&filter_a.label_counts, &filter_b.label_counts);
-    // A rename can fix at most one missing and one extra label. Insert and
+    let l1 = if with_values {
+        multiset_l1(&filter_a.label_value_counts, &filter_b.label_value_counts)
+    } else {
+        multiset_l1(&filter_a.label_counts, &filter_b.label_counts)
+    };
+    // A rename can fix at most one missing and one extra entry. Insert and
     // delete each change one multiset slot; use the cheapest per-slot cost.
     let per_delta_cost = opts
         .apted
@@ -623,6 +646,7 @@ mod tests {
             eligible_function_count: corpus.len(),
             size_filtered_count: 0,
             label_filtered_count: 0,
+            value_filtered_count: 0,
             arity_filtered_count: 0,
             shingle_filtered_count: 0,
             overlap_filtered_count: 0,
@@ -781,6 +805,93 @@ mod tests {
         );
         // All-identical trees: the exact path must enumerate every pair.
         assert_eq!(gated.pairs.len(), 200 * 199 / 2);
+    }
+
+    /// Past the LSH switch-over the full cheap filters still run when
+    /// the profiles carry them: 200 bodies of one shape whose values are
+    /// all distinct land in one MinHash bucket, and under
+    /// `compare_values` the `(label, value)` bound must reject every
+    /// pair before APTED (#562).
+    #[test]
+    fn lsh_path_runs_value_aware_filter_on_value_disjoint_bodies() {
+        let corpus: Vec<OwnedUnit> = (0..200)
+            .map(|i| {
+                owned_function_with_tree(
+                    &format!("f{i}"),
+                    lens_domain::TreeNode::with_children(
+                        "Block",
+                        "",
+                        vec![
+                            lens_domain::TreeNode::new("Ident", format!("a{i}")),
+                            lens_domain::TreeNode::new("Call", format!("load{i}")),
+                            lens_domain::TreeNode::new("Str", format!("key-{i}")),
+                        ],
+                    ),
+                )
+            })
+            .collect();
+        let profiles: Vec<_> = corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
+            .collect();
+        let mut opts = lens_domain::TSEDOptions::default();
+        opts.apted.compare_values = true;
+        opts.apted.rename_cost = 1.0;
+
+        let candidates = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.5,
+            &opts,
+            SimilarityMethod::Tsed,
+            true,
+        );
+
+        assert!(
+            matches!(candidates.strategy, CandidatePairStrategy::Lsh),
+            "expected lsh, got {}",
+            candidates.strategy.as_str()
+        );
+        assert!(candidates.pairs.is_empty(), "{:?}", candidates.pairs.len());
+        assert_eq!(candidates.value_filtered_count, 200 * 199 / 2);
+        assert_eq!(candidates.total_len(), 200 * 199 / 2);
+    }
+
+    /// Same labels and root arity, different preorder: only the shingle
+    /// bound rejects the pair, and its counter must record it.
+    #[test]
+    fn shingle_filter_counts_pairs_it_drops() {
+        let leaf = lens_domain::TreeNode::leaf;
+        let node = |label, children| lens_domain::TreeNode::with_children(label, "", children);
+        let corpus = vec![
+            owned_function_with_tree(
+                "a",
+                node("Block", vec![node("A", vec![leaf("B")]), leaf("C")]),
+            ),
+            owned_function_with_tree(
+                "b",
+                node("Block", vec![leaf("A"), node("C", vec![leaf("B")])]),
+            ),
+        ];
+        let profiles: Vec<_> = corpus
+            .iter()
+            .map(|f| TreeProfile::from_tree(f.body_tree()))
+            .collect();
+
+        let candidates = candidate_pairs(
+            &corpus,
+            1,
+            &profiles,
+            0.99,
+            &lens_domain::TSEDOptions::default(),
+            SimilarityMethod::Tsed,
+            true,
+        );
+
+        assert!(candidates.pairs.is_empty());
+        assert_eq!(candidates.shingle_filtered_count, 1);
+        assert_eq!(candidates.total_len(), 1);
     }
 
     #[test]
