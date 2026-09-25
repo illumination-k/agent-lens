@@ -17,6 +17,12 @@ updates:
       codeql-action:
         patterns:
           - "github/codeql-action*"
+      # Everything else rides one weekly PR. Listed after `codeql-action`
+      # because Dependabot assigns each dependency to the first group it
+      # matches.
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -35,6 +41,14 @@ updates:
       ruff:
         patterns:
           - "ruff_*"
+      # Remaining minor / patch bumps share one weekly PR. Majors stay as
+      # individual PRs since they are the ones likely to need code changes.
+      cargo:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "npm"
     directory: "/web"
@@ -43,3 +57,11 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
+    groups:
+      # Minor / patch bumps share one weekly PR; majors stay individual.
+      npm:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
