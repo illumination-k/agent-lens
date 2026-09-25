@@ -939,7 +939,12 @@ impl SimilarityAnalyzer {
     /// work and get an empty slice.
     fn tree_profiles(&self, corpus: &[OwnedUnit], min_lines: usize) -> Vec<TreeProfile> {
         if self.method.uses_tree_filters() {
-            build_tree_profiles(corpus, min_lines, self.allow_lsh())
+            build_tree_profiles(
+                corpus,
+                min_lines,
+                self.allow_lsh(),
+                self.tsed_options().apted.compare_values,
+            )
         } else {
             Vec::new()
         }
@@ -1142,21 +1147,31 @@ pub(crate) struct ScoredCorpus {
     pub(crate) pairs: Vec<ScoredUnitPair>,
 }
 
+/// Tree profiles for scoring and the cheap candidate filters.
+///
+/// On the LSH path the filter data is normally skipped: MinHash already
+/// grouped the corpus by label shape, which is what the label-based
+/// bounds measure. `filters_under_lsh` keeps it anyway, for runs whose
+/// score also compares values (`--target blocks`): there MinHash's
+/// value-blind buckets hold every instance of an idiom, and only the
+/// `(label, value)` bound rejects them before APTED (issue #562).
 fn build_tree_profiles(
     corpus: &[OwnedUnit],
     min_lines: usize,
     allow_lsh: bool,
+    filters_under_lsh: bool,
 ) -> Vec<TreeProfile> {
-    let use_lsh_profiles =
-        allow_lsh && similarity_uses_lsh(eligible_function_count(corpus, min_lines));
-    if use_lsh_profiles {
+    let scoring_only = !filters_under_lsh
+        && allow_lsh
+        && similarity_uses_lsh(eligible_function_count(corpus, min_lines));
+    if scoring_only {
         corpus
             .par_iter()
             .map(|f| TreeProfile::from_tree_for_scoring(f.body_tree()))
             .collect()
     } else {
         corpus
-            .iter()
+            .par_iter()
             .map(|f| TreeProfile::from_tree(f.body_tree()))
             .collect()
     }
@@ -1264,6 +1279,7 @@ fn log_candidate_stats(
         retained_candidate_count = candidates.pairs.len(),
         size_filtered_count = candidates.size_filtered_count,
         label_filtered_count = candidates.label_filtered_count,
+        value_filtered_count = candidates.value_filtered_count,
         arity_filtered_count = candidates.arity_filtered_count,
         shingle_filtered_count = candidates.shingle_filtered_count,
         overlap_filtered_count = candidates.overlap_filtered_count,
@@ -1288,6 +1304,7 @@ fn log_score_stats(
         exact_match_count = score_stats.exact_match_count,
         size_filtered_count = candidates.size_filtered_count,
         label_filtered_count = candidates.label_filtered_count,
+        value_filtered_count = candidates.value_filtered_count,
         arity_filtered_count = candidates.arity_filtered_count,
         shingle_filtered_count = candidates.shingle_filtered_count,
         overlap_filtered_count = candidates.overlap_filtered_count,
@@ -1817,6 +1834,72 @@ fn delta(xs: &[i32]) -> i32 {
         }
     }
 
+    fn arb_valued_tree() -> impl Strategy<Value = lens_domain::TreeNode> {
+        let label = || prop_oneof![Just("A"), Just("B"), Just("C")];
+        let value = || prop_oneof![Just(""), Just("x"), Just("y"), Just("z")];
+        let leaf = (label(), value()).prop_map(|(l, v)| lens_domain::TreeNode::new(l, v));
+        leaf.prop_recursive(4, 32, 4, move |inner| {
+            (label(), value(), vec(inner, 0..4))
+                .prop_map(|(l, v, children)| lens_domain::TreeNode::with_children(l, v, children))
+        })
+    }
+
+    proptest! {
+        /// The `(label, value)` bound only runs under `compare_values`;
+        /// there it must stay a lower bound on the value-aware distance
+        /// for any rename cost, or it drops real block clones (#562).
+        #[test]
+        fn value_aware_cheap_filters_do_not_drop_pairs_that_reach_threshold(
+            a in arb_valued_tree(),
+            b in arb_valued_tree(),
+            threshold in 0.0_f64..1.0,
+            rename_cost in 0.1_f64..2.0,
+        ) {
+            let mut opts = TSEDOptions::default();
+            opts.apted.compare_values = true;
+            opts.apted.rename_cost = rename_cost;
+            let profiles = vec![TreeProfile::from_tree(&a), TreeProfile::from_tree(&b)];
+            if let Some(filter) = tsed_upper_bound_filter(&profiles, 0, 1, threshold, &opts) {
+                let actual = lens_domain::calculate_tsed(&a, &b, &opts);
+                prop_assert!(
+                    actual < threshold + 1e-9,
+                    "filter {filter:?} dropped pair with TSED {actual} at threshold {threshold}: {a:?} {b:?}",
+                );
+            }
+        }
+    }
+
+    /// Same shape, disjoint values: only the value-aware bound can tell
+    /// them apart, and only when values are compared.
+    #[rstest]
+    #[case::value_blind(false, None)]
+    #[case::value_aware(true, Some(CheapFilter::LabelValueMultiset))]
+    fn label_value_filter_prunes_value_disjoint_pairs_only_under_compare_values(
+        #[case] compare_values: bool,
+        #[case] expected: Option<CheapFilter>,
+    ) {
+        let body = |v: &str| {
+            lens_domain::TreeNode::with_children(
+                "Block",
+                "",
+                vec![
+                    lens_domain::TreeNode::new("Ident", format!("{v}1")),
+                    lens_domain::TreeNode::new("Ident", format!("{v}2")),
+                    lens_domain::TreeNode::new("Call", format!("{v}3")),
+                ],
+            )
+        };
+        let (a, b) = (body("a"), body("b"));
+        let profiles = vec![TreeProfile::from_tree(&a), TreeProfile::from_tree(&b)];
+        let mut opts = TSEDOptions::default();
+        opts.apted.compare_values = compare_values;
+        opts.apted.rename_cost = 1.0;
+
+        let filter = tsed_upper_bound_filter(&profiles, 0, 1, 0.5, &opts);
+
+        assert_eq!(filter, expected);
+    }
+
     #[test]
     fn cheap_filters_prune_structurally_unreachable_pairs() {
         let a = lens_domain::TreeNode::with_children(
@@ -1955,6 +2038,7 @@ fn delta(xs: &[i32]) -> i32 {
             eligible_function_count: 3,
             size_filtered_count: 0,
             label_filtered_count: 0,
+            value_filtered_count: 0,
             arity_filtered_count: 0,
             shingle_filtered_count: 0,
             overlap_filtered_count: 0,
@@ -2320,7 +2404,7 @@ fn delta(xs: &[i32]) -> i32 {
                 }),
             },
         ];
-        let profiles = build_tree_profiles(&corpus, 1, true);
+        let profiles = build_tree_profiles(&corpus, 1, true, false);
 
         let score = score_candidate_pair(
             &corpus,
@@ -4222,9 +4306,28 @@ impl Counter {
     fn build_tree_profiles_keeps_filter_profiles_below_lsh_threshold() {
         let corpus = vec![owned_function("a", 1, 10), owned_function("b", 1, 10)];
 
-        let profiles = build_tree_profiles(&corpus, 1, true);
+        let profiles = build_tree_profiles(&corpus, 1, true, false);
 
         assert!(profiles.iter().all(TreeProfile::has_filters));
+    }
+
+    /// Past the LSH switch-over, value-comparing runs (blocks) must keep
+    /// the filter profiles, or the `(label, value)` bound never runs and
+    /// every idiom instance in a MinHash bucket reaches APTED (#562).
+    #[rstest]
+    #[case::value_blind(false, false)]
+    #[case::value_aware(true, true)]
+    fn build_tree_profiles_past_lsh_threshold_keeps_filters_only_when_asked(
+        #[case] filters_under_lsh: bool,
+        #[case] expected: bool,
+    ) {
+        let corpus: Vec<_> = (0..200)
+            .map(|i| owned_function(&format!("f{i}"), 1, 10))
+            .collect();
+
+        let profiles = build_tree_profiles(&corpus, 1, true, filters_under_lsh);
+
+        assert!(profiles.iter().all(|p| p.has_filters() == expected));
     }
 
     /// A type inside `#[cfg(test)]` is a test unit even when the file
