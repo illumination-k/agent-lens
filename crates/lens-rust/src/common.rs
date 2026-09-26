@@ -327,6 +327,7 @@ mod tests {
     #[case::path("crate::Foo<T>", Some("Foo"))]
     #[case::reference("&'a mut W", Some("W"))]
     #[case::pointer("*const Foo", Some("Foo"))]
+    #[case::paren("(Foo)", Some("Foo"))]
     #[case::slice("[u8]", Some("[u8]"))]
     #[case::array("[Foo; 4]", Some("[Foo;_]"))]
     #[case::tuple("(A, B)", Some("(A,B)"))]
@@ -336,6 +337,18 @@ mod tests {
     fn impl_self_type_names_every_owner(#[case] ty: &str, #[case] expected: Option<&str>) {
         let ty: Type = parse_str(ty).unwrap();
         assert_eq!(impl_self_type_name(&ty).as_deref(), expected);
+    }
+
+    /// A type that reached the `impl` through a macro's `$t:ty` arrives
+    /// wrapped in an invisible group.
+    #[test]
+    fn impl_self_type_name_sees_through_a_macro_group() {
+        let ty = Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
+            group_token: Default::default(),
+            elem: Box::new(parse_str("Foo").unwrap()),
+        });
+        assert_eq!(impl_self_type_name(&ty).as_deref(), Some("Foo"));
     }
 
     #[test]
