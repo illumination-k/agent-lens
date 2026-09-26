@@ -1,0 +1,483 @@
+[
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::header",
+      "location": "benches/parse.rs:131"
+    },
+    "callee": {
+      "qualified_name": "httparse::Status::unwrap",
+      "location": "src/lib.rs:247"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::method",
+      "location": "benches/parse.rs:183"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::new",
+      "location": "src/iter.rs:16"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::method",
+      "location": "benches/parse.rs:183"
+    },
+    "callee": {
+      "qualified_name": "httparse::parse_method",
+      "location": "src/lib.rs:843"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::req",
+      "location": "benches/parse.rs:22"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse",
+      "location": "src/lib.rs:599"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::req_short",
+      "location": "benches/parse.rs:39"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse",
+      "location": "src/lib.rs:599"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::resp",
+      "location": "benches/parse.rs:75"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::resp_short",
+      "location": "benches/parse.rs:92"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::uri",
+      "location": "benches/parse.rs:110"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::new",
+      "location": "src/iter.rs:16"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::uri",
+      "location": "benches/parse.rs:110"
+    },
+    "callee": {
+      "qualified_name": "httparse::parse_uri",
+      "location": "src/lib.rs:955"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::version",
+      "location": "benches/parse.rs:168"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::new",
+      "location": "src/iter.rs:16"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::benches::parse::version",
+      "location": "benches/parse.rs:168"
+    },
+    "callee": {
+      "qualified_name": "httparse::parse_version",
+      "location": "src/lib.rs:805"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::ParserConfig::parse_request",
+      "location": "src/lib.rs:394"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse_with_config",
+      "location": "src/lib.rs:578"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::ParserConfig::parse_request_with_uninit_headers",
+      "location": "src/lib.rs:403"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse_with_config_and_uninit_headers",
+      "location": "src/lib.rs:528"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::ParserConfig::parse_response",
+      "location": "src/lib.rs:460"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse_with_config",
+      "location": "src/lib.rs:681"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::ParserConfig::parse_response_with_uninit_headers",
+      "location": "src/lib.rs:469"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse_with_config_and_uninit_headers",
+      "location": "src/lib.rs:700"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::Request::parse_with_config_and_uninit_headers",
+      "location": "src/lib.rs:528"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::len",
+      "location": "src/iter.rs:87"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::Response::parse_with_config_and_uninit_headers",
+      "location": "src/lib.rs:700"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::len",
+      "location": "src/iter.rs:87"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::parse_headers_iter_uninit",
+      "location": "src/lib.rs:1055"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::peek",
+      "location": "src/iter.rs:35"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::parse_headers_iter_uninit",
+      "location": "src/lib.rs:1055"
+    },
+    "callee": {
+      "qualified_name": "httparse::simd::runtime::match_header_name_vectored",
+      "location": "src/simd/runtime.rs:33"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::parse_headers_iter_uninit",
+      "location": "src/lib.rs:1055"
+    },
+    "callee": {
+      "qualified_name": "httparse::simd::runtime::match_header_value_vectored",
+      "location": "src/simd/runtime.rs:48"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::parse_uri",
+      "location": "src/lib.rs:955"
+    },
+    "callee": {
+      "qualified_name": "httparse::simd::runtime::match_uri_vectored",
+      "location": "src/simd/runtime.rs:37"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::partial_permutations",
+      "location": "src/lib.rs:1841"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse",
+      "location": "src/lib.rs:599"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::skip_empty_lines",
+      "location": "src/lib.rs:605"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::peek",
+      "location": "src/iter.rs:35"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::skip_spaces",
+      "location": "src/lib.rs:630"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::peek",
+      "location": "src/iter.rs:35"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_request_with_multiple_space_delimiters",
+      "location": "src/lib.rs:2117"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse",
+      "location": "src/lib.rs:599"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_request_with_weird_whitespace_delimiters",
+      "location": "src/lib.rs:2146"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse",
+      "location": "src/lib.rs:599"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_request_with_whitespace_between_header_name_and_colon",
+      "location": "src/lib.rs:1909"
+    },
+    "callee": {
+      "qualified_name": "httparse::Request::parse",
+      "location": "src/lib.rs:599"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_multiple_space_delimiters",
+      "location": "src/lib.rs:2066"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_obsolete_line_folding_at_end",
+      "location": "src/lib.rs:1961"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_obsolete_line_folding_at_start",
+      "location": "src/lib.rs:1932"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_obsolete_line_folding_in_empty_header",
+      "location": "src/lib.rs:2019"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_obsolete_line_folding_in_middle",
+      "location": "src/lib.rs:1990"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_space_before_first_header",
+      "location": "src/lib.rs:2634"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_weird_whitespace_delimiters",
+      "location": "src/lib.rs:2095"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::tests::test_forbid_response_with_whitespace_between_header_name_and_colon",
+      "location": "src/lib.rs:1861"
+    },
+    "callee": {
+      "qualified_name": "httparse::Response::parse",
+      "location": "src/lib.rs:677"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::simd::swar::match_header_value_vectored",
+      "location": "src/simd/swar.rs:38"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::peek",
+      "location": "src/iter.rs:35"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "httparse::simd::swar::match_uri_vectored",
+      "location": "src/simd/swar.rs:10"
+    },
+    "callee": {
+      "qualified_name": "httparse::iter::Bytes::peek",
+      "location": "src/iter.rs:35"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  }
+]

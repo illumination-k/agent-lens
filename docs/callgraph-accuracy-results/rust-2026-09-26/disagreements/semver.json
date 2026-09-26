@@ -1,0 +1,639 @@
+[
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::benches::parse::bench",
+      "location": "benches/parse.rs:5"
+    },
+    "callee": {
+      "qualified_name": "semver::parse::Prerelease::from_str",
+      "location": "src/parse.rs:125"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::benches::parse::bench",
+      "location": "benches/parse.rs:5"
+    },
+    "callee": {
+      "qualified_name": "semver::parse::Version::from_str",
+      "location": "src/parse.rs:28"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::benches::parse::bench",
+      "location": "benches/parse.rs:5"
+    },
+    "callee": {
+      "qualified_name": "semver::parse::VersionReq::from_str",
+      "location": "src/parse.rs:87"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::display::BuildMetadata::fmt",
+      "location": "src/display.rs:86"
+    },
+    "callee": {
+      "qualified_name": "semver::BuildMetadata::as_str",
+      "location": "src/lib.rs:562"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::display::Comparator::fmt",
+      "location": "src/display.rs:49"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::display::Prerelease::fmt",
+      "location": "src/display.rs:80"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::as_str",
+      "location": "src/lib.rs:544"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::display::Version::fmt",
+      "location": "src/display.rs:5"
+    },
+    "callee": {
+      "qualified_name": "semver::BuildMetadata::is_empty",
+      "location": "src/lib.rs:566"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::display::Version::fmt",
+      "location": "src/display.rs:5"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::display::Version::fmt",
+      "location": "src/display.rs:92"
+    },
+    "callee": {
+      "qualified_name": "semver::BuildMetadata::is_empty",
+      "location": "src/lib.rs:566"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::display::Version::fmt",
+      "location": "src/display.rs:92"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::error::Error::fmt",
+      "location": "src/error.rs:105"
+    },
+    "callee": {
+      "qualified_name": "semver::error::Error::fmt",
+      "location": "src/error.rs:33"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::eval::matches_comparator",
+      "location": "src/eval.rs:26"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::eval::matches_req",
+      "location": "src/eval.rs:3"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::eval::pre_is_compatible",
+      "location": "src/eval.rs:170"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::impls::BuildMetadata::cmp",
+      "location": "src/impls.rs:108"
+    },
+    "callee": {
+      "qualified_name": "semver::BuildMetadata::as_str",
+      "location": "src/lib.rs:562"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::impls::BuildMetadata::deref",
+      "location": "src/impls.rs:33"
+    },
+    "callee": {
+      "qualified_name": "semver::identifier::Identifier::as_str",
+      "location": "src/identifier.rs:188"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::impls::Identifier::hash",
+      "location": "src/impls.rs:17"
+    },
+    "callee": {
+      "qualified_name": "semver::identifier::Identifier::as_str",
+      "location": "src/identifier.rs:188"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::impls::Prerelease::cmp",
+      "location": "src/impls.rs:51"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::as_str",
+      "location": "src/lib.rs:544"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::impls::Prerelease::cmp",
+      "location": "src/impls.rs:51"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::impls::Prerelease::deref",
+      "location": "src/impls.rs:25"
+    },
+    "callee": {
+      "qualified_name": "semver::identifier::Identifier::as_str",
+      "location": "src/identifier.rs:188"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::BuildMetadata::as_str",
+      "location": "src/lib.rs:562"
+    },
+    "callee": {
+      "qualified_name": "semver::identifier::Identifier::as_str",
+      "location": "src/identifier.rs:188"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::BuildMetadata::is_empty",
+      "location": "src/lib.rs:566"
+    },
+    "callee": {
+      "qualified_name": "semver::identifier::Identifier::is_empty",
+      "location": "src/identifier.rs:167"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::Prerelease::as_str",
+      "location": "src/lib.rs:544"
+    },
+    "callee": {
+      "qualified_name": "semver::identifier::Identifier::as_str",
+      "location": "src/identifier.rs:188"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "callee": {
+      "qualified_name": "semver::identifier::Identifier::is_empty",
+      "location": "src/identifier.rs:167"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::parse::Version::from_str",
+      "location": "src/parse.rs:28"
+    },
+    "callee": {
+      "qualified_name": "semver::BuildMetadata::is_empty",
+      "location": "src/lib.rs:566"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::parse::Version::from_str",
+      "location": "src/parse.rs:28"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::parse::comparator",
+      "location": "src/parse.rs:287"
+    },
+    "callee": {
+      "qualified_name": "semver::BuildMetadata::is_empty",
+      "location": "src/lib.rs:566"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::parse::comparator",
+      "location": "src/parse.rs:287"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::serde::Comparator::deserialize",
+      "location": "src/serde.rs:86"
+    },
+    "callee": {
+      "qualified_name": "semver::parse::Comparator::from_str",
+      "location": "src/parse.rs:111"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::serde::Version::deserialize",
+      "location": "src/serde.rs:34"
+    },
+    "callee": {
+      "qualified_name": "semver::parse::Version::from_str",
+      "location": "src/parse.rs:28"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::serde::VersionReq::deserialize",
+      "location": "src/serde.rs:60"
+    },
+    "callee": {
+      "qualified_name": "semver::parse::VersionReq::from_str",
+      "location": "src/parse.rs:87"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_autotrait::test",
+      "location": "tests/test_autotrait.rs:6"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::test_autotrait::assert_send_sync",
+      "location": "tests/test_autotrait.rs:3"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_identifier::test_new",
+      "location": "tests/test_identifier.rs:14"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::as_str",
+      "location": "src/lib.rs:544"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_identifier::test_new",
+      "location": "tests/test_identifier.rs:14"
+    },
+    "callee": {
+      "qualified_name": "semver::Prerelease::is_empty",
+      "location": "src/lib.rs:548"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::assert_match_all",
+      "location": "tests/test_version_req.rs:22"
+    },
+    "callee": {
+      "qualified_name": "semver::VersionReq::matches",
+      "location": "src/lib.rs:513"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::assert_match_none",
+      "location": "tests/test_version_req.rs:30"
+    },
+    "callee": {
+      "qualified_name": "semver::VersionReq::matches",
+      "location": "src/lib.rs:513"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_basic",
+      "location": "tests/test_version_req.rs:38"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_caret",
+      "location": "tests/test_version_req.rs:203"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_cargo3202",
+      "location": "tests/test_version_req.rs:408"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_comparator_parse",
+      "location": "tests/test_version_req.rs:369"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::comparator",
+      "location": "tests/util/mod.rs:27"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_eq_hash",
+      "location": "tests/test_version_req.rs:430"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_exact",
+      "location": "tests/test_version_req.rs:52"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_greater_than",
+      "location": "tests/test_version_req.rs:79"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_leading_digit_in_pre_and_build",
+      "location": "tests/test_version_req.rs:443"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_less_than",
+      "location": "tests/test_version_req.rs:95"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_multiple",
+      "location": "tests/test_version_req.rs:119"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_pre",
+      "location": "tests/test_version_req.rs:327"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_tilde",
+      "location": "tests/test_version_req.rs:184"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "semver::tests::test_version_req::test_wildcard",
+      "location": "tests/test_version_req.rs:275"
+    },
+    "callee": {
+      "qualified_name": "semver::tests::util::req",
+      "location": "tests/util/mod.rs:17"
+    },
+    "dispatch": "static",
+    "in_candidate_set": true
+  }
+]

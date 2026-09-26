@@ -1,0 +1,45 @@
+# Rust discovery targets for the call-graph accuracy benchmark (see
+# docs/callgraph-accuracy.md, "Rust"). Not part of the default run:
+#   python3 scripts/callgraph-accuracy/run.py --targets-file scripts/callgraph-accuracy/targets-rust-discovery.toml
+# Same keys as targets.toml.
+
+[[target]]
+name = "either"
+language = "rust"
+oracle = "rust-analyzer"
+repo = "https://github.com/rayon-rs/either"
+tag = "1.18.0"
+commit = "ce6f07fc3d56d6a56ecfc32256d2c33bd0b4ad09"
+
+[[target]]
+name = "fastrand"
+language = "rust"
+oracle = "rust-analyzer"
+repo = "https://github.com/smol-rs/fastrand"
+tag = "v2.5.0"
+commit = "7a1cc2c69ebde6cb3442809213db3fe19a2cb0ba"
+features = ["std", "alloc"]
+
+[[target]]
+name = "glob"
+language = "rust"
+oracle = "rust-analyzer"
+repo = "https://github.com/rust-lang/glob"
+tag = "v0.3.4"
+commit = "cfa2a58f2e44373573f657ec25b3621e44714dee"
+
+[[target]]
+name = "httparse"
+language = "rust"
+oracle = "rust-analyzer"
+repo = "https://github.com/seanmonstar/httparse"
+tag = "v1.9.5"
+commit = "97c7e6e23672df1482930bdcd5ff1eae3dbecf16"
+
+[[target]]
+name = "strsim"
+language = "rust"
+oracle = "rust-analyzer"
+repo = "https://github.com/rapidfuzz/strsim-rs"
+tag = "v0.11.1"
+commit = "f72cd1cbbfc0b43db217a9c57c543b025bdba863"

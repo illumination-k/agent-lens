@@ -1,0 +1,110 @@
+[
+  {
+    "side": "agent_lens_only",
+    "caller": {
+      "qualified_name": "fastrand::benches::bench::shuffle_wyhash",
+      "location": "benches/bench.rs:36"
+    },
+    "callee": {
+      "qualified_name": "fastrand::Rng::shuffle",
+      "location": "src/lib.rs:576"
+    },
+    "method": [
+      "last_segment"
+    ],
+    "call_lines": [
+      40
+    ]
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "fastrand::tests::smoke::bool",
+      "location": "tests/smoke.rs:8"
+    },
+    "callee": {
+      "qualified_name": "fastrand::global_rng::bool",
+      "location": "src/global_rng.rs:84"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "fastrand::tests::smoke::digit",
+      "location": "tests/smoke.rs:149"
+    },
+    "callee": {
+      "qualified_name": "fastrand::global_rng::digit",
+      "location": "src/global_rng.rs:132"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "fastrand::tests::smoke::global_rng_alphabetic",
+      "location": "tests/smoke.rs:166"
+    },
+    "callee": {
+      "qualified_name": "fastrand::global_rng::alphabetic",
+      "location": "src/global_rng.rs:90"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "fastrand::tests::smoke::global_rng_choice",
+      "location": "tests/smoke.rs:157"
+    },
+    "callee": {
+      "qualified_name": "fastrand::global_rng::choice",
+      "location": "src/global_rng.rs:118"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "fastrand::tests::smoke::global_rng_fill",
+      "location": "tests/smoke.rs:210"
+    },
+    "callee": {
+      "qualified_name": "fastrand::global_rng::fill",
+      "location": "src/global_rng.rs:144"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "fastrand::tests::smoke::global_rng_lowercase",
+      "location": "tests/smoke.rs:174"
+    },
+    "callee": {
+      "qualified_name": "fastrand::global_rng::lowercase",
+      "location": "src/global_rng.rs:102"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  },
+  {
+    "side": "oracle_only",
+    "caller": {
+      "qualified_name": "fastrand::tests::smoke::global_rng_uppercase",
+      "location": "tests/smoke.rs:182"
+    },
+    "callee": {
+      "qualified_name": "fastrand::global_rng::uppercase",
+      "location": "src/global_rng.rs:108"
+    },
+    "dispatch": "static",
+    "in_candidate_set": false
+  }
+]
