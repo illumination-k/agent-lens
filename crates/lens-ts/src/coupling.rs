@@ -202,7 +202,7 @@ impl<'a> Visit<'a> for DynamicImportVisitor {
     }
 }
 
-fn static_string_value<'a>(expr: &'a oxc_ast::ast::Expression<'a>) -> Option<&'a str> {
+pub(crate) fn static_string_value<'a>(expr: &'a oxc_ast::ast::Expression<'a>) -> Option<&'a str> {
     match expr {
         oxc_ast::ast::Expression::StringLiteral(lit) => Some(lit.value.as_str()),
         oxc_ast::ast::Expression::TemplateLiteral(lit) if lit.quasis.len() == 1 => {

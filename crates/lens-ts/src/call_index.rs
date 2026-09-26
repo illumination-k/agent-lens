@@ -23,6 +23,7 @@ use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_syntax::scope::ScopeFlags;
+use oxc_syntax::symbol::SymbolId;
 
 use crate::parser::{Dialect, MODULE_EXTENSIONS, TsParseError, is_test_item};
 use crate::resolver::{ModuleResolver, is_relative_specifier};
@@ -120,6 +121,12 @@ fn extract_call_shapes(
         })
         .map(|binding| binding.local.clone())
         .collect();
+    let mut dynamic = DynamicImportCollector {
+        module,
+        context,
+        out: Vec::new(),
+    };
+    dynamic.visit_program(&ret.program);
     let mut collector = CallShapeCollector {
         module: module.to_owned(),
         line_index: &line_index,
@@ -127,7 +134,8 @@ fn extract_call_shapes(
         imports,
         bindings: bindings
             .into_iter()
-            .map(|binding| (binding.local.clone(), binding))
+            .chain(dynamic.out)
+            .filter_map(|binding| Some((binding.symbol?, binding)))
             .collect(),
         namespace_aliases,
         out: Vec::new(),
@@ -218,9 +226,9 @@ struct CallShapeCollector<'a> {
     line_index: &'a LineIndex,
     scoping: &'a Scoping,
     imports: Vec<ImportShape>,
-    /// Import bindings by local name. Imports bind at module scope, where
-    /// a name is declared once, so the name is the key.
-    bindings: HashMap<String, ImportBinding>,
+    /// Import bindings by the symbol they declare: static imports, and
+    /// locals destructured from a dynamic `import()`.
+    bindings: HashMap<SymbolId, ImportBinding>,
     namespace_aliases: HashSet<String>,
     out: Vec<CallShape>,
 }
@@ -327,15 +335,15 @@ impl FunctionBodyCallVisitor<'_, '_> {
         let Some(symbol) = reference.symbol_id() else {
             return Some(Referent::Global);
         };
+        if let Some(import) = self.collector.bindings.get(&symbol) {
+            return Some(Referent::Import(import));
+        }
         if scoping.symbol_scope_id(symbol) != scoping.root_scope_id() {
             return Some(Referent::Local);
         }
+        // An import form not collected (`import x = require(...)`).
         if scoping.symbol_flags(symbol).is_import() {
-            return self
-                .collector
-                .bindings
-                .get(root.name.as_str())
-                .map(Referent::Import);
+            return None;
         }
         Some(Referent::ModuleScope)
     }
@@ -530,10 +538,12 @@ enum ImportedName {
     Namespace,
 }
 
-/// One local name an `import` declaration binds.
+/// One local name an `import` declaration, or a destructured dynamic
+/// `import()`, binds.
 #[derive(Debug, Clone)]
 struct ImportBinding {
     local: String,
+    symbol: Option<SymbolId>,
     module: Imported,
     name: ImportedName,
     /// The exported name, for [`ImportedName::Named`].
@@ -588,6 +598,7 @@ fn collect_imports(
             };
             out.push(ImportBinding {
                 local: local.name.to_string(),
+                symbol: local.symbol_id.get(),
                 module: imported.clone(),
                 name,
                 exported,
@@ -595,6 +606,61 @@ fn collect_imports(
         }
     }
     out
+}
+
+/// Locals bound from a dynamic import: `const { a, b: c } = await
+/// import("./m")` binds `a` and `c` as named imports of `./m`, and
+/// `const m = await import("./m")` binds `m` as its namespace. Only the
+/// declaring symbol is recorded, so such a local binds the import in its
+/// own scope and nowhere else.
+struct DynamicImportCollector<'m, 'c> {
+    module: &'m str,
+    context: Option<&'c ImportContext<'c>>,
+    out: Vec<ImportBinding>,
+}
+
+impl<'a> Visit<'a> for DynamicImportCollector<'_, '_> {
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if let Some(specifier) = it.init.as_ref().and_then(dynamic_import_specifier) {
+            let module = imported_module(self.module, specifier, self.context);
+            let mut bind = |local: &BindingIdentifier, name, exported| {
+                self.out.push(ImportBinding {
+                    local: local.name.to_string(),
+                    symbol: local.symbol_id.get(),
+                    module: module.clone(),
+                    name,
+                    exported,
+                });
+            };
+            match &it.id {
+                BindingPattern::BindingIdentifier(id) => bind(id, ImportedName::Namespace, None),
+                BindingPattern::ObjectPattern(pattern) => {
+                    for property in &pattern.properties {
+                        if let (Some(key), Some(local)) = (
+                            property.key.static_name(),
+                            property.value.get_binding_identifier(),
+                        ) && !property.computed
+                        {
+                            bind(local, ImportedName::Named, Some(key.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk::walk_variable_declarator(self, it);
+    }
+}
+
+/// The static specifier of `import("…")` or `await import("…")`.
+fn dynamic_import_specifier<'b>(init: &'b Expression<'b>) -> Option<&'b str> {
+    match init.without_parentheses() {
+        Expression::AwaitExpression(inner) => dynamic_import_specifier(&inner.argument),
+        Expression::ImportExpression(import) => {
+            crate::coupling::static_string_value(&import.source)
+        }
+        _ => None,
+    }
 }
 
 /// Settle where `specifier`, imported by `module`, leads. With a context
@@ -751,6 +817,16 @@ mod tests {
         "import { Api } from '../api'; function f() { Api.create(); }",
         "Api::create",
         Some("api::Api::create")
+    )]
+    #[case::dynamic_import_destructured(
+        "async function f() { const { helper: h } = await import('./util'); h(); }",
+        "h",
+        Some("app::util::helper")
+    )]
+    #[case::dynamic_import_namespace(
+        "async function f() { const util = await import('./util'); util.helper(); }",
+        "util::helper",
+        Some("app::util::helper")
     )]
     #[case::default_import("import h from './util'; function f() { h(); }", "h", None)]
     #[case::bare_import_without_context(
