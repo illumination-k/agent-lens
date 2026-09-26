@@ -242,12 +242,11 @@ fn is_function_value(init: &Expression) -> bool {
     )
 }
 
-/// `require("m")`, `require("m").x`, `require("m")(opts)`,
-/// `await import("m")`, through parentheses and TS assertions.
+/// `require("m")`, `require("m").x`, `require("m")(opts)`, through
+/// parentheses and TS assertions. (A dynamic `import()` needs no case:
+/// its locals are import bindings, which win before this is consulted.)
 fn binds_module(init: &Expression) -> bool {
     match init.get_inner_expression() {
-        Expression::ImportExpression(_) => true,
-        Expression::AwaitExpression(inner) => binds_module(&inner.argument),
         Expression::CallExpression(call) => {
             matches!(&call.callee, Expression::Identifier(id) if id.name == "require")
                 || binds_module(&call.callee)
@@ -992,6 +991,10 @@ mod tests {
         "const emit = require('./bus').emit; function pump() { emit(1); }",
         false
     )]
+    #[case::module_scope_require_computed_member(
+        "const emit = require('./bus')['emit']; function pump() { emit(1); }",
+        false
+    )]
     #[case::module_scope_function_expression(
         "const emit = function () {}; function pump() { emit(1); }",
         false
@@ -1097,6 +1100,8 @@ mod tests {
         Some("app::main::N::h")
     )]
     #[case::local_value("function f() { const h = make(); h(); }", "h", None)]
+    // A member of the closure (`h.call()`) is no declaration of it.
+    #[case::local_closure_member("function f() { const h = () => {}; h.call(); }", "h::call", None)]
     #[case::parameter("function f(h: () => void) { h(); }", "h", None)]
     fn callee_bindings(#[case] source: &str, #[case] callee: &str, #[case] expected: Option<&str>) {
         let expected = expected.map_or(SyntaxFact::Unknown, |target| {
