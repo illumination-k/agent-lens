@@ -297,6 +297,7 @@ impl FunctionBodyCallVisitor<'_> {
             receiver_expr_kind: SyntaxFact::Known(facts.receiver),
             arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
+            callee_binding: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: self.imports.to_vec(),
             line,

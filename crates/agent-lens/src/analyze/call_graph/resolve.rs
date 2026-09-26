@@ -1,8 +1,9 @@
 //! Heuristic call-site resolution.
 //!
-//! Maps [`CallShape`]s onto graph node ids without type inference:
-//! lexical path candidates first, then last-segment fallbacks with
-//! path-suffix and caller-crate narrowing. Every outcome records its
+//! Maps [`CallShape`]s onto graph node ids without type inference: an
+//! adapter's semantic binding ([`CallShape::callee_binding`]) first, then
+//! lexical path candidates, then last-segment fallbacks with path-suffix
+//! and caller-crate narrowing. Every outcome records its
 //! provenance ([`ResolutionMethod`]) and, when ambiguous, the full
 //! candidate node-id set so downstream analyzers can widen traversals
 //! instead of dropping the edge.
@@ -31,7 +32,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lens_domain::{CallShape, ReceiverExprKind, SyntaxFact, qualify_module};
+use lens_domain::{CallShape, CalleeBinding, ReceiverExprKind, SyntaxFact, qualify_module};
 
 use super::model::{CallGraphNode, GraphLanguage, Resolution, ResolutionMethod, name_last_segment};
 
@@ -164,6 +165,20 @@ impl Resolver {
             SyntaxFact::Known(ReceiverExprKind::SelfValue)
         ) {
             return self.resolve_self_method(site, callee_name);
+        }
+        // The adapter bound the name: a declaration that is a node is the
+        // target, and a global or an external package's import is no
+        // workspace function whatever its name. A declaration that is no
+        // node (a module-scope value, a barrel's re-export) falls through
+        // to the heuristics below.
+        match site.callee_binding() {
+            Some(CalleeBinding::Declaration(target)) => {
+                if let Some(ids) = self.qualified.get(target) {
+                    return resolve_ids(ids, ResolutionMethod::Binding);
+                }
+            }
+            Some(CalleeBinding::External) => return ResolvedCall::unresolved(),
+            None => {}
         }
         if site.has_receiver_expression() {
             return self.resolve_receiver_method(site, callee_name, language);
@@ -474,6 +489,7 @@ mod tests {
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
+            callee_binding: SyntaxFact::Unknown,
             lexical_resolution: lens_domain::LexicalResolutionStatus::NotAttempted,
             visible_imports: vec![
                 ImportShape {

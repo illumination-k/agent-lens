@@ -160,10 +160,10 @@ pub use search::{
 };
 pub use source_walk::{IncludeAll, SourceFilter, collect_files_with_extension};
 pub use syntax::{
-    ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, InterfaceMethodShape,
-    InterfaceShape, LexicalResolutionStatus, OwnerKind, OwnerShape, ParameterShape,
-    ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact, TraitDeclShape, TraitImplShape,
-    VisibilityShape, callee_names_local_binding,
+    ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, ImportShape,
+    InterfaceMethodShape, InterfaceShape, LexicalResolutionStatus, OwnerKind, OwnerShape,
+    ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact, TraitDeclShape,
+    TraitImplShape, VisibilityShape, callee_names_local_binding,
 };
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};

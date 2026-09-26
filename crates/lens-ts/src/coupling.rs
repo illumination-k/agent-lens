@@ -2,14 +2,13 @@
 //!
 //! Unlike `lens-rust` (which walks Rust `mod` trees), TS/JS coupling is
 //! modeled at file granularity: each discovered source file is one module,
-//! and relative `import` / `export ... from` edges become `EdgeKind::Use`
-//! edges between those file modules. Inside a JS/TS workspace (a
-//! monorepo), a bare specifier that names a member package — `@acme/ui`,
-//! `@acme/ui/button` — is followed into that package's source as well;
-//! see [`crate::workspace`].
+//! and `import` / `export ... from` edges become `EdgeKind::Use` edges
+//! between those file modules. Specifiers are resolved the way the
+//! TypeScript toolchain does — relative paths, tsconfig `paths`,
+//! `exports` maps, workspace members — see [`crate::resolver`].
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
 use oxc_allocator::Allocator;
@@ -20,8 +19,8 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{Visit, walk::walk_import_expression};
 
 use crate::module_path::module_segments;
-use crate::parser::{Dialect, MODULE_EXTENSIONS, TsParseError};
-use crate::workspace::Workspace;
+use crate::parser::{Dialect, TsParseError};
+use crate::resolver::{ModuleResolver, is_followable_specifier, normalize_path};
 
 /// Failures raised while discovering a TS/JS module graph.
 #[derive(Debug, thiserror::Error)]
@@ -50,12 +49,13 @@ pub struct TsModule {
     links: Vec<ImportLink>,
 }
 
-/// Build the transitive file graph rooted at `entry` by following
-/// relative module specifiers (`./` and `../`) and, when `entry` sits in
-/// a JS/TS workspace, bare specifiers naming one of its member packages.
+/// Build the transitive file graph rooted at `entry` by following every
+/// module specifier that resolves to a project source file: relative
+/// ones, tsconfig `paths` aliases, and, when `entry` sits in a JS/TS
+/// workspace, bare specifiers naming one of its member packages.
 pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
     let entry = normalize_path(entry);
-    let workspace = Workspace::discover(&entry).unwrap_or_default();
+    let resolver = ModuleResolver::new(&entry);
     let mut discovered = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut stack = vec![entry.clone()];
@@ -87,11 +87,8 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
                 });
             }
         };
-        let base = file.parent().unwrap_or_else(|| Path::new("."));
         for link in &mut links {
-            link.target = resolve_module(base, &link.specifier, &workspace)
-                .filter(|next| next.exists())
-                .map(|next| normalize_path(&next));
+            link.target = resolver.resolve(&file, &link.specifier);
             if let Some(next) = &link.target {
                 stack.push(next.clone());
             }
@@ -264,81 +261,6 @@ fn maybe_push_re_export_all(out: &mut Vec<ImportLink>, decl: &ExportAllDeclarati
         return;
     }
     out.push(ImportLink::new(specifier, vec!["*".to_owned()]));
-}
-
-fn is_relative_specifier(specifier: &str) -> bool {
-    specifier.starts_with("./") || specifier.starts_with("../")
-}
-
-/// Relative specifiers, plus bare ones (`@acme/ui`, `lodash`) that may
-/// name a workspace member. Absolute paths and URL-style specifiers
-/// (`node:fs`, `https://…`) never resolve to a local module.
-fn is_followable_specifier(specifier: &str) -> bool {
-    is_relative_specifier(specifier)
-        || !(specifier.is_empty() || specifier.starts_with('/') || specifier.contains(':'))
-}
-
-/// Resolve `specifier`, imported from a file in `base`, to a local file.
-fn resolve_module(base: &Path, specifier: &str, workspace: &Workspace) -> Option<PathBuf> {
-    if is_relative_specifier(specifier) {
-        resolve_relative_module(base, specifier)
-    } else {
-        workspace.resolve(normalize_module_specifier(specifier))
-    }
-}
-
-fn resolve_relative_module(base: &Path, specifier: &str) -> Option<PathBuf> {
-    if !is_relative_specifier(specifier) {
-        return None;
-    }
-    let specifier = normalize_module_specifier(specifier);
-    let joined = base.join(specifier);
-    if joined.extension().is_some() {
-        return Dialect::from_path(&joined)
-            .is_some()
-            .then(|| normalize_path(&joined));
-    }
-
-    probe_module(&joined).map(|found| normalize_path(&found))
-}
-
-/// The file the TS resolver picks for an extensionless `path`: `path`
-/// with a module extension, else an `index` file inside it.
-pub(crate) fn probe_module(path: &Path) -> Option<PathBuf> {
-    MODULE_EXTENSIONS
-        .iter()
-        .map(|ext| path.with_extension(ext))
-        .chain(
-            MODULE_EXTENSIONS
-                .iter()
-                .map(|ext| path.join(format!("index.{ext}"))),
-        )
-        .find(|candidate| candidate.exists())
-}
-
-fn normalize_module_specifier(specifier: &str) -> &str {
-    specifier
-        .split_once(['?', '#'])
-        .map_or(specifier, |(path, _)| path)
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        normalized
-    }
 }
 
 fn common_source_root(discovered: &[(PathBuf, Vec<ImportLink>)]) -> PathBuf {
@@ -672,25 +594,5 @@ mod tests {
 
         assert!(!modules.iter().any(|m| m.path.as_str() == "crate::main"));
         assert!(edges.is_empty());
-    }
-
-    #[rstest::rstest]
-    #[case("./util", true)]
-    #[case("../util", true)]
-    #[case("@acme/ui", true)]
-    #[case("lodash", true)]
-    #[case("", false)]
-    #[case("/abs/path", false)]
-    #[case("node:fs", false)]
-    fn followable_specifiers(#[case] specifier: &str, #[case] expected: bool) {
-        assert_eq!(is_followable_specifier(specifier), expected);
-    }
-
-    #[test]
-    fn normalize_path_removes_current_directory_components() {
-        assert_eq!(
-            normalize_path(Path::new("src/./routes/../main.ts")),
-            PathBuf::from("src/main.ts")
-        );
     }
 }

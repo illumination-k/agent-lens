@@ -210,6 +210,10 @@ pub(crate) enum Resolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ResolutionMethod {
+    /// The adapter bound the callee's name semantically — to a
+    /// declaration in scope or an import it resolved to a file — and
+    /// that declaration is a graph node. No name matching involved.
+    Binding,
     /// Matched a lexical candidate path (absolute, `self::`/`super::`,
     /// `Self::`, imports/aliases) against a qualified name.
     Lexical,

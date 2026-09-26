@@ -25,6 +25,7 @@ mod module_path;
 mod parser;
 #[cfg(test)]
 mod proptests;
+mod resolver;
 mod statements;
 mod tree;
 mod type_defs;
@@ -32,7 +33,10 @@ mod walk;
 mod workspace;
 mod wrapper;
 
-pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};
+pub use call_index::{
+    ImportContext, extract_call_shapes_with_imports, extract_call_shapes_with_module,
+    extract_function_shapes_with_module,
+};
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::{ContextSpanError, extract_context_spans};
@@ -41,6 +45,7 @@ pub use dependence::TsVocabulary;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use module_path::module_segments;
 pub use parser::{Dialect, TsParseError, TypeScriptParser};
+pub use resolver::ModuleResolver;
 pub use statements::extract_statement_seqs;
 pub use type_defs::extract_type_defs;
 pub use wrapper::find_wrappers;

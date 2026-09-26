@@ -15,8 +15,8 @@
 //!   - ambiguous edges carry `candidates`, the sorted node-id set the
 //!     resolver could not pick between (`to` stays `null`).
 //!   - resolved and ambiguous edges carry `resolution_method`
-//!     provenance (`lexical`, `self_method`, `last_segment`,
-//!     `path_suffix`, `crate_narrowed`). Grouped call sites that
+//!     provenance (`binding`, `lexical`, `self_method`,
+//!     `last_segment`, `path_suffix`, `crate_narrowed`). Grouped call sites that
 //!     reached the same target through different heuristics keep the
 //!     most direct one. Ambiguous edges with different candidate sets
 //!     no longer collapse into one edge.
@@ -867,6 +867,97 @@ mod tests {
             target_qualified_name(&report, local).as_deref(),
             Some("module::local"),
         );
+    }
+
+    /// Issue #578: TS/JS imports bind through the TypeScript toolchain's
+    /// own resolution — a tsconfig `paths` alias, an aliased named import,
+    /// a workspace member's `exports` subpath, a namespace import — and
+    /// land as `binding` edges. A barrel re-export is no node, so it
+    /// keeps the name fallback; a global and an external package's
+    /// import stay unresolved even when a workspace function shares the
+    /// name.
+    #[test]
+    fn typescript_imports_bind_through_tsconfig_paths_and_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_file(root, "package.json", r#"{"workspaces": ["packages/*"]}"#);
+        write_file(
+            root,
+            "packages/app/tsconfig.json",
+            r#"{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}"#,
+        );
+        write_file(root, "packages/app/package.json", r#"{"name": "app"}"#);
+        write_file(
+            root,
+            "packages/app/src/main.ts",
+            "import { query as q } from '@/lib/db';
+             import * as fmt from '@acme/ui/format';
+             import { Button } from '@acme/ui';
+             import { useState } from 'react';
+             function main() { q(); fmt.pad(); Button(); fetch('/'); useState(); }
+",
+        );
+        write_file(
+            root,
+            "packages/app/src/lib/db.ts",
+            "export function query() {}
+",
+        );
+        write_file(
+            root,
+            "packages/ui/package.json",
+            r#"{"name": "@acme/ui", "exports": {".": "./dist/index.js", "./*": "./src/*.ts"}}"#,
+        );
+        write_file(
+            root,
+            "packages/ui/src/index.ts",
+            "export { Button } from './button';
+",
+        );
+        write_file(
+            root,
+            "packages/ui/src/button.ts",
+            "export function Button() {}
+",
+        );
+        write_file(
+            root,
+            "packages/ui/src/format.ts",
+            "export function pad() {}
+",
+        );
+        // Same names as the globals and the external import: the name
+        // fallback alone would have picked these.
+        write_file(
+            root,
+            "packages/ui/src/shims.ts",
+            "export function fetch() {}
+export function useState() {}
+",
+        );
+
+        let report = analyze_json(root);
+        let edge = |callee: &str| edge_by_callee(&report, callee);
+        for (callee, target) in [
+            ("q", "packages::app::src::lib::db::query"),
+            ("pad", "packages::ui::src::format::pad"),
+        ] {
+            assert_eq!(edge(callee)["resolution"], "resolved", "{callee}");
+            assert_eq!(edge(callee)["resolution_method"], "binding", "{callee}");
+            assert_eq!(
+                target_qualified_name(&report, edge(callee)).as_deref(),
+                Some(target)
+            );
+        }
+        // `@acme/ui` resolves to the barrel, which declares no `Button`.
+        assert_eq!(edge("Button")["resolution_method"], "last_segment");
+        assert_eq!(
+            target_qualified_name(&report, edge("Button")).as_deref(),
+            Some("packages::ui::src::button::Button")
+        );
+        for callee in ["fetch", "useState"] {
+            assert_eq!(edge(callee)["resolution"], "unresolved", "{callee}");
+        }
     }
 
     #[test]

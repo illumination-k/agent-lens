@@ -318,6 +318,7 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
             receiver_expr_kind: SyntaxFact::Known(facts.receiver),
             arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(locally_bound),
+            callee_binding: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: ctx.imports.to_vec(),
             line: node.start_position().row + 1,

@@ -136,6 +136,18 @@ fn qualify_rust_module_segments(rel: &str, crate_name: &str) -> String {
     }
 }
 
+/// The module path a TS/JS import that resolved to `path` names, in the
+/// same spelling [`module_path_for`] gives the file when it is scanned.
+/// `None` when `path` is outside `root`, or `root` is a single file and so
+/// has no layout to place another file in.
+pub(crate) fn ts_module_path_for_path(root: &Path, path: &Path) -> Option<String> {
+    if !root.is_dir() {
+        return None;
+    }
+    let rel = path.strip_prefix(root).ok()?;
+    Some(ts_module_path_from_relative_file(&rel.to_string_lossy()))
+}
+
 fn ts_module_path_from_relative_file(file: &str) -> String {
     join_or_placeholder(lens_ts::module_segments(&normalize_separators(file)))
 }

@@ -9,6 +9,7 @@ export type NodeVisibility =
   | "unknown";
 
 export type ResolutionMethod =
+  | "binding"
   | "lexical"
   | "self_method"
   | "last_segment"
