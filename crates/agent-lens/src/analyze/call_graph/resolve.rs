@@ -575,6 +575,18 @@ mod tests {
         assert_eq!(join_tail(&["Self", "parse"], 1).as_deref(), Some("parse"));
     }
 
+    #[rstest]
+    #[case::single_segment("parse", None)]
+    #[case::unbound_head("b::parse", None)]
+    #[case::two_segments("a::parse", Some("crate::a::parse"))]
+    #[case::three_segments("a::S::helper", Some("crate::a::S::helper"))]
+    fn import_expanded_path_replaces_an_imported_head(
+        #[case] path: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(import_expanded_path(&site(path), path).as_deref(), expected);
+    }
+
     fn receiver_site(name: &str) -> CallShape {
         CallShape {
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::Expression),
