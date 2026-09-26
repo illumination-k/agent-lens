@@ -1578,7 +1578,7 @@ mod tests {
                 ),
                 (
                     "caller.rs",
-                    "pub fn calls(v: &Vec<u8>) -> usize { shared() + v.clone().len() }\n",
+                    "pub fn calls(v: &Vec<u8>, x: &crate::one::A) -> usize { x.shared() + v.clone().len() }\n",
                 ),
             ],
         );

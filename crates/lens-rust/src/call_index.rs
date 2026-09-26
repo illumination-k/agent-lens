@@ -13,8 +13,11 @@
 //!   segment — `crate::a::foo()`, `Self::foo()`, `obj.foo()`, and a bare
 //!   `foo()` all collapse into the same `foo` bucket. Same-named methods
 //!   on different types are indistinguishable.
-//! * **No macro expansion.** Calls invoked via macros are invisible to
-//!   `syn` and therefore to the visitor.
+//! * **No macro expansion.** A call a macro's own definition makes is
+//!   invisible. Calls written in the arguments of an expression- or
+//!   statement-position macro (`assert_eq!(f(x), 1)`, `vec![g()]`,
+//!   `write!(out, "{}", h())`) are recorded when the arguments parse as a
+//!   comma-separated list of expressions — see [`macro_argument_exprs`].
 //! * **`#[cfg(test)]` modules are skipped.** Test scaffolding is
 //!   forwarding by design and would inflate reuse counts without
 //!   reflecting production usage. This matches the existing wrapper
@@ -28,16 +31,17 @@ use lens_domain::{
     ArgumentShape, CallShape, ImportShape, LexicalResolutionStatus, ReceiverExprKind, SyntaxFact,
     qualify, qualify_module, starts_uppercase,
 };
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Block, Expr, ExprCall, ExprMethodCall, FnArg, GenericArgument, GenericParam, Generics,
-    ImplItem, Item, ItemFn, ItemUse, Local, Pat, PathArguments, Signature, TraitItem, Type,
-    TypeParamBound, UnOp, UseTree, WherePredicate,
+    Block, Expr, ExprCall, ExprMacro, ExprMethodCall, FnArg, GenericArgument, GenericParam,
+    Generics, ImplItem, Item, ItemFn, ItemUse, Local, Macro, Pat, PathArguments, Signature,
+    StmtMacro, Token, TraitItem, Type, TypeParamBound, UnOp, UseTree, WherePredicate,
 };
 
 use crate::attrs::has_cfg_test;
-use crate::common::{render_tokens, type_path_last_ident};
+use crate::common::{impl_self_type_name, render_tokens, type_path_last_ident};
 use crate::parser::RustParseError;
 
 /// One call-site occurrence inside a Rust source file.
@@ -304,7 +308,7 @@ impl CallVisitor {
                 }
             }
             Item::Impl(item_impl) => {
-                let owner = type_path_last_ident(&item_impl.self_ty);
+                let owner = impl_self_type_name(&item_impl.self_ty);
                 self.impl_owners.push(owner);
                 for impl_item in &item_impl.items {
                     self.visit_impl_item(impl_item);
@@ -329,23 +333,40 @@ impl CallVisitor {
     /// along with the callables its own scope binds, walk `block`, and
     /// pop both. Shared by the `Item::Fn` and `ImplItem::Fn` arms — both
     /// used to spell this loop out themselves.
+    ///
+    /// A `fn` declared inside another function's body is no graph node,
+    /// so its calls stay with the enclosing function, as a closure's do:
+    /// `fn glob_vec(p) { glob(p) }` inside `main` is `main → glob`.
     fn visit_block_in_fn_scope(&mut self, sig: &Signature, block: &Block) {
+        // The owner is still the innermost `impl`'s: a method of an `impl`
+        // nested in the body has its own `self`, which is no node's.
+        let caller = match self.current_caller() {
+            Some(outer) => CallerContext {
+                impl_owner: self.current_owner().map(ToOwned::to_owned),
+                ..outer
+            },
+            None => self.caller_context(sig),
+        };
+        self.callers.push(caller);
+        self.local_callables
+            .push(local_callable_bindings(sig, block));
+        visit::visit_block(self, block);
+        self.local_callables.pop();
+        self.callers.pop();
+    }
+
+    fn caller_context(&self, sig: &Signature) -> CallerContext {
         let ident = &sig.ident;
         let name = qualify(self.current_owner(), &ident.to_string());
         let qualified_name = self.current_owner().map_or_else(
             || qualify_module(self.current_module(), &ident.to_string()),
             |owner| qualify_module(self.current_module(), &format!("{owner}::{ident}")),
         );
-        self.callers.push(CallerContext {
+        CallerContext {
             name,
             qualified_name,
             impl_owner: self.current_owner().map(ToOwned::to_owned),
-        });
-        self.local_callables
-            .push(local_callable_bindings(sig, block));
-        visit::visit_block(self, block);
-        self.local_callables.pop();
-        self.callers.pop();
+        }
     }
 
     fn current_owner(&self) -> Option<&str> {
@@ -481,6 +502,50 @@ impl<'ast> Visit<'ast> for CallVisitor {
         );
         visit::visit_expr_method_call(self, call);
     }
+
+    fn visit_expr_macro(&mut self, mac: &'ast ExprMacro) {
+        self.visit_macro_arguments(&mac.mac);
+    }
+
+    fn visit_stmt_macro(&mut self, mac: &'ast StmtMacro) {
+        self.visit_macro_arguments(&mac.mac);
+    }
+}
+
+impl CallVisitor {
+    /// Walk the arguments of a macro invocation as expressions, so
+    /// `assert_eq!(parse(s), Ok(v))` records its call to `parse`. Item-
+    /// position macros (`macro_rules!`, `thread_local!`) are not routed
+    /// here: their bodies are no expression lists.
+    fn visit_macro_arguments(&mut self, mac: &Macro) {
+        for expr in macro_argument_exprs(mac) {
+            self.visit_expr(&expr);
+        }
+    }
+}
+
+/// The arguments of `mac` when they parse as a comma-separated list of
+/// expressions (`assert_eq!`, `vec!`, `format!`, `write!`, `println!`),
+/// otherwise nothing: a macro with its own grammar (`vec![x; n]`,
+/// `select! { .. }`, a DSL) keeps its calls invisible rather than being
+/// read half-way. The pattern-taking macros are skipped even when their
+/// pattern parses as an expression, since `Foo::Bar(_)` there is a
+/// variant pattern, not a call.
+fn macro_argument_exprs(mac: &Macro) -> Vec<Expr> {
+    let name = mac.path.segments.last().map(|s| s.ident.to_string());
+    if name.as_deref().is_some_and(is_pattern_macro) {
+        return Vec::new();
+    }
+    mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+        .map(|args| args.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn is_pattern_macro(name: &str) -> bool {
+    matches!(
+        name,
+        "matches" | "assert_matches" | "debug_assert_matches" | "let_assert"
+    )
 }
 
 /// Names bound to a callable inside one function's own scope: closures
@@ -930,7 +995,8 @@ mod tests {
     }
 
     /// A nested `fn` has its own scope: the outer function's locals are
-    /// not visible inside it, and its own bindings do not leak out.
+    /// not visible inside it, and its own bindings do not leak out. Its
+    /// calls are still the enclosing function's, since it is no node.
     #[test]
     fn nested_fn_scopes_do_not_share_bindings() {
         let src = "fn pump() { let emit = |e: u8| {}; fn inner() { emit(1); } emit(2); }";
@@ -942,9 +1008,50 @@ mod tests {
         assert_eq!(
             flags,
             [
-                (Some("inner".to_owned()), false),
+                (Some("pump".to_owned()), false),
                 (Some("pump".to_owned()), true),
             ]
+        );
+    }
+
+    /// A method of an `impl` nested in a function body is no node either,
+    /// so its calls go to the enclosing function, but its `self` is the
+    /// nested type's: `self.c()` must not read as the outer `S::c`.
+    #[test]
+    fn nested_impl_methods_keep_their_own_owner() {
+        let sites = run("impl S { fn a() { struct T; impl T { fn b(&self) { self.c(); } } } }");
+        let site = sites
+            .iter()
+            .find(|site| site.callee_name.as_deref() == Some("c"))
+            .expect("c call site");
+        assert_eq!(site.caller_name.as_deref(), Some("S::a"));
+        assert_eq!(site.caller_impl_owner.as_deref(), Some("T"));
+    }
+
+    /// Calls in the arguments of an expression- or statement-position
+    /// macro are sites of the enclosing function, nested macros
+    /// included; arguments with their own grammar (`vec![x; n]`) or a
+    /// pattern (`matches!`) stay opaque.
+    #[rstest]
+    #[case::assert_eq("fn t() { assert_eq!(f(1), 2); }", &["f"])]
+    #[case::format_in_expr("fn t() -> String { format!(\"{}\", f(1)) }", &["f"])]
+    #[case::write_method("fn t(o: &mut W) { write!(o, \"{}\", x.g()).unwrap(); }", &["unwrap", "g"])]
+    #[case::nested("fn t() { assert!(vec![f()].is_empty()); }", &["is_empty", "f"])]
+    #[case::repeat_form("fn t() { let _ = vec![f(); 2]; }", &[])]
+    #[case::pattern("fn t() { assert!(matches!(x, Foo::Bar(_))); }", &[])]
+    #[case::item_position("m!(f()); fn t() {}", &[])]
+    fn macro_arguments_are_call_sites(#[case] src: &str, #[case] expected: &[&str]) {
+        let sites = run(src);
+        let found: Vec<&str> = sites
+            .iter()
+            .filter_map(|site| site.callee_name.as_deref())
+            .collect();
+        assert_eq!(found, expected, "{src}");
+        assert!(
+            sites
+                .iter()
+                .all(|site| site.caller_name.as_deref() == Some("t")),
+            "{src}"
         );
     }
 

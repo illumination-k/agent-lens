@@ -904,7 +904,7 @@ fn build_edges(
         for site in file.calls.iter() {
             let from = site
                 .caller_qualified_name()
-                .and_then(|caller| caller_index.resolve_in_file(&file.file, caller));
+                .and_then(|caller| caller_index.resolve_in_file(&file.file, caller, site.line));
             if site.caller_qualified_name().is_some() && from.is_none() {
                 continue;
             }
@@ -1522,6 +1522,59 @@ mod tests {
         assert!(
             target.is_some_and(|t| t.ends_with("helper")),
             "got {target:?}",
+        );
+    }
+
+    /// `impl Display for V` and `impl Debug for V` both declare
+    /// `V::fmt` in one file; each call is attributed to the `fmt` whose
+    /// body holds it rather than dropped for want of a unique caller.
+    #[test]
+    fn same_named_callers_in_one_file_are_told_apart_by_span() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub struct V;
+             fn pad() {}
+             fn digits() {}
+             impl std::fmt::Display for V {
+                 fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                     pad();
+                     Ok(())
+                 }
+             }
+             impl std::fmt::Debug for V {
+                 fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                     digits();
+                     Ok(())
+                 }
+             }
+",
+        );
+
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
+        let mut edges: Vec<(String, String)> = graph
+            .edges
+            .iter()
+            .filter(|e| e.resolution == Resolution::Resolved)
+            .filter_map(|e| Some((e.from.clone()?, e.to.clone()?)))
+            .collect();
+        edges.sort();
+        assert_eq!(
+            edges,
+            [
+                (
+                    "src/lib.rs:V::fmt:11".to_owned(),
+                    "src/lib.rs:digits:3".to_owned()
+                ),
+                (
+                    "src/lib.rs:V::fmt:5".to_owned(),
+                    "src/lib.rs:pad:2".to_owned()
+                ),
+            ],
+            "got {edges:?}"
         );
     }
 

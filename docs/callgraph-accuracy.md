@@ -63,15 +63,15 @@ are normalised to this before comparison.
 What agent-lens does today with nested code, measured on small samples (keep
 this table in sync when the resolver changes):
 
-| Construct                             | Rust                                                                          | Go                                                             | Python                                   | TypeScript                                         |
-| ------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------- |
-| calls in a closure / lambda body      | attributed to the enclosing fn                                                | attributed to the enclosing function                           | attributed to the enclosing function     | attributed to the closure's own `::closure#N` node |
-| calls in a nested named fn / def      | **dropped**                                                                   | n/a                                                            | attributed to the enclosing function     | attributed to the nested function's own node       |
-| calling the closure / nested fn       | `unresolved`                                                                  | `unresolved` (named variable) or `anonymous` (`func(){...}()`) | `unresolved`                             | `unresolved`                                       |
-| `A()` on a class                      | n/a                                                                           | n/a                                                            | `unresolved` (no `__init__` edge)        | `new A()`: no call site at all                     |
-| calls inside a macro invocation       | **dropped** (`assert_eq!(f(), 1)` records no call site)                       | n/a                                                            | n/a                                      | n/a                                                |
-| method on an interface / trait object | `resolved` via `last_segment` if one impl has that name, else a candidate set | same                                                           | same                                     | same                                               |
-| decorated def                         | n/a                                                                           | n/a                                                            | node spans from the first decorator line | node spans from the first decorator line           |
+| Construct                             | Rust                                                                                                                                                                                          | Go                                                             | Python                                   | TypeScript                                         |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------- |
+| calls in a closure / lambda body      | attributed to the enclosing fn                                                                                                                                                                | attributed to the enclosing function                           | attributed to the enclosing function     | attributed to the closure's own `::closure#N` node |
+| calls in a nested named fn / def      | attributed to the enclosing fn                                                                                                                                                                | n/a                                                            | attributed to the enclosing function     | attributed to the nested function's own node       |
+| calling the closure / nested fn       | `unresolved`                                                                                                                                                                                  | `unresolved` (named variable) or `anonymous` (`func(){...}()`) | `unresolved`                             | `unresolved`                                       |
+| `A()` on a class                      | n/a                                                                                                                                                                                           | n/a                                                            | `unresolved` (no `__init__` edge)        | `new A()`: no call site at all                     |
+| calls inside a macro invocation       | attributed to the enclosing fn when the arguments parse as an expression list (`assert_eq!`, `format!`, `write!`, `vec![a, b]`); none for `vec![x; n]`, `matches!` or a macro's own expansion | n/a                                                            | n/a                                      | n/a                                                |
+| method on an interface / trait object | `resolved` via `last_segment` if one impl has that name, else a candidate set                                                                                                                 | same                                                           | same                                     | same                                               |
+| decorated def                         | n/a                                                                                                                                                                                           | n/a                                                            | node spans from the first decorator line | node spans from the first decorator line           |
 
 A Go oracle edge whose call site is inside a func literal is attributed to
 the enclosing named function by both sides (the oracle keeps the real call
@@ -438,10 +438,11 @@ What the misses are, from reading the disagreements:
 
 - Rust static misses without a call site are mostly calls inside macro
   arguments (`assert_eq!(f(x), ...)`, `write!(f, "{}", g())`): 59 of 72 in
-  semver. agent-lens records no call site in a macro invocation.
+  semver. agent-lens records no call site in a macro invocation (fixed
+  since: see "Rust" below).
 - Rust: semver's `display.rs` has two `Version::fmt` (the `Display` and the
   `Debug` impl); the first gets no edges at all, not even to `pad` or
-  `digits`, which are called outside any closure.
+  `digits`, which are called outside any closure (fixed since).
 - Rust false positives: `last_segment` binding a call to the cfg-selected shim
   (`log::AtomicUsize::load` / `store`, compiled only without native atomics);
   `BTreeMap::get(self, ..)` inside `impl Source for BTreeMap` resolved
@@ -453,6 +454,62 @@ What the misses are, from reading the disagreements:
 - TypeScript false positives: `last_segment` binding `useStore()` in the
   zustand examples, where `useStore` is the local result of `create(...)`, to
   `src/react.ts`'s `useStore`.
+
+### Rust
+
+Measured 2026-09-26 after five Rust fixes, found by running the oracle over
+rayon-rs/either `ce6f07f` (1.18.0), smol-rs/fastrand `7a1cc2c` (v2.5.0),
+rust-lang/glob `cfa2a58` (v0.3.4), seanmonstar/httparse `97c7e6e` (v1.9.5)
+and rapidfuzz/strsim-rs `f72cd1c` (v0.11.1), all with default features but
+fastrand (`std`, `alloc`):
+
+- calls in the arguments of an expression- or statement-position macro
+  (`assert_eq!(f(x), 1)`, `format!("{}", g())`) are call sites of the
+  enclosing function when the arguments parse as a comma-separated
+  expression list; `vec![x; n]`, `matches!` and DSL macros stay opaque;
+- calls in a nested `fn` item are attributed to the enclosing function, as a
+  closure's are, instead of dropped;
+- one file declaring the same qualified name twice (`impl Display for V` and
+  `impl Debug for V` both define `V::fmt`) attributes each call to the node
+  whose span holds it instead of dropping both;
+- the name fallback keeps a receiver call (`rng.u8(..)`) to methods and a
+  single-segment call (`u8(..)`) to free functions; the methods of an
+  `impl` for a reference, tuple, slice or array (`impl Extend<..> for (A, B)`)
+  are now methods, not free functions;
+- `krate::Type::name()` reaches `impl Type` anywhere in `krate`
+  (`fastrand::Rng::new()` is `impl Rng` in `fastrand::global_rng`);
+
+plus `as_ptr` / `as_mut_ptr` in Rust's ubiquitous method names.
+
+Per repository (the five discovery targets are not in `targets.toml`; no
+disagreement is adjudicated, so precision counts every agent-lens-only pair
+as a false positive):
+
+| Repository                  | Commit    | Precision (before) | Precision (after) | Static recall (before) | Static recall (after) |
+| --------------------------- | --------- | ------------------ | ----------------- | ---------------------- | --------------------- |
+| dtolnay/semver 1.0.28       | `5368cdf` | 1.000 (147 / 147)  | 1.000 (157 / 157) | 0.714 (147 / 206)      | 0.762 (157 / 206)     |
+| rust-lang/log 0.4.34        | `8034743` | 0.847 (122 / 144)  | 0.796 (144 / 181) | 0.423 (113 / 267)      | 0.491 (131 / 267)     |
+| rayon-rs/either 1.18.0      | `ce6f07f` | 1.000 (6 / 6)      | 1.000 (11 / 11)   | 0.263 (5 / 19)         | 0.526 (10 / 19)       |
+| smol-rs/fastrand v2.5.0     | `7a1cc2c` | 0.906 (48 / 53)    | 0.991 (107 / 108) | 0.421 (48 / 114)       | 0.939 (107 / 114)     |
+| rust-lang/glob v0.3.4       | `cfa2a58` | 0.941 (32 / 34)    | 0.962 (51 / 53)   | 0.516 (32 / 62)        | 0.823 (51 / 62)       |
+| seanmonstar/httparse v1.9.5 | `97c7e6e` | 0.970 (227 / 234)  | 1.000 (247 / 247) | 0.799 (227 / 284)      | 0.870 (247 / 284)     |
+| rapidfuzz/strsim-rs v0.11.1 | `f72cd1c` | 1.000 (33 / 33)    | 1.000 (123 / 123) | 0.258 (33 / 128)       | 0.961 (123 / 128)     |
+| semver + log (micro-avg.)   |           | 0.924 (269 / 291)  | 0.891 (301 / 338) | 0.550 (260 / 473)      | 0.609 (288 / 473)     |
+| five discovery targets      |           | 0.961 (346 / 360)  | 0.994 (539 / 542) | 0.568 (345 / 607)      | 0.886 (538 / 607)     |
+
+log's precision fell because its macro arguments are now visible, not
+because a resolution changed: the new false positives are receiver calls
+to methods a macro generates (`v.to_u64()` inside `assert!` binding
+`Inner::to_u64`, since `Value::to_u64` comes from `impl_to_primitive!` and is
+no node), and trait-qualified calls on a concrete value
+(`Source::get(&vec, k)` inside `assert_eq!`), which agent-lens binds to the
+trait's default method and rust-analyzer to the `Vec` impl. The same shapes
+outside a macro were already false positives. What is left on the discovery
+targets: `e.path()` on a `std::fs::DirEntry` bound to glob's
+`GlobError::path`, re-exports through `pub use m::*` or a `pub mod` of
+`pub use` items (`fastrand::bool()`, httparse's `_benchable`), and calls on
+ubiquitous names (`is_empty`, `as_str`, `parse`, `next`), which the
+resolver refuses by design.
 
 ## Metamorphic checks
 

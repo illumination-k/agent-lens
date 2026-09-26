@@ -116,9 +116,9 @@ const NOTE: &str = "Structural, not behavioural: two tests scoring alike share a
      the tree, and the Rust adapter keeps literal text out of it. The call graph subtracts what it can \
      disprove, in two directions: a pair whose two tests reach no production function in common \
      is not a pair, and a test that is the sole static caller of something is never offered as \
-     foldable. It traverses resolved edges only and cannot see through an unexpanded macro, so a \
-     clean guard is not a coverage proof, and a suite whose tests call only through macros gets \
-     no guard at all.";
+     foldable. It traverses resolved edges only and cannot see into a macro's expansion (calls \
+     written in its arguments are seen), so a clean guard is not a coverage proof, and a suite \
+     whose tests call only through macro expansions gets no guard at all.";
 
 /// `analyze test-redundancy` flags, and the
 /// `[profile.<name>.test-redundancy]` table.
@@ -1241,14 +1241,15 @@ mod tests {
             "src/lib.rs",
             // The signatures are spread over enough lines to clear
             // `--min-lines` on their own, which is what an `#[rstest]`
-            // case list does in real code; each body is one macro.
+            // case list does in real code; each body is one macro, and
+            // both call `left`, so only the opaque bodies keep them apart.
             "pub fn left(a: u32, b: u32) -> u32 { a + b }\n\
              pub fn right(a: u32, b: u32) -> u32 { a * b }\n\
              #[cfg(test)]\nmod tests {\nuse super::*;\n\
              #[test]\nfn macro_only_left(\n) \n{\n\
              \nassert_eq!(left(1, 1), 2);\n\n}\n\
              #[test]\nfn macro_only_right(\n) \n{\n\
-             \nassert_eq!(right(1, 1), 1);\n\n}\n\
+             \nassert_eq!(left(2, 2), 4);\n\n}\n\
              }\n",
         );
 

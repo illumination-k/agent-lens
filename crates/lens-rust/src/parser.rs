@@ -216,7 +216,7 @@ fn extract_impl_functions(
     in_test_context: bool,
     out: &mut Vec<RustFunctionDef>,
 ) {
-    let owner = crate::common::type_path_last_ident(&item_impl.self_ty);
+    let owner = crate::common::impl_self_type_name(&item_impl.self_ty);
     // A trait `impl` is reached through the trait: a caller can name
     // `Trait::method` — or dispatch dynamically — and never mention this
     // definition, which is why the two kinds of `impl` are not the same
