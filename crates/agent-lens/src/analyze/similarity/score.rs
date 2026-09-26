@@ -301,6 +301,7 @@ fn trees_match_without_distance(a: &TreeNode, b: &TreeNode, compare_values: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn score_stats_record_and_merge_preserve_counts() {
@@ -389,5 +390,70 @@ mod tests {
     #[test]
     fn sorted_pair_key_orders_indices() {
         assert_eq!(sorted_pair_key(5, 3), (3, 5));
+    }
+
+    #[test]
+    fn scored_pair_count_adds_kept_and_below_threshold_pairs() {
+        let stats = ScoreStats {
+            pairs: vec![ScoredPair {
+                i: 0,
+                j: 1,
+                components: SimilarityComponents {
+                    similarity: 0.9,
+                    body_similarity: 0.9,
+                    signature_similarity: None,
+                    type_overlap: None,
+                    identifier_overlap: None,
+                    doc_overlap: None,
+                    same_trait: false,
+                },
+            }],
+            exact_match_count: 0,
+            below_threshold_count: 3,
+            diff_filtered_count: 0,
+        };
+        assert_eq!(stats.scored_pair_count(), 4);
+    }
+
+    fn node(label: &str, value: &str, children: Vec<TreeNode>) -> TreeNode {
+        TreeNode::with_children(label, value, children)
+    }
+
+    fn sample() -> TreeNode {
+        node(
+            "Block",
+            "",
+            vec![node("Let", "x", vec![]), node("Return", "x", vec![])],
+        )
+    }
+
+    #[rstest]
+    #[case::identical(sample(), true, true)]
+    #[case::label_differs(node("Expr", "", sample().children), false, false)]
+    #[case::value_differs_compared(
+        node("Block", "", vec![node("Let", "y", vec![]), node("Return", "x", vec![])]),
+        true,
+        false
+    )]
+    #[case::value_differs_ignored(
+        node("Block", "", vec![node("Let", "y", vec![]), node("Return", "x", vec![])]),
+        false,
+        true
+    )]
+    #[case::fewer_children(node("Block", "", vec![node("Let", "x", vec![])]), false, false)]
+    #[case::child_label_differs(
+        node("Block", "", vec![node("Let", "x", vec![]), node("Break", "x", vec![])]),
+        false,
+        false
+    )]
+    fn trees_match_without_distance_compares_the_whole_tree(
+        #[case] other: TreeNode,
+        #[case] compare_values: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            trees_match_without_distance(&sample(), &other, compare_values),
+            expected
+        );
     }
 }
