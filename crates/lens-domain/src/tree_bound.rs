@@ -299,6 +299,19 @@ mod tests {
         );
     }
 
+    /// A free deletion leaves no band to cut: every diagonal stays
+    /// reachable, so the table is filled in full.
+    #[test]
+    fn free_deletion_disables_the_band() {
+        let a = parent("Root", vec![leaf("A"); 8]);
+        let b = parent("Root", vec![leaf("A")]);
+        let opts = APTEDOptions {
+            delete_cost: 0.0,
+            ..unit_costs()
+        };
+        assert_eq!(bound(&a, &b, &opts, 0.5), DistanceBound::Within(0.0));
+    }
+
     #[test]
     fn negative_cutoff_rejects_everything() {
         let tree = leaf("A");

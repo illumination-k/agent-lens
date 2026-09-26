@@ -431,6 +431,20 @@ mod tests {
     }
 
     #[test]
+    fn idf_weights_k_grams_by_document_frequency() {
+        // Block X Y Z against Block X Y W: they share the k-gram (Block,
+        // X, Y), which three more bodies also carry, and differ in one.
+        let a = seq(&["X", "Y", "Z"]);
+        let b = seq(&["X", "Y", "W"]);
+        let others: Vec<TokenProfile> = (0..3).map(|_| seq(&["X", "Y", "Q"])).collect();
+        let idf = TokenIdf::from_profiles(others.iter().chain([&a, &b]));
+        let weight = |df: f64| (6.0 / (1.0 + df)).ln() + 1.0;
+        let expected = weight(5.0) / (weight(5.0) + 2.0 * weight(1.0));
+        let got = weighted_token_similarity(&a, &b, &idf);
+        assert!((got - expected).abs() < 1e-12, "got {got}, want {expected}");
+    }
+
+    #[test]
     fn idf_weights_tiny_bodies_by_unigram_document_frequency() {
         // Below the k-gram width, so the unigram weights decide the score.
         let a = seq(&["Let"]);
