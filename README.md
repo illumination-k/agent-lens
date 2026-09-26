@@ -536,7 +536,8 @@ mise run fmt      # format everything (cargo fmt, dprint, shfmt, oxfmt)
 mise run lint     # clippy, cargo-deny/audit, prek, shell + GHA lints
 mise run test     # cargo nextest + doctests + vitest
 mise run ci       # the full lint + test pipeline CI runs
-mise run bench    # Criterion benchmarks (not in CI)
+mise run bench    # Criterion benchmarks
+mise run bench-compare [ref]  # benchmark ref vs working tree; fails on a regression (what CI runs on a PR)
 mise run mutants  # full-workspace cargo-mutants (slow; not in normal CI)
 mise run mutants:rust:diff [base]  # diff-scoped mutation tests (what CI runs on a PR)
 mise run selftest # run agent-lens over its own sources (dogfooding)
@@ -555,7 +556,12 @@ versions.
 Testing conventions: prefer [`rstest`](https://docs.rs/rstest) for
 parameterized cases and fixtures, property-based tests where regression risk
 is high, and diff-scoped mutation testing (`mise run mutants:rust:diff`) for
-Rust logic changes. Benchmarked code uses Criterion baselines:
+Rust logic changes. Benchmarks cover every whole-tree analyzer, each language
+adapter, and end-to-end `agent-lens run` profiles over a git repository;
+`mise run bench-compare [ref]` runs them on `ref` and on the working tree back
+to back and fails when one slowed down by more than `--threshold` (20% by
+default, judged on the lower 95% confidence bound). `bench.yml` runs it on
+every PR against the base branch. To compare by hand instead:
 
 ```bash
 git stash && mise run bench:rust --save-baseline base && git stash pop
