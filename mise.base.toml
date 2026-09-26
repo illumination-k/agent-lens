@@ -1,5 +1,5 @@
 [tools]
-uv = "0.11.5"
+uv = "0.12.19"
 dprint = "0.54.0"
 prek = "0.3.8"
 shfmt = "3.13.1"
@@ -31,7 +31,9 @@ run = [
 description = "Lint GitHub Actions workflows and policies"
 run = [
   "actionlint",
-  "zizmor .",
+  # Claude Code cloud sessions cannot reach the GitHub API, so skip zizmor's
+  # online audits there instead of failing on a 403.
+  "zizmor ${CLAUDE_CODE_REMOTE:+--offline} .",
   "ghalint run",
   "pinact run",
 ]

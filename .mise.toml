@@ -1,3 +1,6 @@
+[settings]
+lockfile = true
+
 [tasks.fmt]
 description = "Run all fmt:* tasks"
 depends = "fmt:*"
