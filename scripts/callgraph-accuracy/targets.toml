@@ -5,14 +5,15 @@
 # Keys:
 #   name      directory under target/callgraph-accuracy/, and the key
 #             adjudications.toml entries are filed under
-#   language  go | python
-#   oracle    go-vta | python-setprofile
+#   language  go | python | rust | typescript
+#   oracle    go-vta | python-setprofile | rust-analyzer | typescript-checker
 #   repo      git URL
 #   tag       release tag `commit` was resolved from (informational)
 #   commit    full commit SHA that is checked out
 #   subdir    optional: analyse only this directory of the checkout
 #   install   python only: extra pip requirements next to the editable install
 #   pytest    python only: arguments passed to pytest under the oracle
+#   features  rust only: cargo features rust-analyzer enables (default: all)
 
 [[target]]
 name = "pflag"
@@ -61,3 +62,38 @@ install = ["pytest"]
 # test_has_version reads the version from git tags, which a shallow checkout
 # at a pinned commit does not have.
 pytest = ["-q", "-p", "no:cacheprovider", "toolz", "--deselect", "toolz/tests/test_package.py::test_has_version"]
+
+[[target]]
+name = "semver"
+language = "rust"
+oracle = "rust-analyzer"
+repo = "https://github.com/dtolnay/semver"
+tag = "1.0.28"
+commit = "5368cdfc013f90a4ecb686a013374a651a846e0e"
+
+[[target]]
+name = "log"
+language = "rust"
+oracle = "rust-analyzer"
+repo = "https://github.com/rust-lang/log"
+tag = "0.4.34"
+commit = "8034743dd9d7f7583bd9a670271483d176130911"
+# Not all features: the max_level_* / release_max_level_* features are
+# mutually exclusive and would switch off the integration test's body.
+features = ["kv_serde", "kv_sval"]
+
+[[target]]
+name = "neverthrow"
+language = "typescript"
+oracle = "typescript-checker"
+repo = "https://github.com/supermacro/neverthrow"
+tag = "v8.2.0"
+commit = "1b7a959dc83593de12b646565dfddc08bd1ed561"
+
+[[target]]
+name = "zustand"
+language = "typescript"
+oracle = "typescript-checker"
+repo = "https://github.com/pmndrs/zustand"
+tag = "v5.0.15"
+commit = "2115efb9e270e73ad1d3472dfe0e0c7b8c6abcd4"

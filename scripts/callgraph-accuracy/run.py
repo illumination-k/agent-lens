@@ -8,7 +8,8 @@ oracle with score.py. Everything is written under target/callgraph-accuracy/
 
 The agent-lens binary is not built here: `mise run callgraph-accuracy` builds
 it first. Override its path with AGENT_LENS_BIN. Needs git, and go (Go
-targets) or uv (Python targets) on PATH. See docs/callgraph-accuracy.md.
+targets), uv (Python targets), rust-analyzer (Rust targets) or node and npm
+(TypeScript targets) on PATH. See docs/callgraph-accuracy.md.
 """
 
 from __future__ import annotations
@@ -79,6 +80,19 @@ def python_oracle(t: dict, checkout_dir: Path, root: Path, out: Path) -> None:
     run([python, HERE / "oracle_py.py", "--root", root, "--out", out, "--", *t.get("pytest", [])], cwd=root)
 
 
+def rust_oracle(t: dict, root: Path, out: Path) -> None:
+    ra = os.environ.get("RUST_ANALYZER") or require("rust-analyzer")
+    features = ["--features", ",".join(t["features"])] if "features" in t else []
+    run([sys.executable, HERE / "oracle_rs.py", "--root", root, "--out", out, "--rust-analyzer", ra, *features])
+
+
+def ts_oracle(t: dict, root: Path, out: Path) -> None:
+    oracle_dir = HERE / "oracle-ts"
+    if not (oracle_dir / "node_modules" / "typescript").is_dir():
+        run([require("npm"), "ci", "--no-audit", "--no-fund", "--silent"], cwd=oracle_dir)
+    run([require("node"), oracle_dir / "oracle.mjs", "--root", root, "--out", out])
+
+
 def run_target(t: dict, binary: Path, adjudications: Path) -> dict:
     checkout_dir = checkout(t)
     root = checkout_dir / t.get("subdir", "")
@@ -90,6 +104,10 @@ def run_target(t: dict, binary: Path, adjudications: Path) -> dict:
         go_oracle(t, root, oracle_json)
     elif t["oracle"] == "python-setprofile":
         python_oracle(t, checkout_dir, root, oracle_json)
+    elif t["oracle"] == "rust-analyzer":
+        rust_oracle(t, root, oracle_json)
+    elif t["oracle"] == "typescript-checker":
+        ts_oracle(t, root, oracle_json)
     else:
         sys.exit(f"{t['name']}: unknown oracle {t['oracle']!r}")
 

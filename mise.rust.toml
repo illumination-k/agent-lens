@@ -134,13 +134,15 @@ cargo mutants --workspace --no-shuffle --iterate --jobs "$jobs" --in-diff target
 '''
 
 [tasks."test:callgraph-accuracy"]
-description = "Unit-test the call-graph accuracy scorer and Python oracle (scripts/callgraph-accuracy)"
+description = "Unit-test the call-graph accuracy scorer and the Python and Rust oracles (scripts/callgraph-accuracy)"
 # The oracle tests run pytest under the profiler; uv supplies it (they skip
 # without pytest). uv is declared here because ci_rust.yml sets MISE_ENV=rust.
 tools = { uv = "0.11.5" }
 # `ruff check` (default rules) is the harness's only Python lint gate; the Go
-# oracle's gofmt / vet / tests run by hand (see its README), since this task
-# runs with MISE_ENV=rust, which has no Go toolchain.
+# oracle's gofmt / vet / tests and the TypeScript oracle's `npm test` run by
+# hand (see their READMEs), since this task runs with MISE_ENV=rust, which has
+# no Go or Node toolchain. The Rust oracle's end-to-end test skips unless the
+# rust-analyzer component is installed.
 run = [
   "uvx ruff@0.14.0 check scripts/callgraph-accuracy",
   "uv run --no-project --python 3.12 --with pytest==8.4.2 python -m unittest discover -s scripts/callgraph-accuracy",
@@ -152,8 +154,9 @@ depends = ["lint:rust", "test:rust", "test:rust:doc", "test:callgraph-accuracy"]
 
 # Call-graph accuracy benchmark (issue #579, docs/callgraph-accuracy.md):
 # precision/recall of `function-graph` per ResolutionMethod against a Go
-# go/callgraph/vta oracle and a Python sys.setprofile oracle on the pinned
-# projects in scripts/callgraph-accuracy/targets.toml.
+# go/callgraph/vta oracle, a Python sys.setprofile oracle, a rust-analyzer
+# oracle and a TypeScript type-checker oracle on the pinned projects in
+# scripts/callgraph-accuracy/targets.toml.
 #
 # Deliberately not a `ci:*` / `test:*` / `bench:*` task, like `bench`: it
 # clones third-party repositories, downloads Go modules and PyPI packages,
@@ -162,15 +165,17 @@ depends = ["lint:rust", "test:rust", "test:rust:doc", "test:callgraph-accuracy"]
 # unit tests are `test:callgraph-accuracy`, which `ci:rust` runs; the
 # metamorphic resolver tests are ordinary cargo tests.
 [tasks.callgraph-accuracy]
-description = "Measure call-graph precision/recall against Go (VTA) and Python (setprofile) oracles"
+description = "Measure call-graph precision/recall against Go (VTA), Python (setprofile), Rust (rust-analyzer) and TypeScript (tsc) oracles"
 usage = '''
 arg "[target]..." help="Targets from scripts/callgraph-accuracy/targets.toml (default: all)" var=#true
 '''
 # go for the VTA oracle, uv for the Python targets' venvs (uv is also a base tool,
-# but this task must work with MISE_ENV=rust alone).
-tools = { go = "1.26.8", uv = "0.11.5" }
+# but this task must work with MISE_ENV=rust alone), node for the TypeScript
+# oracle; rust-analyzer is the toolchain's rustup component.
+tools = { go = "1.26.8", uv = "0.11.5", node = "25.9.0" }
 run = '''
 set -eu
+rustup component add rust-analyzer
 cargo build --release --locked -p agent-lens
 python3 scripts/callgraph-accuracy/run.py ${usage_target:-}
 '''

@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Crates checked out under target/ (the call-graph accuracy benchmark's
+# targets) are their own workspaces, not members of this one.
+exclude = ["target"]
 
 [workspace.package]
 version = "0.7.0"
