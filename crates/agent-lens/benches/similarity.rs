@@ -1,3 +1,14 @@
+//! Benchmarks for `analyze similarity` across its strategies (cartesian,
+//! LSH), methods (TSED, token, PDG), targets (functions, types, blocks)
+//! and language adapters.
+//!
+//! The Go idiom corpus is the shape behind issue #562: blocks sharing one
+//! skeleton with disjoint values, where a value-blind candidate stage
+//! turned scoring quadratic. It runs at two sizes so a regression back to
+//! that path shows up as the larger one outgrowing the smaller.
+
+mod support;
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -6,131 +17,79 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 
 fn bench_similarity(c: &mut Criterion) {
-    let small = dense_bench_corpus(2, 16);
-    let medium = dense_bench_corpus(16, 16);
-    let large_dense = dense_bench_corpus(32, 32);
-    let large_sparse = sparse_bench_corpus(32, 32);
-    let types = types_bench_corpus(32, 16);
+    let small = support::corpus(|root| write_dense_corpus(root, 2, 16));
+    let medium = support::corpus(|root| write_dense_corpus(root, 16, 16));
+    let large_dense = support::corpus(|root| write_dense_corpus(root, 32, 32));
+    let large_sparse = support::corpus(|root| write_sparse_corpus(root, 32, 32));
+    let types = support::corpus(|root| write_types_corpus(root, 32, 16));
+    let go_idiom_small = support::corpus(|root| support::write_go_idiom_corpus(root, 8));
+    let go_idiom_large = support::corpus(|root| support::write_go_idiom_corpus(root, 16));
+    let go = support::corpus(|root| support::write_go_module_corpus(root, 32, 32));
+    let ts = support::corpus(|root| support::write_ts_corpus(root, 32, 32));
+    let py = support::corpus(|root| support::write_py_corpus(root, 32, 32));
     let analyzer = SimilarityAnalyzer::new();
     let token_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Token);
     let pdg_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Pdg);
     let types_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Types);
     let blocks_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Blocks);
 
-    c.bench_function("similarity_directory_cartesian_32_functions", |b| {
-        b.iter(|| {
-            let report = match analyzer.analyze(small.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
+    let cases: [(&str, &SimilarityAnalyzer, &TempDir); 13] = [
+        (
+            "similarity_directory_cartesian_32_functions",
+            &analyzer,
+            &small,
+        ),
+        ("similarity_directory_lsh_256_functions", &analyzer, &medium),
+        (
+            "similarity_directory_lsh_dense_1024_functions",
+            &analyzer,
+            &large_dense,
+        ),
+        (
+            "similarity_directory_lsh_sparse_1024_functions",
+            &analyzer,
+            &large_sparse,
+        ),
+        // Types always take the cartesian path (LSH is gated off for small
+        // trees), so 512 units ≈ 130k pairs is the shape a real repo hits.
+        ("similarity_directory_types_512", &types_analyzer, &types),
+        // Blocks multiply the unit count: the dense corpus's 256 functions
+        // mint several thousand statement windows, which is the shape that
+        // decides whether the target is usable on a real repo at all.
+        (
+            "similarity_directory_blocks_256_functions",
+            &blocks_analyzer,
+            &medium,
+        ),
+        (
+            "similarity_blocks_go_idiom_64_functions",
+            &blocks_analyzer,
+            &go_idiom_small,
+        ),
+        (
+            "similarity_blocks_go_idiom_128_functions",
+            &blocks_analyzer,
+            &go_idiom_large,
+        ),
+        (
+            "similarity_token_directory_lsh_dense_1024_functions",
+            &token_analyzer,
+            &large_dense,
+        ),
+        (
+            "similarity_pdg_directory_lsh_dense_1024_functions",
+            &pdg_analyzer,
+            &large_dense,
+        ),
+        ("similarity_go_lsh_1024_functions", &analyzer, &go),
+        ("similarity_ts_lsh_1024_functions", &analyzer, &ts),
+        ("similarity_py_lsh_1024_functions", &analyzer, &py),
+    ];
+    for (id, analyzer, dir) in cases {
+        c.bench_function(id, |b| {
+            b.iter(|| support::consume(analyzer.analyze(dir.path(), OutputFormat::Json)));
         });
-    });
-
-    c.bench_function("similarity_directory_lsh_256_functions", |b| {
-        b.iter(|| {
-            let report = match analyzer.analyze(medium.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
-        });
-    });
-
-    c.bench_function("similarity_directory_lsh_dense_1024_functions", |b| {
-        b.iter(|| {
-            let report = match analyzer.analyze(large_dense.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
-        });
-    });
-
-    c.bench_function("similarity_directory_lsh_sparse_1024_functions", |b| {
-        b.iter(|| {
-            let report = match analyzer.analyze(large_sparse.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
-        });
-    });
-
-    // Types always take the cartesian path (LSH is gated off for small
-    // trees), so 512 units ≈ 130k pairs is the shape a real repo hits.
-    c.bench_function("similarity_directory_types_512", |b| {
-        b.iter(|| {
-            let report = match types_analyzer.analyze(types.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
-        });
-    });
-
-    // Blocks multiply the unit count: the dense corpus's 256 functions
-    // mint several thousand statement windows, which is the shape that
-    // decides whether the target is usable on a real repo at all.
-    c.bench_function("similarity_directory_blocks_256_functions", |b| {
-        b.iter(|| {
-            let report = match blocks_analyzer.analyze(medium.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
-        });
-    });
-
-    c.bench_function("similarity_token_directory_lsh_dense_1024_functions", |b| {
-        b.iter(|| {
-            let report = match token_analyzer.analyze(large_dense.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
-        });
-    });
-
-    c.bench_function("similarity_pdg_directory_lsh_dense_1024_functions", |b| {
-        b.iter(|| {
-            let report = match pdg_analyzer.analyze(large_dense.path(), OutputFormat::Json) {
-                Ok(report) => report,
-                Err(err) => panic!("similarity benchmark failed: {err}"),
-            };
-            std::hint::black_box(report.len());
-        });
-    });
-}
-
-fn dense_bench_corpus(file_count: usize, functions_per_file: usize) -> TempDir {
-    let dir = tempfile::tempdir().unwrap_or_else(|err| {
-        panic!("failed to create benchmark tempdir: {err}");
-    });
-    write_dense_corpus(dir.path(), file_count, functions_per_file).unwrap_or_else(|err| {
-        panic!("failed to write benchmark corpus: {err}");
-    });
-    dir
-}
-
-fn sparse_bench_corpus(file_count: usize, functions_per_file: usize) -> TempDir {
-    let dir = tempfile::tempdir().unwrap_or_else(|err| {
-        panic!("failed to create benchmark tempdir: {err}");
-    });
-    write_sparse_corpus(dir.path(), file_count, functions_per_file).unwrap_or_else(|err| {
-        panic!("failed to write benchmark corpus: {err}");
-    });
-    dir
-}
-
-fn types_bench_corpus(file_count: usize, types_per_file: usize) -> TempDir {
-    let dir = tempfile::tempdir().unwrap_or_else(|err| {
-        panic!("failed to create benchmark tempdir: {err}");
-    });
-    write_types_corpus(dir.path(), file_count, types_per_file).unwrap_or_else(|err| {
-        panic!("failed to write benchmark corpus: {err}");
-    });
-    dir
+    }
 }
 
 fn write_types_corpus(

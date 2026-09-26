@@ -44,3 +44,11 @@ harness = false
 [[bench]]
 name = "function_graph"
 harness = false
+
+[[bench]]
+name = "analyzers"
+harness = false
+
+[[bench]]
+name = "profile"
+harness = false

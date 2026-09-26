@@ -31,6 +31,7 @@ mise run lint     # Lint and policy checks
 mise run test     # Tests (nextest, doctests, vitest)
 mise run ci       # Full required verification; covers everything CI gates on
 mise run bench    # Criterion benchmarks; not part of ci
+mise run bench-compare [ref]  # Benchmarks on ref vs working tree; fails on a regression (CI runs it on PRs)
 mise run mutants  # Mutation tests; slow and not part of normal ci
 mise run selftest # Run agent-lens over its own sources; not part of ci
 ```
@@ -63,12 +64,14 @@ When adding or changing tests, use [`rstest`](https://docs.rs/rstest) as much as
 
 When regression risk is high, especially around core logic, introduce property-based tests.
 
-When a change touches code that has benchmarks, report whether benchmark regression was checked and what the result was. The convention is to save a baseline on the unchanged code and compare against it:
+When a change touches code that has benchmarks, report whether benchmark regression was checked and what the result was. `mise run bench-compare [ref]` (ref defaults to `main`) benchmarks the ref and the working tree back to back and fails when a benchmark slowed down past the threshold; `bench.yml` runs the same task on every PR. To iterate on one benchmark, save a baseline on the unchanged code and compare against it:
 
 ```bash
 git stash && mise run bench:rust --save-baseline base && git stash pop
 mise run bench:rust --baseline base
 ```
+
+A performance fix should come with a benchmark that reproduces the slow shape (as `similarity_blocks_go_idiom_*` does for #562), so the gate catches it coming back. Corpus writers shared across bench targets live in `crates/agent-lens/benches/support/`.
 
 Keep stdout reserved for protocol data and analyzer results. Send logs and diagnostics to stderr through `tracing`.
 

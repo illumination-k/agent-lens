@@ -58,8 +58,20 @@ fi
 if [ -n "${usage_baseline:-}" ]; then
   set -- "$@" --baseline "$usage_baseline"
 fi
-cargo bench --workspace --all-features -- "$@"
+cargo bench --workspace --all-features --bench '*' -- "$@"
 '''
+
+# Regression gate over the Criterion benchmarks: `ref` and the working tree run
+# back to back and the task fails when a benchmark slowed down past
+# `--threshold` (see `scripts/bench-compare.sh`). Not a `bench:*` task, since
+# `mise run bench` would then pull it in; `bench-compare.yml` runs it on PRs.
+[tasks.bench-compare]
+description = "Benchmark a git ref against the working tree and fail on a regression"
+usage = '''
+arg "[ref]" help="Git ref to compare the working tree against" default="main"
+flag "--threshold <percent>" help="Slowdown in percent (lower 95% CI bound of the mean change) that fails the task" default="20"
+'''
+run = 'scripts/bench-compare.sh "${usage_ref:-main}" "${usage_threshold:-20}"'
 
 # Lives here rather than in `.mise.toml` so it resolves only where its dependency
 # does, and is not a `mutants:*` glob: that would also pull in the diff-scoped
