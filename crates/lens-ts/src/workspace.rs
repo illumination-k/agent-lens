@@ -315,7 +315,7 @@ fn unquote(value: &str) -> String {
 fn expand_pattern(root: &Path, pattern: &str) -> Vec<PathBuf> {
     let pattern = pattern.trim_start_matches("./").trim_end_matches('/');
     let mut current = vec![root.to_path_buf()];
-    for segment in pattern.split('/').filter(|s| !s.is_empty() && *s != ".") {
+    for segment in pattern.split('/').filter(|s| !s.is_empty()) {
         let mut next = Vec::new();
         for dir in &current {
             if segment == "**" {
@@ -423,6 +423,8 @@ mod tests {
     #[case("a*b*c", "ac", false)]
     #[case("exact", "exact", true)]
     #[case("exact", "exactly", false)]
+    // The middle part is consumed, so it cannot also satisfy the suffix.
+    #[case("*ab*b", "ab", false)]
     fn matches_segment_wildcards(#[case] pattern: &str, #[case] name: &str, #[case] hit: bool) {
         assert_eq!(wildcard_match(pattern, name), hit);
     }
@@ -434,8 +436,87 @@ mod tests {
     )]
     #[case::flow("packages: [apps/*, 'libs/*']\n", vec!["apps/*", "libs/*"])]
     #[case::none("catalog:\n  react: ^19\n", vec![])]
+    // A column-0 comment inside the list does not end it.
+    #[case::comment_line("packages:\n# apps\n  - apps/*\n", vec!["apps/*"])]
     fn reads_pnpm_packages(#[case] yaml: &str, #[case] expected: Vec<&str>) {
         assert_eq!(pnpm_packages(yaml), expected);
+    }
+
+    fn package(manifest: &str) -> Package {
+        Package {
+            dir: PathBuf::from("pkg"),
+            manifest: serde_json::from_str(manifest).unwrap(),
+        }
+    }
+
+    const SRC_ROOT: [&str; 2] = ["./src/index", "./index"];
+
+    #[rstest]
+    #[case::string_export(r#"{"exports": "./a.js"}"#, "", vec!["./a.js"])]
+    // Conditions in resolver order; `types` never a candidate.
+    #[case::conditions(
+        r#"{"exports": {"types": "./t.d.ts", "default": "./d.js", "import": "./i.js"}}"#,
+        "",
+        vec!["./i.js", "./d.js"],
+    )]
+    #[case::fallback_array(r#"{"exports": ["./a.js", {"import": "./b.js"}]}"#, "", vec!["./a.js", "./b.js"])]
+    #[case::subpath_map(
+        r#"{"exports": {".": "./root.js", "./x": {"import": "./x.js"}}}"#,
+        "",
+        vec!["./root.js"],
+    )]
+    #[case::subpath_hit(
+        r#"{"exports": {".": "./root.js", "./x": "./x.js"}}"#,
+        "x",
+        vec!["./x.js"],
+    )]
+    #[case::wildcard(r#"{"exports": {"./*": "./src/*.ts"}}"#, "a/b", vec!["./src/a/b.ts"])]
+    // A conditions-only `exports` is the root export, never a subpath.
+    #[case::conditions_not_subpath(r#"{"exports": {"import": "./i.js"}}"#, "x", vec![])]
+    #[case::entry_fields(
+        r#"{"main": "./m.js", "module": "./mod.js", "source": "./s.ts"}"#,
+        "",
+        vec!["./s.ts", "./mod.js", "./m.js"],
+    )]
+    fn lists_candidates_in_resolution_order(
+        #[case] manifest: &str,
+        #[case] subpath: &str,
+        #[case] expected: Vec<&str>,
+    ) {
+        let mut expected: Vec<String> = expected.into_iter().map(str::to_owned).collect();
+        if subpath.is_empty() {
+            expected.extend(SRC_ROOT.map(str::to_owned));
+        } else {
+            expected.extend([format!("./src/{subpath}"), format!("./{subpath}")]);
+        }
+        assert_eq!(package(manifest).candidates(subpath), expected);
+    }
+
+    #[test]
+    fn resolve_in_package_stays_inside_the_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        write(&pkg.join("src/index.ts"), "");
+        write(&pkg.join("src/types.d.ts"), "");
+        write(&pkg.join("data.json"), "");
+        write(&dir.path().join("outside.ts"), "");
+        let outside = dir.path().join("outside.ts");
+
+        assert_eq!(
+            resolve_in_package(&pkg, "./src/index.ts"),
+            Some(pkg.join("src/index.ts"))
+        );
+        // Build output mirrors `src/`; another directory does not.
+        assert_eq!(
+            resolve_in_package(&pkg, "./dist/index.js"),
+            Some(pkg.join("src/index.ts"))
+        );
+        assert_eq!(resolve_in_package(&pkg, "./other/index.js"), None);
+        assert_eq!(resolve_in_package(&pkg, "../outside.ts"), None);
+        assert_eq!(resolve_in_package(&pkg, outside.to_str().unwrap()), None);
+        // Declaration files and non-code files are not modules.
+        assert_eq!(resolve_in_package(&pkg, "./src/types.d.ts"), None);
+        assert_eq!(resolve_in_package(&pkg, "./data.json"), None);
     }
 
     fn write(path: &Path, content: &str) {

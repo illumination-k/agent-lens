@@ -674,6 +674,18 @@ mod tests {
         assert!(edges.is_empty());
     }
 
+    #[rstest::rstest]
+    #[case("./util", true)]
+    #[case("../util", true)]
+    #[case("@acme/ui", true)]
+    #[case("lodash", true)]
+    #[case("", false)]
+    #[case("/abs/path", false)]
+    #[case("node:fs", false)]
+    fn followable_specifiers(#[case] specifier: &str, #[case] expected: bool) {
+        assert_eq!(is_followable_specifier(specifier), expected);
+    }
+
     #[test]
     fn normalize_path_removes_current_directory_components() {
         assert_eq!(
