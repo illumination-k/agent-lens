@@ -14,6 +14,10 @@
 //!   [`find_similar_functions`] helper that drives pairwise comparison, and
 //!   [`cluster_similar_pairs`] for collapsing pairs into complete-link
 //!   clusters.
+//! * [`graph_algo`] — index-based directed-graph algorithms (iterative
+//!   Tarjan condensation, greedy feedback-arc selection, BFS, shortest
+//!   path, weighted PageRank, transitive caller counts) that the
+//!   call-graph analyzers run over their resolved adjacency.
 //! * [`line_index`] — byte offset → 1-based line number mapping, shared by
 //!   every adapter whose parser reports positions as byte offsets.
 //! * [`lsh`] — MinHash + banded LSH used to pre-filter candidate pairs once
@@ -96,6 +100,7 @@ pub mod complexity;
 pub mod context_span;
 pub mod coupling;
 pub mod function;
+pub mod graph_algo;
 pub mod hotspot;
 pub mod line_index;
 pub mod lsh;

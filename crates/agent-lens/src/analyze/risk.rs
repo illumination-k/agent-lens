@@ -48,9 +48,6 @@ use std::path::PathBuf;
 use lens_domain::{FileCentrality, RiskEntry, compute_risk};
 use serde::Serialize;
 
-use super::call_graph::algo::{
-    PAGERANK_DAMPING, PAGERANK_ITERATIONS, pagerank, percentile_buckets, transitive_caller_counts,
-};
 use super::call_graph::model::{CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::churn::ChurnScope;
@@ -59,6 +56,9 @@ use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::{
+    PAGERANK_DAMPING, PAGERANK_ITERATIONS, pagerank, percentile_buckets, transitive_caller_counts,
+};
 
 const SCHEMA_VERSION: u32 = 1;
 

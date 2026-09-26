@@ -44,13 +44,13 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::bfs;
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::{ModuleSection, render_module_confidence, render_module_sections};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::bfs;
 
 const SCHEMA_VERSION: u32 = 1;
 

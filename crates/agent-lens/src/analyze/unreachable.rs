@@ -67,7 +67,6 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::{self, bfs};
 use super::call_graph::model::{
     CallGraphNode, GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
 };
@@ -79,6 +78,7 @@ use super::format::{
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::{self, bfs};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -1158,7 +1158,7 @@ fn build_island(
 
 /// Order an island's members so each precedes everything it calls.
 ///
-/// [`algo::condense`] returns the strongly connected components in
+/// [`graph_algo::condense`] returns the strongly connected components in
 /// reverse topological order — callees first — so reversing it puts a
 /// caller before its callees, which is the order in which removing them
 /// never breaks a member that is still there. Mutually recursive members
@@ -1180,7 +1180,7 @@ fn deletion_order(directed: &[Vec<usize>], component: &[usize]) -> Vec<usize> {
         local_adjacency[local].sort_unstable();
         local_adjacency[local].dedup();
     }
-    algo::condense(&local_adjacency)
+    graph_algo::condense(&local_adjacency)
         .components
         .into_iter()
         .rev()
@@ -2558,7 +2558,7 @@ mod tests {
                 }
                 // Either the caller comes first, or the two are in one
                 // strongly connected component and have to go together.
-                let reaches_back = algo::shortest_path(&directed, *to, *from, None).is_some();
+                let reaches_back = graph_algo::shortest_path(&directed, *to, *from, None).is_some();
                 prop_assert!(
                     position[from] < position[to] || reaches_back,
                     "{from} -> {to} in {order:?}",

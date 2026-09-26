@@ -47,7 +47,7 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::bfs;
+use lens_domain::graph_algo::bfs;
 use std::sync::Arc;
 
 use super::call_graph::{CallGraph, CallGraphBuilder};
