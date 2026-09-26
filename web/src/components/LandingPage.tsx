@@ -281,9 +281,10 @@ function LanguageSection() {
         </tbody>
       </table>
       <p className="note">
-        <code>unreachable</code> and <code>visibility</code> need extracted export status, which
-        TypeScript and Python do not carry — so those two are wired through the Rust and Go adapters
-        only.
+        The <code>test-only</code> and <code>unreachable</code> sections of <code>reach</code>, and
+        the <code>single-impl</code> and <code>visibility</code> sections of <code>narrowable</code>
+        , need extracted export status, which TypeScript and Python do not carry — so they judge
+        Rust and Go only.
       </p>
     </Band>
   );

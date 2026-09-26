@@ -1,6 +1,6 @@
 ---
 name: review-pending-changes
-description: Use when the user wants to audit pending git changes (unstaged edits, work-in-progress) for quality issues before committing — duplicated functions, thin wrappers, complexity creep, weakened cohesion. Composes the `--diff-only` modes of `agent-lens analyze similarity / wrapper / cohesion / complexity / delegation`.
+description: Use when the user wants to audit pending git changes (unstaged edits, work-in-progress) for quality issues before committing — duplicated functions, thin wrappers, complexity creep, weakened cohesion. Composes the `--diff-only` modes of `agent-lens analyze similarity / forwarding / cohesion / complexity`.
 ---
 
 # Review pending changes with agent-lens
@@ -13,7 +13,7 @@ Goal: surface only the noise that the current `git diff` introduced, not the who
 - After the user finishes a multi-file edit and asks "did I break anything?"
 - As a sanity pass after the agent itself made a large edit.
 
-The PostToolUse hook already runs `similarity` + `wrapper` on every Edit/Write, so don't re-run those for a single just-edited file — those reports are already in context. Reach for this skill when the change is broader than one file or when the user explicitly wants a sweep.
+The PostToolUse hook already runs `similarity` + `wrapper` (the `forwarding` analyzer's one-hop section) on every Edit/Write, so don't re-run those for a single just-edited file — those reports are already in context. Reach for this skill when the change is broader than one file or when the user explicitly wants a sweep.
 
 ## Workflow
 
@@ -24,7 +24,7 @@ git diff --name-only --diff-filter=AM \
   | grep -E '\.(rs|tsx?|mts|cts|jsx?|mjs|cjs|py|go)$'
 ```
 
-All five diff-only analyzers (`similarity`, `wrapper`, `cohesion`, `complexity`, `delegation`) accept Rust, TypeScript / JavaScript, Python, and Go — no need to fan out by extension.
+All four diff-only analyzers (`similarity`, `forwarding`, `cohesion`, `complexity`) accept Rust, TypeScript / JavaScript, Python, and Go — no need to fan out by extension.
 
 ### 2. Run the diff-scoped analyzers per file
 
@@ -32,7 +32,7 @@ For each touched source file:
 
 ```bash
 agent-lens analyze similarity <path> --diff-only --format md
-agent-lens analyze wrapper    <path> --diff-only --format md
+agent-lens analyze forwarding <path> --section wrapper --diff-only --format md
 agent-lens analyze cohesion   <path> --diff-only --format md
 agent-lens analyze complexity <path> --diff-only --format md
 ```
@@ -40,7 +40,7 @@ agent-lens analyze complexity <path> --diff-only --format md
 Then once, for the tree the change lives in — a forwarding chain spans files, so a per-file run cannot see one:
 
 ```bash
-agent-lens analyze delegation <dir> --diff-only --format md
+agent-lens analyze forwarding <dir> --section delegation --diff-only --format md
 ```
 
 And once for the change as a whole, from the repository root — this one asks whether the edit is one change or several tangled together:

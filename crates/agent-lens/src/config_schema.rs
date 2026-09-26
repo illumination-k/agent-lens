@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 29] = [
+const TOOL_ORDER: [ToolName; 23] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -37,18 +37,12 @@ const TOOL_ORDER: [ToolName; 29] = [
     ToolName::Impact,
     ToolName::Footprint,
     ToolName::Layers,
-    ToolName::SingleImpl,
-    ToolName::SingleUse,
-    ToolName::Parameters,
-    ToolName::TestOnly,
+    ToolName::Reach,
+    ToolName::Narrowable,
     ToolName::TestRedundancy,
-    ToolName::Untested,
-    ToolName::Unreachable,
-    ToolName::Visibility,
-    ToolName::Delegation,
+    ToolName::Forwarding,
     ToolName::GraphQuery,
     ToolName::ContextSpan,
-    ToolName::Wrapper,
     ToolName::Coupling,
     ToolName::Communities,
     ToolName::FunctionGraph,
@@ -87,7 +81,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, footprint, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, parameters, risk, search, similarity, single-impl, single-use, test-only, test-redundancy, unreachable, untested, visibility, wrapper.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
     },
     Field {
         key: "format",
@@ -494,40 +488,6 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             presence: "optional",
             desc: "Cap each markdown listing to the top N rows.",
         }],
-        ToolName::SingleUse => &[
-            Field {
-                key: "max-loc",
-                ty: "int",
-                presence: "default: 30",
-                desc: "Body-size ceiling in source lines: a single-caller function larger than this is excluded from the candidate list (the calibration section still counts it).",
-            },
-            Field {
-                key: "max-cyclomatic",
-                ty: "int",
-                presence: "default: 6",
-                desc: "Cyclomatic-complexity ceiling: a single-caller function branching more than this is excluded from the candidate list (the calibration section still counts it).",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap each markdown candidate list to the top N rows.",
-            },
-        ],
-        ToolName::Parameters => &[
-            Field {
-                key: "min-call-sites",
-                ty: "int",
-                presence: "default: 2",
-                desc: "Minimum resolved production call sites a parameter needs before \"always the same value\" is reported. A single-caller function's arguments are single-use's finding, not this one's.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap each markdown finding list to the top N rows.",
-            },
-        ],
         ToolName::TestRedundancy => &[
             Field {
                 key: "threshold",
@@ -566,66 +526,58 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap the markdown group list to the top N groups.",
             },
         ],
-        ToolName::SingleImpl => &[Field {
-            key: "top",
-            ty: "int",
-            presence: "optional",
-            desc: "Cap each markdown section to the top N rows.",
-        }],
-        ToolName::TestOnly => &[Field {
-            key: "top",
-            ty: "int",
-            presence: "optional",
-            desc: "Cap each markdown section to the top N rows.",
-        }],
-        ToolName::Untested => &[Field {
-            key: "top",
-            ty: "int",
-            presence: "optional",
-            desc: "Cap the markdown module listing to the top N modules.",
-        }],
-        ToolName::Unreachable => &[
+        ToolName::Reach => &[
             Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown module listing to the top N modules.",
+                key: "section",
+                ty: "array of \"untested\", \"test-only\", \"unreachable\"",
+                presence: "default: all three",
+                desc: "Sections to report, always in the order untested, test-only, unreachable. `untested`: entry points reach it, no test does. `test-only`: a test reaches it, no production entry point does. `unreachable`: neither does.",
             },
             Field {
                 key: "tier",
                 ty: "\"confirmed\", \"likely\", or \"unknown\"",
                 presence: "default: confirmed",
-                desc: "Lowest confidence tier rendered in markdown. JSON always carries every tier.",
+                desc: "Lowest confidence tier the unreachable section renders in markdown. JSON always carries every tier.",
             },
-        ],
-        ToolName::Visibility => &[Field {
-            key: "top",
-            ty: "int",
-            presence: "optional",
-            desc: "Cap the markdown module listing to the top N modules.",
-        }],
-        ToolName::Delegation => &[
             Field {
                 key: "top",
                 ty: "int",
                 presence: "optional",
-                desc: "Cap the markdown chain and module listings to the top N rows.",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Keep only chains with a hop or terminus on an unstaged changed line.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Keep only chains with a hop or terminus on a line changed in the given git revision range (`HEAD~1..HEAD`). Mutually exclusive with diff-only.",
+                desc: "Cap each section's markdown listing to the top N rows.",
             },
         ],
-        // The only tool whose options table is mandatory when the tool
-        // is listed: a traversal needs a verb and a start symbol.
+        ToolName::Narrowable => &[
+            Field {
+                key: "section",
+                ty: "array of \"single-use\", \"single-impl\", \"parameters\", \"visibility\"",
+                presence: "default: all four",
+                desc: "Sections to report, always in the order single-use, single-impl, parameters, visibility.",
+            },
+            Field {
+                key: "max-loc",
+                ty: "int",
+                presence: "default: 30",
+                desc: "single-use body-size ceiling in source lines: a single-caller function larger than this is excluded from the candidate list (the calibration section still counts it).",
+            },
+            Field {
+                key: "max-cyclomatic",
+                ty: "int",
+                presence: "default: 6",
+                desc: "single-use cyclomatic-complexity ceiling: a single-caller function branching more than this is excluded from the candidate list (the calibration section still counts it).",
+            },
+            Field {
+                key: "min-call-sites",
+                ty: "int",
+                presence: "default: 2",
+                desc: "parameters floor: minimum resolved production call sites a parameter needs before \"always the same value\" is reported. A single-caller function's arguments are the single-use section's finding.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap each section's markdown listing to the top N rows.",
+            },
+        ],
         ToolName::GraphQuery => &[
             Field {
                 key: "query",
@@ -678,24 +630,30 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap the markdown module table to the top N spans.",
             },
         ],
-        ToolName::Wrapper => &[
+        ToolName::Forwarding => &[
+            Field {
+                key: "section",
+                ty: "array of \"wrapper\", \"delegation\"",
+                presence: "default: both",
+                desc: "Sections to report, always in the order wrapper, delegation. `wrapper`: single forwarding hops with argument-level evidence. `delegation`: the chains those hops stack into, with the terminus doing the work, and a per-module roll-up.",
+            },
             Field {
                 key: "top",
                 ty: "int",
                 presence: "default: 20",
-                desc: "Cap the markdown listing to the first N wrappers, in file order.",
+                desc: "Cap each section's markdown listing to the top N rows (wrappers in file order).",
             },
             Field {
                 key: "diff-only",
                 ty: "bool",
                 presence: "default: false",
-                desc: "Restrict analysis to functions touched by the working-tree diff.",
+                desc: "Keep only wrappers, and chains with a hop or terminus, on an unstaged changed line.",
             },
             Field {
                 key: "diff-range",
                 ty: "string",
                 presence: "optional",
-                desc: "Restrict analysis to functions touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
+                desc: "Keep only wrappers, and chains with a hop or terminus, on a line changed in the given git revision range (`HEAD~1..HEAD`, `main...topic`). Mutually exclusive with diff-only.",
             },
         ],
         ToolName::Coupling => &[Field {
@@ -740,7 +698,10 @@ since = \"90.days.ago\"
 # is invisible to a profile that can only name one of them.
 [profile.services]
 path = [\"internal\", \"cmd\"]
-tools = [\"similarity\", \"unreachable\"]";
+tools = [\"similarity\", \"reach\"]
+
+[profile.services.reach]
+section = [\"unreachable\"]";
 
 /// Render the whole `agent-lens.toml` schema as one Markdown document.
 pub fn render() -> String {
@@ -880,11 +841,10 @@ mod tests {
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
-        ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
-        FootprintOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
-        LayersOptions, ParametersOptions, Profile, RiskOptions, SearchOptions, SimilarityOptions,
-        SingleImplOptions, SingleUseOptions, TestOnlyOptions, TestRedundancyOptions,
-        UnreachableOptions, UntestedOptions, VisibilityOptions, WrapperOptions,
+        ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions,
+        ForwardingOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
+        LayersOptions, NarrowableOptions, Profile, ReachOptions, RiskOptions, SearchOptions,
+        SimilarityOptions, TestRedundancyOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -922,19 +882,13 @@ mod tests {
         assert_tool_parity::<ImpactOptions>(ToolName::Impact);
         assert_tool_parity::<FootprintOptions>(ToolName::Footprint);
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
-        assert_tool_parity::<SingleImplOptions>(ToolName::SingleImpl);
-        assert_tool_parity::<SingleUseOptions>(ToolName::SingleUse);
-        assert_tool_parity::<ParametersOptions>(ToolName::Parameters);
-        assert_tool_parity::<TestOnlyOptions>(ToolName::TestOnly);
+        assert_tool_parity::<ReachOptions>(ToolName::Reach);
+        assert_tool_parity::<NarrowableOptions>(ToolName::Narrowable);
         assert_tool_parity::<TestRedundancyOptions>(ToolName::TestRedundancy);
-        assert_tool_parity::<UnreachableOptions>(ToolName::Unreachable);
-        assert_tool_parity::<UntestedOptions>(ToolName::Untested);
-        assert_tool_parity::<VisibilityOptions>(ToolName::Visibility);
-        assert_tool_parity::<DelegationOptions>(ToolName::Delegation);
+        assert_tool_parity::<ForwardingOptions>(ToolName::Forwarding);
         assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<CouplingOptions>(ToolName::Coupling);
-        assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);
     }
 
     #[test]

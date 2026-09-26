@@ -1,4 +1,4 @@
-//! `analyze test-only` — production functions only tests keep alive.
+//! `analyze reach --section test-only` — production functions only tests keep alive.
 //!
 //! A function that lives in production code but is reachable only from
 //! test entry points is paying production costs (it is read, compiled,
@@ -94,14 +94,14 @@ const NOTE: &str = "Each row is a production function only tests keep alive: no 
      analyzed tree cannot be ruled out.";
 
 analyzer_options! {
-    /// `analyze test-only` flags, and the `[profile.<name>.test-only]`
-    /// table.
+    /// Options of the `test-only` section of `analyze reach`; the `reach` options
+    /// and the `[profile.<name>.reach]` table map onto them.
     pub struct TestOnlyOptions {
         @shared(ranking);
     }
 }
 
-/// Analyzer entry point for `analyze test-only`.
+/// Analyzer for the `test-only` section of `analyze reach`.
 #[derive(Debug, Default, Clone)]
 pub struct TestOnlyAnalyzer {
     builder: CallGraphBuilder,
@@ -113,9 +113,8 @@ pub struct TestOnlyAnalyzer {
 }
 
 impl TestOnlyAnalyzer {
-    /// Apply a whole [`TestOnlyOptions`] group. The CLI flags and the
-    /// `[profile.<name>.test-only]` table are the same type, so this is
-    /// the only seam between parsed options and the analyzer.
+    /// Apply a whole [`TestOnlyOptions`] group — the seam `analyze reach` hands its
+    /// `test-only` section options through.
     pub fn with_options(self, opts: TestOnlyOptions) -> Self {
         self.with_top(opts.top)
     }

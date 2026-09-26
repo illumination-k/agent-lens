@@ -40,7 +40,13 @@ use setup::{run_codex_hook_setup, run_hook_setup};
 
 pub fn main() -> ExitCode {
     init_tracing();
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|err| {
+        if let Some(hint) = merged_subcommand_hint(&err) {
+            let _ = writeln!(io::stderr(), "error: {hint}");
+            std::process::exit(2);
+        }
+        err.exit()
+    });
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
@@ -48,6 +54,25 @@ pub fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// A merged analyzer's old subcommand is not just unrecognised: say
+/// which analyzer and section carry it now, so a stale skill or script
+/// can fix itself from the error alone.
+fn merged_subcommand_hint(err: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if err.kind() != ErrorKind::InvalidSubcommand {
+        return None;
+    }
+    let Some(ContextValue::String(name)) = err.get(ContextKind::InvalidSubcommand) else {
+        return None;
+    };
+    let (_, tool, section) = agent_lens::config::MERGED_TOOLS
+        .iter()
+        .find(|(old, ..)| old == name)?;
+    Some(format!(
+        "`analyze {name}` is now `analyze {tool} --section {section}`"
+    ))
 }
 
 fn init_tracing() {
@@ -179,7 +204,39 @@ fn write_stdout_json<T: serde::Serialize>(value: &T) -> Result<(), Box<dyn std::
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case(
+        "untested",
+        "`analyze untested` is now `analyze reach --section untested`"
+    )]
+    #[case(
+        "test-only",
+        "`analyze test-only` is now `analyze reach --section test-only`"
+    )]
+    #[case(
+        "single-use",
+        "`analyze single-use` is now `analyze narrowable --section single-use`"
+    )]
+    #[case(
+        "visibility",
+        "`analyze visibility` is now `analyze narrowable --section visibility`"
+    )]
+    fn a_merged_subcommand_names_its_new_home(#[case] name: &str, #[case] expected: &str) {
+        let err = Cli::try_parse_from(["agent-lens", "analyze", name, "."]).unwrap_err();
+        assert_eq!(merged_subcommand_hint(&err).as_deref(), Some(expected));
+    }
+
+    #[rstest]
+    #[case(&["agent-lens", "analyze", "untestd", "."])]
+    #[case(&["agent-lens", "analyze", "reach", "--bogus"])]
+    fn other_parse_errors_get_no_hint(#[case] argv: &[&str]) {
+        let err = Cli::try_parse_from(argv).unwrap_err();
+        assert_eq!(merged_subcommand_hint(&err), None);
+    }
 
     #[test]
     fn help_md_render_covers_the_whole_command_surface() {

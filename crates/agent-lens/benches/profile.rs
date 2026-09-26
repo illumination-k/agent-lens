@@ -20,7 +20,7 @@ const CONFIG: &str = r#"
 path = "."
 format = "json"
 tools = [
-  "complexity", "cohesion", "similarity", "wrapper", "delegation",
+  "complexity", "cohesion", "similarity", "forwarding",
   "coupling", "communities", "context-span", "cycles", "layers", "hubs",
   "hotspot", "risk",
 ]
@@ -33,17 +33,15 @@ tools = ["hotspot", "risk", "co-change", "change-entropy"]
 [profile.changes]
 path = "."
 format = "json"
-tools = ["similarity", "wrapper", "complexity", "cohesion", "delegation", "change-entropy", "footprint"]
+tools = ["similarity", "forwarding", "complexity", "cohesion", "change-entropy", "footprint"]
 
 [profile.changes.similarity]
-diff-only = true
-[profile.changes.wrapper]
 diff-only = true
 [profile.changes.complexity]
 diff-only = true
 [profile.changes.cohesion]
 diff-only = true
-[profile.changes.delegation]
+[profile.changes.forwarding]
 diff-only = true
 [profile.changes.change-entropy]
 diff-only = true

@@ -134,7 +134,6 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::CoChange
         | ToolName::Communities
         | ToolName::Cycles
-        | ToolName::Delegation
         | ToolName::FunctionGraph
         | ToolName::GraphQuery
         | ToolName::HiddenCoupling
@@ -142,17 +141,12 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Footprint
         | ToolName::Impact
         | ToolName::Layers
-        | ToolName::Parameters
+        | ToolName::Narrowable
+        | ToolName::Reach
         | ToolName::Risk
         | ToolName::Search
-        | ToolName::SingleImpl
-        | ToolName::SingleUse
-        | ToolName::TestOnly
         | ToolName::TestRedundancy
-        | ToolName::Unreachable
-        | ToolName::Untested
-        | ToolName::Visibility
-        | ToolName::Wrapper => None,
+        | ToolName::Forwarding => None,
     }
 }
 
@@ -590,20 +584,17 @@ mod tests {
     #[case(ToolName::CoChange)]
     #[case(ToolName::Communities)]
     #[case(ToolName::Cycles)]
-    #[case(ToolName::Delegation)]
+    #[case(ToolName::Forwarding)]
     #[case(ToolName::FunctionGraph)]
     #[case(ToolName::GraphQuery)]
     #[case(ToolName::Hubs)]
     #[case(ToolName::Impact)]
     #[case(ToolName::Footprint)]
     #[case(ToolName::Layers)]
-    #[case(ToolName::Parameters)]
+    #[case(ToolName::Narrowable)]
+    #[case(ToolName::Reach)]
     #[case(ToolName::Risk)]
-    #[case(ToolName::Unreachable)]
     #[case(ToolName::TestRedundancy)]
-    #[case(ToolName::Untested)]
-    #[case(ToolName::Visibility)]
-    #[case(ToolName::Wrapper)]
     fn tools_without_a_summary_are_reported_as_such(#[case] tool: ToolName) {
         assert!(summarizer(tool).is_none());
     }

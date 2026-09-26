@@ -1,4 +1,4 @@
-//! `analyze visibility` — `pub` (Rust) / exported (Go) functions whose
+//! `analyze narrowable --section visibility` — `pub` (Rust) / exported (Go) functions whose
 //! resolved callers never leave a narrower scope than the one they are
 //! declared with.
 //!
@@ -109,13 +109,14 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
      through the interface, which no static edge records, so a missing caller is expected there.";
 
 analyzer_options! {
-    /// `analyze visibility` flags, and the `[profile.<name>.visibility]` table.
+    /// Options of the `visibility` section of `analyze narrowable`; the `narrowable` options
+    /// and the `[profile.<name>.narrowable]` table map onto them.
     pub struct VisibilityOptions {
         @shared(ranking);
     }
 }
 
-/// Analyzer entry point for `analyze visibility`.
+/// Analyzer for the `visibility` section of `analyze narrowable`.
 #[derive(Debug, Default, Clone)]
 pub struct VisibilityAnalyzer {
     builder: CallGraphBuilder,
@@ -123,9 +124,8 @@ pub struct VisibilityAnalyzer {
 }
 
 impl VisibilityAnalyzer {
-    /// Apply a whole [`VisibilityOptions`] group. The CLI flags and the
-    /// `[profile.<name>.visibility]` table are the same type, so this is
-    /// the only seam between parsed options and the analyzer.
+    /// Apply a whole [`VisibilityOptions`] group — the seam `analyze narrowable` hands its
+    /// `visibility` section options through.
     pub fn with_options(self, opts: VisibilityOptions) -> Self {
         self.with_top(opts.top)
     }

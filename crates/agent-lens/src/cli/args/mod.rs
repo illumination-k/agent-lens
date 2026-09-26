@@ -235,8 +235,8 @@ pub(super) struct BaselineCompareArgs {
 mod tests {
     use super::*;
     use agent_lens::analyze::{
-        DEFAULT_SIMILARITY_DRIFT_FLOOR, GraphDirection, GraphQueryKind, PairKey, SimilarityMethod,
-        UnreachableTier,
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, ForwardingSection, GraphDirection, GraphQueryKind,
+        NarrowableSection, PairKey, ReachSection, SimilarityMethod, UnreachableTier,
     };
     use agent_lens::hooks::setup_engine::{HookSelection, SetupScope};
     use clap::CommandFactory;
@@ -500,8 +500,7 @@ mod tests {
     #[case::similarity("similarity")]
     #[case::complexity("complexity")]
     #[case::cohesion("cohesion")]
-    #[case::delegation("delegation")]
-    #[case::wrapper("wrapper")]
+    #[case::forwarding("forwarding")]
     fn diff_only_and_diff_range_conflict(#[case] tool: &str) {
         let err = Cli::try_parse_from([
             "agent-lens",
@@ -899,30 +898,99 @@ mod tests {
     }
 
     #[test]
-    fn parses_analyze_single_use_with_thresholds() {
+    fn parses_analyze_reach_with_sections_tier_and_top() {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "single-use",
+            "reach",
             "crates",
+            "--section",
+            "unreachable,untested",
+            "--tier",
+            "unknown",
+            "--top",
+            "12",
+            "--format",
+            "md",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Reach(args)) = cli.command else {
+            panic!("expected analyze reach");
+        };
+        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
+        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(
+            args.opts.section,
+            [ReachSection::Unreachable, ReachSection::Untested]
+        );
+        assert_eq!(args.opts.tier, Some(UnreachableTier::Unknown));
+        assert_eq!(args.opts.top, Some(12));
+    }
+
+    #[test]
+    fn parses_analyze_reach_defaults_to_json_and_every_section() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "reach", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Reach(args)) = cli.command else {
+            panic!("expected analyze reach");
+        };
+        assert_eq!(args.common.format, OutputFormat::Json);
+        assert!(args.opts.section.is_empty());
+        assert_eq!(args.opts.tier, None);
+        assert_eq!(args.opts.top, None);
+    }
+
+    #[test]
+    fn parses_analyze_narrowable_with_every_section_option() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "narrowable",
+            "crates",
+            "--section",
+            "single-use",
+            "--section",
+            "parameters",
             "--max-loc",
             "12",
             "--max-cyclomatic",
             "4",
+            "--min-call-sites",
+            "3",
             "--top",
             "10",
             "--format",
             "md",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::SingleUse(args)) = cli.command else {
-            panic!("expected analyze single-use");
+        let Command::Analyze(AnalyzeCommand::Narrowable(args)) = cli.command else {
+            panic!("expected analyze narrowable");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(
+            args.opts.section,
+            [NarrowableSection::SingleUse, NarrowableSection::Parameters]
+        );
         assert_eq!(args.opts.max_loc, Some(12));
         assert_eq!(args.opts.max_cyclomatic, Some(4));
+        assert_eq!(args.opts.min_call_sites, Some(3));
         assert_eq!(args.opts.top, Some(10));
+    }
+
+    #[test]
+    fn rejects_an_unknown_section() {
+        assert!(
+            Cli::try_parse_from([
+                "agent-lens",
+                "analyze",
+                "reach",
+                ".",
+                "--section",
+                "visibility"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -1005,72 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_analyze_parameters_with_min_call_sites() {
-        let cli = Cli::try_parse_from([
-            "agent-lens",
-            "analyze",
-            "parameters",
-            "crates",
-            "--min-call-sites",
-            "3",
-            "--top",
-            "10",
-            "--format",
-            "md",
-        ])
-        .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Parameters(args)) = cli.command else {
-            panic!("expected analyze parameters");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.min_call_sites, Some(3));
-        assert_eq!(args.opts.top, Some(10));
-    }
-
-    #[test]
-    fn parses_analyze_single_impl_with_top() {
-        let cli = Cli::try_parse_from([
-            "agent-lens",
-            "analyze",
-            "single-impl",
-            "crates",
-            "--top",
-            "10",
-            "--format",
-            "md",
-        ])
-        .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::SingleImpl(args)) = cli.command else {
-            panic!("expected analyze single-impl");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(10));
-    }
-
-    #[test]
-    fn parses_analyze_test_only_with_top() {
-        let cli = Cli::try_parse_from([
-            "agent-lens",
-            "analyze",
-            "test-only",
-            "crates",
-            "--top",
-            "10",
-            "--format",
-            "md",
-        ])
-        .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::TestOnly(args)) = cli.command else {
-            panic!("expected analyze test-only");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(10));
-    }
-
-    #[test]
     fn parses_analyze_hubs_with_top() {
         let cli = Cli::try_parse_from([
             "agent-lens",
@@ -1129,147 +1131,61 @@ mod tests {
     }
 
     #[test]
-    fn parses_analyze_unreachable_with_tier_and_top() {
+    fn parses_analyze_forwarding_with_sections_top_and_diff_only() {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "unreachable",
-            "crates",
-            "--tier",
-            "unknown",
-            "--top",
-            "12",
-            "--format",
-            "md",
-        ])
-        .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Unreachable(args)) = cli.command else {
-            panic!("expected analyze unreachable");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.tier, Some(UnreachableTier::Unknown));
-        assert_eq!(args.opts.top, Some(12));
-    }
-
-    #[test]
-    fn parses_analyze_unreachable_defaults_to_json_and_no_tier() {
-        let cli = Cli::try_parse_from(["agent-lens", "analyze", "unreachable", "."])
-            .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Unreachable(args)) = cli.command else {
-            panic!("expected analyze unreachable");
-        };
-        assert_eq!(args.common.format, OutputFormat::Json);
-        assert_eq!(args.opts.tier, None);
-        assert_eq!(args.opts.top, None);
-    }
-
-    #[test]
-    fn parses_analyze_untested_with_top() {
-        let cli = Cli::try_parse_from([
-            "agent-lens",
-            "analyze",
-            "untested",
-            "crates",
-            "--top",
-            "30",
-            "--format",
-            "md",
-            "--exclude",
-            "benches/**",
-        ])
-        .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
-            panic!("expected analyze untested");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(30));
-        assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
-    }
-
-    #[test]
-    fn parses_analyze_untested_default_format_is_json() {
-        let cli =
-            Cli::try_parse_from(["agent-lens", "analyze", "untested", "."]).expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Untested(args)) = cli.command else {
-            panic!("expected analyze untested");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from(".")]);
-        assert_eq!(args.common.format, OutputFormat::Json);
-        assert_eq!(args.opts.top, None);
-    }
-
-    #[test]
-    fn parses_analyze_visibility_with_top() {
-        let cli = Cli::try_parse_from([
-            "agent-lens",
-            "analyze",
-            "visibility",
-            "crates",
-            "--top",
-            "30",
-            "--format",
-            "md",
-            "--exclude",
-            "benches/**",
-        ])
-        .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
-            panic!("expected analyze visibility");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(30));
-        assert_eq!(args.common.path_filter.exclude, ["benches/**"]);
-    }
-
-    #[test]
-    fn parses_analyze_visibility_default_format_is_json() {
-        let cli =
-            Cli::try_parse_from(["agent-lens", "analyze", "visibility", "."]).expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Visibility(args)) = cli.command else {
-            panic!("expected analyze visibility");
-        };
-        assert_eq!(args.common.paths, [PathBuf::from(".")]);
-        assert_eq!(args.common.format, OutputFormat::Json);
-        assert_eq!(args.opts.top, None);
-    }
-
-    #[test]
-    fn parses_analyze_delegation_with_top_and_diff_only() {
-        let cli = Cli::try_parse_from([
-            "agent-lens",
-            "analyze",
-            "delegation",
+            "forwarding",
             "crates",
             "--format",
             "md",
             "--top",
             "30",
             "--diff-only",
+            "--section",
+            "delegation,wrapper",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
-            panic!("expected analyze delegation");
+        let Command::Analyze(AnalyzeCommand::Forwarding(args)) = cli.command else {
+            panic!("expected analyze forwarding");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(30));
         assert!(args.opts.diff_only);
+        assert_eq!(
+            args.opts.section,
+            [ForwardingSection::Delegation, ForwardingSection::Wrapper]
+        );
     }
 
     #[test]
-    fn parses_analyze_delegation_default_format_is_json() {
+    fn parses_analyze_forwarding_defaults() {
         let cli =
-            Cli::try_parse_from(["agent-lens", "analyze", "delegation", "."]).expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
-            panic!("expected analyze delegation");
+            Cli::try_parse_from(["agent-lens", "analyze", "forwarding", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Forwarding(args)) = cli.command else {
+            panic!("expected analyze forwarding");
         };
-        assert_eq!(args.common.paths, [PathBuf::from(".")]);
         assert_eq!(args.common.format, OutputFormat::Json);
         assert_eq!(args.opts.top, None);
         assert!(!args.opts.diff_only);
+        assert!(args.opts.section.is_empty());
+    }
+
+    #[test]
+    fn forwarding_rejects_both_diff_flags() {
+        assert!(
+            Cli::try_parse_from([
+                "agent-lens",
+                "analyze",
+                "forwarding",
+                ".",
+                "--diff-only",
+                "--diff-range",
+                "HEAD~1..HEAD",
+            ])
+            .is_err()
+        );
     }
 
     /// The monorepo case the multi-PATH signature exists for: several
@@ -1309,15 +1225,15 @@ mod tests {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "wrapper",
+            "forwarding",
             "--exclude",
             "generated/**",
             "packages",
             "cli",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Wrapper(args)) = cli.command else {
-            panic!("expected analyze wrapper");
+        let Command::Analyze(AnalyzeCommand::Forwarding(args)) = cli.command else {
+            panic!("expected analyze forwarding");
         };
         assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
         assert_eq!(
@@ -1366,17 +1282,6 @@ mod tests {
         assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(15));
-    }
-
-    #[test]
-    fn parses_analyze_wrapper_with_top() {
-        let cli = Cli::try_parse_from(["agent-lens", "analyze", "wrapper", "src", "--top", "7"])
-            .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Wrapper(args)) = cli.command else {
-            panic!("expected analyze wrapper");
-        };
-        assert_eq!(args.opts.top, Some(7));
-        assert!(!args.opts.diff_only);
     }
 
     #[test]
@@ -1718,15 +1623,17 @@ mod tests {
             .find(|sub| sub.get_name() == "analyze")
             .expect("analyze subcommand");
 
-        // Routing rows are `<question>  analyze <name>`, indented to read
-        // as a code block; the surrounding prose has no such row.
+        // Routing rows are `<question>  analyze <name> [flags]`, indented
+        // to read as a code block; the surrounding prose has no such row.
+        // A bundled analyzer is routed once per section it answers.
         let mut routed: Vec<&str> = examples::ANALYZE
             .lines()
             .filter(|line| line.starts_with("    "))
             .filter_map(|line| line.rsplit_once(" analyze "))
-            .map(|(_, name)| name.trim())
+            .filter_map(|(_, rest)| rest.split_whitespace().next())
             .collect();
         routed.sort_unstable();
+        routed.dedup();
 
         let mut declared: Vec<&str> = analyze
             .get_subcommands()

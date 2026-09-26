@@ -118,24 +118,19 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
           "Near-duplicate pairs by TSED tree-edit distance over normalised ASTs, folded into clusters. --target picks functions, type definitions, or statement blocks inside function bodies.",
       },
       {
-        name: "wrapper",
+        name: "forwarding",
         summary:
-          "Functions whose body is a forwarding call modulo a short chain of ?, .unwrap(), .into(), .await.",
+          "Functions that only pass the call along: single hops whose body is a forwarding call modulo ?, .unwrap(), .into(), .await, and the chains they stack into — api::save -> service::save -> repo::save -> db::insert — with the terminus that does the work as the headline and a per-module lasagna roll-up.",
       },
       {
-        name: "delegation",
+        name: "narrowable",
         summary:
-          "Chains that only forward — api::save -> service::save -> repo::save -> db::insert — with the terminus that does the work as the headline and a per-module lasagna roll-up.",
+          "Declarations wider than their uses: functions one caller needs, traits and interfaces one type implements, parameters that only ever get one value, and pub items whose callers all sit in a narrower scope — each a section with its own caveats.",
       },
       {
-        name: "single-use",
+        name: "test-redundancy",
         summary:
-          "Functions with exactly one resolved production caller, small and simple enough to inline into it — with caveats where the claim is weaker, and a calibration section for setting the thresholds per repository.",
-      },
-      {
-        name: "single-impl",
-        summary:
-          "Traits and interfaces with at most one production implementor — candidates for the concrete type, with mock-seam, dyn-dispatch and visibility caveats, and the tree's implementor-count histogram.",
+          "Tests that are near-copies of each other, and which one of each set to keep — duplicate or parameterize, with the call graph vetoing a fold that would drop a test's only path to production code.",
       },
     ],
   },
@@ -200,6 +195,11 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
           "Blast radius of the working-tree diff or a named function: transitive callers folded per depth, plus the reachable tests as a verification checklist.",
       },
       {
+        name: "footprint",
+        summary:
+          "The shape of the pending diff: how many functions it touched, which edits sit outside its impact closure, and what it left behind — new wrappers, complexity increases, uncalled additions.",
+      },
+      {
         name: "graph-query",
         summary:
           "One canned traversal per run — callers, callees, neighborhood, or the shortest path between two symbols.",
@@ -208,27 +208,12 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
   },
   {
     title: "Reachability",
-    blurb: "Code nothing runs, nothing tests, or nothing outside the module needs.",
+    blurb: "Code nothing runs, only tests run, or no test guards.",
     analyzers: [
       {
-        name: "untested",
+        name: "reach",
         summary:
-          "Production functions with no resolved call path from any test, grouped by module and ranked by untested LOC.",
-      },
-      {
-        name: "unreachable",
-        summary:
-          "Functions no entry point reaches, in confidence tiers — confirmed rows are deletable on that evidence alone (Rust, Go).",
-      },
-      {
-        name: "test-only",
-        summary:
-          "Production functions only tests keep alive — candidates to move into test scope or delete with their tests (Rust, Go).",
-      },
-      {
-        name: "visibility",
-        summary:
-          "pub or exported functions whose callers all sit inside a narrower scope, with the declaration that would still compile (Rust, Go).",
+          "Who reaches each production function: untested (entry points do, no test does), test-only (a test does, no entry point does), and unreachable in confidence tiers — confirmed rows are deletable on that evidence alone.",
       },
     ],
   },
@@ -276,9 +261,13 @@ export const LANGUAGES: readonly LanguageRow[] = [
   {
     language: "TypeScript / JavaScript",
     parser: "oxc",
-    coverage: "All but unreachable, visibility",
+    coverage: "All but the export-status sections",
   },
-  { language: "Python", parser: "ruff_python_parser", coverage: "All but unreachable, visibility" },
+  {
+    language: "Python",
+    parser: "ruff_python_parser",
+    coverage: "All but the export-status sections",
+  },
   { language: "Go", parser: "tree-sitter", coverage: "Every analyzer" },
 ];
 
@@ -320,7 +309,7 @@ export const FAQ: readonly FaqEntry[] = [
   {
     question: "Which languages does it analyze?",
     answer:
-      "Rust, TypeScript / JavaScript, Python, and Go. Every analyzer runs on all four except unreachable and visibility, which need extracted export status and are wired through the Rust and Go adapters only. The git-history analyzers — co-change and change-entropy — read git log rather than parsing files, so they cover anything the repository tracks. Analysis is split into a language-neutral core and per-language adapters, so adding a language means writing one adapter crate rather than reimplementing the metrics.",
+      "Rust, TypeScript / JavaScript, Python, and Go. Every analyzer runs on all four; the reach sections test-only and unreachable and the narrowable sections single-impl and visibility need extracted export status and judge Rust and Go only. The git-history analyzers — co-change and change-entropy — read git log rather than parsing files, so they cover anything the repository tracks. Analysis is split into a language-neutral core and per-language adapters, so adding a language means writing one adapter crate rather than reimplementing the metrics.",
   },
   {
     question: "Do I have to use it through a coding agent?",

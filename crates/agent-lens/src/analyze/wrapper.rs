@@ -1,4 +1,4 @@
-//! `analyze wrapper` — surface thin forwarding wrappers in source files.
+//! `analyze forwarding --section wrapper` — surface thin forwarding wrappers in source files.
 //!
 //! Accepts either a single source file or a directory. When the input is a
 //! directory the analyzer walks it recursively (respecting `.gitignore`
@@ -21,7 +21,9 @@ use super::runner::{
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, SourceLang, read_source};
 
 analyzer_options! {
-    /// `analyze wrapper` flags, and the `[profile.<name>.wrapper]` table.
+    /// Options of the `wrapper` section of `analyze forwarding`; the
+    /// `forwarding` options and the `[profile.<name>.forwarding]` table map
+    /// onto them.
     pub struct WrapperOptions {
         @shared(ranking, diff);
     }
@@ -57,9 +59,8 @@ impl WrapperAnalyzer {
         self
     }
 
-    /// Apply a whole [`WrapperOptions`] group. The CLI flags and the
-    /// `[profile.<name>.wrapper]` table are the same type, so this is the
-    /// only seam between parsed options and the analyzer.
+    /// Apply a whole [`WrapperOptions`] group — the seam `analyze forwarding` hands
+    /// its `wrapper` section options through.
     pub fn with_options(self, opts: WrapperOptions) -> Self {
         let diff = opts.diff_scope();
         self.with_top(opts.top).with_diff_scope(diff)

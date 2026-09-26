@@ -1,4 +1,4 @@
-//! `analyze untested` — production functions with no static call path
+//! `analyze reach --section untested` — production functions with no static call path
 //! from any test function.
 //!
 //! Multi-source breadth-first traversal from every `is_test` node of the
@@ -73,13 +73,14 @@ const NOTE: &str = "Structural, not coverage: this is \"no resolved call path fr
      functions an ambiguous edge might reach are flagged per row.";
 
 analyzer_options! {
-    /// `analyze untested` flags, and the `[profile.<name>.untested]` table.
+    /// Options of the `untested` section of `analyze reach`; the `reach` options
+    /// and the `[profile.<name>.reach]` table map onto them.
     pub struct UntestedOptions {
         @shared(ranking);
     }
 }
 
-/// Analyzer entry point for `analyze untested`.
+/// Analyzer for the `untested` section of `analyze reach`.
 #[derive(Debug, Default, Clone)]
 pub struct UntestedAnalyzer {
     builder: CallGraphBuilder,
@@ -87,9 +88,8 @@ pub struct UntestedAnalyzer {
 }
 
 impl UntestedAnalyzer {
-    /// Apply a whole [`UntestedOptions`] group. The CLI flags and the
-    /// `[profile.<name>.untested]` table are the same type, so this is the
-    /// only seam between parsed options and the analyzer.
+    /// Apply a whole [`UntestedOptions`] group — the seam `analyze reach`
+    /// hands its `untested` section options through.
     pub fn with_options(self, opts: UntestedOptions) -> Self {
         self.with_top(opts.top)
     }
