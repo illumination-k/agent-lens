@@ -9,39 +9,39 @@ description: Use when the user asks to analyze this codebase with agent-lens, or
 
 ## Pick the analyzer
 
-| Question                                                | Subcommand        | Path argument                                     |
-| ------------------------------------------------------- | ----------------- | ------------------------------------------------- |
-| Are there near-duplicate functions?                     | `similarity`      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Are there forwarding-only functions worth inlining?     | `wrapper`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| How many hops of forwarding before the real work?       | `delegation`      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which functions does only one caller need?              | `single-use`      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which traits/interfaces has only one type implemented?  | `single-impl`     | `.rs` / `.go` file or dir                         |
-| Which classes/`impl` blocks are doing too many things?  | `cohesion`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which functions are landmines to edit?                  | `complexity`      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which modules are Fan-In bottlenecks or cyclic?         | `coupling`        | Rust crate / TS/JS entry / Go or Python directory |
-| Is this file filed under the right module?              | `communities`     | Rust crate / TS/JS entry / Go or Python directory |
-| Which functions call each other in a cycle?             | `cycles`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| How many files must I read to understand a module?      | `context-span`    | Rust crate / TS/JS entry / Python / Go            |
-| Who calls this function? What does it call?             | `graph-query`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Is there a call chain from A to B?                      | `graph-query`     | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| I need the whole call graph as data                     | `function-graph`  | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which functions are hubs I should read/handle first?    | `hubs`            | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| What could my current edit break? Which tests cover it? | `impact`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Where does this new function belong vertically?         | `layers`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Is it OK for this module to call that one?              | `layers`          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Which code has no test path guarding it?                | `untested`        | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
-| Can anything still reach this code? Is it dead?         | `unreachable`     | `.rs` / `.go` file or dir                         |
-| Which production code do only tests keep alive?         | `test-only`       | `.rs` / `.go` file or dir                         |
-| Is this `pub` wider than its callers need?              | `visibility`      | `.rs` / `.go` file or dir                         |
-| Where do churn and complexity collide?                  | `hotspot`         | git-tracked file or directory                     |
-| How carefully should I treat this edit?                 | `risk`            | git-tracked file or directory                     |
-| What else will history make me edit alongside this?     | `co-change`       | git-tracked directory (any file type)             |
-| Was change around this file scattered or focused?       | `change-entropy`  | git-tracked directory (any file type)             |
-| What couples these files without the code saying so?    | `hidden-coupling` | git-tracked directory (any file type)             |
-| Is my pending edit scattered enough to split up?        | `change-entropy`  | git-tracked directory, with `--diff-only`         |
-| Did my diff sprawl, or leave scaffolding behind?        | `footprint`       | git-tracked directory (Rust / TS / JS / Py / Go)  |
+| Question                                                | Subcommand                         | Path argument                                     |
+| ------------------------------------------------------- | ---------------------------------- | ------------------------------------------------- |
+| Are there near-duplicate functions?                     | `similarity`                       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Are there forwarding-only functions worth inlining?     | `wrapper`                          | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| How many hops of forwarding before the real work?       | `delegation`                       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which functions does only one caller need?              | `narrowable --section single-use`  | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which traits/interfaces has only one type implemented?  | `narrowable --section single-impl` | `.rs` / `.go` file or dir                         |
+| Which classes/`impl` blocks are doing too many things?  | `cohesion`                         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which functions are landmines to edit?                  | `complexity`                       | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which modules are Fan-In bottlenecks or cyclic?         | `coupling`                         | Rust crate / TS/JS entry / Go or Python directory |
+| Is this file filed under the right module?              | `communities`                      | Rust crate / TS/JS entry / Go or Python directory |
+| Which functions call each other in a cycle?             | `cycles`                           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| How many files must I read to understand a module?      | `context-span`                     | Rust crate / TS/JS entry / Python / Go            |
+| Who calls this function? What does it call?             | `graph-query`                      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is there a call chain from A to B?                      | `graph-query`                      | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| I need the whole call graph as data                     | `function-graph`                   | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which functions are hubs I should read/handle first?    | `hubs`                             | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| What could my current edit break? Which tests cover it? | `impact`                           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Where does this new function belong vertically?         | `layers`                           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Is it OK for this module to call that one?              | `layers`                           | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Which code has no test path guarding it?                | `reach --section untested`         | `.rs` / `.ts` / `.js` / `.py` / `.go` file or dir |
+| Can anything still reach this code? Is it dead?         | `reach --section unreachable`      | `.rs` / `.go` file or dir                         |
+| Which production code do only tests keep alive?         | `reach --section test-only`        | `.rs` / `.go` file or dir                         |
+| Is this `pub` wider than its callers need?              | `narrowable --section visibility`  | `.rs` / `.go` file or dir                         |
+| Where do churn and complexity collide?                  | `hotspot`                          | git-tracked file or directory                     |
+| How carefully should I treat this edit?                 | `risk`                             | git-tracked file or directory                     |
+| What else will history make me edit alongside this?     | `co-change`                        | git-tracked directory (any file type)             |
+| Was change around this file scattered or focused?       | `change-entropy`                   | git-tracked directory (any file type)             |
+| What couples these files without the code saying so?    | `hidden-coupling`                  | git-tracked directory (any file type)             |
+| Is my pending edit scattered enough to split up?        | `change-entropy`                   | git-tracked directory, with `--diff-only`         |
+| Did my diff sprawl, or leave scaffolding behind?        | `footprint`                        | git-tracked directory (Rust / TS / JS / Py / Go)  |
 
-`similarity` / `wrapper` / `delegation` / `single-use` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go (`single-use` can only vouch for a clean, caveat-free candidate on Rust and Go, the two languages with extracted export status — TS and Python rows always carry that caveat). `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility`, `unreachable`, `test-only`, and `single-impl` judge Rust and Go only — TypeScript and Python carry no extracted export status (nor extracted trait/interface declarations), and each says how many functions or files it skipped for that reason (`unreachable` treats them as entry points, so nothing they call is reported). `coupling` and `communities` work on Rust crates, TS/JS module graphs, Go modules, and Python package trees; both grow one module graph from one entry point. Read `communities` top-down: if its declared modularity is close to its detected one, the declared boundaries already are the clustering and the misfiled rows below it are noise. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot`, `risk`, `co-change`, `change-entropy` and `hidden-coupling` require a git working tree. `hidden-coupling` is the only analyzer that reads both halves: its history side is language-agnostic like `co-change`, and its static side is the same Rust / TS / JS / Python / Go graphs `coupling` and the call-graph analyzers build. `co-change` and `change-entropy` have no language matrix at all — both read `git log` and never parse a file, so they are the only analyzers that see `.toml`, `.md`, workflow YAML and fixtures.
+`reach` and `narrowable` bundle several reports: each `--section` is a full report, and without `--section` they run every section over one shared call graph (JSON nests each section's report under its key, markdown stacks them). `similarity` / `wrapper` / `delegation` / `single-use` / `cohesion` / `complexity` / `function-graph` / `graph-query` / `cycles` / `hubs` / `impact` / `layers` / `untested` / `context-span` work on Rust, TypeScript / JavaScript, Python, and Go (`single-use` can only vouch for a clean, caveat-free candidate on Rust and Go, the two languages with extracted export status — TS and Python rows always carry that caveat). `delegation` is strongest on Rust: only Rust and Go can exempt a module facade, and the per-language forwarding idioms it does not model (Python properties, Go embedded structs) only cost it findings. `visibility`, `unreachable`, `test-only`, and `single-impl` judge Rust and Go only — TypeScript and Python carry no extracted export status (nor extracted trait/interface declarations), and each says how many functions or files it skipped for that reason (`unreachable` treats them as entry points, so nothing they call is reported). `coupling` and `communities` work on Rust crates, TS/JS module graphs, Go modules, and Python package trees; both grow one module graph from one entry point. Read `communities` top-down: if its declared modularity is close to its detected one, the declared boundaries already are the clustering and the misfiled rows below it are noise. For `context-span`, pass `--entry-glob` repeatedly to merge several TS/JS entry trees (Next.js App Router, Remix, Astro, …) in one run. `hotspot`, `risk`, `co-change`, `change-entropy` and `hidden-coupling` require a git working tree. `hidden-coupling` is the only analyzer that reads both halves: its history side is language-agnostic like `co-change`, and its static side is the same Rust / TS / JS / Python / Go graphs `coupling` and the call-graph analyzers build. `co-change` and `change-entropy` have no language matrix at all — both read `git log` and never parse a file, so they are the only analyzers that see `.toml`, `.md`, workflow YAML and fixtures.
 
 ## Several paths in one run
 
@@ -132,17 +132,23 @@ agent-lens analyze impact crates/agent-lens/src \
 # Inferred layer map: function/module levels, module cycles, skip-level calls
 agent-lens analyze layers crates/agent-lens/src --exclude-tests --format md
 
+# Untested, test-only, and unreachable code in one pass over one call graph
+agent-lens analyze reach . --format md
+
 # Which production functions no test statically reaches
-agent-lens analyze untested crates/agent-lens/src --format md
+agent-lens analyze reach crates/agent-lens/src --section untested --format md
 
 # Which functions nothing can reach any more (leads with the deletable tier)
-agent-lens analyze unreachable . --format md
+agent-lens analyze reach . --section unreachable --format md
 
 # …plus the leads the tool cannot confirm, when hunting for an abandoned feature
-agent-lens analyze unreachable . --tier unknown --format md
+agent-lens analyze reach . --section unreachable --tier unknown --format md
+
+# Declarations wider than their uses: one caller, one impl, one value, narrower callers
+agent-lens analyze narrowable . --format md
 
 # Which `pub` items no caller outside a narrower scope uses
-agent-lens analyze visibility . --format md
+agent-lens analyze narrowable . --section visibility --format md
 
 # How many forwarding hops sit between an entry point and the real work
 agent-lens analyze delegation crates/agent-lens/src --format md
@@ -168,7 +174,7 @@ agent-lens analyze hidden-coupling . --min-support 5 --top 15 --format md
 
 - **similarity**: each entry is a pair `(a, b)` with `tsed` in `[0.0, 1.0]`. ≥ 0.95 is essentially a clone; 0.85–0.95 is a near-miss worth refactoring; below 0.85 is filtered out by default. The `--threshold` flag is for tightening or loosening that bar; `--sweep 0.6,0.75,0.85` instead clusters once at the lowest rung and tags each cluster with the highest rung it survives (a coarse dendrogram), separating verbatim clones from structural parallels in one run.
 - **wrapper**: a hit means the function body, after stripping `?` / `.into()` / `.unwrap()` / `.await`, is just a forwarding call. Either inline it or document why the indirection exists.
-- **single-use**: each row is a function exactly one resolved production caller needs, small and simple enough (per the echoed `--max-loc` / `--max-cyclomatic` thresholds) to inline into that caller — a candidate edit, not a verdict, since a single-caller function can be a deliberate, well-named extraction. Fan-in counts resolved edges only, so a macro body (a call inside `format!`/`write!` arguments produces no call edge) or an unresolved call site can hide a second caller — the raw-name scan therefore caveats any row whose bare name is written outside its definition and its known callers (`raw refs=N`), and a shared or ubiquitous name (`new`, `get`) will in practice always carry that caveat. The scan only covers files the graph scanned, so still check config files, templates, and other languages before inlining. Caveat-free rows lead; caveated rows say exactly why they are weaker (visibility, test callers, several call sites, a cross-module caller, uncertain resolution). Thresholds are absolute and per-repository on purpose — read the report's calibration section (the loc/cyclomatic distribution over all single-caller functions) and set them in `[profile.<name>.single-use]` rather than trusting the defaults. The `Collapsible chains` section groups candidates whose one caller is itself a candidate: inline members in the listed order (deepest first) and the whole run folds into the named sink, reclaiming the summed loc.
+- **single-use**: each row is a function exactly one resolved production caller needs, small and simple enough (per the echoed `--max-loc` / `--max-cyclomatic` thresholds) to inline into that caller — a candidate edit, not a verdict, since a single-caller function can be a deliberate, well-named extraction. Fan-in counts resolved edges only, so a macro body (a call inside `format!`/`write!` arguments produces no call edge) or an unresolved call site can hide a second caller — the raw-name scan therefore caveats any row whose bare name is written outside its definition and its known callers (`raw refs=N`), and a shared or ubiquitous name (`new`, `get`) will in practice always carry that caveat. The scan only covers files the graph scanned, so still check config files, templates, and other languages before inlining. Caveat-free rows lead; caveated rows say exactly why they are weaker (visibility, test callers, several call sites, a cross-module caller, uncertain resolution). Thresholds are absolute and per-repository on purpose — read the report's calibration section (the loc/cyclomatic distribution over all single-caller functions) and set them in `[profile.<name>.narrowable]` rather than trusting the defaults. The `Collapsible chains` section groups candidates whose one caller is itself a candidate: inline members in the listed order (deepest first) and the whole run folds into the named sink, reclaiming the summed loc.
 - **single-impl**: each row is a Rust trait or Go interface declared in the analyzed tree with at most one production implementor — a candidate to replace with the concrete type, not a verdict. The caveats are the reading: `a test implementor exists (mock seam)` means the abstraction exists to be mocked and removing it moves those tests onto the concrete type; `` `dyn`-dispatched `` means a concrete type cannot replace it without restructuring; `visible outside its module` means implementors outside the analyzed tree are possible. `refs=N` is what removal costs (bounds, `impl Trait` positions, imports, derives get rewritten), not evidence the row is wrong. Go matching is structural by method name and parameter count, so a Go interface satisfied only by std or third-party types reads as unimplemented — the no-production-implementor section says which rows those may be. Read the implementor distribution last: it is this tree's base rate, and a repo where most abstractions are single-impl is telling you about its house style, not about one bad trait.
 - **delegation**: each row is a chain of functions that only forward, ending at the terminus — the one doing the work, named with its `file:line`, which is the file to open first. Depth is the context tax: a 3-hop chain costs four file opens to answer one question. Trust the hops marked `args forwarded verbatim` most (the language's own wrapper detector agreed); a hop without that mark was classified from body shape alone and can be composing rather than forwarding — a constructor calling a constructor is the usual false positive. `other caller(s) to move` on a hop is the cost of collapsing the chain: those call sites have to be repointed at the terminus. The module roll-up is the lasagna half: a module flagged `layer candidate` is mostly forwarders pointing mostly at one other module, so inlining it is a single mechanical change. One-hop forwards are counted, not listed — that is `analyze wrapper`'s report, and it carries argument-level evidence.
 - **cohesion**: `lcom4 == 1` is healthy. `lcom4 >= 2` means the `impl` has disjoint method clusters and is a candidate for splitting.

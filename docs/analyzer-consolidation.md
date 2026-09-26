@@ -8,10 +8,14 @@ that a single analyzer with sections would not charge. This plan merges them
 down to 17, with an optional further step to 15.
 
 The project is pre-alpha, so old names are removed rather than kept as
-aliases. Each removed name keeps one hidden clap subcommand and one config
-parse arm whose only job is to fail with `renamed: use <new form>` — cheap,
-and it turns an agent's stale skill or `agent-lens.toml` into an actionable
-error instead of "unrecognized subcommand".
+aliases. A removed name still fails usefully: `analyze <old>` exits 2 with
+`` `analyze <old>` is now `analyze <new> --section <old>` ``, and a profile
+listing it fails to load with the analyzer and section that carry it now
+(`config::MERGED_TOOLS` is the one table both read). A stale skill or
+`agent-lens.toml` then says how to fix itself.
+
+Status: `reach` and `narrowable` are done (29 → 24). The rest of this plan is
+still open.
 
 ## Target surface
 
@@ -33,27 +37,44 @@ error instead of "unrecognized subcommand".
 `co-change` (same churn window). Deferred because each has its own options
 (`--granularity`, `--period`) and a distinct headline.
 
-### `reach`: one matrix instead of three lists
+### How a bundle works (`reach`, `narrowable`)
 
-Each production function is classified by two bits over the resolved call
-graph: reached from an entry point, reached from a test.
+A merged analyzer is a bundle of sections, and each section is the former
+analyzer's report, unchanged. `analyze/composite.rs` runs the selected
+sections under one `AnalysisIndexScope`, so the call graph and per-file facts
+they share are built once, and stacks the reports:
+
+- JSON: `{schema_version, sections: [keys], <key>: <section report>, …}`.
+- Markdown: one `# <Bundle> (sections)` title, each section's headings demoted
+  one level, and the repeated resolution-confidence rows folded after the
+  first section (the same `ConfidenceDeduper` a profile run uses).
+- `--section a,b` (repeatable; `section = [...]` in a profile) selects
+  sections; they always render in declaration order. Default is all.
+- The digest folds per section, and a drill-down names the section
+  (`analyze reach src --section untested`).
+
+Section options keep their spelling on the bundle: `reach` takes `--tier`,
+`narrowable` takes `--max-loc`, `--max-cyclomatic`, `--min-call-sites`, and
+both take `--top`, applied to every section.
+
+### `reach`: one matrix, three sections
+
+Each production function sits in one cell of reached-from-entries ×
+reached-from-tests, and each off-diagonal cell is a section:
 
 |                  | reached from tests | not reached from tests |
 | ---------------- | ------------------ | ---------------------- |
 | from entries     | ok (not listed)    | `untested`             |
 | not from entries | `test-only`        | `unreachable` (tiered) |
 
-One graph build, one traversal per root set, and the three current reports
-become filters (`--show untested,test-only,unreachable`, default all). The
-unreachable confidence tiers (`--tier`) carry over to the bottom-right cell.
+A true single-traversal matrix report (one row per function with both bits)
+is a possible follow-up; the sections were kept byte-identical to the old
+reports so the merge changed no finding.
 
 ### `narrowable`: sections, not a merged score
 
-The four checks stay independent and each keeps its own section and options
-(`--max-loc`, `--max-cyclomatic`, `--min-call-sites`). `--check
-single-use,single-impl,parameters,visibility` selects sections; default all.
-They already share `unreachable`'s root and export logic, so the merged
-command builds that once.
+`single-use`, `single-impl`, `parameters`, `visibility`: four independent
+checks for "declared wider than its uses", each with its own caveats.
 
 ## Phases
 
@@ -66,13 +87,12 @@ into each other, so they are mostly CLI, config and output-schema work.
    `risk` → `hotspot --by blast`;
    `hidden-coupling` → `co-change --against-code`;
    `context-span` → `coupling`.
-2. **`reach`** — needs the new JSON shape above; `footprint` and `stop delta`
-   consume `unreachable` and must move to the new API in the same PR.
+2. **`reach`** — done. `footprint` and `stop delta` still call the
+   `unreachable` module directly; only the CLI surface moved.
 3. **`forwarding`** — the `post-tool-use wrapper` hook and the `stop delta`
    wrapper facts stay; only the analyzer entry point and report change. Hook
    ids are not renamed in this phase (it would break installed settings).
-4. **`narrowable`** — largest diff (four modules, ~7.7k lines); lands after
-   `reach` so it can build on the shared root set.
+4. **`narrowable`** — done, on the same bundle machinery as `reach`.
 5. **`layers` + `cycles`** — last because the layer map's module SCC and the
    function SCC must be reconciled in one report, which is a design question,
    not a move.
@@ -102,7 +122,7 @@ should show it.
 
 ## Open questions
 
-- Names: `forwarding`, `reach`, `narrowable`, `graph` are proposals.
+- Names: `forwarding` and `graph` are proposals.
 - Whether hook ids (`post-tool-use:wrapper`) follow the analyzer rename. This
   plan keeps them, since renaming breaks every installed `settings.json`.
 - Whether to take the optional step to 15.

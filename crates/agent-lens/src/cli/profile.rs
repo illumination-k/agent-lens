@@ -197,7 +197,8 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.impact.is_some(), config::ToolName::Impact),
         (profile.footprint.is_some(), config::ToolName::Footprint),
         (profile.layers.is_some(), config::ToolName::Layers),
-        (profile.parameters.is_some(), config::ToolName::Parameters),
+        (profile.narrowable.is_some(), config::ToolName::Narrowable),
+        (profile.reach.is_some(), config::ToolName::Reach),
         (
             profile.test_redundancy.is_some(),
             config::ToolName::TestRedundancy,
@@ -208,12 +209,6 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             config::ToolName::ContextSpan,
         ),
         (profile.delegation.is_some(), config::ToolName::Delegation),
-        (profile.single_impl.is_some(), config::ToolName::SingleImpl),
-        (profile.single_use.is_some(), config::ToolName::SingleUse),
-        (profile.test_only.is_some(), config::ToolName::TestOnly),
-        (profile.unreachable.is_some(), config::ToolName::Unreachable),
-        (profile.untested.is_some(), config::ToolName::Untested),
-        (profile.visibility.is_some(), config::ToolName::Visibility),
         (profile.wrapper.is_some(), config::ToolName::Wrapper),
     ]
     .into_iter()

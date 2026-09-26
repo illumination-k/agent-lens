@@ -1,4 +1,4 @@
-//! `analyze unreachable` — functions no call path from an entry point
+//! `analyze reach --section unreachable` — functions no call path from an entry point
 //! reaches, reported in confidence tiers.
 //!
 //! Dead code is expensive for an agent twice over: it reads it, and then
@@ -116,8 +116,8 @@ const NOTE: &str = "Relative to the entry set below, and sound in one direction 
      template, or another language is invisible here.";
 
 analyzer_options! {
-    /// `analyze unreachable` flags, and the `[profile.<name>.unreachable]`
-    /// table.
+    /// Options of the `unreachable` section of `analyze reach`; the `reach` options
+    /// and the `[profile.<name>.reach]` table map onto them.
     pub struct UnreachableOptions {
         @shared(ranking);
         /// Lowest confidence tier to render in markdown: `confirmed`
@@ -180,9 +180,8 @@ pub struct UnreachableAnalyzer {
 }
 
 impl UnreachableAnalyzer {
-    /// Apply a whole [`UnreachableOptions`] group. The CLI flags and the
-    /// `[profile.<name>.unreachable]` table are the same type, so this is
-    /// the only seam between parsed options and the analyzer.
+    /// Apply a whole [`UnreachableOptions`] group — the seam `analyze reach` hands its
+    /// `unreachable` section options through.
     pub fn with_options(self, opts: UnreachableOptions) -> Self {
         self.with_top(opts.top).with_tier(opts.tier)
     }

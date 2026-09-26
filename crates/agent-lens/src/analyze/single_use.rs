@@ -1,4 +1,4 @@
-//! `analyze single-use` — functions with exactly one resolved
+//! `analyze narrowable --section single-use` — functions with exactly one resolved
 //! production caller, reported as inline candidates.
 //!
 //! A function only one call site needs is indirection an agent pays for
@@ -40,7 +40,7 @@
 //! house style. The report carries a calibration section — the loc and
 //! cyclomatic distribution over *all* single-caller functions, and how
 //! many the current thresholds keep — so an agent can read one run and
-//! set `[profile.<name>.single-use]` for that repository instead of
+//! set `[profile.<name>.narrowable]` for that repository instead of
 //! trusting the defaults.
 //!
 //! # Schema history
@@ -104,8 +104,8 @@ const NOTE: &str = "Each row is a function with exactly one resolved production 
      not be inlined anyway.";
 
 analyzer_options! {
-    /// `analyze single-use` flags, and the `[profile.<name>.single-use]`
-    /// table.
+    /// Options of the `single-use` section of `analyze narrowable`; the `narrowable` options
+    /// and the `[profile.<name>.narrowable]` table map onto them.
     pub struct SingleUseOptions {
         @shared(ranking);
         /// Body-size ceiling in source lines: a single-caller function
@@ -132,9 +132,8 @@ pub struct SingleUseAnalyzer {
 }
 
 impl SingleUseAnalyzer {
-    /// Apply a whole [`SingleUseOptions`] group. The CLI flags and the
-    /// `[profile.<name>.single-use]` table are the same type, so this is
-    /// the only seam between parsed options and the analyzer.
+    /// Apply a whole [`SingleUseOptions`] group — the seam `analyze narrowable` hands its
+    /// `single-use` section options through.
     pub fn with_options(self, opts: SingleUseOptions) -> Self {
         self.with_top(opts.top)
             .with_max_loc(opts.max_loc)
@@ -974,7 +973,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.calibration.cyclomatic.as_ref(),
     );
     out.push_str(
-        "\nSet `--max-loc` / `--max-cyclomatic` (or `[profile.<name>.single-use]`) off these \
+        "\nSet `--max-loc` / `--max-cyclomatic` (or `[profile.<name>.narrowable]`) off these \
          percentiles for this repository's own appetite; p75 keeps the typical extraction, p90 \
          sweeps in most of the tail.\n",
     );

@@ -15,6 +15,7 @@ pub mod co_change;
 pub mod cohesion;
 pub mod communities;
 pub mod complexity;
+mod composite;
 pub mod context_span;
 pub mod coupling;
 mod crate_root;
@@ -36,9 +37,11 @@ pub mod index;
 pub mod layers;
 mod module_graph;
 pub(crate) mod module_label;
+pub mod narrowable;
 mod options;
 pub mod parameters;
 mod path_filter;
+pub mod reach;
 pub mod risk;
 mod roots;
 mod runner;
@@ -81,7 +84,9 @@ pub use hubs::HubsAnalyzer;
 pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
 pub use index::{AnalysisIndex, AnalysisIndexScope};
 pub use layers::LayersAnalyzer;
+pub use narrowable::{NarrowableAnalyzer, NarrowableSection};
 pub use parameters::ParametersAnalyzer;
+pub use reach::{ReachAnalyzer, ReachSection};
 pub use risk::{RiskAnalyzer, RiskError};
 pub use search::{DEFAULT_SEARCH_LIMIT, FuzzyMode, RankMode, SearchAnalyzer};
 
@@ -103,6 +108,7 @@ pub use untested::UntestedAnalyzer;
 pub use visibility::VisibilityAnalyzer;
 pub use wrapper::WrapperAnalyzer;
 
+pub(crate) use composite::BundleSection;
 pub use crate_root::resolve_crate_root;
 pub(crate) use diff::overlaps_any;
 pub use diff::{

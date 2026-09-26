@@ -1033,7 +1033,7 @@ fn run_profile_drives_impact_end_to_end() {
 }
 
 #[test]
-fn run_profile_drives_unreachable_end_to_end() {
+fn run_profile_drives_reach_unreachable_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(
         dir.path(),
@@ -1044,15 +1044,19 @@ fn run_profile_drives_unreachable_end_to_end() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.dead]\npath = \"src\"\ntools = [\"unreachable\"]\n\n\
-         [profile.dead.unreachable]\ntop = 5\ntier = \"unknown\"\n",
+        "[profile.dead]\npath = \"src\"\ntools = [\"reach\"]\n\n\
+         [profile.dead.reach]\nsection = [\"unreachable\"]\ntop = 5\ntier = \"unknown\"\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "dead"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "unreachable");
-    let report = &json["results"][0]["report"];
+    assert_eq!(json["results"][0]["tool"], "reach");
+    assert_eq!(
+        json["results"][0]["report"]["sections"],
+        serde_json::json!(["unreachable"]),
+    );
+    let report = &json["results"][0]["report"]["unreachable"];
     assert_eq!(report["summary"]["confirmed_count"], 1);
     assert_eq!(
         report["modules"][0]["findings"][0]["qualified_name"],
@@ -1062,7 +1066,7 @@ fn run_profile_drives_unreachable_end_to_end() {
 }
 
 #[test]
-fn run_profile_drives_single_use_end_to_end() {
+fn run_profile_drives_narrowable_single_use_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(
         dir.path(),
@@ -1074,15 +1078,15 @@ fn run_profile_drives_single_use_end_to_end() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.inline]\npath = \"src\"\ntools = [\"single-use\"]\n\n\
-         [profile.inline.single-use]\nmax-loc = 10\nmax-cyclomatic = 3\ntop = 5\n",
+        "[profile.inline]\npath = \"src\"\ntools = [\"narrowable\"]\n\n\
+         [profile.inline.narrowable]\nsection = [\"single-use\"]\nmax-loc = 10\nmax-cyclomatic = 3\ntop = 5\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "inline"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "single-use");
-    let report = &json["results"][0]["report"];
+    assert_eq!(json["results"][0]["tool"], "narrowable");
+    let report = &json["results"][0]["report"]["single_use"];
     assert_eq!(report["thresholds"]["max_loc"], 10);
     assert_eq!(report["thresholds"]["max_cyclomatic"], 3);
     let candidates = report["candidates"].as_array().unwrap();
@@ -1092,7 +1096,7 @@ fn run_profile_drives_single_use_end_to_end() {
 }
 
 #[test]
-fn run_profile_drives_single_impl_end_to_end() {
+fn run_profile_drives_narrowable_single_impl_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(
         dir.path(),
@@ -1103,15 +1107,15 @@ fn run_profile_drives_single_impl_end_to_end() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.abstractions]\npath = \"src\"\ntools = [\"single-impl\"]\n\n\
-         [profile.abstractions.single-impl]\ntop = 5\n",
+        "[profile.abstractions]\npath = \"src\"\ntools = [\"narrowable\"]\n\n\
+         [profile.abstractions.narrowable]\nsection = [\"single-impl\"]\ntop = 5\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "abstractions"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "single-impl");
-    let report = &json["results"][0]["report"];
+    assert_eq!(json["results"][0]["tool"], "narrowable");
+    let report = &json["results"][0]["report"]["single_impl"];
     let findings = report["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 1, "got {findings:?}");
     assert_eq!(findings[0]["display_name"], "Store");
@@ -1122,7 +1126,7 @@ fn run_profile_drives_single_impl_end_to_end() {
 }
 
 #[test]
-fn run_profile_drives_test_only_end_to_end() {
+fn run_profile_drives_reach_test_only_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(
         dir.path(),
@@ -1137,15 +1141,15 @@ fn run_profile_drives_test_only_end_to_end() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.seams]\npath = \"src\"\ntools = [\"test-only\"]\n\n\
-         [profile.seams.test-only]\ntop = 5\n",
+        "[profile.seams]\npath = \"src\"\ntools = [\"reach\"]\n\n\
+         [profile.seams.reach]\nsection = [\"test-only\"]\ntop = 5\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "seams"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "test-only");
-    let report = &json["results"][0]["report"];
+    assert_eq!(json["results"][0]["tool"], "reach");
+    let report = &json["results"][0]["report"]["test_only"];
     let findings = report["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 1, "got {findings:?}");
     assert_eq!(findings[0]["qualified_name"], "crate::fixture");
@@ -1153,7 +1157,7 @@ fn run_profile_drives_test_only_end_to_end() {
 }
 
 #[test]
-fn run_profile_drives_untested_end_to_end() {
+fn run_profile_drives_reach_untested_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(
         dir.path(),
@@ -1169,15 +1173,19 @@ fn run_profile_drives_untested_end_to_end() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.gaps]\npath = \"src\"\ntools = [\"untested\"]\n\n\
-         [profile.gaps.untested]\ntop = 5\n",
+        "[profile.gaps]\npath = \"src\"\ntools = [\"reach\"]\n\n\
+         [profile.gaps.reach]\ntop = 5\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "gaps"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "untested");
-    let report = &json["results"][0]["report"];
+    assert_eq!(json["results"][0]["tool"], "reach");
+    assert_eq!(
+        json["results"][0]["report"]["sections"],
+        serde_json::json!(["untested", "test_only", "unreachable"]),
+    );
+    let report = &json["results"][0]["report"]["untested"];
     assert_eq!(report["summary"]["untested_function_count"], 1);
     assert_eq!(
         report["modules"][0]["functions"][0]["qualified_name"],
@@ -1186,7 +1194,7 @@ fn run_profile_drives_untested_end_to_end() {
 }
 
 #[test]
-fn run_profile_drives_visibility_end_to_end() {
+fn run_profile_drives_narrowable_visibility_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", "pub mod inner;\n");
     write_file(
@@ -1197,15 +1205,15 @@ fn run_profile_drives_visibility_end_to_end() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.exposure]\npath = \"src\"\ntools = [\"visibility\"]\n\n\
-         [profile.exposure.visibility]\ntop = 5\n",
+        "[profile.exposure]\npath = \"src\"\ntools = [\"narrowable\"]\n\n\
+         [profile.exposure.narrowable]\nsection = [\"visibility\"]\ntop = 5\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "exposure"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "visibility");
-    let report = &json["results"][0]["report"];
+    assert_eq!(json["results"][0]["tool"], "narrowable");
+    let report = &json["results"][0]["report"]["visibility"];
     let findings: Vec<(&str, &str)> = report["modules"]
         .as_array()
         .unwrap()
@@ -2163,5 +2171,21 @@ fn skills_install_reports_conflict_until_forced() {
         std::fs::read_to_string(&target)
             .unwrap()
             .contains("name: agent-lens")
+    );
+}
+
+#[test]
+fn a_merged_analyzer_name_points_at_its_new_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-lens"))
+        .args(["analyze", "untested", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("`analyze untested` is now `analyze reach --section untested`"),
+        "got: {stderr}",
     );
 }

@@ -29,10 +29,10 @@ Pick an analyzer by question:
     where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
     is this body just a forwarder?        analyze wrapper
-    is one caller all this function has?  analyze single-use
-    is one value all this param gets?     analyze parameters
+    is one caller all this function has?  analyze narrowable --section single-use
+    is one value all this param gets?     analyze narrowable --section parameters
     did I write this test twice?          analyze test-redundancy
-    is one impl all this trait has?       analyze single-impl
+    is one impl all this trait has?       analyze narrowable --section single-impl
     how many hops before real work?       analyze delegation
     does this type do too many things?    analyze cohesion
     which modules are entangled?          analyze coupling
@@ -42,10 +42,10 @@ Pick an analyzer by question:
     what breaks if I change this?         analyze impact
     did my diff sprawl or leave debris?   analyze footprint
     which level does this code sit on?    analyze layers
-    what has no test path guarding it?    analyze untested
-    what do only tests keep alive?        analyze test-only
-    can anything still reach this code?   analyze unreachable
-    is this `pub` wider than it needs?    analyze visibility
+    what has no test path guarding it?    analyze reach --section untested
+    what do only tests keep alive?        analyze reach --section test-only
+    can anything still reach this code?   analyze reach --section unreachable
+    is this `pub` wider than it needs?    analyze narrowable --section visibility
     who calls this / how do I get there?  analyze graph-query
     give me the raw call graph            analyze function-graph
 "
@@ -176,20 +176,6 @@ Examples:
     agent-lens analyze hubs src/ --exclude-tests --format md
 ";
 
-pub const SINGLE_IMPL: &str = "\
-Examples:
-
-    agent-lens analyze single-impl src/ --format md
-    agent-lens analyze single-impl src/ --top 10 --format md
-";
-
-pub const SINGLE_USE: &str = "\
-Examples:
-
-    agent-lens analyze single-use src/ --format md
-    agent-lens analyze single-use src/ --max-loc 12 --max-cyclomatic 4 --format md
-";
-
 pub const FOOTPRINT: &str = "\
 Examples:
 
@@ -204,13 +190,6 @@ Examples:
     agent-lens analyze test-redundancy crates/ --format md
     agent-lens analyze test-redundancy crates/ --threshold 0.9 --top 10 --format md
     agent-lens analyze test-redundancy crates/ --method pdg --no-reach-guard
-";
-
-pub const PARAMETERS: &str = "\
-Examples:
-
-    agent-lens analyze parameters src/ --format md
-    agent-lens analyze parameters src/ --min-call-sites 3 --format md
 ";
 
 pub const IMPACT: &str = "\
@@ -229,26 +208,22 @@ Examples:
     agent-lens analyze layers src/ --exclude-tests --top 30 --format md
 ";
 
-pub const TEST_ONLY: &str = "\
+pub const REACH: &str = "\
 Examples:
 
-    agent-lens analyze test-only src/ --format md
-    agent-lens analyze test-only src/ --top 10 --format md
+    agent-lens analyze reach . --format md
+    agent-lens analyze reach src/ --section untested --top 30 --format md
+    agent-lens analyze reach crates/ --section unreachable --tier unknown --format md
+    agent-lens analyze reach . --exclude 'benches/**' --format md
 ";
 
-pub const UNTESTED: &str = "\
+pub const NARROWABLE: &str = "\
 Examples:
 
-    agent-lens analyze untested src/ --format md
-    agent-lens analyze untested . --exclude 'benches/**' --top 30 --format md
-";
-
-pub const UNREACHABLE: &str = "\
-Examples:
-
-    agent-lens analyze unreachable . --format md
-    agent-lens analyze unreachable crates/ --tier unknown --format md
-    agent-lens analyze unreachable . --exclude 'benches/**' --top 30 --format md
+    agent-lens analyze narrowable . --format md
+    agent-lens analyze narrowable src/ --section single-use,parameters --format md
+    agent-lens analyze narrowable src/ --max-loc 12 --max-cyclomatic 4 --format md
+    agent-lens analyze narrowable crates/ --section visibility --exclude-tests
 ";
 
 pub const DELEGATION: &str = "\
@@ -257,14 +232,6 @@ Examples:
     agent-lens analyze delegation . --format md
     agent-lens analyze delegation crates/ --top 30 --format md
     agent-lens analyze delegation . --diff-only --format md
-";
-
-pub const VISIBILITY: &str = "\
-Examples:
-
-    agent-lens analyze visibility . --format md
-    agent-lens analyze visibility crates/ --top 30 --format md
-    agent-lens analyze visibility . --exclude-tests --format md
 ";
 
 pub const HOTSPOT: &str = "\

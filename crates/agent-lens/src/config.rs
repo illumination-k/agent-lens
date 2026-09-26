@@ -71,17 +71,12 @@ pub use crate::analyze::hotspot::HotspotOptions;
 pub use crate::analyze::hubs::HubsOptions;
 pub use crate::analyze::impact::ImpactOptions;
 pub use crate::analyze::layers::LayersOptions;
-pub use crate::analyze::parameters::ParametersOptions;
+pub use crate::analyze::narrowable::NarrowableOptions;
+pub use crate::analyze::reach::ReachOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
-pub use crate::analyze::single_impl::SingleImplOptions;
-pub use crate::analyze::single_use::SingleUseOptions;
-pub use crate::analyze::test_only::TestOnlyOptions;
 pub use crate::analyze::test_redundancy::TestRedundancyOptions;
-pub use crate::analyze::unreachable::UnreachableOptions;
-pub use crate::analyze::untested::UntestedOptions;
-pub use crate::analyze::visibility::VisibilityOptions;
 pub use crate::analyze::wrapper::WrapperOptions;
 
 /// File name searched for when discovering a project config.
@@ -177,7 +172,9 @@ pub struct Profile {
     #[serde(default)]
     pub layers: Option<LayersOptions>,
     #[serde(default)]
-    pub parameters: Option<ParametersOptions>,
+    pub narrowable: Option<NarrowableOptions>,
+    #[serde(default)]
+    pub reach: Option<ReachOptions>,
     #[serde(default)]
     pub graph_query: Option<GraphQueryOptions>,
     #[serde(default)]
@@ -187,19 +184,7 @@ pub struct Profile {
     #[serde(default)]
     pub delegation: Option<DelegationOptions>,
     #[serde(default)]
-    pub single_impl: Option<SingleImplOptions>,
-    #[serde(default)]
-    pub single_use: Option<SingleUseOptions>,
-    #[serde(default)]
-    pub test_only: Option<TestOnlyOptions>,
-    #[serde(default)]
     pub test_redundancy: Option<TestRedundancyOptions>,
-    #[serde(default)]
-    pub unreachable: Option<UnreachableOptions>,
-    #[serde(default)]
-    pub untested: Option<UntestedOptions>,
-    #[serde(default)]
-    pub visibility: Option<VisibilityOptions>,
     #[serde(default)]
     pub wrapper: Option<WrapperOptions>,
 }
@@ -356,8 +341,12 @@ impl ProfilePaths {
 }
 
 /// One of the on-demand analyzers a profile can run.
+///
+/// Deserialized from its [`ToolName::as_str`] spelling. A tool merged
+/// into another fails with the name of the analyzer and section that now
+/// carry it, so a stale profile says how to fix itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(try_from = "String")]
 pub enum ToolName {
     ChangeEntropy,
     CoChange,
@@ -376,21 +365,77 @@ pub enum ToolName {
     Hubs,
     Impact,
     Layers,
-    Parameters,
+    Narrowable,
+    Reach,
     Risk,
     Search,
     Similarity,
-    SingleImpl,
-    SingleUse,
-    TestOnly,
     TestRedundancy,
-    Unreachable,
-    Untested,
-    Visibility,
     Wrapper,
 }
 
+/// Analyzers that became a section of another: `(old name, analyzer,
+/// section)`.
+pub const MERGED_TOOLS: [(&str, &str, &str); 7] = [
+    ("untested", "reach", "untested"),
+    ("test-only", "reach", "test-only"),
+    ("unreachable", "reach", "unreachable"),
+    ("single-use", "narrowable", "single-use"),
+    ("single-impl", "narrowable", "single-impl"),
+    ("parameters", "narrowable", "parameters"),
+    ("visibility", "narrowable", "visibility"),
+];
+
+impl TryFrom<String> for ToolName {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        if let Some(tool) = Self::ALL.into_iter().find(|t| t.as_str() == name) {
+            return Ok(tool);
+        }
+        if let Some((_, tool, section)) = MERGED_TOOLS.iter().find(|(old, ..)| *old == name) {
+            return Err(format!(
+                "`{name}` is now the `{section}` section of `{tool}`: list `{tool}` in `tools` \
+                 (set `section = [\"{section}\"]` in its table to run only this section)"
+            ));
+        }
+        let known: Vec<&str> = Self::ALL.iter().map(|t| t.as_str()).collect();
+        Err(format!(
+            "unknown tool `{name}`, expected one of: {}",
+            known.join(", ")
+        ))
+    }
+}
+
 impl ToolName {
+    /// Every analyzer, in `as_str` order.
+    pub const ALL: [Self; 24] = [
+        Self::ChangeEntropy,
+        Self::CoChange,
+        Self::Cohesion,
+        Self::Communities,
+        Self::Complexity,
+        Self::Coupling,
+        Self::ContextSpan,
+        Self::Cycles,
+        Self::Delegation,
+        Self::Footprint,
+        Self::FunctionGraph,
+        Self::GraphQuery,
+        Self::HiddenCoupling,
+        Self::Hotspot,
+        Self::Hubs,
+        Self::Impact,
+        Self::Layers,
+        Self::Narrowable,
+        Self::Reach,
+        Self::Risk,
+        Self::Search,
+        Self::Similarity,
+        Self::TestRedundancy,
+        Self::Wrapper,
+    ];
+
     /// Stable lowercase spelling, matching the `analyze` subcommand name.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -411,17 +456,12 @@ impl ToolName {
             Self::Hubs => "hubs",
             Self::Impact => "impact",
             Self::Layers => "layers",
-            Self::Parameters => "parameters",
+            Self::Narrowable => "narrowable",
+            Self::Reach => "reach",
             Self::Risk => "risk",
             Self::Search => "search",
             Self::Similarity => "similarity",
-            Self::SingleImpl => "single-impl",
-            Self::SingleUse => "single-use",
-            Self::TestOnly => "test-only",
             Self::TestRedundancy => "test-redundancy",
-            Self::Unreachable => "unreachable",
-            Self::Untested => "untested",
-            Self::Visibility => "visibility",
             Self::Wrapper => "wrapper",
         }
     }
@@ -696,6 +736,52 @@ since = "90.days.ago"
     }
 
     #[test]
+    fn every_tool_name_round_trips_through_its_spelling() {
+        for tool in ToolName::ALL {
+            assert_eq!(ToolName::try_from(tool.as_str().to_owned()), Ok(tool));
+        }
+    }
+
+    /// A merged tool's name is not just unknown: the error names the
+    /// analyzer and section that carry it now.
+    #[rstest]
+    #[case("untested", "`untested` section of `reach`")]
+    #[case("test-only", "`test-only` section of `reach`")]
+    #[case("unreachable", "`unreachable` section of `reach`")]
+    #[case("single-use", "`single-use` section of `narrowable`")]
+    #[case("single-impl", "`single-impl` section of `narrowable`")]
+    #[case("parameters", "`parameters` section of `narrowable`")]
+    #[case("visibility", "`visibility` section of `narrowable`")]
+    #[case("typo", "unknown tool `typo`, expected one of: change-entropy")]
+    fn a_removed_tool_name_says_where_it_went(#[case] name: &str, #[case] expected: &str) {
+        let err = toml::from_str::<Config>(&format!(
+            "[profile.x]\npath = \"src\"\ntools = [\"{name}\"]\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains(expected), "{err}");
+    }
+
+    #[test]
+    fn parses_reach_and_narrowable_sections() {
+        use crate::analyze::{NarrowableSection, ReachSection};
+        let config: Config = toml::from_str(
+            "[profile.x]\npath = \"src\"\ntools = [\"reach\", \"narrowable\"]\n\n\
+             [profile.x.reach]\nsection = [\"test-only\"]\ntier = \"likely\"\n\n\
+             [profile.x.narrowable]\nsection = [\"parameters\", \"visibility\"]\nmin-call-sites = 3\n",
+        )
+        .unwrap();
+        let profile = config.profile("x").unwrap();
+        let reach = profile.reach.as_ref().unwrap();
+        assert_eq!(reach.section, [ReachSection::TestOnly]);
+        let narrowable = profile.narrowable.as_ref().unwrap();
+        assert_eq!(
+            narrowable.section,
+            [NarrowableSection::Parameters, NarrowableSection::Visibility]
+        );
+        assert_eq!(narrowable.min_call_sites, Some(3));
+    }
+
+    #[test]
     fn parses_impact_options() {
         let config: Config = toml::from_str(
             "[profile.blast]\npath = \"src/\"\ntools = [\"impact\"]\n\n\
@@ -888,7 +974,7 @@ since = "90.days.ago"
     #[case::several("path = [\"internal\", \"cmd\"]", &["internal", "cmd"])]
     fn path_accepts_a_string_or_an_array(#[case] path: &str, #[case] expected: &[&str]) {
         let config: Config = toml::from_str(&format!(
-            "[profile.backend]\n{path}\ntools = [\"similarity\", \"unreachable\"]\n",
+            "[profile.backend]\n{path}\ntools = [\"similarity\", \"reach\"]\n",
         ))
         .unwrap();
         let expected: Vec<PathBuf> = expected.iter().map(PathBuf::from).collect();

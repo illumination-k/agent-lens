@@ -8,9 +8,8 @@ use agent_lens::analyze::{
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
     FootprintAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
     HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
-    OutputFormat, ParametersAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
-    SingleImplAnalyzer, SingleUseAnalyzer, TestOnlyAnalyzer, TestRedundancyAnalyzer,
-    UnreachableAnalyzer, UntestedAnalyzer, VisibilityAnalyzer, WrapperAnalyzer,
+    NarrowableAnalyzer, OutputFormat, ReachAnalyzer, RiskAnalyzer, SearchAnalyzer,
+    SimilarityAnalyzer, TestRedundancyAnalyzer, WrapperAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -19,10 +18,9 @@ use super::args::{
     AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
     AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeFootprintArgs, AnalyzeGraphQueryArgs,
     AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
-    AnalyzeLayersArgs, AnalyzeParametersArgs, AnalyzePathArgs, AnalyzeRiskArgs, AnalyzeRootArgs,
-    AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeSingleImplArgs, AnalyzeSingleUseArgs,
-    AnalyzeTestOnlyArgs, AnalyzeTestRedundancyArgs, AnalyzeUnreachableArgs, AnalyzeUntestedArgs,
-    AnalyzeVisibilityArgs, AnalyzeWrapperArgs,
+    AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzePathArgs, AnalyzeReachArgs, AnalyzeRiskArgs,
+    AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeTestRedundancyArgs,
+    AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -135,22 +133,6 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.footprint.clone().unwrap_or_default(),
         }),
-        config::ToolName::SingleImpl => AnalyzeCommand::SingleImpl(AnalyzeSingleImplArgs {
-            common,
-            opts: profile.single_impl.clone().unwrap_or_default(),
-        }),
-        config::ToolName::SingleUse => AnalyzeCommand::SingleUse(AnalyzeSingleUseArgs {
-            common,
-            opts: profile.single_use.clone().unwrap_or_default(),
-        }),
-        config::ToolName::Parameters => AnalyzeCommand::Parameters(AnalyzeParametersArgs {
-            common,
-            opts: profile.parameters.clone().unwrap_or_default(),
-        }),
-        config::ToolName::TestOnly => AnalyzeCommand::TestOnly(AnalyzeTestOnlyArgs {
-            common,
-            opts: profile.test_only.clone().unwrap_or_default(),
-        }),
         config::ToolName::TestRedundancy => {
             AnalyzeCommand::TestRedundancy(AnalyzeTestRedundancyArgs {
                 common,
@@ -161,6 +143,14 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.layers.clone().unwrap_or_default(),
         }),
+        config::ToolName::Narrowable => AnalyzeCommand::Narrowable(AnalyzeNarrowableArgs {
+            common,
+            opts: profile.narrowable.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Reach => AnalyzeCommand::Reach(AnalyzeReachArgs {
+            common,
+            opts: profile.reach.clone().unwrap_or_default(),
+        }),
         config::ToolName::Risk => AnalyzeCommand::Risk(AnalyzeRiskArgs {
             common,
             opts: profile.risk.clone().unwrap_or_default(),
@@ -168,18 +158,6 @@ pub(super) fn build_analyze_command(
         config::ToolName::Similarity => AnalyzeCommand::Similarity(AnalyzeSimilarityArgs {
             common,
             opts: profile.similarity.clone().unwrap_or_default(),
-        }),
-        config::ToolName::Unreachable => AnalyzeCommand::Unreachable(AnalyzeUnreachableArgs {
-            common,
-            opts: profile.unreachable.clone().unwrap_or_default(),
-        }),
-        config::ToolName::Untested => AnalyzeCommand::Untested(AnalyzeUntestedArgs {
-            common,
-            opts: profile.untested.clone().unwrap_or_default(),
-        }),
-        config::ToolName::Visibility => AnalyzeCommand::Visibility(AnalyzeVisibilityArgs {
-            common,
-            opts: profile.visibility.clone().unwrap_or_default(),
         }),
         config::ToolName::Wrapper => AnalyzeCommand::Wrapper(AnalyzeWrapperArgs {
             common,
@@ -261,15 +239,10 @@ impl_with_analyze_path_args!(
     FootprintAnalyzer,
     ImpactAnalyzer,
     LayersAnalyzer,
-    ParametersAnalyzer,
+    NarrowableAnalyzer,
+    ReachAnalyzer,
     RiskAnalyzer,
-    SingleImplAnalyzer,
-    SingleUseAnalyzer,
-    TestOnlyAnalyzer,
     TestRedundancyAnalyzer,
-    UnreachableAnalyzer,
-    UntestedAnalyzer,
-    VisibilityAnalyzer,
     WrapperAnalyzer,
 );
 
@@ -357,16 +330,11 @@ impl AnalyzeCommand {
                 Footprint => FootprintAnalyzer,
                 Impact => ImpactAnalyzer,
                 Layers => LayersAnalyzer,
-                Parameters => ParametersAnalyzer,
+                Narrowable => NarrowableAnalyzer,
+                Reach => ReachAnalyzer,
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,
-                SingleImpl => SingleImplAnalyzer,
-                SingleUse => SingleUseAnalyzer,
-                TestOnly => TestOnlyAnalyzer,
                 TestRedundancy => TestRedundancyAnalyzer,
-                Unreachable => UnreachableAnalyzer,
-                Untested => UntestedAnalyzer,
-                Visibility => VisibilityAnalyzer,
                 Wrapper => WrapperAnalyzer,
             }
             from_options {
@@ -385,7 +353,7 @@ impl AnalyzeCommand {
 mod tests {
     use agent_lens::analyze::{
         DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphQueryKind, PairKey,
-        SimilarityMethod, UnreachableTier,
+        ReachSection, SimilarityMethod, UnreachableTier,
     };
     use agent_lens::test_support::write_file;
     use clap::Parser;
@@ -603,68 +571,6 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
-    fn build_analyze_command_maps_single_use_options() {
-        let profile: config::Profile = toml::from_str(
-            "path = \"crates\"\ntools = [\"single-use\"]\n\n\
-             [single-use]\nmax-loc = 12\nmax-cyclomatic = 4\ntop = 7\n",
-        )
-        .unwrap();
-        let cmd = build_analyze_command(
-            config::ToolName::SingleUse,
-            &profile,
-            &[PathBuf::from("crates")],
-            OutputFormat::Md,
-        )
-        .unwrap();
-        let AnalyzeCommand::SingleUse(args) = cmd else {
-            panic!("expected analyze single-use");
-        };
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.max_loc, Some(12));
-        assert_eq!(args.opts.max_cyclomatic, Some(4));
-        assert_eq!(args.opts.top, Some(7));
-    }
-
-    #[test]
-    fn build_analyze_command_maps_single_impl_options() {
-        let profile: config::Profile = toml::from_str(
-            "path = \"crates\"\ntools = [\"single-impl\"]\n\n[single-impl]\ntop = 6\n",
-        )
-        .unwrap();
-        let cmd = build_analyze_command(
-            config::ToolName::SingleImpl,
-            &profile,
-            &[PathBuf::from("crates")],
-            OutputFormat::Md,
-        )
-        .unwrap();
-        let AnalyzeCommand::SingleImpl(args) = cmd else {
-            panic!("expected analyze single-impl");
-        };
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(6));
-    }
-
-    #[test]
-    fn build_analyze_command_maps_test_only_options() {
-        let profile: config::Profile =
-            toml::from_str("path = \"crates\"\ntools = [\"test-only\"]\n\n[test-only]\ntop = 7\n")
-                .unwrap();
-        let cmd = build_analyze_command(
-            config::ToolName::TestOnly,
-            &profile,
-            &[PathBuf::from("crates")],
-            OutputFormat::Md,
-        )
-        .unwrap();
-        let AnalyzeCommand::TestOnly(args) = cmd else {
-            panic!("expected analyze test-only");
-        };
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(7));
-    }
-
-    #[test]
     fn build_analyze_command_maps_hubs_options() {
         let profile: config::Profile =
             toml::from_str("path = \"crates\"\ntools = [\"hubs\"]\n\n[hubs]\ntop = 7\n").unwrap();
@@ -723,26 +629,6 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
-    fn build_analyze_command_maps_visibility_options() {
-        let profile: config::Profile = toml::from_str(
-            "path = \"crates\"\ntools = [\"visibility\"]\n\n[visibility]\ntop = 9\n",
-        )
-        .unwrap();
-        let cmd = build_analyze_command(
-            config::ToolName::Visibility,
-            &profile,
-            &[PathBuf::from("crates")],
-            OutputFormat::Md,
-        )
-        .unwrap();
-        let AnalyzeCommand::Visibility(args) = cmd else {
-            panic!("expected analyze visibility");
-        };
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(9));
-    }
-
-    #[test]
     fn build_analyze_command_maps_delegation_options() {
         let profile: config::Profile = toml::from_str(
             "path = \"crates\"\ntools = [\"delegation\"]\n\n\
@@ -765,44 +651,51 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
-    fn build_analyze_command_maps_unreachable_options() {
+    fn build_analyze_command_maps_reach_options() {
         let profile: config::Profile = toml::from_str(
-            "path = \"crates\"\ntools = [\"unreachable\"]\n\n\
-             [unreachable]\ntop = 6\ntier = \"likely\"\n",
+            "path = \"crates\"\ntools = [\"reach\"]\n\n\
+             [reach]\ntop = 6\ntier = \"likely\"\nsection = [\"unreachable\"]\n",
         )
         .unwrap();
         let cmd = build_analyze_command(
-            config::ToolName::Unreachable,
+            config::ToolName::Reach,
             &profile,
             &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
-        let AnalyzeCommand::Unreachable(args) = cmd else {
-            panic!("expected analyze unreachable");
+        let AnalyzeCommand::Reach(args) = cmd else {
+            panic!("expected analyze reach");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(6));
         assert_eq!(args.opts.tier, Some(UnreachableTier::Likely));
+        assert_eq!(args.opts.section, [ReachSection::Unreachable]);
     }
 
     #[test]
-    fn build_analyze_command_maps_untested_options() {
-        let profile: config::Profile =
-            toml::from_str("path = \"crates\"\ntools = [\"untested\"]\n\n[untested]\ntop = 11\n")
-                .unwrap();
+    fn build_analyze_command_maps_narrowable_options() {
+        let profile: config::Profile = toml::from_str(
+            "path = \"crates\"\ntools = [\"narrowable\"]\n\n\
+             [narrowable]\nmax-loc = 12\nmax-cyclomatic = 4\nmin-call-sites = 3\ntop = 7\n",
+        )
+        .unwrap();
         let cmd = build_analyze_command(
-            config::ToolName::Untested,
+            config::ToolName::Narrowable,
             &profile,
             &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
-        let AnalyzeCommand::Untested(args) = cmd else {
-            panic!("expected analyze untested");
+        let AnalyzeCommand::Narrowable(args) = cmd else {
+            panic!("expected analyze narrowable");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
-        assert_eq!(args.opts.top, Some(11));
+        assert_eq!(args.opts.max_loc, Some(12));
+        assert_eq!(args.opts.max_cyclomatic, Some(4));
+        assert_eq!(args.opts.min_call_sites, Some(3));
+        assert_eq!(args.opts.top, Some(7));
+        assert!(args.opts.section.is_empty());
     }
 
     #[test]

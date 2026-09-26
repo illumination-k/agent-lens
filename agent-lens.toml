@@ -111,56 +111,31 @@ top = 15
 #
 # So this profile keeps the tests and widens to the workspace.
 #
-# `single-use` lives here rather than in `self` for the same reason:
+# `narrowable` lives here rather than in `self` for the same reason:
 # under `exclude-tests` a directly-tested helper loses both its
-# test-seam caveat (its test callers are gone from the graph) and the
-# raw-reference scan's view of the test files that mention it, so a
-# deliberate test seam ranks as a clean inline candidate. With tests
-# kept, both signals fire.
+# single-use test-seam caveat (its test callers are gone from the graph)
+# and the raw-reference scan's view of the test files that mention it,
+# so a deliberate test seam ranks as a clean inline candidate. The
+# `parameters` section's tests-vary-value caveat and the `single-impl`
+# section's mock-seam caveat need the test code kept visible too. With
+# tests kept, all of them fire.
 [profile.self-reach]
 path = "crates"
 format = "md"
 exclude = ["agent-lens/benches/**"]
-# `test-only` and `single-impl` live here for the same reason: the first
-# is defined relative to test entry points, and the second's mock-seam
-# caveat needs the `#[cfg(test)]` implementors kept visible.
-tools = [
-  "untested",
-  "unreachable",
-  "visibility",
-  "single-use",
-  "parameters",
-  "test-only",
-  "single-impl",
-]
+# `reach`'s `untested` and `test-only` sections are defined relative to
+# test entry points, so it needs the tests kept as well.
+tools = ["reach", "narrowable"]
 
-[profile.self-reach.untested]
-top = 10
-
-[profile.self-reach.unreachable]
-top = 10
-
-[profile.self-reach.visibility]
+[profile.self-reach.reach]
 top = 10
 
 # Defaults were calibrated on this repository (58% of its production
 # functions are single-caller; loc p75 = 29, cyclomatic p75 = 4), so
-# only the markdown cap is set here. Re-read the report's calibration
-# section after large refactors and retune max-loc / max-cyclomatic if
-# the distribution has moved.
-[profile.self-reach.single-use]
-top = 10
-
-# `parameters` keeps tests for the same reason as `single-use`: a test
-# call site passing a different value is the tests-vary-value caveat,
-# and dropping the test files would silently promote deliberate seams.
-[profile.self-reach.parameters]
-top = 10
-
-[profile.self-reach.test-only]
-top = 10
-
-[profile.self-reach.single-impl]
+# only the markdown cap is set here. Re-read the single-use section's
+# calibration after large refactors and retune max-loc / max-cyclomatic
+# if the distribution has moved.
+[profile.self-reach.narrowable]
 top = 10
 
 # The same lens turned on the test corpus. Test code has its own failure
@@ -228,9 +203,9 @@ min-score = 3
 # The web viewer: the TypeScript half of the repo, and the only profile
 # that drives the TS front-end end to end.
 #
-# `unreachable` and `visibility` are omitted deliberately — neither
-# extracts export status for TypeScript, so both would spend a walk to
-# report on an empty audit set.
+# `reach` is omitted deliberately, and `narrowable` runs only its
+# `single-use` section — export status is not extracted for TypeScript,
+# so the others would spend a walk to report on an empty audit set.
 [profile.web]
 path = "web/src"
 format = "md"
@@ -240,7 +215,7 @@ tools = [
   "cohesion",
   "similarity",
   "wrapper",
-  "single-use",
+  "narrowable",
   "cycles",
   "layers",
   "hubs",
@@ -261,7 +236,8 @@ min-lines = 6
 [profile.web.layers]
 top = 10
 
-[profile.web.single-use]
+[profile.web.narrowable]
+section = ["single-use"]
 top = 10
 
 [profile.web.hubs]

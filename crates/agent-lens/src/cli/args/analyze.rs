@@ -16,17 +16,12 @@ use agent_lens::analyze::hotspot::HotspotOptions;
 use agent_lens::analyze::hubs::HubsOptions;
 use agent_lens::analyze::impact::ImpactOptions;
 use agent_lens::analyze::layers::LayersOptions;
-use agent_lens::analyze::parameters::ParametersOptions;
+use agent_lens::analyze::narrowable::NarrowableOptions;
+use agent_lens::analyze::reach::ReachOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
-use agent_lens::analyze::single_impl::SingleImplOptions;
-use agent_lens::analyze::single_use::SingleUseOptions;
-use agent_lens::analyze::test_only::TestOnlyOptions;
 use agent_lens::analyze::test_redundancy::TestRedundancyOptions;
-use agent_lens::analyze::unreachable::UnreachableOptions;
-use agent_lens::analyze::untested::UntestedOptions;
-use agent_lens::analyze::visibility::VisibilityOptions;
 use agent_lens::analyze::wrapper::WrapperOptions;
 use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
 use clap::{Args, Subcommand};
@@ -501,103 +496,72 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// `--doc-overlap`.
     #[command(after_long_help = examples::SIMILARITY)]
     Similarity(AnalyzeSimilarityArgs),
-    /// Report traits and interfaces with at most one production
-    /// implementor.
-    ///
-    /// Inventories every Rust `trait` and Go `interface` declared in
-    /// the analyzed tree and takes an implementor census: `impl Trait
-    /// for Type` blocks matched by the trait path's trailing identifier
-    /// for Rust, and in-tree types whose method sets cover the
-    /// interface by name and parameter count for Go. Declarations with
-    /// at most one production implementor are reported — an abstraction
-    /// with one user is a candidate for replacement with the concrete
-    /// type, not a verdict — with caveats where the indirection is
-    /// deliberate or the census weaker: a test implementor (a mock
-    /// seam), `dyn` references (dynamic dispatch), public visibility
-    /// (implementors outside the tree), a shared declaration name. A
-    /// raw-name scan counts references outside the declaration and its
-    /// implementors' blocks, which is what removing the abstraction
-    /// costs. An implementor-count histogram gives the tree's base
-    /// rate. Rust and Go only. JSON is the default; `--format md` caps
-    /// each section at `--top` (default 20).
-    #[command(name = "single-impl", after_long_help = examples::SINGLE_IMPL)]
-    SingleImpl(AnalyzeSingleImplArgs),
-    /// Report functions with exactly one resolved production caller as
-    /// inline candidates.
+    /// Report declarations wider than their uses: single-use functions,
+    /// single-impl abstractions, constant or dead parameters, and
+    /// over-exposed visibility.
     ///
     /// Builds the same heuristic call graph as `analyze function-graph`
-    /// and lists the non-test functions exactly one resolved caller
-    /// needs, provided the body is small and simple enough to fold into
-    /// that caller (`--max-loc`, `--max-cyclomatic`; both absolute and
-    /// per-repository on purpose). Each row names the caller and the
-    /// call sites, and carries caveats where the single-caller claim or
-    /// the edit is weaker: wider-than-private visibility, direct test
-    /// callers, several call sites, a cross-module caller, ambiguous or
-    /// fallback-resolved inbound edges. Trait/interface methods,
-    /// functions with live annotations, and self-recursive functions
-    /// are excluded outright. Fan-in counts resolved edges only, so a
-    /// hidden caller (a macro body, an unresolved call site) is
-    /// possible — a raw-name scan therefore caveats any row whose bare
-    /// name is written outside its definition and its known callers,
-    /// and the report says what the scan cannot see (files the graph
-    /// did not scan). A
-    /// calibration section carries the loc and cyclomatic distribution
-    /// over every single-caller function, so thresholds can be set from
-    /// one run instead of guessed. The parser is chosen from each file
-    /// extension (Rust, TypeScript/JavaScript, Python, or Go). JSON is
-    /// the default; `--format md` caps the lists at `--top`
+    /// and reports four kinds of candidate edit, each a section and a
+    /// full report with its own caveats. `single-use`: a non-test
+    /// function exactly one resolved caller needs, small and simple
+    /// enough to inline (`--max-loc`, `--max-cyclomatic`), with a
+    /// calibration section of the loc and cyclomatic distribution over
+    /// every single-caller function. `single-impl`: a Rust `trait` or Go
+    /// `interface` with at most one production implementor (`impl Trait
+    /// for Type` blocks; in-tree Go types whose method sets cover the
+    /// interface), caveated when the indirection is deliberate — a test
+    /// implementor, `dyn` references, public visibility. `parameters`:
+    /// a parameter every resolved production call site passes the same
+    /// literal or constant path (from `--min-call-sites`, default 2), a
+    /// parameter no call site passes, or one the body never reads.
+    /// `visibility`: a `pub` / exported function whose resolved callers
+    /// all sit in a narrower module, with the visibility they would
+    /// still permit; narrowing is compiler-verified, so a wrong row
+    /// costs a failed build. Fan-in counts resolved edges only, so
+    /// every section backs its rows with a raw-name scan and demotes
+    /// with a caveat rather than dropping; trait/interface methods and
+    /// annotated functions are excluded outright where their signature
+    /// is not theirs to change. `single-impl` and `visibility` read
+    /// Rust and Go only. The sections share one graph build.
+    /// `--section` picks the sections (default all four). JSON nests
+    /// each section's report under its key and is the default;
+    /// `--format md` stacks them and caps each listing at `--top`
     /// (default 20).
-    #[command(name = "single-use", after_long_help = examples::SINGLE_USE)]
-    SingleUse(AnalyzeSingleUseArgs),
-    /// Report constant arguments and dead parameters.
+    #[command(after_long_help = examples::NARROWABLE)]
+    Narrowable(AnalyzeNarrowableArgs),
+    /// Report who reaches each production function: untested,
+    /// test-only, and unreachable code.
     ///
     /// Builds the same heuristic call graph as `analyze function-graph`
-    /// with per-call-site argument shapes, and asks two questions per
-    /// declared parameter. Constant argument: does every resolved
-    /// production call site pass the same literal (or the same
-    /// constant-looking path)? The candidate edit is inlining the value
-    /// and dropping the parameter; a Python/TypeScript parameter no
-    /// call site ever passes is reported as default-only. Dead
-    /// parameter: does the body ever read the name past its
-    /// declaration? The check is textual (mentions in strings or
-    /// comments count as reads), so it under-reports. "Every call
-    /// site" is what the graph could see: sites with spreads,
-    /// unmatched keywords, or arity mismatches, ambiguous inbound
-    /// edges, raw name references, and public/exported visibility each
-    /// demote a row with a caveat. Trait/interface methods and
-    /// annotated functions are excluded outright — their signatures
-    /// are not theirs to change. A parameter with one call site is
-    /// `analyze single-use`'s finding, so `--min-call-sites` defaults
-    /// to 2; a calibration section reports how many parameters have
-    /// 1 / 2 / 3+ distinct values so the threshold can be set per
-    /// repository. The parser is chosen from each file extension
-    /// (Rust, TypeScript/JavaScript, Python, or Go). JSON is the
-    /// default; `--format md` caps the lists at `--top` (default 20).
-    #[command(after_long_help = examples::PARAMETERS)]
-    Parameters(AnalyzeParametersArgs),
-    /// Report production functions only tests keep alive.
-    ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
-    /// and lists the non-test functions no resolved call path from any
-    /// production entry point (`main`, a public/exported declaration, a
-    /// live annotation) reaches, while a test does — the code `analyze
-    /// unreachable` never reports (tests root its traversal) and
-    /// `analyze untested` blesses (tests do reach it). The candidate
-    /// edit is moving the function into the language's test scope, or
-    /// deleting it together with the tests that exist only to exercise
-    /// it. Public/exported declarations whose resolved callers are all
-    /// tests are listed as a separate, weaker section — in a library a
-    /// consumer outside the analyzed tree cannot be ruled out. Rows
-    /// carry caveats where the claim is weaker (crate-restricted
-    /// visibility, trait/interface dispatch, ambiguous inbound calls,
-    /// the bare name written in a production body), and a raw-name scan
-    /// counts unattributed references (imports, attributes, top-level
-    /// macros) informationally. Rust and Go only — TypeScript and
-    /// Python carry no extracted export status, and the report counts
-    /// what it skipped. JSON is the default; `--format md` caps each
-    /// section at `--top` (default 20).
-    #[command(name = "test-only", after_long_help = examples::TEST_ONLY)]
-    TestOnly(AnalyzeTestOnlyArgs),
+    /// and places every production function in one cell of
+    /// reached-from-entries × reached-from-tests, where entries are
+    /// `main`, Go `init`, `pub` / exported declarations, and anything
+    /// carrying a non-inert annotation. Each off-diagonal cell is a
+    /// section, and each section is a full report with its own bounds.
+    /// `untested`: entries reach it, no test does — a forward walk from
+    /// every test function over resolved edges, grouped by module and
+    /// ranked by untested LOC; structural, not coverage, and an upper
+    /// bound, since integration tests that drive the built binary have
+    /// no in-graph caller. `test-only`: a test reaches it, no entry does
+    /// — the candidate edit is moving it into the language's test
+    /// scope; public declarations whose resolved callers are all tests
+    /// are a separate, weaker list. `unreachable`: neither does — after
+    /// a raw identifier-reference scan each row lands in a tier:
+    /// `confirmed` (private, unreferenced, deletable on this evidence),
+    /// `likely` (the declaration reaches outside the analyzed path),
+    /// `unknown` (trait or interface dispatch, an annotation, an
+    /// ambiguous call site, a raw reference); clusters that only call
+    /// each other are islands with a deletion order. Export status is
+    /// extracted for Rust and Go only, so `test-only` and `unreachable`
+    /// judge those languages and count the rest. `--exclude-tests`
+    /// removes the test roots and every section says so. The sections
+    /// share one graph build. `--section` picks the cells (default all
+    /// three). JSON nests each section's report under its key and is
+    /// the default; `--format md` stacks them, caps each listing at
+    /// `--top` (default 20), and renders `unreachable` from `confirmed`
+    /// up (`--tier` widens it).
+    #[command(after_long_help = examples::REACH)]
+    Reach(AnalyzeReachArgs),
     /// Report tests that are near-copies of each other, and which one
     /// of each set to keep.
     ///
@@ -627,84 +591,6 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// group list at `--top` (default 20).
     #[command(name = "test-redundancy", after_long_help = examples::TEST_REDUNDANCY)]
     TestRedundancy(AnalyzeTestRedundancyArgs),
-    /// Report production functions with no static call path from any
-    /// test function.
-    ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
-    /// and walks forward from every test function over resolved call
-    /// edges; the production functions the walk never reaches are the
-    /// report, grouped by module and ranked by untested LOC. This is a
-    /// structural complement to coverage — no execution, no
-    /// instrumentation — and it measures "no resolved call path from a
-    /// test function", not "uncovered": integration tests that drive the
-    /// built binary reach functions with no in-graph test caller, and
-    /// those are listed here anyway. Only resolved edges are traversable,
-    /// so the listing is an upper bound; unresolved and ambiguous call
-    /// sites leaving test-reached code are counted, and a function an
-    /// ambiguous site might reach is flagged on its own row.
-    /// `--exclude-tests` removes the traversal's starting points and is
-    /// reported as such. The parser is chosen from each file extension
-    /// (Rust, TypeScript/JavaScript, Python, or Go); other extensions are
-    /// ignored silently. JSON is the default; `--format md` caps the
-    /// module listing at `--top` (default 20).
-    #[command(after_long_help = examples::UNTESTED)]
-    Untested(AnalyzeUntestedArgs),
-    /// Report functions no call path from an entry point reaches, in
-    /// confidence tiers.
-    ///
-    /// Builds the same heuristic call graph as `analyze function-graph`,
-    /// walks forward from every entry point (`main`, Go `init`, test
-    /// functions, `pub` / exported declarations, and anything carrying a
-    /// non-inert annotation), and reports what the walk never reaches.
-    /// The entry set is emitted with the report, because every verdict
-    /// is relative to it. Each candidate then goes through a raw
-    /// identifier-reference scan over the scanned sources — a name
-    /// written in a macro body, a string, or an expression the parser
-    /// did not attribute is a reason to stop trusting the graph — and
-    /// lands in one of three tiers: `confirmed` (private/unexported,
-    /// unreachable, unreferenced, no caveat: deletable on this evidence
-    /// alone), `likely` (nothing in the analyzed path uses it, but the
-    /// declaration reaches outside it), `unknown` (a lead, demoted by
-    /// trait or interface dispatch, an annotation, an ambiguous call
-    /// site, or a raw reference). The direction of soundness is
-    /// deliberate: dead code this misses is expected, a `confirmed` row
-    /// that is live is a bug. Clusters of unreachable functions that
-    /// only call each other are reported as islands with their total LOC
-    /// and a deletion order. Export status is extracted for Rust and Go
-    /// only; TypeScript and Python functions are treated as entry points
-    /// and never judged. `--exclude-tests` removes both the test entry
-    /// points and the references test bodies hold, and is reported as
-    /// such. JSON is the default and always carries every tier;
-    /// `--format md` leads with `confirmed` (`--tier` widens it) and
-    /// caps the module listing at `--top` (default 20).
-    #[command(after_long_help = examples::UNREACHABLE)]
-    Unreachable(AnalyzeUnreachableArgs),
-    /// Report `pub` / exported functions no caller outside a narrower
-    /// scope uses.
-    ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
-    /// and folds each public function's resolved callers into the
-    /// narrowest module containing all of them; when that is narrower
-    /// than the declaration, the function is listed with the visibility
-    /// its callers would still permit (`drop pub`, `pub(in crate::cli)`,
-    /// `pub(in ...)`, `pub(crate)`, or unexporting for Go). Narrowing is
-    /// compiler-verified, so a wrong row costs a failed build rather
-    /// than lost code. Only resolved edges carry a caller module:
-    /// ambiguous and name-matching unresolved call sites from outside
-    /// the proposed scope are counted per row as the reason to check it
-    /// first. An exported Go method matching a method of an interface
-    /// declared in the analyzed tree (same name and parameter count) is
-    /// annotated `may satisfy interface ...` and ranked after the
-    /// unannotated rows of its bucket: its calls can dispatch through
-    /// the interface, so a missing caller is expected rather than
-    /// evidence. Callers outside the analyzed path are invisible, so a
-    /// single library crate's own API surface looks crate-internal —
-    /// the report says so when only one crate is in scope. Export status
-    /// is extracted for Rust and Go only; TypeScript and Python
-    /// functions are counted as skipped. JSON is the default;
-    /// `--format md` caps the module listing at `--top` (default 20).
-    #[command(after_long_help = examples::VISIBILITY)]
-    Visibility(AnalyzeVisibilityArgs),
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
@@ -922,38 +808,6 @@ pub(in crate::cli) struct AnalyzeSimilarityArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeUnreachableArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: UnreachableOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeUntestedArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: UntestedOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeSingleUseArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: SingleUseOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeParametersArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: ParametersOptions,
-}
-
-#[derive(Debug, Clone, Args)]
 pub(in crate::cli) struct AnalyzeTestRedundancyArgs {
     #[command(flatten)]
     pub(in crate::cli) common: AnalyzeCommonArgs,
@@ -962,27 +816,19 @@ pub(in crate::cli) struct AnalyzeTestRedundancyArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeSingleImplArgs {
+pub(in crate::cli) struct AnalyzeReachArgs {
     #[command(flatten)]
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(in crate::cli) opts: SingleImplOptions,
+    pub(in crate::cli) opts: ReachOptions,
 }
 
 #[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeTestOnlyArgs {
+pub(in crate::cli) struct AnalyzeNarrowableArgs {
     #[command(flatten)]
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(in crate::cli) opts: TestOnlyOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeVisibilityArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: VisibilityOptions,
+    pub(in crate::cli) opts: NarrowableOptions,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -142,16 +142,11 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Footprint
         | ToolName::Impact
         | ToolName::Layers
-        | ToolName::Parameters
+        | ToolName::Narrowable
+        | ToolName::Reach
         | ToolName::Risk
         | ToolName::Search
-        | ToolName::SingleImpl
-        | ToolName::SingleUse
-        | ToolName::TestOnly
         | ToolName::TestRedundancy
-        | ToolName::Unreachable
-        | ToolName::Untested
-        | ToolName::Visibility
         | ToolName::Wrapper => None,
     }
 }
@@ -597,12 +592,10 @@ mod tests {
     #[case(ToolName::Impact)]
     #[case(ToolName::Footprint)]
     #[case(ToolName::Layers)]
-    #[case(ToolName::Parameters)]
+    #[case(ToolName::Narrowable)]
+    #[case(ToolName::Reach)]
     #[case(ToolName::Risk)]
-    #[case(ToolName::Unreachable)]
     #[case(ToolName::TestRedundancy)]
-    #[case(ToolName::Untested)]
-    #[case(ToolName::Visibility)]
     #[case(ToolName::Wrapper)]
     fn tools_without_a_summary_are_reported_as_such(#[case] tool: ToolName) {
         assert!(summarizer(tool).is_none());

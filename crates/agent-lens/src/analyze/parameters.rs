@@ -1,4 +1,4 @@
-//! `analyze parameters` — parameters that only ever receive one thing.
+//! `analyze narrowable --section parameters` — parameters that only ever receive one thing.
 //!
 //! The third member of the `single-use` family, one level down: where
 //! `single-use` asks "how many callers does this function have?", this
@@ -81,8 +81,8 @@ const NOTE: &str = "Two finding kinds, both candidates rather than verdicts. A c
      are excluded outright because their signatures are not theirs to change.";
 
 analyzer_options! {
-    /// `analyze parameters` flags, and the `[profile.<name>.parameters]`
-    /// table.
+    /// Options of the `parameters` section of `analyze narrowable`; the `narrowable` options
+    /// and the `[profile.<name>.narrowable]` table map onto them.
     pub struct ParametersOptions {
         @shared(ranking);
         /// Minimum resolved production call sites a parameter needs
@@ -104,9 +104,8 @@ pub struct ParametersAnalyzer {
 }
 
 impl ParametersAnalyzer {
-    /// Apply a whole [`ParametersOptions`] group. The CLI flags and the
-    /// `[profile.<name>.parameters]` table are the same type, so this is
-    /// the only seam between parsed options and the analyzer.
+    /// Apply a whole [`ParametersOptions`] group — the seam `analyze narrowable` hands its
+    /// `parameters` section options through.
     pub fn with_options(self, opts: ParametersOptions) -> Self {
         self.with_top(opts.top)
             .with_min_call_sites(opts.min_call_sites)
@@ -1066,7 +1065,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.calibration.varying_count,
     );
     out.push_str(
-        "\nSet `--min-call-sites` (or `[profile.<name>.parameters]`) off these counts: raising \
+        "\nSet `--min-call-sites` (or `[profile.<name>.narrowable]`) off these counts: raising \
          it trades findings for confidence that \"always\" is not an accident of few callers.\n",
     );
 

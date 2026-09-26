@@ -1,4 +1,4 @@
-//! `analyze single-impl` — traits and interfaces with at most one
+//! `analyze narrowable --section single-impl` — traits and interfaces with at most one
 //! production implementor.
 //!
 //! An abstraction is a promise that callers will not care which
@@ -82,8 +82,8 @@ const NOTE: &str = "Each row is a trait or interface declared in the analyzed tr
      and its implementor count is a lower bound.";
 
 analyzer_options! {
-    /// `analyze single-impl` flags, and the `[profile.<name>.single-impl]`
-    /// table.
+    /// Options of the `single-impl` section of `analyze narrowable`; the `narrowable` options
+    /// and the `[profile.<name>.narrowable]` table map onto them.
     pub struct SingleImplOptions {
         @shared(ranking);
     }
@@ -97,9 +97,8 @@ pub struct SingleImplAnalyzer {
 }
 
 impl SingleImplAnalyzer {
-    /// Apply a whole [`SingleImplOptions`] group. The CLI flags and the
-    /// `[profile.<name>.single-impl]` table are the same type, so this
-    /// is the only seam between parsed options and the analyzer.
+    /// Apply a whole [`SingleImplOptions`] group — the seam `analyze narrowable` hands its
+    /// `single-impl` section options through.
     pub fn with_options(self, opts: SingleImplOptions) -> Self {
         self.with_top(opts.top)
     }

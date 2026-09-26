@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::analyze::{BundleSection, NarrowableSection, ReachSection};
 use crate::config::ToolName;
 
 /// How many files one analyzer may contribute. Every extractor reads
@@ -61,6 +62,89 @@ const COGNITIVE_FLOOR: u64 = 10;
 /// LCOM4 1 is cohesive and 0 is empty; 2+ is the "does more than one
 /// thing" population, same floor `baseline` counts split units at.
 const LCOM4_FLOOR: u64 = 2;
+
+/// What a digest fragment is attributed to: an analyzer, or one section
+/// of an analyzer that bundles several reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Source {
+    tool: ToolName,
+    /// The section's CLI spelling, for a bundled analyzer.
+    section: Option<&'static str>,
+}
+
+impl Source {
+    fn tool(tool: ToolName) -> Self {
+        Self {
+            tool,
+            section: None,
+        }
+    }
+
+    /// How the source is named in the corpus and "nothing to report"
+    /// lines.
+    fn label(self) -> String {
+        match self.section {
+            None => self.tool.as_str().to_owned(),
+            Some(section) => format!("{} {section}", self.tool.as_str()),
+        }
+    }
+}
+
+type Fold = fn(&Value, &Path) -> Extraction;
+
+/// The extractor for each `reach` section. Exhaustive, so a new section
+/// cannot ship without a digest fold.
+fn reach_fold(section: ReachSection) -> Fold {
+    match section {
+        ReachSection::Untested => untested,
+        ReachSection::TestOnly => test_only,
+        ReachSection::Unreachable => unreachable,
+    }
+}
+
+/// The extractor for each `narrowable` section.
+fn narrowable_fold(section: NarrowableSection) -> Fold {
+    match section {
+        NarrowableSection::SingleUse => single_use,
+        NarrowableSection::SingleImpl => single_impl,
+        NarrowableSection::Parameters => parameters,
+        NarrowableSection::Visibility => visibility,
+    }
+}
+
+/// Every section of a bundle as `(JSON key, CLI spelling, extractor)`.
+fn bundle_folds<S: BundleSection>(fold: fn(S) -> Fold) -> Vec<(&'static str, &'static str, Fold)> {
+    S::ALL
+        .iter()
+        .map(|&section| {
+            let (key, name) = section.labels();
+            (key, name, fold(section))
+        })
+        .collect()
+}
+
+/// Fold one report into per-source extractions: one for a plain
+/// analyzer, one per section present for a bundled one. `None` means
+/// the digest has no fold for this tool at all.
+fn fold_report(tool: ToolName, report: &Value, base: &Path) -> Option<Vec<(Source, Extraction)>> {
+    let sections = match tool {
+        ToolName::Reach => bundle_folds(reach_fold),
+        ToolName::Narrowable => bundle_folds(narrowable_fold),
+        _ => return extract(tool, report, base).map(|e| vec![(Source::tool(tool), e)]),
+    };
+    Some(
+        sections
+            .into_iter()
+            .filter_map(|(key, section, fold)| {
+                let source = Source {
+                    tool,
+                    section: Some(section),
+                };
+                report.get(key).map(|sub| (source, fold(sub, base)))
+            })
+            .collect(),
+    )
+}
 
 /// One analyzer's contribution to the digest.
 #[derive(Debug, Default, PartialEq)]
@@ -147,8 +231,8 @@ pub fn render(
 struct Folded {
     rows: Vec<EntityRow>,
     corpus_lines: Vec<String>,
-    unsummarized: Vec<&'static str>,
-    quiet: Vec<&'static str>,
+    unsummarized: Vec<String>,
+    quiet: Vec<String>,
 }
 
 impl Folded {
@@ -161,36 +245,15 @@ impl Folded {
             quiet: Vec::new(),
         };
         for (tool, report) in sections {
-            let Some(extraction) = extract(*tool, report, base) else {
-                folded.unsummarized.push(tool.as_str());
+            let Some(folds) = fold_report(*tool, report, base) else {
+                folded.unsummarized.push(tool.as_str().to_owned());
                 continue;
             };
-            if extraction.files.is_empty() && extraction.corpus.is_empty() {
-                folded.quiet.push(tool.as_str());
-                continue;
+            if folds.is_empty() {
+                folded.quiet.push(tool.as_str().to_owned());
             }
-            // Rank weight: the top file of an analyzer scores 1, the
-            // last of n scores 1/n. Summed across analyzers this is the
-            // cross-tool weight — a file three analyzers rank high
-            // beats a file one analyzer ranks first.
-            let count = extraction.files.len().min(PER_TOOL_FILE_CAP);
-            for (index, finding) in extraction.files.into_iter().take(count).enumerate() {
-                let weight = (count - index) as f64 / count as f64;
-                let row = entities.entry(finding.path.clone()).or_insert(EntityRow {
-                    path: finding.path,
-                    weight: 0.0,
-                    fragments: Vec::new(),
-                });
-                row.weight += weight;
-                row.fragments.push((weight, *tool, finding.headline));
-            }
-            if !extraction.corpus.is_empty() {
-                folded.corpus_lines.push(format!(
-                    "- {}: {} — {}",
-                    tool.as_str(),
-                    extraction.corpus.join("; "),
-                    drill_down(*tool, target_args),
-                ));
+            for (source, extraction) in folds {
+                folded.add(&mut entities, source, extraction, target_args);
             }
         }
         folded.rows = entities.into_values().collect();
@@ -202,6 +265,44 @@ impl Folded {
                 .then_with(|| a.path.cmp(&b.path))
         });
         folded
+    }
+
+    /// Fold one source's extraction into the entity rows and corpus
+    /// lines.
+    fn add(
+        &mut self,
+        entities: &mut HashMap<PathBuf, EntityRow>,
+        source: Source,
+        extraction: Extraction,
+        target_args: &str,
+    ) {
+        if extraction.files.is_empty() && extraction.corpus.is_empty() {
+            self.quiet.push(source.label());
+            return;
+        }
+        // Rank weight: the top file of an analyzer scores 1, the last
+        // of n scores 1/n. Summed across analyzers this is the
+        // cross-tool weight — a file three analyzers rank high beats a
+        // file one analyzer ranks first.
+        let count = extraction.files.len().min(PER_TOOL_FILE_CAP);
+        for (index, finding) in extraction.files.into_iter().take(count).enumerate() {
+            let weight = (count - index) as f64 / count as f64;
+            let row = entities.entry(finding.path.clone()).or_insert(EntityRow {
+                path: finding.path,
+                weight: 0.0,
+                fragments: Vec::new(),
+            });
+            row.weight += weight;
+            row.fragments.push((weight, source, finding.headline));
+        }
+        if !extraction.corpus.is_empty() {
+            self.corpus_lines.push(format!(
+                "- {}: {} — {}",
+                source.label(),
+                extraction.corpus.join("; "),
+                drill_down(source, target_args),
+            ));
+        }
     }
 }
 
@@ -221,7 +322,7 @@ fn render_entity_rows(out: &mut String, rows: &[EntityRow], cwd: &Path, target_a
         // tool-name tiebreak keeps equal weights deterministic.
         fragments.sort_by(|a, b| {
             b.0.total_cmp(&a.0)
-                .then_with(|| a.1.as_str().cmp(b.1.as_str()))
+                .then_with(|| a.1.label().cmp(&b.1.label()))
         });
         let shown = fragments.len().min(ROW_FRAGMENT_CAP);
         let mut line = fragments[..shown]
@@ -233,14 +334,14 @@ fn render_entity_rows(out: &mut String, rows: &[EntityRow], cwd: &Path, target_a
             let _ = write!(line, ", +{} more", fragments.len() - shown);
         }
         let entity = display_path(&row.path, cwd);
-        let lead_tool = fragments[0].1;
-        let detail_arg = if file_scoped(lead_tool) {
+        let lead = fragments[0].1;
+        let detail_arg = if file_scoped(lead.tool) {
             &entity
         } else {
             target_args
         };
         let _ = writeln!(out, "- {entity} — {line}");
-        let _ = writeln!(out, "  detail: {}", drill_down(lead_tool, detail_arg));
+        let _ = writeln!(out, "  detail: {}", drill_down(lead, detail_arg));
     }
     if rows.len() > listed {
         let _ = writeln!(out, "- … and {} below the cut", rows.len() - listed);
@@ -250,15 +351,19 @@ fn render_entity_rows(out: &mut String, rows: &[EntityRow], cwd: &Path, target_a
 struct EntityRow {
     path: PathBuf,
     weight: f64,
-    fragments: Vec<(f64, ToolName, String)>,
+    fragments: Vec<(f64, Source, String)>,
 }
 
 /// The `agent-lens analyze …` invocation that reproduces the full
 /// detail behind a digest row or corpus line.
-fn drill_down(tool: ToolName, path_args: &str) -> String {
+fn drill_down(source: Source, path_args: &str) -> String {
+    let section = source
+        .section
+        .map(|section| format!(" --section {section}"))
+        .unwrap_or_default();
     format!(
-        "`agent-lens analyze {} {path_args} --format md`",
-        tool.as_str()
+        "`agent-lens analyze {} {path_args}{section} --format md`",
+        source.tool.as_str()
     )
 }
 
@@ -299,14 +404,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Hotspot => hotspot(report, base),
         ToolName::Risk => risk(report, base),
         ToolName::Hubs => hubs(report, base),
-        ToolName::SingleImpl => single_impl(report, base),
-        ToolName::SingleUse => single_use(report, base),
-        ToolName::Parameters => parameters(report, base),
-        ToolName::TestOnly => test_only(report, base),
         ToolName::TestRedundancy => test_redundancy(report, base),
-        ToolName::Untested => untested(report, base),
-        ToolName::Unreachable => unreachable(report, base),
-        ToolName::Visibility => visibility(report, base),
         ToolName::ChangeEntropy => change_entropy(report, base),
         ToolName::CoChange => co_change(report),
         ToolName::HiddenCoupling => hidden_coupling(report),
@@ -315,6 +413,8 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::ContextSpan => context_span(report),
         ToolName::Cycles => cycles(report),
         ToolName::Layers => layers(report),
+        // Bundles are folded per section by `fold_report`, never whole.
+        ToolName::Narrowable | ToolName::Reach => return None,
         ToolName::Footprint
         | ToolName::FunctionGraph
         | ToolName::GraphQuery
@@ -1337,7 +1437,7 @@ mod tests {
     use super::*;
 
     /// Every tool the digest folds, for shape-robustness sweeps.
-    const FOLDED: [ToolName; 20] = [
+    const FOLDED: [ToolName; 17] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Similarity,
@@ -1347,9 +1447,6 @@ mod tests {
         ToolName::Risk,
         ToolName::Hubs,
         ToolName::TestRedundancy,
-        ToolName::Untested,
-        ToolName::Unreachable,
-        ToolName::Visibility,
         ToolName::ChangeEntropy,
         ToolName::CoChange,
         ToolName::HiddenCoupling,
@@ -2021,7 +2118,6 @@ mod tests {
     #[case(ToolName::Cycles, json!({ "summary": { "scc_count": 0, "largest": 0 } }))]
     #[case(ToolName::Coupling, json!({ "cycle_count": 0, "modules": [ { "path": "crate::a", "fan_in": 0, "ifc": 0 } ] }))]
     #[case(ToolName::CoChange, json!({ "pairs": [] }))]
-    #[case(ToolName::Unreachable, json!({ "modules": [], "summary": { "confirmed_count": 0, "likely_count": 0 } }))]
     #[case(ToolName::Delegation, json!({ "chains": [], "summary": { "lasagna_module_count": 0 } }))]
     #[case(ToolName::HiddenCoupling, json!({ "hidden_coupling": [], "suspect_dependencies": [] }))]
     #[case(ToolName::Communities, json!({ "misfiled": [], "spanning": [] }))]
@@ -2057,6 +2153,64 @@ mod tests {
             let extraction = extract(tool, &report, &base()).unwrap();
             assert!(extraction.files.is_empty(), "{tool:?}: {extraction:?}");
         }
+        let folds = bundle_folds(reach_fold)
+            .into_iter()
+            .chain(bundle_folds(narrowable_fold));
+        for (key, _, fold) in folds {
+            let extraction = fold(&report, &base());
+            assert!(extraction.files.is_empty(), "{key}: {extraction:?}");
+        }
+    }
+
+    #[test]
+    fn a_clean_unreachable_section_digests_to_nothing() {
+        let report =
+            json!({ "modules": [], "summary": { "confirmed_count": 0, "likely_count": 0 } });
+        assert_eq!(unreachable(&report, &base()), Extraction::default());
+    }
+
+    #[test]
+    fn bundles_fold_per_section_and_name_the_section_in_drill_downs() {
+        let sections = vec![(
+            ToolName::Reach,
+            json!({
+                "sections": ["untested", "unreachable"],
+                "untested": {
+                    "modules": [ { "functions": [ { "file": "big.rs", "loc": 70 } ] } ],
+                    "summary": { "untested_function_count": 1, "untested_loc": 70, "untested_share": 0.5 },
+                },
+                "unreachable": { "modules": [], "summary": { "confirmed_count": 0, "likely_count": 0 } },
+            }),
+        )];
+        let out = render(
+            "audit",
+            &sections,
+            &[PathBuf::from("/repo/src")],
+            Path::new("/repo"),
+        );
+        assert!(
+            out.contains("detail: `agent-lens analyze reach src --section untested --format md`"),
+            "got: {out}"
+        );
+        assert!(out.contains("- reach untested: "), "got: {out}");
+        assert!(
+            out.contains("\nNothing to report from: reach unreachable.\n"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn a_bundle_with_no_sections_is_quiet_not_unfolded() {
+        let out = render(
+            "audit",
+            &[(ToolName::Narrowable, json!({ "sections": [] }))],
+            &[PathBuf::from("/repo/src")],
+            Path::new("/repo"),
+        );
+        assert!(
+            out.contains("\nNothing to report from: narrowable.\n"),
+            "got: {out}"
+        );
     }
 
     fn complexity_report(files: &[(&str, u64)]) -> Value {
