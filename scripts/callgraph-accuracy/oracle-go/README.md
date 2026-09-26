@@ -10,7 +10,7 @@ between functions declared under the root in the shared oracle contract
 go run . -root <module dir> -out <file.json> [-patterns ./...]
 ```
 
-Needs Go 1.24 or newer. Logs and the drop counts go to stderr.
+Needs Go 1.25 or newer. Logs and the drop counts go to stderr.
 
 ## Edge conventions
 
