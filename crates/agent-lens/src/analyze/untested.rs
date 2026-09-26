@@ -44,13 +44,13 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::bfs;
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::{ModuleSection, render_module_confidence, render_module_sections};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::bfs;
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -654,8 +654,8 @@ mod tests {
     #[test]
     fn an_ambiguous_call_from_a_test_flags_its_candidates_as_possibly_reached() {
         let dir = tempfile::tempdir().unwrap();
-        // Two same-named methods on different owners: a bare `target()`
-        // call from the test cannot pick one, so both stay untested but
+        // Two same-named methods on different owners: a `.target()`
+        // call on a receiver of unknown type cannot pick one, so both stay untested but
         // are flagged rather than asserted unreachable. `quiet` shares
         // their module and is named by nothing, so the flag has to
         // separate the two kinds of row.
@@ -669,7 +669,7 @@ mod tests {
              #[cfg(test)]\n\
              mod tests {\n\
              #[test]\n\
-             fn t() { target(); }\n\
+             fn t() { crate::A.target(); }\n\
              }\n",
         );
 

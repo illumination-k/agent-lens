@@ -91,33 +91,61 @@ impl ResolvedCall {
 }
 
 /// Attributes call sites to their enclosing function node by exact
-/// (file, qualified name) match.
+/// (file, qualified name) match, and by line span where one file
+/// declares that name twice.
 pub(crate) struct CallerIndex {
-    by_file_and_qualified_name: HashMap<(String, String), Vec<String>>,
+    by_file_and_qualified_name: HashMap<(String, String), Vec<CallerSpan>>,
+}
+
+struct CallerSpan {
+    id: String,
+    start_line: usize,
+    end_line: usize,
 }
 
 impl CallerIndex {
     pub(crate) fn new(nodes: &[CallGraphNode]) -> Self {
-        let mut by_file_and_qualified_name: HashMap<(String, String), Vec<String>> = HashMap::new();
+        let mut by_file_and_qualified_name: HashMap<(String, String), Vec<CallerSpan>> =
+            HashMap::new();
         for node in nodes {
             by_file_and_qualified_name
                 .entry((node.file.clone(), node.qualified_name.clone()))
                 .or_default()
-                .push(node.id.clone());
+                .push(CallerSpan {
+                    id: node.id.clone(),
+                    start_line: node.start_line,
+                    end_line: node.end_line,
+                });
         }
         Self {
             by_file_and_qualified_name,
         }
     }
 
-    pub(crate) fn resolve_in_file(&self, file: &str, qualified_name: &str) -> Option<String> {
-        let ids = self
+    /// The node a call on `line` of `file` inside `qualified_name` is
+    /// made from. One file can declare the same name twice — Rust's
+    /// `impl Display for Version` and `impl Debug for Version` both
+    /// define `Version::fmt` — and then the span containing the call
+    /// picks the caller.
+    pub(crate) fn resolve_in_file(
+        &self,
+        file: &str,
+        qualified_name: &str,
+        line: usize,
+    ) -> Option<String> {
+        let spans = self
             .by_file_and_qualified_name
             .get(&(file.to_owned(), qualified_name.to_owned()))?;
-        if ids.len() == 1 {
-            return ids.first().cloned();
+        if let [only] = spans.as_slice() {
+            return Some(only.id.clone());
         }
-        None
+        let mut containing = spans
+            .iter()
+            .filter(|span| span.start_line <= line && line <= span.end_line);
+        match (containing.next(), containing.next()) {
+            (Some(span), None) => Some(span.id.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -125,6 +153,10 @@ pub(crate) struct Resolver {
     qualified: HashMap<String, Vec<String>>,
     last_segment: HashMap<String, Vec<String>>,
     id_to_qualified: HashMap<String, String>,
+    /// Ids of nodes declared with an owner (a method, not a free
+    /// function). Read where the call's shape decides which of the two
+    /// it can reach — see [`GraphLanguage::call_shape_decides_owner`].
+    methods: HashSet<String>,
 }
 
 impl Resolver {
@@ -132,7 +164,11 @@ impl Resolver {
         let mut qualified: HashMap<String, Vec<String>> = HashMap::new();
         let mut last_segment: HashMap<String, Vec<String>> = HashMap::new();
         let mut id_to_qualified: HashMap<String, String> = HashMap::new();
+        let mut methods = HashSet::new();
         for node in nodes {
+            if node.impl_owner.is_some() {
+                methods.insert(node.id.clone());
+            }
             qualified
                 .entry(node.qualified_name.clone())
                 .or_default()
@@ -147,6 +183,7 @@ impl Resolver {
             qualified,
             last_segment,
             id_to_qualified,
+            methods,
         }
     }
 
@@ -213,6 +250,16 @@ impl Resolver {
         let Some(ids) = self.last_segment.get(callee_name) else {
             return ResolvedCall::unresolved();
         };
+        // A bare `Domain(b)` can name a function (or be a conversion to
+        // the type `Domain`), never a method: Go has no implicit
+        // receiver, so `UUID.Domain` is out of reach of that call, and
+        // Rust needs a `Self::` / `Type::` path to reach an associated
+        // function.
+        let qualified_path = site.callee_path().is_some_and(|path| path.contains("::"));
+        let ids = &self.with_owner_shape(ids, false, language, qualified_path);
+        if ids.is_empty() {
+            return ResolvedCall::unresolved();
+        }
         // When the callee was written as a multi-segment path like
         // `Foo::new`, restrict the fallback to candidates whose
         // qualified name ends with that path. Catches calls reaching a
@@ -222,12 +269,7 @@ impl Resolver {
         if let Some(callee_path) = site.callee_path()
             && callee_path.contains("::")
         {
-            let mut narrowed = self.narrow_by_path_suffix(ids, &callee_path);
-            if narrowed.is_empty()
-                && let Some(expanded) = import_expanded_path(site, &callee_path)
-            {
-                narrowed = self.narrow_by_import_path(ids, &expanded);
-            }
+            let narrowed = self.narrow_by_path(ids, site, &callee_path, language);
             return if narrowed.is_empty() {
                 ResolvedCall::unresolved()
             } else {
@@ -237,6 +279,28 @@ impl Resolver {
         resolve_ids(ids, ResolutionMethod::LastSegment)
     }
 
+    /// `ids` narrowed to the ones a multi-segment `callee_path` can
+    /// name: by suffix, then through the import binding its head, then
+    /// (Rust) by the type anywhere in the crate the path starts with.
+    fn narrow_by_path(
+        &self,
+        ids: &[String],
+        site: &CallShape,
+        callee_path: &str,
+        language: GraphLanguage,
+    ) -> Vec<String> {
+        let mut narrowed = self.narrow_by_path_suffix(ids, callee_path);
+        if narrowed.is_empty()
+            && let Some(expanded) = import_expanded_path(site, callee_path)
+        {
+            narrowed = self.narrow_by_import_path(ids, &expanded);
+        }
+        if narrowed.is_empty() && language == GraphLanguage::Rust {
+            narrowed = self.narrow_by_type_in_crate(ids, callee_path);
+        }
+        narrowed
+    }
+
     fn resolve_self_method(&self, site: &CallShape, callee_name: &str) -> ResolvedCall {
         let Some(module) = site.caller_module() else {
             return ResolvedCall::unresolved();
@@ -244,11 +308,20 @@ impl Resolver {
         let Some(owner) = site.caller_owner() else {
             return ResolvedCall::unresolved();
         };
-        let candidate = qualify_module(module, &format!("{owner}::{callee_name}"));
-        if let Some(ids) = self.qualified.get(&candidate) {
-            return resolve_ids(ids, ResolutionMethod::SelfMethod);
+        // A closure inside a method (`Ky::retry::closure#1`) sees the
+        // method's `this`, so the owner is tried from the innermost
+        // segment outwards until one declares the callee.
+        let mut owner = owner;
+        loop {
+            let candidate = qualify_module(module, &format!("{owner}::{callee_name}"));
+            if let Some(ids) = self.qualified.get(&candidate) {
+                return resolve_ids(ids, ResolutionMethod::SelfMethod);
+            }
+            match owner.rsplit_once("::") {
+                Some((outer, _)) => owner = outer,
+                None => return ResolvedCall::unresolved(),
+            }
         }
-        ResolvedCall::unresolved()
     }
 
     /// Receiver method calls (`obj.foo()`) cannot be type-inferred
@@ -301,7 +374,46 @@ impl Resolver {
         let Some(ids) = self.last_segment.get(callee_name) else {
             return ResolvedCall::unresolved();
         };
-        self.resolve_with_crate_narrowing(ids, site)
+        // `wg.Add(1)` on a local value is a method call; a package-level
+        // `tag.Add` shares the name but no receiver reaches it. A
+        // receiver the adapter knows holds a value (`retry.delay()` on a
+        // parameter) says the same in any language.
+        let ids = if matches!(
+            site.receiver_expr_kind,
+            SyntaxFact::Known(ReceiverExprKind::LocalValue)
+        ) {
+            self.with_owner(ids, true)
+        } else {
+            self.with_owner_shape(ids, true, language, false)
+        };
+        if ids.is_empty() {
+            return ResolvedCall::unresolved();
+        }
+        self.resolve_with_crate_narrowing(&ids, site)
+    }
+
+    /// `ids` kept to methods (`method == true`) or to free functions,
+    /// where the language lets the call's shape decide between the two;
+    /// every id otherwise.
+    fn with_owner_shape(
+        &self,
+        ids: &[String],
+        method: bool,
+        language: GraphLanguage,
+        qualified_path: bool,
+    ) -> Vec<String> {
+        if !language.call_shape_decides_owner(qualified_path) {
+            return ids.to_vec();
+        }
+        self.with_owner(ids, method)
+    }
+
+    /// `ids` kept to methods (`method == true`) or to free functions.
+    fn with_owner(&self, ids: &[String], method: bool) -> Vec<String> {
+        ids.iter()
+            .filter(|id| self.methods.contains(id.as_str()) == method)
+            .cloned()
+            .collect()
     }
 
     fn resolve_with_crate_narrowing(&self, ids: &[String], site: &CallShape) -> ResolvedCall {
@@ -347,6 +459,36 @@ impl Resolver {
                         qualified.contains("::")
                             && (expanded == qualified
                                 || expanded.ends_with(&format!("::{qualified}")))
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Candidates named `Type::name` anywhere in `krate`, for a Rust
+    /// path `krate::Type::name`. A type at a crate's root is usually a
+    /// re-export, so the path says where the type is visible, not where
+    /// its `impl` sits: `fastrand::Rng::new()` reaches `impl Rng` in
+    /// `fastrand::global_rng`, which the plain suffix match cannot see.
+    /// A longer path spells out the module and gets no such leeway (a
+    /// `m::inner::Error` re-exported from a dependency is no workspace
+    /// `Error`), and only a type-cased segment before the name
+    /// qualifies, so `krate::module::func` stays with the suffix match.
+    fn narrow_by_type_in_crate(&self, ids: &[String], callee_path: &str) -> Vec<String> {
+        let segments: Vec<&str> = callee_path.split("::").collect();
+        let [krate, owner, name] = segments.as_slice() else {
+            return Vec::new();
+        };
+        if !owner.starts_with(char::is_uppercase) {
+            return Vec::new();
+        }
+        let suffix = format!("::{owner}::{name}");
+        ids.iter()
+            .filter(|id| {
+                self.id_to_qualified
+                    .get(id.as_str())
+                    .is_some_and(|qualified| {
+                        qualified.ends_with(&suffix) && qualified_in_crate(qualified, krate)
                     })
             })
             .cloned()
@@ -610,14 +752,22 @@ mod tests {
         }
     }
 
+    /// A node whose owner is the segment before the name when that
+    /// segment is type-cased (`crate::m::W::clone` is a method of `W`,
+    /// `crate::m::helper` a free function).
     fn node(qualified_name: &str) -> CallGraphNode {
+        let impl_owner = qualified_name
+            .rsplit("::")
+            .nth(1)
+            .filter(|owner| owner.starts_with(char::is_uppercase))
+            .map(ToOwned::to_owned);
         CallGraphNode {
             id: format!("src/lib.rs:{qualified_name}:1"),
             name: name_last_segment(qualified_name).to_owned(),
             qualified_name: qualified_name.to_owned(),
             file: "src/lib.rs".to_owned(),
             module: "crate::m".to_owned(),
-            impl_owner: None,
+            impl_owner,
             owner_kind: None,
             start_line: 1,
             end_line: 2,
@@ -686,7 +836,7 @@ mod tests {
     ) {
         let nodes: Vec<CallGraphNode> = ["append", "len", "parseInt", "drop", "with_children"]
             .into_iter()
-            .map(|name| node(&format!("crate::other::W::{name}")))
+            .map(|name| node(&format!("crate::other::{name}")))
             .collect();
         let resolver = Resolver::new(&nodes);
 
@@ -741,6 +891,68 @@ mod tests {
         assert_eq!(call.method, Some(ResolutionMethod::SelfMethod));
     }
 
+    /// In a closure inside a method the callee is looked up on the
+    /// enclosing owners, innermost first: an arrow keeps the method's
+    /// `this`.
+    #[rstest]
+    #[case::method_owner("S", Some("crate::m::S::helper"))]
+    #[case::closure_owner("S::run::closure#1", Some("crate::m::S::helper"))]
+    #[case::inner_owner_wins("S::Inner", Some("crate::m::S::Inner::helper"))]
+    #[case::no_owner_declares_it("T::run", None)]
+    fn self_method_calls_search_enclosing_owners(
+        #[case] owner: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let nodes = vec![
+            node("crate::m::S::helper"),
+            node("crate::m::S::Inner::helper"),
+        ];
+        let resolver = Resolver::new(&nodes);
+        let self_site = CallShape {
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::SelfValue),
+            caller_owner: SyntaxFact::Known(Some(owner.to_owned())),
+            ..site("helper")
+        };
+
+        let call = resolver.resolve(&self_site, GraphLanguage::TypeScript);
+
+        let expected_id = expected.map(|qualified| format!("src/lib.rs:{qualified}:1"));
+        assert_eq!(call.to, expected_id);
+    }
+
+    /// A receiver the adapter knows holds a value reaches methods only,
+    /// in any language: `retry.delay()` is never the free `delay`. A
+    /// plain `Expression` receiver keeps both in TypeScript, where an
+    /// object literal or a module object may hold the free function.
+    #[rstest]
+    #[case::value_receiver(ReceiverExprKind::LocalValue, &["crate::m::W::delay"])]
+    #[case::expression_receiver(
+        ReceiverExprKind::Expression,
+        &["crate::m::W::delay", "crate::m::delay"]
+    )]
+    fn value_receivers_reach_methods_only(
+        #[case] receiver: ReceiverExprKind,
+        #[case] expected: &[&str],
+    ) {
+        let nodes = vec![node("crate::m::W::delay"), node("crate::m::delay")];
+        let resolver = Resolver::new(&nodes);
+        let call_site = CallShape {
+            receiver_expr_kind: SyntaxFact::Known(receiver),
+            ..site("delay")
+        };
+
+        let call = resolver.resolve(&call_site, GraphLanguage::TypeScript);
+
+        let mut reached: Vec<String> = call.to.into_iter().chain(call.candidates).collect();
+        reached.sort();
+        let mut expected: Vec<String> = expected
+            .iter()
+            .map(|qualified| format!("src/lib.rs:{qualified}:1"))
+            .collect();
+        expected.sort();
+        assert_eq!(reached, expected);
+    }
+
     /// Crate narrowing must not become a back door: several candidates
     /// with one in the caller's crate is still no evidence for a name
     /// `std` defines on everything.
@@ -787,7 +999,7 @@ mod tests {
     /// nothing binds it locally.
     #[test]
     fn the_same_name_resolves_where_it_is_not_locally_bound() {
-        let nodes = vec![node("other::W::emit")];
+        let nodes = vec![node("other::emit")];
         let resolver = Resolver::new(&nodes);
 
         let call = resolver.resolve(&site("emit"), GraphLanguage::Go);
@@ -800,7 +1012,7 @@ mod tests {
     /// that the callee is shadowed — those sites keep resolving.
     #[test]
     fn unknown_local_binding_facts_do_not_suppress_resolution() {
-        let nodes = vec![node("other::W::emit")];
+        let nodes = vec![node("other::emit")];
         let resolver = Resolver::new(&nodes);
         let unknown = CallShape {
             callee_is_locally_bound: SyntaxFact::Unknown,
@@ -828,6 +1040,118 @@ mod tests {
         let call = resolver.resolve(&receiver, GraphLanguage::Go);
 
         assert_eq!(call.resolution, Resolution::Resolved);
+    }
+
+    /// In Go and Rust a bare call reaches only free functions and a
+    /// receiver call only methods, so the name fallback drops the other
+    /// kind; the other languages keep both, since there the shape does
+    /// not decide it.
+    #[rstest]
+    #[case::rust_receiver_call_skips_function(GraphLanguage::Rust, true, "crate::smoke::u8", None)]
+    #[case::rust_bare_call_skips_method(GraphLanguage::Rust, false, "crate::m::Rng::u8", None)]
+    #[case::rust_receiver_call_reaches_method(
+        GraphLanguage::Rust,
+        true,
+        "crate::m::Rng::u8",
+        Some("crate::m::Rng::u8")
+    )]
+    #[case::rust_bare_call_reaches_function(
+        GraphLanguage::Rust,
+        false,
+        "crate::smoke::u8",
+        Some("crate::smoke::u8")
+    )]
+    #[case::go_bare_call_skips_method(GraphLanguage::Go, false, "crate::m::UUID::Domain", None)]
+    #[case::go_receiver_call_skips_function(GraphLanguage::Go, true, "crate::tag::Add", None)]
+    #[case::go_bare_call_reaches_function(
+        GraphLanguage::Go,
+        false,
+        "crate::tag::Add",
+        Some("crate::tag::Add")
+    )]
+    #[case::go_receiver_call_reaches_method(
+        GraphLanguage::Go,
+        true,
+        "crate::m::UUID::Domain",
+        Some("crate::m::UUID::Domain")
+    )]
+    #[case::python_bare_call_keeps_method(
+        GraphLanguage::Python,
+        false,
+        "crate::m::UUID::Domain",
+        Some("crate::m::UUID::Domain")
+    )]
+    #[case::typescript_receiver_call_keeps_function(
+        GraphLanguage::TypeScript,
+        true,
+        "crate::tag::Add",
+        Some("crate::tag::Add")
+    )]
+    fn call_shape_decides_method_or_function(
+        #[case] language: GraphLanguage,
+        #[case] receiver: bool,
+        #[case] defined: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let resolver = Resolver::new(&[node(defined)]);
+        let name = name_last_segment(defined);
+        let site = if receiver {
+            receiver_site(name)
+        } else {
+            CallShape {
+                caller_module: SyntaxFact::Known("crate::other".to_owned()),
+                ..site(name)
+            }
+        };
+
+        let call = resolver.resolve(&site, language);
+
+        assert_eq!(
+            call.to
+                .map(|id| resolver.id_to_qualified[&id].clone())
+                .as_deref(),
+            expected
+        );
+    }
+
+    /// A Rust path keeps methods in reach whatever its length: `Rng::u8`
+    /// names the associated function, and `fastrand::Rng::new` reaches
+    /// `impl Rng` wherever in the `fastrand` crate it sits. A longer path
+    /// spells out its module and a lowercase segment before the name is
+    /// a module, so neither gets the crate-wide match.
+    #[rstest]
+    #[case::type_path("Rng::u8", "crate::m::Rng::u8", Some("crate::m::Rng::u8"))]
+    #[case::root_reexport(
+        "fastrand::Rng::new",
+        "fastrand::global_rng::Rng::new",
+        Some("fastrand::global_rng::Rng::new")
+    )]
+    #[case::other_crate("other::Rng::new", "fastrand::global_rng::Rng::new", None)]
+    #[case::spelled_out_module("fastrand::inner::Rng::new", "fastrand::global_rng::Rng::new", None)]
+    #[case::module_path("fastrand::global::new", "fastrand::x::global::new", None)]
+    fn rust_paths_reach_methods(
+        #[case] path: &str,
+        #[case] defined: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let resolver = Resolver::new(&[node(defined)]);
+        let call_site = CallShape {
+            caller_module: SyntaxFact::Known("fastrand::tests".to_owned()),
+            ..site(path)
+        };
+
+        let call = resolver.resolve(&call_site, GraphLanguage::Rust);
+
+        assert_eq!(
+            call.to
+                .map(|id| resolver.id_to_qualified[&id].clone())
+                .as_deref(),
+            expected,
+            "{path}"
+        );
+        if expected.is_some() {
+            assert_eq!(call.method, Some(ResolutionMethod::PathSuffix));
+        }
     }
 
     /// `a.parse()` after `from crate import a`: the receiver is an

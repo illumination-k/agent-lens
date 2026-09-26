@@ -40,3 +40,4 @@ mutants.out.*/
 
 # Python (callgraph-accuracy harness)
 __pycache__/
+scripts/callgraph-accuracy/oracle-ts/node_modules/

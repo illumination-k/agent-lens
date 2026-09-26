@@ -14,36 +14,6 @@
 #   note    = why, with the call site, so the next reader need not re-derive it
 # A verdict that matches no current disagreement is reported as stale.
 
-# pflag: `(expr).String()` on a parenthesised receiver is read as a bare call
-# to the package-level `String` function.
-[[adjudication]]
-target = "pflag"
-caller = "pflag::durationValue::String"
-callee = "pflag::String"
-verdict = "agent_lens_wrong"
-note = "duration.go:25 `(*time.Duration)(d).String()` is time.Duration.String (stdlib), not pflag.String"
-
-[[adjudication]]
-target = "pflag"
-caller = "pflag::ipValue::String"
-callee = "pflag::String"
-verdict = "agent_lens_wrong"
-note = "ip.go:17 `net.IP(*i).String()` is net.IP.String (stdlib)"
-
-[[adjudication]]
-target = "pflag"
-caller = "pflag::ipMaskValue::String"
-callee = "pflag::String"
-verdict = "agent_lens_wrong"
-note = "ipmask.go:17 `net.IPMask(*i).String()` is net.IPMask.String (stdlib)"
-
-[[adjudication]]
-target = "pflag"
-caller = "pflag::testParse"
-callee = "pflag::String"
-verdict = "agent_lens_wrong"
-note = "flag_test.go:342 `(*maskFlag).String()` is net.IPMask.String (stdlib)"
-
 # pflag: last-segment fallback binds a method call on a stdlib value to the
 # only pflag method with that name.
 [[adjudication]]
@@ -66,45 +36,6 @@ caller = "pflag::textValue::Type"
 callee = "module::FlagSet::Name"
 verdict = "agent_lens_wrong"
 note = "text.go:48 `reflect.ValueOf(v.p).Type().Name()` is reflect.Type.Name (stdlib)"
-
-# go-cmp: a method called on a call expression's result is read as a bare
-# call to the package-level function of that name.
-[[adjudication]]
-target = "go-cmp"
-caller = "cmp::state::callTRFunc"
-callee = "cmp::Equal"
-verdict = "agent_lens_wrong"
-note = "compare.go:336 `s.statelessCompare(step).Equal()` is diff.Result.Equal, a method, not cmp.Equal"
-
-[[adjudication]]
-target = "go-cmp"
-caller = "cmp::textList::AppendEllipsis"
-callee = "cmp::Equal"
-verdict = "agent_lens_wrong"
-note = "report_text.go:155 `(*s)[len(*s)-1].Value.Equal(textEllipsis)` is the textNode.Equal interface method"
-
-# go-cmp: last-segment fallback binds a stdlib method to the only in-repo
-# method with that name.
-[[adjudication]]
-target = "go-cmp"
-caller = "cmp::cmpopts::areNonZeroTimes"
-callee = "cmp::diffStats::IsZero"
-verdict = "agent_lens_wrong"
-note = "cmpopts/equate.go:108 `x.IsZero()` on a time.Time is time.Time.IsZero (stdlib)"
-
-[[adjudication]]
-target = "go-cmp"
-caller = "cmp::cmpopts::IgnoreMapEntries"
-callee = "cmp::internal::value::Pointer::IsNil"
-verdict = "agent_lens_wrong"
-note = "cmpopts/ignore.go:185 `vf.IsNil()` on a reflect.Value is reflect.Value.IsNil (stdlib)"
-
-[[adjudication]]
-target = "go-cmp"
-caller = "cmp::retrieveUnexportedField"
-callee = "cmp::internal::value::Pointer::IsNil"
-verdict = "agent_lens_wrong"
-note = "export.go:25 `ve.IsNil()` on a reflect.Value is reflect.Value.IsNil (stdlib)"
 
 # toolz: a call through a local, a parameter or a loop variable is bound to
 # a same-named function or method elsewhere (the name is shadowed).

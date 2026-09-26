@@ -180,6 +180,58 @@ class AnalyzedFilesTest(unittest.TestCase):
         self.assertIn("| lexical | 2 | 1 | 1 | 0 | 1.000 |", score.render(r, "t"))
 
 
+    def test_callers_the_oracle_could_not_resolve_are_excluded(self):
+        # Rust: a cfg-inactive fn in a file the oracle did analyse.
+        g = graph([resolved(MAIN, HELPER, "lexical"), resolved(OTHER, HELPER, "lexical")])
+        o = oracle([edge(MAIN, 6, HELPER)]) | {"analyzed_files": ["m.py"], "unanalyzed_functions": [{"file": "m.py", "def_line": 3}]}
+        r = score.score(g, o)
+        self.assertEqual(r["precision"]["lexical"], {"resolved": 2, "tp": 1, "caller_not_analyzed": 1})
+        self.assertEqual(r["disagreements"], [])
+
+
+class ModuleLevelEdgeTest(unittest.TestCase):
+    def test_resolved_edge_without_caller_node_is_counted_and_left_out(self):
+        g = graph([resolved(MAIN, HELPER, "lexical", 6), {"from": None, "to": HELPER["id"], "resolution": "resolved", "resolution_method": "lexical", "call_lines": [20]}])
+        r = score.score(g, oracle([edge(MAIN, 6, HELPER)]))
+        self.assertEqual(r["module_level_resolved"], 1)
+        self.assertEqual(r["precision"]["overall"], {"resolved": 1, "tp": 1})
+        self.assertIn("| resolved edge excluded | no caller node (module-level code) | 1 |", score.render(r, "t"))
+        self.assertEqual(score.merge([r, r])["module_level_resolved"], 2)
+
+
+class InnermostCallerTest(unittest.TestCase):
+    # t.ts
+    #  1 function run() {          run          1-5
+    #  2   use(() => {             run::closure 2-4 (a callback starting on the call's line)
+    #  3     helper()
+    #  4   })
+    #  6 function helper() {}      helper       6-6
+    RUN = node("run", 1, 5, "t.ts")
+    CB = node("run::closure#1", 2, 4, "t.ts")
+    HELP = node("helper", 6, 6, "t.ts")
+
+    def score(self, caller_def_line: int, call_line: int, innermost: bool) -> dict:
+        g = {"nodes": [self.RUN, self.CB, self.HELP], "edges": []}
+        e = {"caller_file": "t.ts", "caller_def_line": caller_def_line, "call_line": call_line, "callee_file": "t.ts", "callee_def_line": 6, "dispatch": "static"}
+        o = oracle([e]) | {"caller_is_innermost_function": innermost}
+        return score.score(g, o)
+
+    def pairs(self, r: dict) -> list:
+        return [(d["caller"]["qualified_name"], d["callee"]["qualified_name"]) for d in r["disagreements"]]
+
+    def test_call_before_a_same_line_callback_maps_to_the_outer_function(self):
+        # `use(...)` on line 2 is called by run, not by the callback opening there.
+        self.assertEqual(self.pairs(self.score(1, 2, innermost=True)), [("m::run", "m::helper")])
+        self.assertEqual(self.pairs(self.score(1, 2, innermost=False)), [("m::run::closure#1", "m::helper")])
+
+    def test_call_in_callback_maps_to_the_callback(self):
+        self.assertEqual(self.pairs(self.score(2, 3, innermost=True)), [("m::run::closure#1", "m::helper")])
+
+    def test_function_without_node_falls_back_to_the_enclosing_node(self):
+        # An anonymous function agent-lens has no node for, opening on line 3.
+        self.assertEqual(self.pairs(self.score(3, 3, innermost=True)), [("m::run::closure#1", "m::helper")])
+
+
 class AdjudicationTest(unittest.TestCase):
     def setUp(self):
         self.graph = graph([resolved(MAIN, OTHER, "last_segment"), resolved(MAIN, HELPER, "lexical")])

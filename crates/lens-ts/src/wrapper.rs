@@ -382,7 +382,7 @@ namespace inner {
     export function shim(x: number): number { return core(x); }
 }
 "#,
-        "shim",
+        "inner::shim",
         "core",
         &[]
     )]

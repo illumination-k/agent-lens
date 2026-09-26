@@ -7,7 +7,10 @@
 //! module. The table below lists the names where that match is
 //! worthless: the methods of the standard interfaces every Go package
 //! implements or consumes (`fmt.Stringer`, `error`, `io`,
-//! `encoding/json`, `sort.Interface`, `sync`, `context`, `testing.TB`).
+//! `encoding/json`, `sort.Interface`, `sync`, `context`, `testing.TB`),
+//! plus the nil / zero probes the standard library defines on its
+//! everyday values (`reflect.Value.IsNil`, `time.Time.IsZero`, the
+//! `IsZero` that `encoding/json`'s `omitzero` consults).
 //!
 //! Package-qualified calls (`fmt.Sprintf`) and type-qualified calls
 //! (`Foo.Method`) are not receiver calls in this adapter's call shapes,
@@ -39,6 +42,8 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "Grow",
     "Helper",
     "Is",
+    "IsNil",
+    "IsZero",
     "Len",
     "Less",
     "Lock",
@@ -132,6 +137,8 @@ mod tests {
     #[case::error("Error", true)]
     #[case::io("Write", true)]
     #[case::sort_interface("Less", true)]
+    #[case::nil_probe("IsNil", true)]
+    #[case::zero_probe("IsZero", true)]
     #[case::project_specific("ServeIndex", false)]
     #[case::reflection_accessor("Kind", false)]
     fn table_separates_stdlib_names_from_project_names(#[case] name: &str, #[case] expected: bool) {

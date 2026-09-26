@@ -326,14 +326,12 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        // Don't descend into nested function/method declarations or
-        // closures: their calls belong to the inner unit. Mirrors the
-        // Python adapter, which scopes `FunctionBodyCallVisitor` to a
-        // single `def`.
-        if matches!(
-            child.kind(),
-            "function_declaration" | "method_declaration" | "func_literal"
-        ) {
+        // A `func_literal` has no node of its own, so its calls belong
+        // to the enclosing named function (docs/callgraph-accuracy.md,
+        // "Edge definition"), as the Rust and Python adapters attribute
+        // closure / lambda bodies. Skipping it would drop every call made
+        // from a goroutine, a deferred closure or a callback.
+        if matches!(child.kind(), "function_declaration" | "method_declaration") {
             continue;
         }
         visit_calls(child, ctx, out);
@@ -466,10 +464,22 @@ fn callee_facts(
                     receiver: ReceiverExprKind::Expression,
                 };
             };
-            let mut segments = callee
+            // An operand that is no plain path — a call result
+            // (`NewDecoder(r).Decode(v)`), a conversion
+            // (`net.IP(b).String()`), an index — is a value, so the call
+            // is a method on it. Reading only the field would turn it
+            // into a bare call to the package-level function of the same
+            // name.
+            let Some(mut segments) = callee
                 .child_by_field_name("operand")
                 .and_then(|operand| expression_path(operand, source))
-                .unwrap_or_default();
+            else {
+                return CalleeFacts {
+                    name: Some(field_name),
+                    path_segments: None,
+                    receiver: ReceiverExprKind::Expression,
+                };
+            };
             segments.push(field_name.clone());
             // Two operand shapes are namespace-aliased path calls in Go:
             // a known import alias (`pkg.Func()`) and a Go type-style
@@ -486,9 +496,29 @@ fn callee_facts(
             };
             CalleeFacts {
                 name: Some(field_name),
-                path_segments: (!segments.is_empty()).then_some(segments),
+                path_segments: Some(segments),
                 receiver,
             }
+        }
+        // `Empty[K]()`: with one type argument that is a bare name, the
+        // grammar cannot tell an explicit instantiation from indexing and
+        // reads an index (`Empty[[]byte]()` and `Empty[pkg.T]()` parse as
+        // type arguments). A name that can only be a type makes it the
+        // generic function named by the operand; `handlers[i]()` stays an
+        // anonymous value.
+        "index_expression"
+            if callee
+                .child_by_field_name("index")
+                .is_some_and(|index| index_reads_as_type(index, source)) =>
+        {
+            callee.child_by_field_name("operand").map_or(
+                CalleeFacts {
+                    name: None,
+                    path_segments: None,
+                    receiver: ReceiverExprKind::Expression,
+                },
+                |operand| callee_facts(operand, source, namespace_aliases),
+            )
         }
         "parenthesized_expression" => {
             let mut cursor = callee.walk();
@@ -509,6 +539,42 @@ fn callee_facts(
         },
     }
 }
+
+/// Whether the bare-name index of `f[X]` can only be a type argument: a
+/// predeclared type (`int`) or a type-cased name (`K`) — Go's type
+/// parameters and exported types are capitalised, its loop indices and
+/// keys are not.
+fn index_reads_as_type(index: Node<'_>, source: &[u8]) -> bool {
+    index.kind() == "identifier"
+        && node_str(index, source)
+            .is_some_and(|name| starts_uppercase(name) || PREDECLARED_TYPES.contains(&name))
+}
+
+/// Go's predeclared type names.
+const PREDECLARED_TYPES: &[&str] = &[
+    "any",
+    "bool",
+    "byte",
+    "comparable",
+    "complex128",
+    "complex64",
+    "error",
+    "float32",
+    "float64",
+    "int",
+    "int16",
+    "int32",
+    "int64",
+    "int8",
+    "rune",
+    "string",
+    "uint",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint8",
+    "uintptr",
+];
 
 fn expression_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
     match node.kind() {
@@ -825,10 +891,10 @@ func caller() { Foo.Bar() }
     }
 
     #[test]
-    fn closures_inside_functions_do_not_steal_outer_calls() {
+    fn closure_calls_are_attributed_to_the_enclosing_function() {
         // Closures (`func_literal`) stay attached to their parent
-        // function: their inner calls should still be attributed to the
-        // outer caller, mirroring `lens-rust` and `lens-py`.
+        // function: their inner calls are attributed to the outer
+        // caller, mirroring `lens-rust` and `lens-py`.
         let src = r#"
 package p
 
@@ -840,17 +906,18 @@ func outer() {
 func Inner() {}
 "#;
         let calls = calls(src, "main");
-        // Outer should record the call to `helper` (and not `Inner`,
-        // because that one belongs to the closure body which we skip).
+        // Outer records both the call to `helper` and the `Inner` call
+        // made from the closure body.
         let names: Vec<_> = calls
             .iter()
             .map(|c| (c.caller_qualified_name(), c.callee_name()))
             .collect();
-        assert!(
-            names
-                .iter()
-                .any(|(caller, callee)| *caller == Some("main::outer") && *callee == Some("helper")),
-            "expected outer→helper call, got {names:?}",
+        assert_eq!(
+            names,
+            [
+                (Some("main::outer"), Some("Inner")),
+                (Some("main::outer"), Some("helper")),
+            ],
         );
     }
 
@@ -877,6 +944,45 @@ func caller() { a.b.c() }
         let call = &calls(src, "main")[0];
         assert_eq!(call.callee_name(), Some("c"));
         assert_eq!(call.callee_path().as_deref(), Some("a::b::c"));
+    }
+
+    #[rstest]
+    #[case::call_result("NewDecoder(r).Decode(v)", "Decode")]
+    #[case::conversion("net.IP(b).String()", "String")]
+    #[case::uppercase_conversion("Duration(d).Seconds()", "Seconds")]
+    #[case::index("items[0].Close()", "Close")]
+    #[case::chained_call("reflect.ValueOf(x).IsNil()", "IsNil")]
+    fn methods_on_non_path_operands_are_receiver_calls(#[case] expr: &str, #[case] name: &str) {
+        // The operand is a value, so this is a method call on it, never a
+        // bare call to a package-level function named like the field.
+        let src = format!("package p\n\nfunc caller() {{ {expr} }}\n");
+        let all = calls(&src, "main");
+        let call = all
+            .iter()
+            .find(|c| c.callee_name() == Some(name))
+            .expect("method call recorded");
+        assert_eq!(call.callee_path(), None);
+        assert!(call.has_receiver_expression());
+    }
+
+    #[rstest]
+    #[case::type_parameter("Empty[K]()", Some("Empty"))]
+    #[case::predeclared_type("Empty[int]()", Some("Empty"))]
+    #[case::slice_type("Empty[[]byte]()", Some("Empty"))]
+    #[case::qualified_type("Empty[time.Duration]()", Some("Empty"))]
+    #[case::package_function("lo.Empty[K]()", Some("Empty"))]
+    #[case::two_type_arguments("Pair[K, V]()", Some("Pair"))]
+    #[case::indexed_value("handlers[i]()", None)]
+    #[case::indexed_call_result("table()[K]()", None)]
+    #[case::keyed_value("handlers[\"x\"]()", None)]
+    fn explicitly_instantiated_calls_name_the_generic_function(
+        #[case] expr: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let src = format!("package p\n\nfunc caller() {{ {expr} }}\n");
+        // The outer call is recorded before any call nested in its callee.
+        let all = calls(&src, "main");
+        assert_eq!(all[0].callee_name(), expected, "{all:?}");
     }
 
     #[test]

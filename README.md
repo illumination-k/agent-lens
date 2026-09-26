@@ -572,6 +572,7 @@ mise run bench    # Criterion benchmarks
 mise run bench-compare [ref]  # benchmark ref vs working tree; fails on a regression (what CI runs on a PR)
 mise run mutants  # full-workspace cargo-mutants (slow; not in normal CI)
 mise run mutants:rust:diff [base]  # diff-scoped mutation tests (what CI runs on a PR)
+mise run mutants:minimize <package>  # redundant tests of a package, via mutrim (needs mutrim on PATH)
 mise run selftest # run agent-lens over its own sources (dogfooding)
 ```
 

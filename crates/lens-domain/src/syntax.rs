@@ -353,7 +353,9 @@ pub struct CallShape {
     pub arguments: SyntaxFact<Vec<ArgumentShape>>,
     /// Whether the callee name is bound in the caller's own local scope
     /// — a closure or nested function assigned to a local name, or a
-    /// function-typed parameter. Such a call targets the local binding,
+    /// function-typed parameter — or, where the adapter can tell, to a
+    /// value its own file computes at module scope (TypeScript's
+    /// `const { isFrozen } = Object`). Such a call targets the binding,
     /// which shadows anything the workspace defines under that name, so
     /// resolution must not attribute it to a global definition.
     ///
@@ -430,7 +432,11 @@ impl CallShape {
     pub fn has_receiver_expression(&self) -> bool {
         matches!(
             self.receiver_expr_kind,
-            SyntaxFact::Known(ReceiverExprKind::Expression | ReceiverExprKind::SelfValue)
+            SyntaxFact::Known(
+                ReceiverExprKind::Expression
+                    | ReceiverExprKind::SelfValue
+                    | ReceiverExprKind::LocalValue
+            )
         )
     }
 }
@@ -440,6 +446,12 @@ pub enum ReceiverExprKind {
     None,
     SelfValue,
     Expression,
+    /// A receiver the caller's own file binds to a value — a local, a
+    /// parameter, a module-scope variable holding a computed value — so
+    /// never a module, namespace, or type. `v.f()` on such a receiver is
+    /// a method call: no free function is reachable through it by name.
+    /// An adapter that cannot tell reports [`Self::Expression`].
+    LocalValue,
 }
 
 /// Whether a call site's callee is a bare name that the caller's own

@@ -138,10 +138,123 @@ fn extract_call_shapes(
             .filter_map(|binding| Some((binding.symbol?, binding)))
             .collect(),
         namespace_aliases,
+        module_values: module_scope_values(&ret.program),
+        local_functions: {
+            let mut names = FunctionNamesBySymbol {
+                module,
+                out: HashMap::new(),
+            };
+            walk_program(&ret.program, &line_index, &mut names);
+            names.out
+        },
+        object_literals: {
+            let mut objects = ObjectLiteralCollector::default();
+            objects.visit_program(&ret.program);
+            objects.out
+        },
         out: Vec::new(),
     };
     walk_program(&ret.program, &line_index, &mut collector);
     Ok(collector.out)
+}
+
+/// Module-scope variables that hold a computed value rather than a
+/// function of their own or a module: `const { isFrozen } = Object`,
+/// `const useStore = create(...)`, `let handler;`. A bare call through
+/// one reaches whatever the value is — the file itself binds the name,
+/// so a same-named function elsewhere in the workspace is out of reach,
+/// exactly as for a local. A function-valued declarator is a node of its
+/// own and a CommonJS `require(...)` / `import(...)` binds a module, so
+/// neither is recorded.
+fn module_scope_values(program: &Program) -> HashSet<SymbolId> {
+    let mut out = HashSet::new();
+    for stmt in &program.body {
+        let declaration = match stmt {
+            Statement::VariableDeclaration(v) => v,
+            Statement::ExportNamedDeclaration(e) => match &e.declaration {
+                Some(Declaration::VariableDeclaration(v)) => v,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        for declarator in &declaration.declarations {
+            if declarator
+                .init
+                .as_ref()
+                .is_some_and(|init| is_function_value(init) || binds_module(init))
+            {
+                continue;
+            }
+            out.extend(
+                declarator
+                    .id
+                    .get_binding_identifiers()
+                    .iter()
+                    .filter_map(|id| id.symbol_id.get()),
+            );
+        }
+    }
+    out
+}
+
+/// The qualified name of every unit declared as a symbol (see
+/// [`FunctionItem::binding`]), so a call through a local name binds the
+/// closure or nested function it holds.
+struct FunctionNamesBySymbol<'m> {
+    module: &'m str,
+    out: HashMap<SymbolId, String>,
+}
+
+impl FunctionVisitor for FunctionNamesBySymbol<'_> {
+    fn on_function(&mut self, item: FunctionItem<'_>) {
+        if let Some(symbol) = item.binding {
+            self.out
+                .insert(symbol, qualify_module(self.module, &item.name));
+        }
+    }
+}
+
+/// Variables initialised with an object literal, at any scope. `const
+/// actions = { add, remove }` holds functions by reference, so
+/// `actions.add()` may well reach a free function named `add`: such a
+/// receiver is no [`ReceiverExprKind::LocalValue`].
+#[derive(Default)]
+struct ObjectLiteralCollector {
+    out: HashSet<SymbolId>,
+}
+
+impl<'a> Visit<'a> for ObjectLiteralCollector {
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if let (Some(init), BindingPattern::BindingIdentifier(id)) = (&it.init, &it.id)
+            && matches!(init.get_inner_expression(), Expression::ObjectExpression(_))
+            && let Some(symbol) = id.symbol_id.get()
+        {
+            self.out.insert(symbol);
+        }
+        walk::walk_variable_declarator(self, it);
+    }
+}
+
+fn is_function_value(init: &Expression) -> bool {
+    matches!(
+        init.without_parentheses(),
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    )
+}
+
+/// `require("m")`, `require("m").x`, `require("m")(opts)`, through
+/// parentheses and TS assertions. (A dynamic `import()` needs no case:
+/// its locals are import bindings, which win before this is consulted.)
+fn binds_module(init: &Expression) -> bool {
+    match init.get_inner_expression() {
+        Expression::CallExpression(call) => {
+            matches!(&call.callee, Expression::Identifier(id) if id.name == "require")
+                || binds_module(&call.callee)
+        }
+        Expression::StaticMemberExpression(member) => binds_module(&member.object),
+        Expression::ComputedMemberExpression(member) => binds_module(&member.object),
+        _ => false,
+    }
 }
 
 struct FunctionShapeCollector {
@@ -230,6 +343,12 @@ struct CallShapeCollector<'a> {
     /// locals destructured from a dynamic `import()`.
     bindings: HashMap<SymbolId, ImportBinding>,
     namespace_aliases: HashSet<String>,
+    /// See [`module_scope_values`].
+    module_values: HashSet<SymbolId>,
+    /// See [`ObjectLiteralCollector`].
+    object_literals: HashSet<SymbolId>,
+    /// See [`FunctionNamesBySymbol`].
+    local_functions: HashMap<SymbolId, String>,
     out: Vec<CallShape>,
 }
 
@@ -260,9 +379,32 @@ impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_, '_> {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         let arguments = it.arguments.iter().map(argument_shape).collect();
         let line = self.collector.line_index.line(it.span.start);
-        let shape = self.call_shape(&it.callee, arguments, line);
+        let callee = callee_facts(&it.callee, &self.collector.namespace_aliases);
+        let shape = self.call_shape(callee, root_identifier(&it.callee), arguments, line);
         self.out.push(shape);
         walk::walk_call_expression(self, it);
+    }
+
+    /// `new Foo(x)` runs `Foo`'s `constructor`, so it is recorded as a
+    /// call to the path `Foo::constructor` (`ns::Foo::constructor` for
+    /// `new ns.Foo()`), which the binding and path-suffix steps resolve
+    /// like any static call. A class with no declared constructor has no
+    /// such node and the site stays unresolved. A computed callee
+    /// (`new (pick())()`) names nothing and is not recorded.
+    fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
+        if let Some(mut segments) = expression_path(&it.callee) {
+            segments.push(CONSTRUCTOR.to_owned());
+            let arguments = it.arguments.iter().map(argument_shape).collect();
+            let line = self.collector.line_index.line(it.span.start);
+            let callee = CalleeFacts {
+                name: Some(CONSTRUCTOR.to_owned()),
+                path_segments: Some(segments),
+                receiver: ReceiverExprKind::None,
+            };
+            let shape = self.call_shape(callee, root_identifier(&it.callee), arguments, line);
+            self.out.push(shape);
+        }
+        walk::walk_new_expression(self, it);
     }
 
     // A call site belongs to exactly one function: its nearest enclosing
@@ -280,9 +422,12 @@ impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_, '_> {
 enum Referent<'b> {
     /// Declared in a function, block, or parameter list — any scope
     /// below the module's.
-    Local,
+    Local(SymbolId),
     /// Declared at module scope by this file.
     ModuleScope,
+    /// A module-scope variable holding a computed value — see
+    /// [`module_scope_values`].
+    ModuleValue,
     /// An import binding.
     Import(&'b ImportBinding),
     /// Declared nowhere in the file: a global.
@@ -295,18 +440,34 @@ impl FunctionBodyCallVisitor<'_, '_> {
     /// parameter list.
     fn call_shape(
         &self,
-        callee_expr: &Expression,
+        callee: CalleeFacts,
+        root: Option<&IdentifierReference>,
         arguments: Vec<ArgumentShape>,
         line: usize,
     ) -> CallShape {
         let collector = self.collector;
-        let callee = callee_facts(callee_expr, &collector.namespace_aliases);
-        let referent = root_identifier(callee_expr).and_then(|root| self.referent(root));
+        let referent = root.and_then(|root| self.referent(root));
         // A local binding shadows every definition outside the function,
-        // but only a bare call names the binding itself: `local.run()`
-        // names a method on whatever the local holds.
+        // and a module-scope value every definition outside the file, but
+        // only a bare call names the binding itself: `local.run()` names a
+        // method on whatever the local holds.
         let bare = matches!(callee.path_segments.as_deref(), Some([_]));
-        let callee_is_locally_bound = bare && matches!(referent, Some(Referent::Local));
+        let callee_is_locally_bound =
+            bare && matches!(referent, Some(Referent::Local(_) | Referent::ModuleValue));
+        // `retry.delay()` on a local or a computed module-scope value calls
+        // a method on that value, never a free function named `delay`.
+        // An object literal may hold free functions by reference, so it
+        // keeps the plain `Expression` kind.
+        let receiver = if callee.receiver == ReceiverExprKind::Expression
+            && matches!(referent, Some(Referent::Local(_) | Referent::ModuleValue))
+            && !root
+                .and_then(|root| self.symbol(root))
+                .is_some_and(|symbol| collector.object_literals.contains(&symbol))
+        {
+            ReceiverExprKind::LocalValue
+        } else {
+            callee.receiver
+        };
         let callee_binding = match (&referent, callee.path_segments.as_deref()) {
             (Some(referent), Some(segments)) => self.binding(referent, segments),
             _ => SyntaxFact::Unknown,
@@ -319,7 +480,7 @@ impl FunctionBodyCallVisitor<'_, '_> {
             callee_path_segments: callee
                 .path_segments
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
-            receiver_expr_kind: SyntaxFact::Known(callee.receiver),
+            receiver_expr_kind: SyntaxFact::Known(receiver),
             arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
             callee_binding,
@@ -329,21 +490,30 @@ impl FunctionBodyCallVisitor<'_, '_> {
         }
     }
 
+    /// The symbol `root` refers to; `None` for a global.
+    fn symbol(&self, root: &IdentifierReference) -> Option<SymbolId> {
+        let scoping = self.collector.scoping;
+        scoping.get_reference(root.reference_id.get()?).symbol_id()
+    }
+
     fn referent(&self, root: &IdentifierReference) -> Option<Referent<'_>> {
         let scoping = self.collector.scoping;
-        let reference = scoping.get_reference(root.reference_id.get()?);
-        let Some(symbol) = reference.symbol_id() else {
+        root.reference_id.get()?;
+        let Some(symbol) = self.symbol(root) else {
             return Some(Referent::Global);
         };
         if let Some(import) = self.collector.bindings.get(&symbol) {
             return Some(Referent::Import(import));
         }
         if scoping.symbol_scope_id(symbol) != scoping.root_scope_id() {
-            return Some(Referent::Local);
+            return Some(Referent::Local(symbol));
         }
         // An import form not collected (`import x = require(...)`).
         if scoping.symbol_flags(symbol).is_import() {
             return None;
+        }
+        if self.collector.module_values.contains(&symbol) {
+            return Some(Referent::ModuleValue);
         }
         Some(Referent::ModuleScope)
     }
@@ -354,9 +524,16 @@ impl FunctionBodyCallVisitor<'_, '_> {
         let rest = segments[1..].join("::");
         let declaration = |target: String| SyntaxFact::Known(CalleeBinding::Declaration(target));
         match referent {
-            Referent::Local => SyntaxFact::Unknown,
+            // `const helper = () => …; helper()`: the unit the walker
+            // emitted for that closure, whatever it named it.
+            Referent::Local(symbol) if segments.len() == 1 => self
+                .collector
+                .local_functions
+                .get(symbol)
+                .map_or(SyntaxFact::Unknown, |target| declaration(target.clone())),
+            Referent::Local(_) => SyntaxFact::Unknown,
             Referent::Global => SyntaxFact::Known(CalleeBinding::External),
-            Referent::ModuleScope => {
+            Referent::ModuleScope | Referent::ModuleValue => {
                 declaration(qualify_module(&self.collector.module, &segments.join("::")))
             }
             Referent::Import(import) => match (&import.module, import.name) {
@@ -390,6 +567,7 @@ fn root_identifier<'b>(callee: &'b Expression<'b>) -> Option<&'b IdentifierRefer
     match callee {
         Expression::Identifier(id) => Some(id),
         Expression::StaticMemberExpression(member) => root_identifier(&member.object),
+        Expression::PrivateFieldExpression(field) => root_identifier(&field.object),
         Expression::ParenthesizedExpression(expr) => root_identifier(&expr.expression),
         _ => None,
     }
@@ -463,6 +641,9 @@ fn expression_argument_shape(expr: &Expression) -> ArgumentShape {
     }
 }
 
+/// The method name `new Foo()` is recorded as calling.
+const CONSTRUCTOR: &str = "constructor";
+
 struct CalleeFacts {
     name: Option<String>,
     path_segments: Option<Vec<String>>,
@@ -492,6 +673,23 @@ fn callee_facts(callee: &Expression, namespace_aliases: &HashSet<String>) -> Cal
             CalleeFacts {
                 name: Some(member.property.name.to_string()),
                 path_segments: (!segments.is_empty()).then_some(segments),
+                receiver,
+            }
+        }
+        // `this.#retry()` / `ky.#retry()`: a private method, only ever
+        // called on an instance, never through a namespace or a type.
+        Expression::PrivateFieldExpression(field) => {
+            let name = format!("#{}", field.field.name);
+            let receiver = if matches!(field.object, Expression::ThisExpression(_)) {
+                ReceiverExprKind::SelfValue
+            } else {
+                ReceiverExprKind::Expression
+            };
+            let mut segments = expression_path(&field.object).unwrap_or_default();
+            segments.push(name.clone());
+            CalleeFacts {
+                name: Some(name),
+                path_segments: Some(segments),
                 receiver,
             }
         }
@@ -773,6 +971,34 @@ mod tests {
     #[case::untyped_param("function pump(emit) { emit(1); }", true)]
     #[case::unbound_name("function pump() { emit(1); }", false)]
     #[case::module_scope("const emit = () => {}; function pump() { emit(1); }", false)]
+    // A module-scope value the file computes shadows every other file's
+    // `emit`; a CommonJS import binds a module instead.
+    #[case::module_scope_destructured_global(
+        "const { emit } = Object; function pump() { emit(1); }",
+        true
+    )]
+    #[case::module_scope_computed("const emit = make(); function pump() { emit(1); }", true)]
+    #[case::module_scope_exported_computed(
+        "export const emit = make(); function pump() { emit(1); }",
+        true
+    )]
+    #[case::module_scope_uninitialised("let emit; function pump() { emit(1); }", true)]
+    #[case::module_scope_require(
+        "const { emit } = require('./bus'); function pump() { emit(1); }",
+        false
+    )]
+    #[case::module_scope_require_member(
+        "const emit = require('./bus').emit; function pump() { emit(1); }",
+        false
+    )]
+    #[case::module_scope_require_computed_member(
+        "const emit = require('./bus')['emit']; function pump() { emit(1); }",
+        false
+    )]
+    #[case::module_scope_function_expression(
+        "const emit = function () {}; function pump() { emit(1); }",
+        false
+    )]
     fn local_callable_bindings_shadow_bare_calls(#[case] source: &str, #[case] expected: bool) {
         let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::m")
             .unwrap()
@@ -851,7 +1077,32 @@ mod tests {
         "h",
         None
     )]
-    #[case::local("function f() { const h = () => {}; h(); }", "h", None)]
+    // A local bound to a closure is that closure's unit, whatever the
+    // walker numbered it; a local holding anything else stays unsettled.
+    #[case::local_arrow(
+        "function f() { const h = () => {}; h(); }",
+        "h",
+        Some("app::main::f::closure#1")
+    )]
+    #[case::local_function_declaration(
+        "function f() { g(); function h() {} function g() {} }",
+        "g",
+        Some("app::main::f::closure#2")
+    )]
+    #[case::named_function_expression(
+        "function f() { const h = function inner() {}; h(); }",
+        "h",
+        Some("app::main::f::closure#1")
+    )]
+    #[case::namespace_sibling(
+        "namespace N { function h() {} export function f() { h(); } }",
+        "h",
+        Some("app::main::N::h")
+    )]
+    #[case::local_value("function f() { const h = make(); h(); }", "h", None)]
+    // A member of the closure (`h.call()`) is no declaration of it.
+    #[case::local_closure_member("function f() { const h = () => {}; h.call(); }", "h::call", None)]
+    #[case::parameter("function f(h: () => void) { h(); }", "h", None)]
     fn callee_bindings(#[case] source: &str, #[case] callee: &str, #[case] expected: Option<&str>) {
         let expected = expected.map_or(SyntaxFact::Unknown, |target| {
             SyntaxFact::Known(CalleeBinding::Declaration(target.to_owned()))
@@ -1242,6 +1493,130 @@ mod tests {
             Some("Api::Services::create"),
         );
         assert!(!calls[0].has_receiver_expression());
+    }
+
+    /// A receiver the file binds to a value (a parameter, a local, a
+    /// computed module-scope value) is a `LocalValue`: `v.f()` there is a
+    /// method call. An object literal may hold free functions, and an
+    /// import or a global may be a module, so those stay `Expression`.
+    #[rstest]
+    #[case::parameter("function f(retry) { retry.delay(); }", ReceiverExprKind::LocalValue)]
+    #[case::local(
+        "function f() { const t = make(); t.delay(); }",
+        ReceiverExprKind::LocalValue
+    )]
+    #[case::module_value(
+        "const t = make(); function f() { t.delay(); }",
+        ReceiverExprKind::LocalValue
+    )]
+    #[case::nested_member("function f(t) { t.timer.delay(); }", ReceiverExprKind::LocalValue)]
+    #[case::object_literal(
+        "const t = { delay }; function f() { t.delay(); }",
+        ReceiverExprKind::Expression
+    )]
+    #[case::local_object_literal(
+        "function f() { const t = { delay }; t.delay(); }",
+        ReceiverExprKind::Expression
+    )]
+    #[case::named_import(
+        "import { t } from './t'; function f() { t.delay(); }",
+        ReceiverExprKind::Expression
+    )]
+    #[case::required_module(
+        "const t = require('./t'); function f() { t.delay(); }",
+        ReceiverExprKind::Expression
+    )]
+    #[case::global("function f() { t.delay(); }", ReceiverExprKind::Expression)]
+    fn receivers_bound_to_values(#[case] source: &str, #[case] expected: ReceiverExprKind) {
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::main")
+            .unwrap()
+            .into_iter()
+            .find(|call| call.callee_name() == Some("delay"))
+            .expect("delay call");
+        assert_eq!(call.receiver_expr_kind, SyntaxFact::Known(expected));
+    }
+
+    /// `new Foo()` is a call to `Foo::constructor`, bound like any path
+    /// call through the class's name; a computed class is not recorded.
+    #[rstest]
+    #[case::module_class(
+        "class Foo {} function f() { new Foo(1); }",
+        Some(("Foo::constructor", Some("src::main::Foo::constructor")))
+    )]
+    #[case::imported_class(
+        "import { Foo } from './foo'; function f() { new Foo(); }",
+        Some(("Foo::constructor", Some("src::foo::Foo::constructor")))
+    )]
+    #[case::namespace_import(
+        "import * as m from './foo'; function f() { new m.Foo(); }",
+        Some(("m::Foo::constructor", Some("src::foo::Foo::constructor")))
+    )]
+    #[case::global_class("function f() { new Map(); }", Some(("Map::constructor", None)))]
+    #[case::computed_class("function f() { new (pick())(); }", None)]
+    fn new_expressions_call_the_constructor(
+        #[case] source: &str,
+        #[case] expected: Option<(&str, Option<&str>)>,
+    ) {
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::main")
+            .unwrap()
+            .into_iter()
+            .find(|call| call.callee_name() == Some("constructor"));
+        let Some((path, binding)) = expected else {
+            assert!(call.is_none());
+            return;
+        };
+        let call = call.expect("constructor call");
+        assert_eq!(call.callee_path().as_deref(), Some(path));
+        assert!(!call.has_receiver_expression());
+        let expected_binding = match binding {
+            Some(target) => SyntaxFact::Known(CalleeBinding::Declaration(target.to_owned())),
+            None => SyntaxFact::Known(CalleeBinding::External),
+        };
+        assert_eq!(call.callee_binding, expected_binding);
+    }
+
+    #[rstest]
+    #[case::on_this(
+        "class A { #a() {} b() { this.#a(); } }",
+        "#a",
+        ReceiverExprKind::SelfValue
+    )]
+    #[case::on_value(
+        "class A { #a() {} static b(x: A) { x.#a(); } }",
+        "x::#a",
+        ReceiverExprKind::LocalValue
+    )]
+    fn private_method_calls_name_the_private_method(
+        #[case] source: &str,
+        #[case] path: &str,
+        #[case] receiver: ReceiverExprKind,
+    ) {
+        let calls = extract_call_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+        let [call] = calls.as_slice() else {
+            panic!("one call expected: {calls:?}");
+        };
+        assert_eq!(call.callee_name(), Some("#a"));
+        assert_eq!(call.callee_path().as_deref(), Some(path));
+        assert_eq!(call.receiver_expr_kind, SyntaxFact::Known(receiver));
+    }
+
+    /// Functions and classes inside a `namespace` are named under it, as
+    /// every caller outside spells them (`Result.combine()`).
+    #[test]
+    fn namespace_members_are_qualified_by_the_namespace() {
+        let source = "export namespace Result {\n  export function combine() {}\n}\n\
+                      namespace A.B { class C { m() {} } }\n\
+                      declare module 'pkg' { function ambient(): void; }\n";
+        let functions =
+            extract_function_shapes_with_module(source, Dialect::Ts, "src::main").unwrap();
+        let qualified: Vec<&str> = functions
+            .iter()
+            .filter_map(|f| f.qualified_name.known_value().map(String::as_str))
+            .collect();
+        assert_eq!(
+            qualified,
+            ["src::main::Result::combine", "src::main::A::B::C::m"]
+        );
     }
 
     #[test]

@@ -903,11 +903,6 @@ const KNOWN_GAPS: &[KnownGap] = &[
         ],
     },
     KnownGap {
-        rewrite: "typescript_index_module",
-        missing: &["src::geo::perimeter -> src::text::count [Resolved/Lexical] x1"],
-        extra: &["src::geo::perimeter -> src::text::count [Resolved/LastSegment] x1"],
-    },
-    KnownGap {
         rewrite: "typescript_barrel",
         missing: &[
             "src::main::run -> src::geo::area [Resolved] x1",

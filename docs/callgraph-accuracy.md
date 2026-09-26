@@ -14,7 +14,8 @@ mise run callgraph-accuracy pflag      # one or more targets
 
 The task builds the release binary and runs
 `scripts/callgraph-accuracy/run.py`. It needs network access (git, Go module
-proxy, PyPI); mise supplies `go` and `uv` through the task's `tools`. Output
+proxy, PyPI, crates.io, npm); mise supplies `go`, `uv` and `node` through the
+task's `tools`, and the task adds the `rust-analyzer` rustup component. Output
 goes to `target/callgraph-accuracy/` and is never committed:
 
 | Path                                         | Content                                                    |
@@ -25,13 +26,19 @@ goes to `target/callgraph-accuracy/` and is never committed:
 | `results/<target>/graph.json`, `oracle.json` | the two inputs of the scorer                               |
 | `repos/<target>`, `venvs/<target>`           | checkout at the pinned commit, Python venv                 |
 
+Rust checkouts sit under this repository's `target/`, which the root
+`Cargo.toml` excludes from its workspace so that cargo treats each as its own.
+
 It is outside `ci` like `bench`: it clones third-party code and runs its test
 suite under a profiler, and the result is a report, not a gate. What does run
 in `ci`: `ruff check` and the unit tests of the scorer and the Python oracle
 (`test:callgraph-accuracy`, under `ci:rust`; `ci_rust.yml` also triggers on
 `scripts/callgraph-accuracy/**`) and the metamorphic resolver
-tests (cargo tests). The Go oracle's own tests (`go test ./...` in
-`scripts/callgraph-accuracy/oracle-go`) are not wired into `ci`.
+tests (cargo tests). The Rust oracle's tests are discovered with the others; its
+end-to-end test skips unless rust-analyzer is installed. The Go oracle's own
+tests (`go test ./...` in `scripts/callgraph-accuracy/oracle-go`) and the
+TypeScript oracle's (`npm ci && npm test` in
+`scripts/callgraph-accuracy/oracle-ts`) are not wired into `ci`.
 
 ## Edge definition
 
@@ -39,35 +46,36 @@ An edge is **function → function**: from the innermost agent-lens node
 containing the call site to the node of the function that runs. Both oracles
 are normalised to this before comparison.
 
-| Case                                                                                      | Rule                                                                                                                                         |
-| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| builtins, stdlib, third-party, vendored, generated code                                   | excluded; only functions defined in files under the analysed root are endpoints                                                              |
-| constructor                                                                               | Python `A()` → `A.__init__`. Go and Rust have no constructors: `NewX()` / `X::new()` is a plain function edge                                |
-| static dispatch                                                                           | a direct call of a named function, or a method on a concrete type: must be a `resolved` edge                                                 |
-| `dyn` / interface / virtual dispatch, call through a function value                       | a **candidate set**, scored apart from static dispatch; not expected to be resolved syntactically                                            |
-| callback (Python function invoked from C, e.g. `sorted(key=f)`, `map(f, ...)`)            | its own recall row; agent-lens emits no edge for passing a function as a value                                                               |
-| call inside a closure, lambda, comprehension or nested function                           | attributed to the innermost named function agent-lens has a node for (see below)                                                             |
-| a closure / lambda / nested function as the callee                                        | no node, so unmapped (`callee_nested_or_anonymous`)                                                                                          |
-| test code                                                                                 | included (test functions are ordinary nodes with `is_test`)                                                                                  |
-| recursion                                                                                 | kept (self edges count)                                                                                                                      |
-| decorators                                                                                | the decorated function is the callee; a decorator's wrapper is not an edge of its own (the Python oracle does not implement this: see below) |
-| implicit calls (Python `__iter__` / `__next__` in a `for`, operators, `with`, properties) | edges, since the function runs, but there is no call expression; missed pairs of this kind show up under `of which no call site`             |
+| Case                                                                                      | Rule                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| builtins, stdlib, third-party, vendored, generated code                                   | excluded; only functions defined in files under the analysed root are endpoints                                                                                           |
+| constructor                                                                               | Python `A()` → `A.__init__`, TypeScript `new A()` → `A`'s `constructor` (when declared). Go and Rust have no constructors: `NewX()` / `X::new()` is a plain function edge |
+| static dispatch                                                                           | a direct call of a named function, or a method on a concrete type: must be a `resolved` edge                                                                              |
+| `dyn` / interface / virtual dispatch, call through a function value                       | a **candidate set**, scored apart from static dispatch; not expected to be resolved syntactically                                                                         |
+| callback (Python function invoked from C, e.g. `sorted(key=f)`, `map(f, ...)`)            | its own recall row; agent-lens emits no edge for passing a function as a value                                                                                            |
+| call inside a closure, lambda, comprehension or nested function                           | attributed to the innermost named function agent-lens has a node for (see below)                                                                                          |
+| a closure / lambda / nested function as the callee                                        | no node, so unmapped (`callee_nested_or_anonymous`)                                                                                                                       |
+| test code                                                                                 | included (test functions are ordinary nodes with `is_test`)                                                                                                               |
+| recursion                                                                                 | kept (self edges count)                                                                                                                                                   |
+| decorators                                                                                | the decorated function is the callee; a decorator's wrapper is not an edge of its own (the Python oracle does not implement this: see below)                              |
+| implicit calls (Python `__iter__` / `__next__` in a `for`, operators, `with`, properties) | edges, since the function runs, but there is no call expression; missed pairs of this kind show up under `of which no call site`                                          |
 
 What agent-lens does today with nested code, measured on small samples (keep
 this table in sync when the resolver changes):
 
-| Construct                             | Rust                                                                          | Go                                                             | Python                                   |
-| ------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------- |
-| calls in a closure / lambda body      | attributed to the enclosing fn                                                | **dropped** (no edge from any node)                            | attributed to the enclosing function     |
-| calls in a nested named fn / def      | **dropped**                                                                   | n/a                                                            | attributed to the enclosing function     |
-| calling the closure / nested fn       | `unresolved`                                                                  | `unresolved` (named variable) or `anonymous` (`func(){...}()`) | `unresolved`                             |
-| `A()` on a class                      | n/a                                                                           | n/a                                                            | `unresolved` (no `__init__` edge)        |
-| method on an interface / trait object | `resolved` via `last_segment` if one impl has that name, else a candidate set | same                                                           | same                                     |
-| decorated def                         | n/a                                                                           | n/a                                                            | node spans from the first decorator line |
+| Construct                             | Rust                                                                                                                                                                                          | Go                                                             | Python                                   | TypeScript                                         |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------- |
+| calls in a closure / lambda body      | attributed to the enclosing fn                                                                                                                                                                | attributed to the enclosing function                           | attributed to the enclosing function     | attributed to the closure's own `::closure#N` node |
+| calls in a nested named fn / def      | attributed to the enclosing fn                                                                                                                                                                | n/a                                                            | attributed to the enclosing function     | attributed to the nested function's own node       |
+| calling the closure / nested fn       | `unresolved`                                                                                                                                                                                  | `unresolved` (named variable) or `anonymous` (`func(){...}()`) | `unresolved`                             | `unresolved`                                       |
+| `A()` on a class                      | n/a                                                                                                                                                                                           | n/a                                                            | `unresolved` (no `__init__` edge)        | `new A()`: no call site at all                     |
+| calls inside a macro invocation       | attributed to the enclosing fn when the arguments parse as an expression list (`assert_eq!`, `format!`, `write!`, `vec![a, b]`); none for `vec![x; n]`, `matches!` or a macro's own expansion | n/a                                                            | n/a                                      | n/a                                                |
+| method on an interface / trait object | `resolved` via `last_segment` if one impl has that name, else a candidate set                                                                                                                 | same                                                           | same                                     | same                                               |
+| decorated def                         | n/a                                                                                                                                                                                           | n/a                                                            | node spans from the first decorator line | node spans from the first decorator line           |
 
-So a Go oracle edge whose call site is inside a func literal is attributed to
-the enclosing named function (by the oracle, which keeps the real call line)
-and counts as missed by agent-lens, under `of which no call site`.
+A Go oracle edge whose call site is inside a func literal is attributed to
+the enclosing named function by both sides (the oracle keeps the real call
+line).
 
 Where the oracles fall short of the definition:
 
@@ -84,6 +92,24 @@ Where the oracles fall short of the definition:
   agent-lens-only `caller → decorated` as `oracle_wrong`. A decorator that is
   a class (toolz `@curry`) shows up as `caller → curry.__call__` instead. A C
   wrapper (`functools.lru_cache`) is transparent.
+- Rust: rust-analyzer resolves with one feature set (all features unless the
+  target names some), so a fn behind an inactive `cfg` is unresolved: the
+  oracle lists it in `unanalyzed_functions` and the scorer leaves agent-lens
+  edges from it out of precision. A `#[cfg]` on a block or statement inside
+  an analysed fn is not seen that way, so its calls are neither edges nor
+  excluded: pick the target's features to keep such code active.
+- Rust: a call through a trait (`dyn`, a generic `T: Trait`, a default
+  method) is `dynamic` to the trait method and to every in-root impl
+  (`textDocument/implementation`): a CHA-style set, far larger than the VTA
+  sets of the Go oracle. A trait method declared without a body has no
+  agent-lens node, so those edges are unmapped (`callee_no_enclosing_node`).
+- TypeScript: interface / abstract method calls fan out only to classes that
+  name the type in an `extends` / `implements` clause (transitively); an
+  object literal or a structurally compatible class without the clause is not
+  a candidate. Implicit calls (getters, JSX elements, tagged templates,
+  decorators, iterators) have no edge, and neither do calls whose callee type
+  comes from an uninstalled dependency (the checkout has no `node_modules`,
+  so such a value is `any`).
 - Python: a generator's call is seen only when it is first advanced; the
   edge is kept when that line names the generator (`for x in gen():`) and
   dropped otherwise (counted in the oracle's `stats`); an agent-lens edge
@@ -91,10 +117,12 @@ Where the oracles fall short of the definition:
 
 ## Oracles
 
-| Language | Oracle              | Kind         | Tool                                                                                                             |
-| -------- | ------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------- |
-| Go       | `go-vta`            | type-checker | `golang.org/x/tools/go/callgraph/vta` over the packages and their tests (`scripts/callgraph-accuracy/oracle-go`) |
-| Python   | `python-setprofile` | dynamic      | `sys.setprofile` while the project's pytest suite runs (`scripts/callgraph-accuracy/oracle_py.py`)               |
+| Language   | Oracle               | Kind         | Tool                                                                                                                          |
+| ---------- | -------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Go         | `go-vta`             | type-checker | `golang.org/x/tools/go/callgraph/vta` over the packages and their tests (`scripts/callgraph-accuracy/oracle-go`)              |
+| Python     | `python-setprofile`  | dynamic      | `sys.setprofile` while the project's pytest suite runs (`scripts/callgraph-accuracy/oracle_py.py`)                            |
+| Rust       | `rust-analyzer`      | type-checker | rust-analyzer's LSP call hierarchy, plus `textDocument/definition` inside macros and at trait calls (`oracle_rs.py`)          |
+| TypeScript | `typescript-checker` | type-checker | the TypeScript compiler API (`checker.getResolvedSignature`) over every TS / JS file (`scripts/callgraph-accuracy/oracle-ts`) |
 
 Static-dispatch edges of a type-checker oracle are near exact, so precision
 and recall are both verdicts. A dynamic oracle only sees what the tests run:
@@ -106,10 +134,11 @@ replaced by an indicator (below).
 
 ```json
 {
-  "oracle": "go-vta | python-setprofile",
-  "language": "go | python",
+  "oracle": "go-vta | python-setprofile | rust-analyzer | typescript-checker",
+  "language": "go | python | rust | typescript",
   "kind": "type-checker | dynamic",
   "root": "<absolute path of the analysed tree>",
+  "caller_is_innermost_function": false,
   "edges": [{
     "caller_file": "<posix path relative to root>",
     "caller_def_line": 12,
@@ -119,12 +148,16 @@ replaced by an indicator (below).
     "dispatch": "static | dynamic | callback"
   }],
   "executed_functions": [{ "file": "<relative>", "def_line": 12 }],
-  "analyzed_files": ["<relative>"]
+  "analyzed_files": ["<relative>"],
+  "unanalyzed_functions": [{ "file": "<relative>", "def_line": 12 }]
 }
 ```
 
-- Lines are 1-based. A def line is the line of the `def` / `func` keyword
-  (Python: after skipping decorator lines).
+- Lines are 1-based. A def line is the line of the `def` / `func` / `fn`
+  keyword (Python: after skipping decorator lines); TypeScript: the first line
+  of the declaration, decorators and modifiers included, and for a function or
+  arrow that initialises a variable, property or object key, the line of that
+  declaration.
 - Edges are deduplicated on all fields; only functions defined under `root`
   appear.
 - `static`: callee fixed at compile time. `dynamic`: interface / virtual
@@ -134,6 +167,13 @@ replaced by an indicator (below).
 - `analyzed_files` (optional, type-checker oracles): every file under `root`
   the oracle type-checked. When present, an agent-lens edge whose caller is in
   another file is outside the oracle's view and left out of precision.
+- `unanalyzed_functions` (optional, type-checker oracles): functions in an
+  analysed file the oracle could not resolve (Rust: cfg-inactive). An
+  agent-lens edge whose caller maps to one is left out of precision, as for
+  `analyzed_files`.
+- `caller_is_innermost_function` (optional, default false): when true,
+  `caller_def_line` is the innermost function around the call, anonymous ones
+  included, and the scorer maps the caller from it (see below).
 - The Python oracle reads dispatch off the call line, since it sees no types:
   `static` when a call expression on that line names the callee (`f(...)`,
   `x.f(...)`), or, for a constructor dunder (`__init__`, `__new__`), the
@@ -153,11 +193,32 @@ replaced by an indicator (below).
   called on a type-parameter value in a generic body. Synthetic wrappers (method values, promoted methods,
   generic instances) are followed to the declared function they forward to.
   `call_line` is the line of the call's `(`.
+- The Rust oracle: `static` unless the callee is declared in a `trait` block;
+  then `dynamic`, plus a `dynamic` edge to every in-root impl of that method.
+  Calls rust-analyzer's call hierarchy lists come with the callee pinned by
+  the type checker; for a trait method (std traits included) the call site is
+  re-resolved with `textDocument/definition`, which gives the impl when the
+  receiver type is known (`Version::from_str(s)`). Calls inside macro
+  arguments, which the call hierarchy skips, are found by lexing each macro
+  invocation's token tree for `name(` / `.name(` / `name::<..>(` and asking
+  `textDocument/definition` at each. `call_line` is the line of the callee's
+  name.
+- The TypeScript oracle: `static` when the callee expression names the callee
+  (the identifier or property resolves, through import aliases, to the
+  function, the method, or a `const` / `readonly` binding initialised with
+  it), and for `new C()` / `super()`; `dynamic` for a call through any other
+  value, for an interface / abstract method (to every class implementing it
+  by heritage clause) and for a method on a union-typed receiver (to every
+  member's method). `call_line` is the line of the callee's name.
 
 ### Mapping to agent-lens nodes
 
 - Caller: the innermost node in `caller_file` whose `[start_line, end_line]`
-  contains `call_line` (fallback: `caller_def_line`).
+  contains `call_line` (fallback: `caller_def_line`). With
+  `caller_is_innermost_function`, the node defined at `caller_def_line`, else
+  the innermost node containing it: mapping by `call_line` would give a call
+  to the callback that opens on its own line (`safeTry(function* () {`), which
+  TypeScript nodes (one per closure) make common.
 - Callee: the innermost node in `callee_file` containing `callee_def_line`,
   provided that line is the node's own definition (its first line, or reached
   from it through decorator lines only). Otherwise the callee is a nested or
@@ -174,7 +235,10 @@ replaced by an indicator (below).
 
 `O` is the set of mapped oracle pairs (caller node, callee node); `R_m` the
 agent-lens `resolved` pairs with resolution method `m` (`lexical`,
-`self_method`, `last_segment`, `path_suffix`, `crate_narrowed`).
+`self_method`, `last_segment`, `path_suffix`, `crate_narrowed`, and for
+TypeScript `binding`). A resolved edge with no caller node (a call in
+module-level code: a Rust `const` initialiser) is outside every set and only
+counted (`resolved edge excluded`).
 
 - **Precision** (type-checker oracle), per `m`: TP = |R_m ∩ O|,
   FP = |R_m \ O|, precision = TP / (TP + FP), over the pairs whose caller is
@@ -191,7 +255,7 @@ agent-lens `resolved` pairs with resolution method `m` (`lexical`,
   ambiguous edge's candidates from that caller but not resolved; `missed` =
   neither. `of which no call site` counts the missed pairs where agent-lens
   recorded no call site at all on the oracle's call line in that caller
-  (implicit calls such as `__iter__`, dropped Go closure bodies); the rest of
+  (implicit calls such as `__iter__`, calls in Rust macro arguments); the rest of
   `missed` are call sites agent-lens saw but left unresolved.
 - **Candidate sets**, per method over `ambiguous` edges whose caller is in the
   oracle's view (same scope as precision; the others are counted as
@@ -232,7 +296,9 @@ reason.
 
 `scripts/callgraph-accuracy/targets.toml` pins small, well-tested,
 single-language projects by full commit SHA: Go `spf13/pflag`, `google/go-cmp`;
-Python `more-itertools`, `toolz`. Add one by resolving a release tag with
+Python `more-itertools`, `toolz`; Rust `dtolnay/semver`, `rust-lang/log`;
+TypeScript `supermacro/neverthrow`, `pmndrs/zustand`. A Rust target may
+name the cargo `features` rust-analyzer enables (default: all). Add one by resolving a release tag with
 `git ls-remote <repo> refs/tags/<tag>` and checking its test suite passes at
 that commit.
 
@@ -275,20 +341,231 @@ callees, 1 callee and 3 callers with no enclosing node).
 
 What the misses are, from reading the disagreements:
 
-- Go static misses without a call site (84 of 271; every one sampled) are calls inside func
-  literals, which agent-lens drops; the rest are method calls on a typed
+- Go static misses without a call site (84 of 271; every one sampled) were calls inside func
+  literals, which agent-lens dropped (fixed since: see "Go" below); the rest are method calls on a typed
   package variable or local (`CommandLine.StringP(...)`, `err.Unwrap()`) left
   unresolved.
 - Go false positives: a method on a call expression's result read as the
   package-level function of that name (`(expr).String()`,
   `s.statelessCompare(step).Equal()`), and `last_segment` binding a stdlib
   method (`reflect.Type.Name`, `time.Time.IsZero`, `reflect.Value.IsNil`) to
-  the only in-repo method with that name.
+  the only in-repo method with that name. All but `reflect.Type.Name` are
+  fixed since (see "Go" below).
 - Python static misses are almost all `mi.foo(...)` in more-itertools' tests:
   `import more_itertools as mi` over an `__init__.py` that re-exports with
   `from .more import *` (the barrel gap pinned in the metamorphic tests).
 - Python unobserved `last_segment` edges are mostly shadowed names: a local, a
   parameter or an `itertools` import bound to a same-named in-repo function.
+
+### Go
+
+Measured 2026-09-26 on pflag and go-cmp after four Go fixes, found by running
+the oracle over google/uuid `0f11ee6` (v1.6.0), BurntSushi/toml `d97def5`
+(v1.5.0), samber/lo `203faca` (v1.51.0), gorilla/mux `b4617d0` (v1.8.1) and
+spf13/cast `40e8e07` (v1.9.2):
+
+- calls inside a func literal are attributed to the enclosing function
+  instead of dropped;
+- a method on a value that is no plain path (`NewDecoder(r).Decode(v)`,
+  `net.IP(b).String()`) is a receiver call, not a bare call to the
+  package-level function named like it;
+- the name fallback keeps a bare call to free functions (`Domain(b)` is a
+  conversion or a function, never `UUID.Domain`) and a receiver call to
+  methods (`wg.Add(1)` is never the package-level `tag.Add`);
+- an explicit single type argument (`Empty[K]()`) names the generic
+  function instead of reading as an index;
+
+plus `IsNil` / `IsZero` in Go's ubiquitous method names.
+
+Per repository, after the fixes (the five discovery targets are not in
+`targets.toml`; their precision counts every agent-lens-only pair as a false
+positive, since none is adjudicated):
+
+| Repository                  | Commit    | Precision           | Static recall       | Static pairs only in a candidate set | Dynamic recall |
+| --------------------------- | --------- | ------------------- | ------------------- | ------------------------------------ | -------------- |
+| spf13/pflag v1.0.10         | `0491e57` | 0.985 (1098 / 1115) | 0.841 (1094 / 1301) | 30                                   | 4 / 837        |
+| google/go-cmp v0.7.0        | `9b12f36` | 1.000 (376 / 376)   | 0.830 (376 / 453)   | 63                                   | 0 / 222        |
+| google/uuid v1.6.0          | `0f11ee6` | 1.000 (159 / 159)   | 0.828 (159 / 192)   | 8                                    | 0 / 5          |
+| BurntSushi/toml v1.5.0      | `d97def5` | 0.972 (692 / 712)   | 0.889 (690 / 776)   | 65                                   | 2 / 87         |
+| samber/lo v1.51.0           | `203faca` | 0.993 (144 / 145)   | 0.706 (144 / 204)   | 7                                    | 0 / 3          |
+| gorilla/mux v1.8.1          | `b4617d0` | 0.981 (358 / 365)   | 0.669 (358 / 535)   | 177                                  | 0 / 66         |
+| spf13/cast v1.9.2           | `40e8e07` | 0.887 (94 / 106)    | 0.803 (94 / 117)    | 0                                    | 0 / 37         |
+| pflag + go-cmp (micro-avg.) |           | 0.989 (1474 / 1491) | 0.838 (1470 / 1754) | 93                                   | 4 / 1059       |
+
+Against the baseline above, pflag + go-cmp went from precision 0.973 and
+static recall 0.536. On the five discovery targets, the fixes raised
+precision from 0.968 to 0.973 and static recall from 0.678 to 0.792. What is
+left there: `reflect.Value.Type` bound to an in-repo `Type` method by
+`crate_narrowed` (toml), `Get` on an `http.Header` (mux), edges to
+`zz_generated.go`, which the oracle excludes as generated (cast, all 12 of
+its false positives), and lo's self-edges on generic functions
+(`Contains → Contains`), which come from the oracle collapsing instantiation
+wrappers.
+
+### TypeScript
+
+Measured 2026-09-26 after seven TypeScript fixes, found by running the oracle
+over neverthrow and zustand plus four more projects: immerjs/immer `b00474e`
+(v11.1.18), pmndrs/jotai `3e0b9ff` (v2.20.3), ianstormtaylor/superstruct
+`d31f007` (v2.0.2) and sindresorhus/ky `a6faace` (v2.1.0):
+
+- functions and classes inside a `namespace` are named under it
+  (`Result::combine`), which is how every caller outside spells them;
+- `new C()` is a call to `C::constructor`, bound like a static path call;
+- `this.#m()` / `x.#m()` name the private method `#m`, and `this.m()` in an
+  arrow inside a method finds `m` on the enclosing class;
+- a bare call through a local bound to a closure or a nested function
+  (`const parse = (s) => ...; parse(x)`, `function helper() {}` inside a
+  function, a sibling in a `namespace`) binds that closure's node;
+- a module-scope value the file computes (`const { isFrozen } = Object`,
+  `const useStore = create(...)`) shadows same-named functions elsewhere, as a
+  local does; a CommonJS `require(...)` still binds a module;
+- a receiver bound to a value (a parameter, a local, a computed module-scope
+  value, but not an object literal, which may hold functions by reference)
+  reaches methods only: `retry.delay()` is never the free function `delay`;
+- `constructor` joins the ubiquitous method names (`arr.constructor(1)`).
+
+The oracle also changed: a call through a type-annotated `const` bound to a
+function (`const f: Api["set"] = (x) => ...`) goes to that function instead of
+the annotation's signature, which had made every such call an agent-lens-only
+pair. Both columns below use the updated oracle; the discovery targets are not
+in `targets.toml`, and every agent-lens-only pair counts as a false positive.
+
+| Repository                     | Commit    | Precision before    | Precision after     | Static recall before | Static recall after |
+| ------------------------------ | --------- | ------------------- | ------------------- | -------------------- | ------------------- |
+| supermacro/neverthrow v8.2.0   | `1b7a959` | 1.000 (563 / 563)   | 1.000 (699 / 699)   | 0.650 (562 / 864)    | 0.808 (698 / 864)   |
+| pmndrs/zustand v5.0.15         | `2115efb` | 0.981 (202 / 206)   | 0.978 (220 / 225)   | 0.894 (202 / 226)    | 0.973 (220 / 226)   |
+| immerjs/immer v11.1.18         | `b00474e` | 0.920 (506 / 550)   | 0.980 (647 / 660)   | 0.621 (292 / 470)    | 0.919 (432 / 470)   |
+| pmndrs/jotai v2.20.3           | `3e0b9ff` | 0.997 (1300 / 1304) | 0.993 (1363 / 1372) | 0.929 (1300 / 1399)  | 0.974 (1363 / 1399) |
+| ianstormtaylor/superstruct 2.0 | `d31f007` | 1.000 (356 / 356)   | 1.000 (376 / 376)   | 0.734 (356 / 485)    | 0.775 (376 / 485)   |
+| sindresorhus/ky v2.1.0         | `a6faace` | 0.987 (620 / 628)   | 1.000 (714 / 714)   | 0.862 (620 / 719)    | 0.993 (714 / 719)   |
+| all six (micro-avg.)           |           | 0.983 (3547 / 3607) | 0.993 (4019 / 4046) | 0.800 (3332 / 4163)  | 0.914 (3803 / 4163) |
+
+Dynamic recall is unchanged (215 → 216 of 703). What is left:
+
+- agent-lens-only pairs that are real calls: the oracle's caller or callee
+  line holds two nodes (a curried `const f = (a) => (b) => ...`, a closure
+  written on the line of the closure it is passed to), so the scorer cannot
+  map its edge (zustand, jotai); immer's benchmarks import `../dist/immer.mjs`,
+  which is not analysed, and the name fallback binds `setAutoFreeze()` to the
+  `Immer` method that `dist` re-exports;
+- static misses: calls through a barrel re-export (`import { mask } from
+  '../src'` in superstruct's tests, `export { f as g }` aliases in jotai),
+  which leave an ambiguous candidate set or nothing, and method chains on
+  returned values (`ok(1).andThen(...)` in neverthrow), which need a type.
+
+### Rust and TypeScript
+
+Measured 2026-09-26 with `mise run callgraph-accuracy semver log neverthrow
+zustand` on agent-lens `ec8e182`, with no adjudications yet (every
+disagreement is still unadjudicated, so these precisions count every
+agent-lens-only pair as a false positive). Targets: semver `5368cdf` (1.0.28),
+log `8034743` (0.4.34, features `kv_serde`, `kv_sval`), neverthrow `1b7a959`
+(v8.2.0), zustand `2115efb` (v5.0.15).
+
+| Language (oracle)               | Precision         | Static recall      | Static pairs only in a candidate set | Dynamic recall | Candidate-set hit rate |
+| ------------------------------- | ----------------- | ------------------ | ------------------------------------ | -------------- | ---------------------- |
+| Rust (rust-analyzer)            | 0.924 (269 / 291) | 0.550 (260 / 473)  | 86                                   | 9 / 606        | 0.932 (118 sets)       |
+| TypeScript (typescript-checker) | 0.995 (765 / 769) | 0.704 (764 / 1085) | 148                                  | 1 / 392        | 1.000 (315 sets)       |
+
+| Method           | Rust precision    | Rust static pairs found | TypeScript precision | TypeScript static pairs found |
+| ---------------- | ----------------- | ----------------------- | -------------------- | ----------------------------- |
+| `lexical`        | 0.942 (162 / 172) | 162                     | n/a                  | n/a                           |
+| `self_method`    | 1.000 (20 / 20)   | 18                      | 1.000 (2 / 2)        | 2                             |
+| `last_segment`   | 0.792 (38 / 48)   | 37                      | 0.993 (419 / 422)    | 418                           |
+| `path_suffix`    | 0.961 (49 / 51)   | 43                      | 1.000 (72 / 72)      | 72                            |
+| `binding`        | n/a               | n/a                     | 0.996 (272 / 273)    | 272                           |
+| `crate_narrowed` | resolves nothing  | n/a                     | resolves nothing     | n/a                           |
+
+Per target: precision semver 1.000, log 0.847, neverthrow 1.000, zustand
+0.981; static recall semver 0.714, log 0.423, neverthrow 0.651, zustand 0.910.
+
+Unknown: Rust 95 oracle edges unmapped (63 to trait methods without a body,
+32 to closures / nested fns), 10 resolved edges excluded as their caller is
+cfg-inactive, 2 as module-level; TypeScript 8 unmapped (5 callers with no
+enclosing node, 3 ambiguous: a `const f = (a) => (b) => {...}` curried arrow
+gives two nodes of the same span).
+
+What the misses are, from reading the disagreements:
+
+- Rust static misses without a call site are mostly calls inside macro
+  arguments (`assert_eq!(f(x), ...)`, `write!(f, "{}", g())`): 59 of 72 in
+  semver. agent-lens records no call site in a macro invocation (fixed
+  since: see "Rust" below).
+- Rust: semver's `display.rs` has two `Version::fmt` (the `Display` and the
+  `Debug` impl); the first gets no edges at all, not even to `pad` or
+  `digits`, which are called outside any closure (fixed since).
+- Rust false positives: `last_segment` binding a call to the cfg-selected shim
+  (`log::AtomicUsize::load` / `store`, compiled only without native atomics);
+  `BTreeMap::get(self, ..)` inside `impl Source for BTreeMap` resolved
+  `lexical` to the enclosing method itself.
+- TypeScript static misses: calls to functions of a `namespace`
+  (`Result.combine(...)`, 66 of neverthrow's 153), `new C()` (35; no call
+  site is recorded for a `new` expression), and calls to local closures
+  (`const parse = (s) => ...; parse(x)`, all 20 of zustand's). All three are
+  fixed; see TypeScript above.
+- TypeScript false positives: `last_segment` binding `useStore()` in the
+  zustand examples, where `useStore` is the local result of `create(...)`, to
+  `src/react.ts`'s `useStore`. Fixed; see TypeScript above.
+
+### Rust
+
+Measured 2026-09-26 after five Rust fixes, found by running the oracle over
+rayon-rs/either `ce6f07f` (1.18.0), smol-rs/fastrand `7a1cc2c` (v2.5.0),
+rust-lang/glob `cfa2a58` (v0.3.4), seanmonstar/httparse `97c7e6e` (v1.9.5)
+and rapidfuzz/strsim-rs `f72cd1c` (v0.11.1), all with default features but
+fastrand (`std`, `alloc`):
+
+- calls in the arguments of an expression- or statement-position macro
+  (`assert_eq!(f(x), 1)`, `format!("{}", g())`) are call sites of the
+  enclosing function when the arguments parse as a comma-separated
+  expression list; `vec![x; n]`, `matches!` and DSL macros stay opaque;
+- calls in a nested `fn` item are attributed to the enclosing function, as a
+  closure's are, instead of dropped;
+- one file declaring the same qualified name twice (`impl Display for V` and
+  `impl Debug for V` both define `V::fmt`) attributes each call to the node
+  whose span holds it instead of dropping both;
+- the name fallback keeps a receiver call (`rng.u8(..)`) to methods and a
+  single-segment call (`u8(..)`) to free functions; the methods of an
+  `impl` for a reference, tuple, slice or array (`impl Extend<..> for (A, B)`)
+  are now methods, not free functions;
+- `krate::Type::name()` reaches `impl Type` anywhere in `krate`
+  (`fastrand::Rng::new()` is `impl Rng` in `fastrand::global_rng`);
+
+plus `as_ptr` / `as_mut_ptr` in Rust's ubiquitous method names.
+
+Per repository, after the fixes (the five discovery targets are not in
+`targets.toml`; their precision counts every agent-lens-only pair as a false
+positive, since none is adjudicated):
+
+| Repository                  | Commit    | Precision         | Static recall     | Static pairs only in a candidate set | Dynamic recall |
+| --------------------------- | --------- | ----------------- | ----------------- | ------------------------------------ | -------------- |
+| dtolnay/semver 1.0.28       | `5368cdf` | 1.000 (157 / 157) | 0.762 (157 / 206) | 13                                   | 0 / 0          |
+| rust-lang/log 0.4.34        | `8034743` | 0.796 (144 / 181) | 0.491 (131 / 267) | 85                                   | 13 / 606       |
+| rayon-rs/either 1.18.0      | `ce6f07f` | 1.000 (11 / 11)   | 0.526 (10 / 19)   | 0                                    | 1 / 1          |
+| smol-rs/fastrand v2.5.0     | `7a1cc2c` | 0.991 (107 / 108) | 0.939 (107 / 114) | 0                                    | 0 / 0          |
+| rust-lang/glob v0.3.4       | `cfa2a58` | 0.962 (51 / 53)   | 0.823 (51 / 62)   | 0                                    | 0 / 0          |
+| seanmonstar/httparse v1.9.5 | `97c7e6e` | 1.000 (247 / 247) | 0.870 (247 / 284) | 4                                    | 0 / 0          |
+| rapidfuzz/strsim-rs v0.11.1 | `f72cd1c` | 1.000 (123 / 123) | 0.961 (123 / 128) | 0                                    | 0 / 0          |
+| semver + log (micro-avg.)   |           | 0.891 (301 / 338) | 0.609 (288 / 473) | 98                                   | 13 / 606       |
+
+Against "Rust and TypeScript" above, semver + log went from precision 0.924 and static
+recall 0.550. On the five discovery targets, the fixes raised precision from
+0.961 to 0.994 and static recall from 0.568 to 0.886.
+
+log's precision fell because its macro arguments are now visible, not
+because a resolution changed: the new false positives are receiver calls
+to methods a macro generates (`v.to_u64()` inside `assert!` binding
+`Inner::to_u64`, since `Value::to_u64` comes from `impl_to_primitive!` and is
+no node), and trait-qualified calls on a concrete value
+(`Source::get(&vec, k)` inside `assert_eq!`), which agent-lens binds to the
+trait's default method and rust-analyzer to the `Vec` impl. The same shapes
+outside a macro were already false positives. What is left on the discovery
+targets: `e.path()` on a `std::fs::DirEntry` bound to glob's
+`GlobError::path`, re-exports through `pub use m::*` or a `pub mod` of
+`pub use` items (`fastrand::bool()`, httparse's `_benchable`), and calls on
+ubiquitous names (`is_empty`, `as_str`, `parse`, `next`), which the
+resolver refuses by design.
 
 ## Metamorphic checks
 
@@ -297,7 +574,7 @@ imports, splitting or moving modules, re-exporting through a barrel file) need
 no oracle: any difference is a resolver bug. They run as ordinary cargo tests
 in `ci` (`crates/agent-lens/src/analyze/call_graph/metamorphic_tests.rs`), for
 Rust, TypeScript, Python and Go. Differences the resolver does not handle yet
-(re-exports through a barrel file, relative imports inside a directory index)
+(re-exports through a barrel file)
 are pinned exactly in its `KNOWN_GAPS` table; deleting a row records the fix.
 
 ## Existing suites and literature

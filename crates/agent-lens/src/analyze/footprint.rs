@@ -43,7 +43,6 @@ use std::process::Command;
 use serde::Serialize;
 use tracing::warn;
 
-use super::call_graph::algo::{bfs, reverse_adjacency};
 use super::call_graph::model::CallGraphNode;
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::diff::{FileDiff, diff_files, untracked_file_diffs};
@@ -56,6 +55,7 @@ use super::{
     AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, SourceLang, collect_source_files,
     format_optional_f64, relative_display_path,
 };
+use lens_domain::graph_algo::{bfs, reverse_adjacency};
 
 const SCHEMA_VERSION: u32 = 1;
 

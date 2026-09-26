@@ -616,7 +616,7 @@ namespace inner {
     export function hidden(n: number): number { return n > 0 ? 1 : 0; }
 }
 "#,
-        "hidden",
+        "inner::hidden",
         Some(2)
     )]
     #[case::export_default_function(
@@ -672,7 +672,7 @@ namespace outer {
     export function inner(): void {}
 }
 "#,
-        "inner",
+        "outer::inner",
         None
     )]
     fn extracted_function_matches(

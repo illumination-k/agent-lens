@@ -32,12 +32,12 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::{bfs, condense, reverse_adjacency};
 use super::call_graph::model::{CallGraphNode, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders, match_symbol};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, overlaps_any};
+use lens_domain::graph_algo::{bfs, condense, reverse_adjacency};
 
 const SCHEMA_VERSION: u32 = 1;
 
