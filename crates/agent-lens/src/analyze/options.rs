@@ -525,6 +525,7 @@ mod tests {
             min_lines: Some(9),
             target: crate::analyze::SimilarityTarget::Types,
             method: crate::analyze::SimilarityMethod::Token,
+            idf: true,
             doc_overlap: true,
         };
         let via_options = SimilarityAnalyzer::new().with_options(opts);
@@ -535,6 +536,7 @@ mod tests {
             .with_min_lines_opt(Some(9))
             .with_target(crate::analyze::SimilarityTarget::Types)
             .with_method(crate::analyze::SimilarityMethod::Token)
+            .with_idf(true)
             .with_doc_overlap(true)
             .with_paired_by(None)
             .with_drift_floor(0.4)

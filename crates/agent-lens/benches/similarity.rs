@@ -29,11 +29,12 @@ fn bench_similarity(c: &mut Criterion) {
     let py = support::corpus(|root| support::write_py_corpus(root, 32, 32));
     let analyzer = SimilarityAnalyzer::new();
     let token_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Token);
+    let lcs_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Lcs);
     let pdg_analyzer = SimilarityAnalyzer::new().with_method(SimilarityMethod::Pdg);
     let types_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Types);
     let blocks_analyzer = SimilarityAnalyzer::new().with_target(SimilarityTarget::Blocks);
 
-    let cases: [(&str, &SimilarityAnalyzer, &TempDir); 13] = [
+    let cases: [(&str, &SimilarityAnalyzer, &TempDir); 14] = [
         (
             "similarity_directory_cartesian_32_functions",
             &analyzer,
@@ -74,6 +75,11 @@ fn bench_similarity(c: &mut Criterion) {
         (
             "similarity_token_directory_lsh_dense_1024_functions",
             &token_analyzer,
+            &large_dense,
+        ),
+        (
+            "similarity_lcs_directory_lsh_dense_1024_functions",
+            &lcs_analyzer,
             &large_dense,
         ),
         (

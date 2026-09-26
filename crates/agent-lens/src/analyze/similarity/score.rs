@@ -2,7 +2,10 @@
 //! component, the same-trait exemption, and the blend of the two into the
 //! one number the threshold is compared against.
 
-use lens_domain::{TSEDOptions, TreeNode, calculate_tsed_with_subtree_sizes, signature_components};
+use lens_domain::{
+    DistanceBound, TSEDOptions, TreeNode, calculate_tsed_with_subtree_sizes,
+    edit_distance_lower_bound, signature_components, tsed_distance_cutoff, tsed_from_distance,
+};
 use rayon::prelude::*;
 
 use super::candidates::TreeProfile;
@@ -37,6 +40,16 @@ impl ScoreWeights {
     pub(super) fn body_candidate_threshold(self, threshold: f64) -> f64 {
         ((threshold - self.signature) / self.body).clamp(0.0, 1.0)
     }
+
+    /// Lowest body score that reaches `threshold` given the pair's actual
+    /// signature score. Exact where [`Self::body_candidate_threshold`] is
+    /// generous, because scoring already knows the signature.
+    fn body_needed(self, threshold: f64, signature_similarity: f64) -> f64 {
+        if self.body <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        (threshold - self.signature * signature_similarity) / self.body
+    }
 }
 
 pub(super) fn is_exact_match_without_distance(
@@ -66,7 +79,9 @@ pub(super) fn score_candidate_pairs(
     pairs
         .par_iter()
         .fold(ScoreStats::default, |mut stats, &(i, j)| {
-            if let Some(score) = score_candidate_pair(corpus, profiles, i, j, opts, weights) {
+            if let Some(score) =
+                score_candidate_pair(corpus, profiles, i, j, opts, weights, threshold)
+            {
                 stats.record(score, threshold);
             }
             stats
@@ -75,6 +90,13 @@ pub(super) fn score_candidate_pairs(
         .sorted()
 }
 
+/// Score one candidate pair under TSED.
+///
+/// Before paying for APTED, a pair whose traversal-string lower bound
+/// already proves it cannot reach `threshold` is cut short: its body
+/// score is the bound's upper estimate, below what the threshold needs,
+/// so it is recorded as below threshold exactly as the full score would
+/// have been. Pass `threshold <= 0` to always compute the exact score.
 pub(super) fn score_candidate_pair(
     corpus: &[OwnedUnit],
     profiles: &[TreeProfile],
@@ -82,6 +104,7 @@ pub(super) fn score_candidate_pair(
     j: usize,
     opts: &TSEDOptions,
     weights: ScoreWeights,
+    threshold: f64,
 ) -> Option<PairScore> {
     let a = corpus.get(i)?;
     let b = corpus.get(j)?;
@@ -90,10 +113,31 @@ pub(super) fn score_candidate_pair(
     let compare_values = opts.apted.compare_values;
     let body_a = a.body_tree();
     let body_b = b.body_tree();
+    let signature = signature_components(a.signature(), b.signature());
+    let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
+    let same_trait = same_trait_pair(a, b);
+    let weights = if same_trait {
+        ScoreWeights::BODY_ONLY
+    } else {
+        weights
+    };
     let exact_match =
         is_exact_match_without_distance(profile_a, profile_b, body_a, body_b, compare_values);
+    let mut bound_pruned = false;
     let body_similarity = if exact_match {
         1.0
+    } else if let Some(upper) = body_upper_bound_below_needed(
+        profile_a,
+        profile_b,
+        body_a,
+        body_b,
+        opts,
+        weights.body_needed(threshold, signature_similarity),
+    )
+    .filter(|&upper| weights.blend(upper, signature_similarity) < threshold)
+    {
+        bound_pruned = true;
+        upper
     } else {
         let sizes_a = profile_a.subtree_sizes(body_a);
         let sizes_b = profile_b.subtree_sizes(body_b);
@@ -106,14 +150,6 @@ pub(super) fn score_candidate_pair(
             sizes_b,
             opts,
         )
-    };
-    let signature = signature_components(a.signature(), b.signature());
-    let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
-    let same_trait = same_trait_pair(a, b);
-    let weights = if same_trait {
-        ScoreWeights::BODY_ONLY
-    } else {
-        weights
     };
     Some(PairScore {
         i,
@@ -128,7 +164,44 @@ pub(super) fn score_candidate_pair(
             same_trait,
         },
         exact_match,
+        bound_pruned,
     })
+}
+
+/// Relative slack on the distance cutoff, so floating-point rounding in
+/// the bound can only ever keep a pair for the exact score, never drop
+/// one the exact score would have kept.
+const CUTOFF_SLACK: f64 = 1e-9;
+
+/// An upper bound on the pair's TSED body score when that bound is
+/// already below `needed`, from the traversal-string lower bound on the
+/// edit distance ([`edit_distance_lower_bound`]). `None` means the pair
+/// may still reach `needed` and must be scored exactly.
+fn body_upper_bound_below_needed(
+    profile_a: &TreeProfile,
+    profile_b: &TreeProfile,
+    body_a: &TreeNode,
+    body_b: &TreeNode,
+    opts: &TSEDOptions,
+    needed: f64,
+) -> Option<f64> {
+    let (size_a, size_b) = (profile_a.size, profile_b.size);
+    let cutoff = tsed_distance_cutoff(size_a, size_b, needed, opts)?;
+    let cutoff = cutoff + CUTOFF_SLACK * (size_a.max(size_b) as f64 + 1.0);
+    let compare_values = opts.apted.compare_values;
+    let bound = edit_distance_lower_bound(
+        profile_a.traversal(body_a, compare_values),
+        profile_b.traversal(body_b, compare_values),
+        &opts.apted,
+        cutoff,
+    );
+    match bound {
+        DistanceBound::Exceeds(lower) => {
+            let upper = tsed_from_distance(size_a, size_b, lower, opts);
+            (upper < needed).then_some(upper)
+        }
+        DistanceBound::Within(_) => None,
+    }
 }
 
 /// Whether both units implement the same method of the same trait
@@ -205,6 +278,7 @@ pub(super) fn score_profile_pair(
             same_trait,
         },
         exact_match: body_similarity >= 1.0,
+        bound_pruned: false,
     })
 }
 
@@ -214,6 +288,10 @@ pub(super) struct PairScore {
     pub(super) j: usize,
     pub(super) components: SimilarityComponents,
     pub(super) exact_match: bool,
+    /// The body score is an upper bound from the edit-distance lower
+    /// bound, not an exact APTED score; only ever set on pairs that fall
+    /// below the threshold.
+    pub(super) bound_pruned: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -244,6 +322,9 @@ pub(super) struct ScoreStats {
     pub(super) pairs: Vec<ScoredPair>,
     pub(super) exact_match_count: usize,
     pub(super) below_threshold_count: usize,
+    /// Below-threshold pairs whose APTED run the edit-distance lower
+    /// bound made unnecessary. A subset of `below_threshold_count`.
+    pub(super) bound_pruned_count: usize,
     pub(super) diff_filtered_count: usize,
 }
 
@@ -251,6 +332,9 @@ impl ScoreStats {
     pub(super) fn record(&mut self, score: PairScore, threshold: f64) {
         if score.exact_match {
             self.exact_match_count += 1;
+        }
+        if score.bound_pruned {
+            self.bound_pruned_count += 1;
         }
         if score.components.similarity < threshold {
             self.below_threshold_count += 1;
@@ -265,6 +349,7 @@ impl ScoreStats {
 
     pub(super) fn merge(mut a: Self, mut b: Self) -> Self {
         a.below_threshold_count += b.below_threshold_count;
+        a.bound_pruned_count += b.bound_pruned_count;
         a.diff_filtered_count += b.diff_filtered_count;
         a.exact_match_count += b.exact_match_count;
         a.pairs.append(&mut b.pairs);
@@ -323,6 +408,7 @@ mod tests {
                 j: 1,
                 components: components(1.0),
                 exact_match: true,
+                bound_pruned: false,
             },
             0.85,
         );
@@ -332,6 +418,7 @@ mod tests {
                 j: 2,
                 components: components(0.25),
                 exact_match: false,
+                bound_pruned: false,
             },
             0.85,
         );
@@ -346,6 +433,7 @@ mod tests {
                 }],
                 exact_match_count: 2,
                 below_threshold_count: 3,
+                bound_pruned_count: 0,
                 diff_filtered_count: 4,
             },
         );
@@ -378,6 +466,7 @@ mod tests {
                     same_trait: false,
                 },
                 exact_match: false,
+                bound_pruned: false,
             },
             0.85,
         );

@@ -87,12 +87,20 @@ fn calculate_tsed_with_distance(
     opts: &TSEDOptions,
     distance: impl FnOnce(&TreeNode, &TreeNode) -> f64,
 ) -> f64 {
+    if size_a.max(size_b) == 0 {
+        return 1.0;
+    }
+    tsed_from_distance(size_a, size_b, distance(a, b), opts)
+}
+
+/// TSED score of two trees of `size_a` and `size_b` nodes whose edit
+/// distance is `distance`. Monotonically non-increasing in `distance`, so
+/// a lower bound on the distance gives an upper bound on the score.
+pub fn tsed_from_distance(size_a: usize, size_b: usize, distance: f64, opts: &TSEDOptions) -> f64 {
     let max_size = size_a.max(size_b);
     if max_size == 0 {
         return 1.0;
     }
-
-    let distance = distance(a, b);
     let base = 1.0 - distance / max_size as f64;
 
     let similarity = if opts.size_penalty {
@@ -106,6 +114,31 @@ fn calculate_tsed_with_distance(
     };
 
     similarity.clamp(0.0, 1.0)
+}
+
+/// Largest edit distance at which two trees of `size_a` and `size_b`
+/// nodes can still score `min_similarity` under [`tsed_from_distance`].
+/// `None` when every distance qualifies (`min_similarity <= 0`, or two
+/// empty trees); negative when none does.
+pub fn tsed_distance_cutoff(
+    size_a: usize,
+    size_b: usize,
+    min_similarity: f64,
+    opts: &TSEDOptions,
+) -> Option<f64> {
+    let max_size = size_a.max(size_b);
+    if min_similarity <= 0.0 || max_size == 0 {
+        return None;
+    }
+    let penalty = if opts.size_penalty {
+        (size_a.min(size_b) as f64 / max_size as f64).sqrt()
+    } else {
+        1.0
+    };
+    if penalty <= 0.0 {
+        return Some(-1.0);
+    }
+    Some(max_size as f64 * (1.0 - min_similarity / penalty))
 }
 
 #[cfg(test)]
@@ -348,6 +381,28 @@ mod tests {
                 with_penalty <= without_penalty + 1e-9,
                 "with={with_penalty}, without={without_penalty}"
             );
+        }
+
+        /// A distance at the cutoff still reaches `min_similarity`, and
+        /// one clearly above it does not: the cutoff is exactly where
+        /// [`tsed_from_distance`] crosses the threshold.
+        #[test]
+        fn distance_cutoff_brackets_the_threshold(
+            size_a in 1usize..60,
+            size_b in 1usize..60,
+            min_similarity in 0.01_f64..1.0,
+            size_penalty in any::<bool>(),
+        ) {
+            let opts = TSEDOptions { size_penalty, ..TSEDOptions::default() };
+            let cutoff = tsed_distance_cutoff(size_a, size_b, min_similarity, &opts);
+            prop_assert!(cutoff.is_some());
+            let cutoff = cutoff.unwrap_or_default();
+            if cutoff >= 0.0 {
+                let at = tsed_from_distance(size_a, size_b, cutoff, &opts);
+                prop_assert!(at >= min_similarity - 1e-9, "at={at}");
+            }
+            let above = tsed_from_distance(size_a, size_b, cutoff.max(0.0) + 1e-6, &opts);
+            prop_assert!(above < min_similarity, "above={above}");
         }
 
         /// The precomputed-sizes variant is the same algorithm fed

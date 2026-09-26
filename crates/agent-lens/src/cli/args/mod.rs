@@ -573,6 +573,7 @@ mod tests {
     #[rstest]
     #[case::token("token", SimilarityMethod::Token)]
     #[case::pdg("pdg", SimilarityMethod::Pdg)]
+    #[case::lcs("lcs", SimilarityMethod::Lcs)]
     fn parses_analyze_similarity_method(#[case] flag: &str, #[case] expected: SimilarityMethod) {
         let cli = Cli::try_parse_from([
             "agent-lens",
