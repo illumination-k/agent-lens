@@ -134,7 +134,6 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::CoChange
         | ToolName::Communities
         | ToolName::Cycles
-        | ToolName::Delegation
         | ToolName::FunctionGraph
         | ToolName::GraphQuery
         | ToolName::HiddenCoupling
@@ -147,7 +146,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Risk
         | ToolName::Search
         | ToolName::TestRedundancy
-        | ToolName::Wrapper => None,
+        | ToolName::Forwarding => None,
     }
 }
 
@@ -585,7 +584,7 @@ mod tests {
     #[case(ToolName::CoChange)]
     #[case(ToolName::Communities)]
     #[case(ToolName::Cycles)]
-    #[case(ToolName::Delegation)]
+    #[case(ToolName::Forwarding)]
     #[case(ToolName::FunctionGraph)]
     #[case(ToolName::GraphQuery)]
     #[case(ToolName::Hubs)]
@@ -596,7 +595,6 @@ mod tests {
     #[case(ToolName::Reach)]
     #[case(ToolName::Risk)]
     #[case(ToolName::TestRedundancy)]
-    #[case(ToolName::Wrapper)]
     fn tools_without_a_summary_are_reported_as_such(#[case] tool: ToolName) {
         assert!(summarizer(tool).is_none());
     }

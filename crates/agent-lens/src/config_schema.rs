@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 24] = [
+const TOOL_ORDER: [ToolName; 23] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -40,10 +40,9 @@ const TOOL_ORDER: [ToolName; 24] = [
     ToolName::Reach,
     ToolName::Narrowable,
     ToolName::TestRedundancy,
-    ToolName::Delegation,
+    ToolName::Forwarding,
     ToolName::GraphQuery,
     ToolName::ContextSpan,
-    ToolName::Wrapper,
     ToolName::Coupling,
     ToolName::Communities,
     ToolName::FunctionGraph,
@@ -82,7 +81,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, delegation, footprint, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, reach, risk, search, similarity, test-redundancy, wrapper. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
     },
     Field {
         key: "format",
@@ -579,28 +578,6 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap each section's markdown listing to the top N rows.",
             },
         ],
-        ToolName::Delegation => &[
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown chain and module listings to the top N rows.",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Keep only chains with a hop or terminus on an unstaged changed line.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Keep only chains with a hop or terminus on a line changed in the given git revision range (`HEAD~1..HEAD`). Mutually exclusive with diff-only.",
-            },
-        ],
-        // The only tool whose options table is mandatory when the tool
-        // is listed: a traversal needs a verb and a start symbol.
         ToolName::GraphQuery => &[
             Field {
                 key: "query",
@@ -653,24 +630,30 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap the markdown module table to the top N spans.",
             },
         ],
-        ToolName::Wrapper => &[
+        ToolName::Forwarding => &[
+            Field {
+                key: "section",
+                ty: "array of \"wrapper\", \"delegation\"",
+                presence: "default: both",
+                desc: "Sections to report, always in the order wrapper, delegation. `wrapper`: single forwarding hops with argument-level evidence. `delegation`: the chains those hops stack into, with the terminus doing the work, and a per-module roll-up.",
+            },
             Field {
                 key: "top",
                 ty: "int",
                 presence: "default: 20",
-                desc: "Cap the markdown listing to the first N wrappers, in file order.",
+                desc: "Cap each section's markdown listing to the top N rows (wrappers in file order).",
             },
             Field {
                 key: "diff-only",
                 ty: "bool",
                 presence: "default: false",
-                desc: "Restrict analysis to functions touched by the working-tree diff.",
+                desc: "Keep only wrappers, and chains with a hop or terminus, on an unstaged changed line.",
             },
             Field {
                 key: "diff-range",
                 ty: "string",
                 presence: "optional",
-                desc: "Restrict analysis to functions touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
+                desc: "Keep only wrappers, and chains with a hop or terminus, on a line changed in the given git revision range (`HEAD~1..HEAD`, `main...topic`). Mutually exclusive with diff-only.",
             },
         ],
         ToolName::Coupling => &[Field {
@@ -858,10 +841,10 @@ mod tests {
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
-        ComplexityOptions, ContextSpanOptions, CouplingOptions, DelegationOptions,
-        FootprintOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
+        ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions,
+        ForwardingOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
         LayersOptions, NarrowableOptions, Profile, ReachOptions, RiskOptions, SearchOptions,
-        SimilarityOptions, TestRedundancyOptions, WrapperOptions,
+        SimilarityOptions, TestRedundancyOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -902,11 +885,10 @@ mod tests {
         assert_tool_parity::<ReachOptions>(ToolName::Reach);
         assert_tool_parity::<NarrowableOptions>(ToolName::Narrowable);
         assert_tool_parity::<TestRedundancyOptions>(ToolName::TestRedundancy);
-        assert_tool_parity::<DelegationOptions>(ToolName::Delegation);
+        assert_tool_parity::<ForwardingOptions>(ToolName::Forwarding);
         assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<CouplingOptions>(ToolName::Coupling);
-        assert_tool_parity::<WrapperOptions>(ToolName::Wrapper);
     }
 
     #[test]

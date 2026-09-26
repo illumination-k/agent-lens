@@ -14,8 +14,8 @@ listing it fails to load with the analyzer and section that carry it now
 (`config::MERGED_TOOLS` is the one table both read). A stale skill or
 `agent-lens.toml` then says how to fix itself.
 
-Status: `reach` and `narrowable` are done (29 → 24). The rest of this plan is
-still open.
+Status: `reach`, `narrowable` and `forwarding` are done (29 → 23). The rest
+of this plan is still open.
 
 ## Target surface
 
@@ -37,7 +37,7 @@ still open.
 `co-change` (same churn window). Deferred because each has its own options
 (`--granularity`, `--period`) and a distinct headline.
 
-### How a bundle works (`reach`, `narrowable`)
+### How a bundle works (`forwarding`, `reach`, `narrowable`)
 
 A merged analyzer is a bundle of sections, and each section is the former
 analyzer's report, unchanged. `analyze/composite.rs` runs the selected
@@ -53,7 +53,8 @@ they share are built once, and stacks the reports:
 - The digest folds per section, and a drill-down names the section
   (`analyze reach src --section untested`).
 
-Section options keep their spelling on the bundle: `reach` takes `--tier`,
+Section options keep their spelling on the bundle: `forwarding` takes
+`--diff-only` / `--diff-range` for both sections, `reach` takes `--tier`,
 `narrowable` takes `--max-loc`, `--max-cyclomatic`, `--min-call-sites`, and
 both take `--top`, applied to every section.
 
@@ -89,9 +90,9 @@ into each other, so they are mostly CLI, config and output-schema work.
    `context-span` → `coupling`.
 2. **`reach`** — done. `footprint` and `stop delta` still call the
    `unreachable` module directly; only the CLI surface moved.
-3. **`forwarding`** — the `post-tool-use wrapper` hook and the `stop delta`
-   wrapper facts stay; only the analyzer entry point and report change. Hook
-   ids are not renamed in this phase (it would break installed settings).
+3. **`forwarding`** — done. The `post-tool-use wrapper` hook and the
+   `stop delta` wrapper facts call the `wrapper` module directly and keep
+   their hook ids; only the analyzer surface moved.
 4. **`narrowable`** — done, on the same bundle machinery as `reach`.
 5. **`layers` + `cycles`** — last because the layer map's module SCC and the
    function SCC must be reconciled in one report, which is a design question,
@@ -122,7 +123,7 @@ should show it.
 
 ## Open questions
 
-- Names: `forwarding` and `graph` are proposals.
+- Names: `graph` is a proposal.
 - Whether hook ids (`post-tool-use:wrapper`) follow the analyzer rename. This
   plan keeps them, since renaming breaks every installed `settings.json`.
 - Whether to take the optional step to 15.

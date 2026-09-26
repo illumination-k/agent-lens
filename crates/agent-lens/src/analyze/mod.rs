@@ -26,6 +26,7 @@ mod error_from;
 mod export_lang;
 pub mod footprint;
 mod format;
+pub mod forwarding;
 pub(crate) mod function_delta;
 pub mod function_graph;
 pub mod graph_query;
@@ -73,6 +74,7 @@ pub use cycles::CyclesAnalyzer;
 pub use delegation::DelegationAnalyzer;
 pub use footprint::{DEFAULT_FOOTPRINT_DEPTH, FootprintAnalyzer, FootprintError};
 pub use format::ConfidenceDeduper;
+pub use forwarding::{ForwardingAnalyzer, ForwardingSection};
 pub use function_graph::FunctionGraphAnalyzer;
 pub use graph_query::{
     DEFAULT_GRAPH_QUERY_DEPTH, DEFAULT_GRAPH_QUERY_LIMIT, GraphDirection, GraphQueryAnalyzer,

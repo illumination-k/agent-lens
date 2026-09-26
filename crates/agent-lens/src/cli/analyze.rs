@@ -5,22 +5,21 @@ use std::path::PathBuf;
 
 use agent_lens::analyze::{
     ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer,
-    ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer,
-    FootprintAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
+    ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, FootprintAnalyzer,
+    ForwardingAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
     HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
     NarrowableAnalyzer, OutputFormat, ReachAnalyzer, RiskAnalyzer, SearchAnalyzer,
-    SimilarityAnalyzer, TestRedundancyAnalyzer, WrapperAnalyzer,
+    SimilarityAnalyzer, TestRedundancyAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeChangeEntropyArgs, AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand,
     AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
-    AnalyzeCouplingArgs, AnalyzeDelegationArgs, AnalyzeFootprintArgs, AnalyzeGraphQueryArgs,
+    AnalyzeCouplingArgs, AnalyzeFootprintArgs, AnalyzeForwardingArgs, AnalyzeGraphQueryArgs,
     AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
     AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzePathArgs, AnalyzeReachArgs, AnalyzeRiskArgs,
     AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeTestRedundancyArgs,
-    AnalyzeWrapperArgs,
 };
 use super::write_stdout_line;
 
@@ -107,10 +106,6 @@ pub(super) fn build_analyze_command(
             common: root()?,
             opts: profile.coupling.clone().unwrap_or_default(),
         }),
-        config::ToolName::Delegation => AnalyzeCommand::Delegation(AnalyzeDelegationArgs {
-            common,
-            opts: profile.delegation.clone().unwrap_or_default(),
-        }),
         config::ToolName::HiddenCoupling => {
             AnalyzeCommand::HiddenCoupling(AnalyzeHiddenCouplingArgs {
                 common,
@@ -132,6 +127,10 @@ pub(super) fn build_analyze_command(
         config::ToolName::Footprint => AnalyzeCommand::Footprint(AnalyzeFootprintArgs {
             common,
             opts: profile.footprint.clone().unwrap_or_default(),
+        }),
+        config::ToolName::Forwarding => AnalyzeCommand::Forwarding(AnalyzeForwardingArgs {
+            common,
+            opts: profile.forwarding.clone().unwrap_or_default(),
         }),
         config::ToolName::TestRedundancy => {
             AnalyzeCommand::TestRedundancy(AnalyzeTestRedundancyArgs {
@@ -158,10 +157,6 @@ pub(super) fn build_analyze_command(
         config::ToolName::Similarity => AnalyzeCommand::Similarity(AnalyzeSimilarityArgs {
             common,
             opts: profile.similarity.clone().unwrap_or_default(),
-        }),
-        config::ToolName::Wrapper => AnalyzeCommand::Wrapper(AnalyzeWrapperArgs {
-            common,
-            opts: profile.wrapper.clone().unwrap_or_default(),
         }),
         config::ToolName::Search => AnalyzeCommand::Search(AnalyzeSearchArgs {
             common,
@@ -229,7 +224,6 @@ impl_with_analyze_path_args!(
     ComplexityAnalyzer,
     CouplingAnalyzer,
     CyclesAnalyzer,
-    DelegationAnalyzer,
     FunctionGraphAnalyzer,
     GraphQueryAnalyzer,
     ContextSpanAnalyzer,
@@ -237,13 +231,13 @@ impl_with_analyze_path_args!(
     HotspotAnalyzer,
     HubsAnalyzer,
     FootprintAnalyzer,
+    ForwardingAnalyzer,
     ImpactAnalyzer,
     LayersAnalyzer,
     NarrowableAnalyzer,
     ReachAnalyzer,
     RiskAnalyzer,
     TestRedundancyAnalyzer,
-    WrapperAnalyzer,
 );
 
 // Similarity and search both need the same `(only_tests,
@@ -323,11 +317,11 @@ impl AnalyzeCommand {
                 Complexity => ComplexityAnalyzer,
                 Coupling => CouplingAnalyzer,
                 ContextSpan => ContextSpanAnalyzer,
-                Delegation => DelegationAnalyzer,
                 HiddenCoupling => HiddenCouplingAnalyzer,
                 Hotspot => HotspotAnalyzer,
                 Hubs => HubsAnalyzer,
                 Footprint => FootprintAnalyzer,
+                Forwarding => ForwardingAnalyzer,
                 Impact => ImpactAnalyzer,
                 Layers => LayersAnalyzer,
                 Narrowable => NarrowableAnalyzer,
@@ -335,7 +329,6 @@ impl AnalyzeCommand {
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,
                 TestRedundancy => TestRedundancyAnalyzer,
-                Wrapper => WrapperAnalyzer,
             }
             from_options {
                 GraphQuery => GraphQueryAnalyzer,
@@ -352,8 +345,8 @@ impl AnalyzeCommand {
 #[cfg(test)]
 mod tests {
     use agent_lens::analyze::{
-        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, GraphQueryKind, PairKey,
-        ReachSection, SimilarityMethod, UnreachableTier,
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, ForwardingSection,
+        GraphQueryKind, PairKey, ReachSection, SimilarityMethod, UnreachableTier,
     };
     use agent_lens::test_support::write_file;
     use clap::Parser;
@@ -629,25 +622,26 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
-    fn build_analyze_command_maps_delegation_options() {
+    fn build_analyze_command_maps_forwarding_options() {
         let profile: config::Profile = toml::from_str(
-            "path = \"crates\"\ntools = [\"delegation\"]\n\n\
-             [delegation]\ntop = 7\ndiff-only = true\n",
+            "path = \"crates\"\ntools = [\"forwarding\"]\n\n\
+             [forwarding]\ntop = 7\ndiff-only = true\nsection = [\"delegation\"]\n",
         )
         .unwrap();
         let cmd = build_analyze_command(
-            config::ToolName::Delegation,
+            config::ToolName::Forwarding,
             &profile,
             &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
-        let AnalyzeCommand::Delegation(args) = cmd else {
-            panic!("expected analyze delegation");
+        let AnalyzeCommand::Forwarding(args) = cmd else {
+            panic!("expected analyze forwarding");
         };
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(7));
         assert!(args.opts.diff_only);
+        assert_eq!(args.opts.section, [ForwardingSection::Delegation]);
     }
 
     #[test]

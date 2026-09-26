@@ -118,14 +118,9 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
           "Near-duplicate pairs by TSED tree-edit distance over normalised ASTs, folded into clusters. --target picks functions, type definitions, or statement blocks inside function bodies.",
       },
       {
-        name: "wrapper",
+        name: "forwarding",
         summary:
-          "Functions whose body is a forwarding call modulo a short chain of ?, .unwrap(), .into(), .await.",
-      },
-      {
-        name: "delegation",
-        summary:
-          "Chains that only forward — api::save -> service::save -> repo::save -> db::insert — with the terminus that does the work as the headline and a per-module lasagna roll-up.",
+          "Functions that only pass the call along: single hops whose body is a forwarding call modulo ?, .unwrap(), .into(), .await, and the chains they stack into — api::save -> service::save -> repo::save -> db::insert — with the terminus that does the work as the headline and a per-module lasagna roll-up.",
       },
       {
         name: "narrowable",

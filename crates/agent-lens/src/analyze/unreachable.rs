@@ -167,7 +167,7 @@ impl Tier {
     }
 }
 
-/// Analyzer entry point for `analyze unreachable`.
+/// Analyzer for the `unreachable` section of `analyze reach`.
 #[derive(Debug, Default, Clone)]
 pub struct UnreachableAnalyzer {
     builder: CallGraphBuilder,

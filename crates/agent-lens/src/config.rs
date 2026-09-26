@@ -64,8 +64,8 @@ pub use crate::analyze::communities::CommunitiesOptions;
 pub use crate::analyze::complexity::ComplexityOptions;
 pub use crate::analyze::context_span::ContextSpanOptions;
 pub use crate::analyze::coupling::CouplingOptions;
-pub use crate::analyze::delegation::DelegationOptions;
 pub use crate::analyze::footprint::FootprintOptions;
+pub use crate::analyze::forwarding::ForwardingOptions;
 pub use crate::analyze::graph_query::GraphQueryOptions;
 pub use crate::analyze::hotspot::HotspotOptions;
 pub use crate::analyze::hubs::HubsOptions;
@@ -77,7 +77,6 @@ pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
 pub use crate::analyze::test_redundancy::TestRedundancyOptions;
-pub use crate::analyze::wrapper::WrapperOptions;
 
 /// File name searched for when discovering a project config.
 pub const CONFIG_FILE_NAME: &str = "agent-lens.toml";
@@ -170,6 +169,8 @@ pub struct Profile {
     #[serde(default)]
     pub footprint: Option<FootprintOptions>,
     #[serde(default)]
+    pub forwarding: Option<ForwardingOptions>,
+    #[serde(default)]
     pub layers: Option<LayersOptions>,
     #[serde(default)]
     pub narrowable: Option<NarrowableOptions>,
@@ -182,11 +183,7 @@ pub struct Profile {
     #[serde(default)]
     pub coupling: Option<CouplingOptions>,
     #[serde(default)]
-    pub delegation: Option<DelegationOptions>,
-    #[serde(default)]
     pub test_redundancy: Option<TestRedundancyOptions>,
-    #[serde(default)]
-    pub wrapper: Option<WrapperOptions>,
 }
 
 impl Profile {
@@ -271,12 +268,8 @@ impl Profile {
                 self.cohesion.as_ref().map(|o| o.has_diff_conflict()),
             ),
             (
-                "delegation",
-                self.delegation.as_ref().map(|o| o.has_diff_conflict()),
-            ),
-            (
-                "wrapper",
-                self.wrapper.as_ref().map(|o| o.has_diff_conflict()),
+                "forwarding",
+                self.forwarding.as_ref().map(|o| o.has_diff_conflict()),
             ),
             (
                 "change-entropy",
@@ -356,8 +349,8 @@ pub enum ToolName {
     Coupling,
     ContextSpan,
     Cycles,
-    Delegation,
     Footprint,
+    Forwarding,
     FunctionGraph,
     GraphQuery,
     HiddenCoupling,
@@ -371,12 +364,11 @@ pub enum ToolName {
     Search,
     Similarity,
     TestRedundancy,
-    Wrapper,
 }
 
 /// Analyzers that became a section of another: `(old name, analyzer,
 /// section)`.
-pub const MERGED_TOOLS: [(&str, &str, &str); 7] = [
+pub const MERGED_TOOLS: [(&str, &str, &str); 9] = [
     ("untested", "reach", "untested"),
     ("test-only", "reach", "test-only"),
     ("unreachable", "reach", "unreachable"),
@@ -384,6 +376,8 @@ pub const MERGED_TOOLS: [(&str, &str, &str); 7] = [
     ("single-impl", "narrowable", "single-impl"),
     ("parameters", "narrowable", "parameters"),
     ("visibility", "narrowable", "visibility"),
+    ("wrapper", "forwarding", "wrapper"),
+    ("delegation", "forwarding", "delegation"),
 ];
 
 impl TryFrom<String> for ToolName {
@@ -409,7 +403,7 @@ impl TryFrom<String> for ToolName {
 
 impl ToolName {
     /// Every analyzer, in `as_str` order.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 23] = [
         Self::ChangeEntropy,
         Self::CoChange,
         Self::Cohesion,
@@ -418,8 +412,8 @@ impl ToolName {
         Self::Coupling,
         Self::ContextSpan,
         Self::Cycles,
-        Self::Delegation,
         Self::Footprint,
+        Self::Forwarding,
         Self::FunctionGraph,
         Self::GraphQuery,
         Self::HiddenCoupling,
@@ -433,7 +427,6 @@ impl ToolName {
         Self::Search,
         Self::Similarity,
         Self::TestRedundancy,
-        Self::Wrapper,
     ];
 
     /// Stable lowercase spelling, matching the `analyze` subcommand name.
@@ -447,8 +440,8 @@ impl ToolName {
             Self::Coupling => "coupling",
             Self::ContextSpan => "context-span",
             Self::Cycles => "cycles",
-            Self::Delegation => "delegation",
             Self::Footprint => "footprint",
+            Self::Forwarding => "forwarding",
             Self::FunctionGraph => "function-graph",
             Self::GraphQuery => "graph-query",
             Self::HiddenCoupling => "hidden-coupling",
@@ -462,7 +455,6 @@ impl ToolName {
             Self::Search => "search",
             Self::Similarity => "similarity",
             Self::TestRedundancy => "test-redundancy",
-            Self::Wrapper => "wrapper",
         }
     }
 
@@ -847,8 +839,7 @@ since = "90.days.ago"
     #[case::similarity("similarity")]
     #[case::complexity("complexity")]
     #[case::cohesion("cohesion")]
-    #[case::delegation("delegation")]
-    #[case::wrapper("wrapper")]
+    #[case::forwarding("forwarding")]
     fn load_rejects_both_diff_flags_on_one_tool(#[case] tool: &str) {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(

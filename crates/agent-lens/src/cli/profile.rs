@@ -208,8 +208,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,
         ),
-        (profile.delegation.is_some(), config::ToolName::Delegation),
-        (profile.wrapper.is_some(), config::ToolName::Wrapper),
+        (profile.forwarding.is_some(), config::ToolName::Forwarding),
     ]
     .into_iter()
     .filter(|&(present, tool)| present && !profile.tools.contains(&tool))
@@ -271,13 +270,13 @@ mod tests {
     fn render_profile_report_md_stacks_tool_sections() {
         let sections = vec![
             (config::ToolName::Complexity, "complexity body\n".to_owned()),
-            (config::ToolName::Wrapper, "wrapper body".to_owned()),
+            (config::ToolName::Forwarding, "forwarding body".to_owned()),
         ];
         let out = render_profile_report("audit", OutputFormat::Md, &sections).unwrap();
         // No leading newline, and a single blank line between sections.
         assert_eq!(
             out,
-            "## complexity\n\ncomplexity body\n\n## wrapper\n\nwrapper body\n",
+            "## complexity\n\ncomplexity body\n\n## forwarding\n\nforwarding body\n",
         );
     }
 
@@ -290,7 +289,7 @@ mod tests {
         let row = "- `murky`: 3/4 call sites not resolved (75%)\n";
         let sections = vec![
             (
-                config::ToolName::Delegation,
+                config::ToolName::Forwarding,
                 format!("# Delegation chains\n\n{confidence}\ndelegation note\n\n{row}"),
             ),
             (
@@ -301,7 +300,7 @@ mod tests {
         let out = render_profile_report("audit", OutputFormat::Md, &sections).unwrap();
         assert_eq!(out.matches(row.trim_end()).count(), 1, "got: {out}");
         assert!(
-            out.contains("Same worst modules as under `## delegation`."),
+            out.contains("Same worst modules as under `## forwarding`."),
             "got: {out}",
         );
         // Each analyzer's note survives — it interprets the shared
@@ -312,9 +311,10 @@ mod tests {
 
     #[test]
     fn tools_keeps_the_listed_order_and_runs_a_repeat_once() {
-        let profile: config::Profile =
-            toml::from_str("path = \"src\"\ntools = [\"wrapper\", \"complexity\", \"wrapper\"]\n")
-                .unwrap();
+        let profile: config::Profile = toml::from_str(
+            "path = \"src\"\ntools = [\"forwarding\", \"complexity\", \"forwarding\"]\n",
+        )
+        .unwrap();
         let resolved = ResolvedProfile {
             name: "audit".to_owned(),
             profile,
@@ -322,21 +322,21 @@ mod tests {
         };
         assert_eq!(
             resolved.tools(),
-            [config::ToolName::Wrapper, config::ToolName::Complexity],
+            [config::ToolName::Forwarding, config::ToolName::Complexity],
         );
     }
 
     #[test]
     fn unused_tool_option_tables_flags_tables_off_the_tools_list() {
         let profile: config::Profile = toml::from_str(
-            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.9\n\n[complexity]\nmin-score = 3\n\n[wrapper]\ndiff-only = true\n",
+            "path = \"web\"\ntools = [\"similarity\"]\n\n[similarity]\nthreshold = 0.9\n\n[complexity]\nmin-score = 3\n\n[forwarding]\ndiff-only = true\n",
         )
         .unwrap();
-        // similarity is listed in `tools`, so only complexity and wrapper
+        // similarity is listed in `tools`, so only complexity and forwarding
         // are flagged — in the fixed iteration order.
         assert_eq!(
             unused_tool_option_tables(&profile),
-            [config::ToolName::Complexity, config::ToolName::Wrapper],
+            [config::ToolName::Complexity, config::ToolName::Forwarding],
         );
     }
 

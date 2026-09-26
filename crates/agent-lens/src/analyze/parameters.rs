@@ -94,7 +94,7 @@ analyzer_options! {
     }
 }
 
-/// Analyzer entry point for `analyze parameters`.
+/// Analyzer for the `parameters` section of `analyze narrowable`.
 #[derive(Debug, Default, Clone)]
 pub struct ParametersAnalyzer {
     builder: CallGraphBuilder,

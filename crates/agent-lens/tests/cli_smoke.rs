@@ -606,7 +606,7 @@ fn analyze_coupling_rejects_a_second_path() {
 /// that used to reject it are the ones with the longest listings.
 #[rstest]
 #[case::coupling(&["analyze", "coupling", "src/lib.rs", "--format", "md", "--top", "1"], "top 1")]
-#[case::wrapper(&["analyze", "wrapper", "src", "--format", "md", "--top", "1"], "not shown")]
+#[case::forwarding(&["analyze", "forwarding", "src", "--section", "wrapper", "--format", "md", "--top", "1"], "not shown")]
 fn top_bounds_the_markdown_report(#[case] args: &[&str], #[case] expected: &str) {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", "pub mod a;\npub mod b;\n");
@@ -791,7 +791,7 @@ fn run_profile_emits_combined_markdown_report() {
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"complexity\", \"wrapper\"]\n\n[profile.audit.complexity]\nmin-score = 1\n",
+        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"complexity\", \"forwarding\"]\n\n[profile.audit.complexity]\nmin-score = 1\n",
     )
     .unwrap();
 
@@ -803,7 +803,7 @@ fn run_profile_emits_combined_markdown_report() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("## complexity"), "got: {stdout}");
-    assert!(stdout.contains("## wrapper"), "got: {stdout}");
+    assert!(stdout.contains("## forwarding"), "got: {stdout}");
     assert!(stdout.contains("`branchy`"), "got: {stdout}");
 }
 
@@ -821,7 +821,7 @@ fn run_profile_digest_transposes_sections_into_entity_rows() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"wrapper\", \"complexity\", \"cycles\"]\n",
+        "[profile.audit]\npath = \"src\"\nformat = \"md\"\ntools = [\"forwarding\", \"complexity\", \"cycles\"]\n",
     )
     .unwrap();
 
@@ -838,15 +838,18 @@ fn run_profile_digest_transposes_sections_into_entity_rows() {
         "got: {stdout}",
     );
     assert!(
-        stdout.contains("detail: `agent-lens analyze wrapper src/lib.rs --format md`"),
+        stdout.contains(
+            "detail: `agent-lens analyze forwarding src/lib.rs --section wrapper --format md`"
+        ),
         "got: {stdout}",
     );
     // The stacked per-tool sections are replaced, not prefixed.
-    assert!(!stdout.contains("## wrapper"), "got: {stdout}");
-    // Both quiet analyzers are named: neither file crosses the
-    // complexity floor and there is no call cycle.
+    assert!(!stdout.contains("## forwarding"), "got: {stdout}");
+    // Every quiet source is named: a one-hop forward is no chain,
+    // neither file crosses the complexity floor, and there is no call
+    // cycle.
     assert!(
-        stdout.contains("Nothing to report from: complexity, cycles."),
+        stdout.contains("Nothing to report from: forwarding delegation, complexity, cycles."),
         "got: {stdout}",
     );
 }
@@ -1233,7 +1236,7 @@ fn run_profile_drives_narrowable_visibility_end_to_end() {
 }
 
 #[test]
-fn run_profile_drives_delegation_end_to_end() {
+fn run_profile_drives_forwarding_delegation_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     write_file(
         dir.path(),
@@ -1252,15 +1255,15 @@ pub mod db {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.layers]\npath = \"src\"\ntools = [\"delegation\"]\n\n\
-         [profile.layers.delegation]\ntop = 5\n",
+        "[profile.layers]\npath = \"src\"\ntools = [\"forwarding\"]\n\n\
+         [profile.layers.forwarding]\nsection = [\"delegation\"]\ntop = 5\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "layers"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "delegation");
-    let chain = &json["results"][0]["report"]["chains"][0];
+    assert_eq!(json["results"][0]["tool"], "forwarding");
+    let chain = &json["results"][0]["report"]["delegation"]["chains"][0];
     assert_eq!(chain["depth"], 2);
     assert_eq!(chain["terminus"]["qualified_name"], "crate::db::insert");
     let hops: Vec<&str> = chain["hops"]
@@ -1437,13 +1440,13 @@ fn baseline_create_lists_analyzers_it_cannot_summarize() {
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.audit]\npath = \"src\"\ntools = [\"wrapper\", \"complexity\"]\n",
+        "[profile.audit]\npath = \"src\"\ntools = [\"forwarding\", \"complexity\"]\n",
     )
     .unwrap();
 
     let output = agent_lens(&["baseline", "create", "audit"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["skipped"][0]["tool"], "wrapper");
+    assert_eq!(json["skipped"][0]["tool"], "forwarding");
     assert!(json["skipped"][0]["reason"].is_string(), "got: {json}");
     // The covered tools still make it into the snapshot.
     assert_eq!(json["tools"][0]["tool"], "complexity");

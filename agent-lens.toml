@@ -32,8 +32,7 @@ tools = [
   "complexity",
   "cohesion",
   "similarity",
-  "wrapper",
-  "delegation",
+  "forwarding",
   "coupling",
   "communities",
   "context-span",
@@ -77,10 +76,7 @@ top = 15
 [profile.self.communities]
 top = 15
 
-[profile.self.wrapper]
-top = 15
-
-[profile.self.delegation]
+[profile.self.forwarding]
 top = 15
 
 [profile.self.hotspot]
@@ -185,7 +181,7 @@ path = "crates"
 format = "md"
 exclude-tests = true
 exclude = ["agent-lens/**", "agent-hooks/**"]
-tools = ["similarity", "complexity", "wrapper", "cohesion"]
+tools = ["similarity", "complexity", "forwarding", "cohesion"]
 
 [profile.lenses.similarity]
 top = 25
@@ -199,6 +195,11 @@ min-score = 10
 [profile.lenses.cohesion]
 top = 10
 min-score = 3
+
+# Delegation chains need the call graph across the adapters and the
+# domain crate they call into; per-lens wrappers are what this view asks.
+[profile.lenses.forwarding]
+section = ["wrapper"]
 
 # The web viewer: the TypeScript half of the repo, and the only profile
 # that drives the TS front-end end to end.
@@ -214,7 +215,7 @@ tools = [
   "complexity",
   "cohesion",
   "similarity",
-  "wrapper",
+  "forwarding",
   "narrowable",
   "cycles",
   "layers",
@@ -236,6 +237,9 @@ min-lines = 6
 [profile.web.layers]
 top = 10
 
+[profile.web.forwarding]
+section = ["wrapper"]
+
 [profile.web.narrowable]
 section = ["single-use"]
 top = 10
@@ -255,10 +259,9 @@ format = "md"
 exclude-tests = true
 tools = [
   "similarity",
-  "wrapper",
+  "forwarding",
   "complexity",
   "cohesion",
-  "delegation",
   "change-entropy",
   "footprint",
 ]
@@ -269,9 +272,6 @@ threshold = 0.85
 min-lines = 6
 top = 15
 
-[profile.changes.wrapper]
-diff-only = true
-
 [profile.changes.complexity]
 diff-only = true
 top = 15
@@ -280,7 +280,7 @@ top = 15
 diff-only = true
 top = 10
 
-[profile.changes.delegation]
+[profile.changes.forwarding]
 diff-only = true
 top = 10
 

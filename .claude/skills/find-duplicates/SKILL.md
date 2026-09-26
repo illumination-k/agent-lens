@@ -1,15 +1,17 @@
 ---
 name: find-duplicates
-description: Use when the user asks to find duplicated, near-duplicate, copy-pasted, or forwarding-only functions in this codebase, duplicated or drifted struct/class/interface/type definitions (`--target types`), repeated boilerplate or copy-pasted fragments *inside* functions (`--target blocks`), or how many forwarding hops sit between an entry point and the real work — or before adding a new function or type, to check whether something similar already exists. Wraps `agent-lens analyze similarity`, `agent-lens analyze wrapper`, and `agent-lens analyze delegation`.
+description: Use when the user asks to find duplicated, near-duplicate, copy-pasted, or forwarding-only functions in this codebase, duplicated or drifted struct/class/interface/type definitions (`--target types`), repeated boilerplate or copy-pasted fragments *inside* functions (`--target blocks`), or how many forwarding hops sit between an entry point and the real work — or before adding a new function or type, to check whether something similar already exists. Wraps `agent-lens analyze similarity` and `agent-lens analyze forwarding` (its `wrapper` and `delegation` sections).
 ---
 
 # Find duplicate and forwarding functions
 
-Three analyzers cover the "is this already written?" and "why does this take four files?" questions:
+Two analyzers, three reports, cover the "is this already written?" and "why does this take four files?" questions:
 
 - `similarity` — pairs of functions whose normalised AST has TSED ≥ threshold (default `0.85`). Catches type-3 clones (logic-equivalent, names differ). Functions shorter than `--min-lines` (default `5`) are skipped to keep getters and one-liners out of the report. With `--target types` it compares type definitions instead, and with `--target blocks` runs of statements inside function bodies — see below.
-- `wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
-- `delegation` — what `wrapper` becomes when it stacks: chains where every hop only forwards, reported with the terminus (the function doing the work) as the headline, plus a per-module roll-up that flags modules built almost entirely out of forwarders.
+- `forwarding --section wrapper` — functions whose body is `?` / `.into()` / `.unwrap()` / `.await` chained around a single forwarding call. Either inline or justify.
+- `forwarding --section delegation` — what `wrapper` becomes when it stacks: chains where every hop only forwards, reported with the terminus (the function doing the work) as the headline, plus a per-module roll-up that flags modules built almost entirely out of forwarders.
+
+`analyze forwarding` without `--section` runs both forwarding reports in one pass and stacks them.
 
 All three parse Rust, TypeScript / JavaScript, Python, and Go (parser is selected from the file extension). All accept files or directories, and more than one of either; in directory mode they walk recursively (respecting `.gitignore` like ripgrep). `similarity` reports cross-file pairs alongside in-file ones; `wrapper` groups findings per file; `delegation` needs a directory to see across files at all.
 
@@ -31,8 +33,8 @@ Restrict to the changed functions only — the rest of the file is noise:
 
 ```bash
 agent-lens analyze similarity <path> --diff-only --format md
-agent-lens analyze wrapper    <path> --diff-only --format md
-agent-lens analyze delegation <dir>  --diff-only --format md
+agent-lens analyze forwarding <path> --section wrapper --diff-only --format md
+agent-lens analyze forwarding <dir>  --section delegation --diff-only --format md
 ```
 
 ### 3. If the user is auditing a whole file or crate
@@ -41,8 +43,7 @@ All three accept a directory, so you don't need to loop manually. `similarity` r
 
 ```bash
 agent-lens analyze similarity crates/<name>/src --format md
-agent-lens analyze wrapper    crates/<name>/src --format md
-agent-lens analyze delegation crates/<name>/src --format md
+agent-lens analyze forwarding crates/<name>/src --format md   # wrapper + delegation
 ```
 
 In a monorepo the trees you care about are usually siblings, and their only common ancestor drags in `node_modules` and generated output. Pass them all at once instead — one corpus, so a duplicate spanning two of them is found where three separate runs cannot see it:

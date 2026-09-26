@@ -183,6 +183,29 @@ mod tests {
         assert_eq!(json["a"]["y"], 2);
     }
 
+    /// A section report is parsed and re-serialized; every float must
+    /// come back bit-identical, so a bundle never reports a value its
+    /// standalone section would not. `4/17` is one the default parser
+    /// rounds one ulp off.
+    #[rstest]
+    #[case(4.0 / 17.0)]
+    #[case(0.1 + 0.2)]
+    #[case(f64::MIN_POSITIVE)]
+    fn json_keeps_section_floats_bit_identical(#[case] value: f64) {
+        let body = serde_json::to_string(&serde_json::json!({ "ratio": value })).unwrap();
+        let out =
+            render_sections("Bundle", "n", vec![section("a", &body)], OutputFormat::Json).unwrap();
+        let json: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            json["a"]["ratio"].as_f64().unwrap().to_bits(),
+            value.to_bits()
+        );
+        assert!(
+            out.contains(&value.to_string()) || out.contains(&format!("{value:e}")),
+            "{out}"
+        );
+    }
+
     #[test]
     fn markdown_demotes_section_headings_under_the_bundle_title() {
         let out = render_sections(

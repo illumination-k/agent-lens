@@ -89,7 +89,7 @@ analyzer_options! {
     }
 }
 
-/// Analyzer entry point for `analyze single-impl`.
+/// Analyzer for the `single-impl` section of `analyze narrowable`.
 #[derive(Debug, Default, Clone)]
 pub struct SingleImplAnalyzer {
     builder: CallGraphBuilder,

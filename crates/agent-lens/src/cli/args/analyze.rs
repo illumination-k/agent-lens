@@ -9,8 +9,8 @@ use agent_lens::analyze::communities::CommunitiesOptions;
 use agent_lens::analyze::complexity::ComplexityOptions;
 use agent_lens::analyze::context_span::ContextSpanOptions;
 use agent_lens::analyze::coupling::CouplingOptions;
-use agent_lens::analyze::delegation::DelegationOptions;
 use agent_lens::analyze::footprint::FootprintOptions;
+use agent_lens::analyze::forwarding::ForwardingOptions;
 use agent_lens::analyze::graph_query::GraphQueryOptions;
 use agent_lens::analyze::hotspot::HotspotOptions;
 use agent_lens::analyze::hubs::HubsOptions;
@@ -22,7 +22,6 @@ use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
 use agent_lens::analyze::test_redundancy::TestRedundancyOptions;
-use agent_lens::analyze::wrapper::WrapperOptions;
 use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
 use clap::{Args, Subcommand};
 
@@ -131,37 +130,34 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// compact summary tuned for LLM context.
     #[command(after_long_help = examples::CYCLES)]
     Cycles(AnalyzeCommonArgs),
-    /// Report chains of functions that only forward, and the modules
-    /// built out of them.
+    /// Report functions that only pass the call along: single
+    /// forwarding hops, and the chains they stack into.
     ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
-    /// and walks the subgraph of functions that add nothing of their
-    /// own: exactly one resolved outgoing target, no other call site
-    /// beyond the language's own trivial adapters (`.clone()`,
-    /// `.into()`, builtins), at most three body statements, and
-    /// `cyclomatic == 1`. `analyze wrapper` reports the one-hop case
-    /// with argument-level evidence; this reports what happens when it
-    /// stacks — `api::save -> service::save -> repo::save ->
-    /// db::insert`, where an agent opens four files to reach the one
-    /// doing the work, so the terminus is the headline of every row. A
-    /// module roll-up adds the "lasagna layer" half: how much of a
-    /// module is forwarding and how much of that forwarding points at
-    /// one other module. Classification under-reports on purpose — a
-    /// forwarder that also logs, locks, or validates is not a middle
-    /// man, and a function whose body facts were unavailable is
-    /// reported as unclassified rather than assumed thin. Test
-    /// functions, a module's sole public surface (a facade; Rust and Go
-    /// only, the two adapters that extract export status), and doc
-    /// comments saying "deprecated" are exempt, and a chain running
-    /// through an exempt function is cut there. Chains follow resolved
-    /// edges only, so depths are lower bounds; forwarding cycles have
-    /// no head to walk from and are counted rather than listed. The
-    /// parser is chosen from each file extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go); other extensions are
-    /// ignored silently. JSON is the default; `--format md` caps each
-    /// listing at `--top` (default 20).
-    #[command(after_long_help = examples::DELEGATION)]
-    Delegation(AnalyzeDelegationArgs),
+    /// Two sections, each a full report. `wrapper`: a function whose
+    /// body, after stripping a short chain of trivial adapters (`?`,
+    /// `.unwrap()`, `.into()`, `.await`, …), is just a forwarding call,
+    /// with argument-level evidence, per-file grouping, and cross-file
+    /// reuse counts when a directory is walked; Go wrappers that satisfy
+    /// an interface are annotated, since deleting them is not the fix.
+    /// `delegation`: builds the same heuristic call graph as `analyze
+    /// function-graph` and walks the functions that add nothing of their
+    /// own — exactly one resolved outgoing target, at most three body
+    /// statements, `cyclomatic == 1` — into chains such as `api::save ->
+    /// service::save -> repo::save -> db::insert`, with the terminus
+    /// doing the work as each row's headline, plus a module roll-up of
+    /// "lasagna" layers that mostly forward into one other module. Both
+    /// under-report on purpose: a forwarder that also logs, locks, or
+    /// validates is not one. Test functions, a module's sole public
+    /// surface (Rust and Go), and deprecated functions are exempt from
+    /// chains; chains follow resolved edges only, so depths are lower
+    /// bounds. The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, or Go). `--section` picks the
+    /// sections (default both); `--diff-only` / `--diff-range` gate
+    /// both on the changed lines. JSON nests each section's report under
+    /// its key and is the default; `--format md` stacks them and caps
+    /// each listing at `--top` (default 20).
+    #[command(after_long_help = examples::FORWARDING)]
+    Forwarding(AnalyzeForwardingArgs),
     /// Emit a static function call graph as visualization-ready data.
     ///
     /// The graph is heuristic and current-source only: nodes are functions,
@@ -591,20 +587,6 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// group list at `--top` (default 20).
     #[command(name = "test-redundancy", after_long_help = examples::TEST_REDUNDANCY)]
     TestRedundancy(AnalyzeTestRedundancyArgs),
-    /// Report functions whose body, after stripping a short chain of
-    /// trivial adapters, is just a forwarding call to another function.
-    ///
-    /// Accepts source files or directories, and more than one of
-    /// either — several paths are walked into one report. In directory
-    /// mode the analyzer walks recursively (respecting `.gitignore` like
-    /// ripgrep) and groups findings per file. The parser is chosen from
-    /// each file extension (Rust, TypeScript/JavaScript, Python, or Go).
-    /// The JSON format is the default machine-readable output and always
-    /// carries every finding; `--format md` emits a compact summary
-    /// tuned for LLM context, capped at `--top` wrappers (default 20) in
-    /// file order, with the remainder counted at the end.
-    #[command(after_long_help = examples::WRAPPER)]
-    Wrapper(AnalyzeWrapperArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -698,14 +680,6 @@ pub(in crate::cli) struct AnalyzeCommunitiesArgs {
     pub(in crate::cli) common: AnalyzeRootArgs,
     #[command(flatten)]
     pub(in crate::cli) opts: CommunitiesOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeDelegationArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: DelegationOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -816,6 +790,14 @@ pub(in crate::cli) struct AnalyzeTestRedundancyArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub(in crate::cli) struct AnalyzeForwardingArgs {
+    #[command(flatten)]
+    pub(in crate::cli) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(in crate::cli) opts: ForwardingOptions,
+}
+
+#[derive(Debug, Clone, Args)]
 pub(in crate::cli) struct AnalyzeReachArgs {
     #[command(flatten)]
     pub(in crate::cli) common: AnalyzeCommonArgs,
@@ -829,14 +811,6 @@ pub(in crate::cli) struct AnalyzeNarrowableArgs {
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(in crate::cli) opts: NarrowableOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeWrapperArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: WrapperOptions,
 }
 
 #[derive(Debug, Clone, Args, Default)]

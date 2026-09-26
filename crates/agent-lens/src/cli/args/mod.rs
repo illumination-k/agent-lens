@@ -235,8 +235,8 @@ pub(super) struct BaselineCompareArgs {
 mod tests {
     use super::*;
     use agent_lens::analyze::{
-        DEFAULT_SIMILARITY_DRIFT_FLOOR, GraphDirection, GraphQueryKind, NarrowableSection, PairKey,
-        ReachSection, SimilarityMethod, UnreachableTier,
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, ForwardingSection, GraphDirection, GraphQueryKind,
+        NarrowableSection, PairKey, ReachSection, SimilarityMethod, UnreachableTier,
     };
     use agent_lens::hooks::setup_engine::{HookSelection, SetupScope};
     use clap::CommandFactory;
@@ -500,8 +500,7 @@ mod tests {
     #[case::similarity("similarity")]
     #[case::complexity("complexity")]
     #[case::cohesion("cohesion")]
-    #[case::delegation("delegation")]
-    #[case::wrapper("wrapper")]
+    #[case::forwarding("forwarding")]
     fn diff_only_and_diff_range_conflict(#[case] tool: &str) {
         let err = Cli::try_parse_from([
             "agent-lens",
@@ -1132,39 +1131,61 @@ mod tests {
     }
 
     #[test]
-    fn parses_analyze_delegation_with_top_and_diff_only() {
+    fn parses_analyze_forwarding_with_sections_top_and_diff_only() {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "delegation",
+            "forwarding",
             "crates",
             "--format",
             "md",
             "--top",
             "30",
             "--diff-only",
+            "--section",
+            "delegation,wrapper",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
-            panic!("expected analyze delegation");
+        let Command::Analyze(AnalyzeCommand::Forwarding(args)) = cli.command else {
+            panic!("expected analyze forwarding");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(30));
         assert!(args.opts.diff_only);
+        assert_eq!(
+            args.opts.section,
+            [ForwardingSection::Delegation, ForwardingSection::Wrapper]
+        );
     }
 
     #[test]
-    fn parses_analyze_delegation_default_format_is_json() {
+    fn parses_analyze_forwarding_defaults() {
         let cli =
-            Cli::try_parse_from(["agent-lens", "analyze", "delegation", "."]).expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Delegation(args)) = cli.command else {
-            panic!("expected analyze delegation");
+            Cli::try_parse_from(["agent-lens", "analyze", "forwarding", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Forwarding(args)) = cli.command else {
+            panic!("expected analyze forwarding");
         };
-        assert_eq!(args.common.paths, [PathBuf::from(".")]);
         assert_eq!(args.common.format, OutputFormat::Json);
         assert_eq!(args.opts.top, None);
         assert!(!args.opts.diff_only);
+        assert!(args.opts.section.is_empty());
+    }
+
+    #[test]
+    fn forwarding_rejects_both_diff_flags() {
+        assert!(
+            Cli::try_parse_from([
+                "agent-lens",
+                "analyze",
+                "forwarding",
+                ".",
+                "--diff-only",
+                "--diff-range",
+                "HEAD~1..HEAD",
+            ])
+            .is_err()
+        );
     }
 
     /// The monorepo case the multi-PATH signature exists for: several
@@ -1204,15 +1225,15 @@ mod tests {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "wrapper",
+            "forwarding",
             "--exclude",
             "generated/**",
             "packages",
             "cli",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Wrapper(args)) = cli.command else {
-            panic!("expected analyze wrapper");
+        let Command::Analyze(AnalyzeCommand::Forwarding(args)) = cli.command else {
+            panic!("expected analyze forwarding");
         };
         assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
         assert_eq!(
@@ -1261,17 +1282,6 @@ mod tests {
         assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
         assert_eq!(args.common.format, OutputFormat::Md);
         assert_eq!(args.opts.top, Some(15));
-    }
-
-    #[test]
-    fn parses_analyze_wrapper_with_top() {
-        let cli = Cli::try_parse_from(["agent-lens", "analyze", "wrapper", "src", "--top", "7"])
-            .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::Wrapper(args)) = cli.command else {
-            panic!("expected analyze wrapper");
-        };
-        assert_eq!(args.opts.top, Some(7));
-        assert!(!args.opts.diff_only);
     }
 
     #[test]

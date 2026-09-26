@@ -121,7 +121,7 @@ analyzer_options! {
     }
 }
 
-/// Analyzer entry point for `analyze single-use`.
+/// Analyzer for the `single-use` section of `analyze narrowable`.
 #[derive(Debug, Default, Clone)]
 pub struct SingleUseAnalyzer {
     builder: CallGraphBuilder,

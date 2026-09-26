@@ -80,7 +80,7 @@ analyzer_options! {
     }
 }
 
-/// Analyzer entry point for `analyze untested`.
+/// Analyzer for the `untested` section of `analyze reach`.
 #[derive(Debug, Default, Clone)]
 pub struct UntestedAnalyzer {
     builder: CallGraphBuilder,

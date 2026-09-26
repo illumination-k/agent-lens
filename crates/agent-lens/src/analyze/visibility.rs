@@ -116,7 +116,7 @@ analyzer_options! {
     }
 }
 
-/// Analyzer entry point for `analyze visibility`.
+/// Analyzer for the `visibility` section of `analyze narrowable`.
 #[derive(Debug, Default, Clone)]
 pub struct VisibilityAnalyzer {
     builder: CallGraphBuilder,

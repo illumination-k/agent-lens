@@ -28,12 +28,12 @@ Pick an analyzer by question:
     is this function too complex?         analyze complexity
     where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
-    is this body just a forwarder?        analyze wrapper
+    is this body just a forwarder?        analyze forwarding --section wrapper
     is one caller all this function has?  analyze narrowable --section single-use
     is one value all this param gets?     analyze narrowable --section parameters
     did I write this test twice?          analyze test-redundancy
     is one impl all this trait has?       analyze narrowable --section single-impl
-    how many hops before real work?       analyze delegation
+    how many hops before real work?       analyze forwarding --section delegation
     does this type do too many things?    analyze cohesion
     which modules are entangled?          analyze coupling
     which functions recurse mutually?     analyze cycles
@@ -226,12 +226,13 @@ Examples:
     agent-lens analyze narrowable crates/ --section visibility --exclude-tests
 ";
 
-pub const DELEGATION: &str = "\
+pub const FORWARDING: &str = "\
 Examples:
 
-    agent-lens analyze delegation . --format md
-    agent-lens analyze delegation crates/ --top 30 --format md
-    agent-lens analyze delegation . --diff-only --format md
+    agent-lens analyze forwarding . --format md
+    agent-lens analyze forwarding src/ --section wrapper --top 30 --format md
+    agent-lens analyze forwarding crates/ --section delegation --format md
+    agent-lens analyze forwarding . --diff-only --format md
 ";
 
 pub const HOTSPOT: &str = "\
@@ -332,14 +333,6 @@ Examples:
     agent-lens analyze similarity . --paired-by name --format md
     agent-lens analyze similarity src/ --target types --format md
     agent-lens analyze similarity . --target types --paired-by name --format md
-";
-
-pub const WRAPPER: &str = "\
-Examples:
-
-    agent-lens analyze wrapper src/ --format md --top 30
-    agent-lens analyze wrapper packages cli --format md
-    agent-lens analyze wrapper . --diff-only --format md
 ";
 
 pub const RUN: &str = "\

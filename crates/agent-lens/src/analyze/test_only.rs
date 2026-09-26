@@ -101,7 +101,7 @@ analyzer_options! {
     }
 }
 
-/// Analyzer entry point for `analyze test-only`.
+/// Analyzer for the `test-only` section of `analyze reach`.
 #[derive(Debug, Default, Clone)]
 pub struct TestOnlyAnalyzer {
     builder: CallGraphBuilder,

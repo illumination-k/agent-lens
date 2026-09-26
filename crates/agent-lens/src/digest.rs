@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::analyze::{BundleSection, NarrowableSection, ReachSection};
+use crate::analyze::{BundleSection, ForwardingSection, NarrowableSection, ReachSection};
 use crate::config::ToolName;
 
 /// How many files one analyzer may contribute. Every extractor reads
@@ -102,6 +102,14 @@ fn reach_fold(section: ReachSection) -> Fold {
     }
 }
 
+/// The extractor for each `forwarding` section.
+fn forwarding_fold(section: ForwardingSection) -> Fold {
+    match section {
+        ForwardingSection::Wrapper => wrapper,
+        ForwardingSection::Delegation => delegation,
+    }
+}
+
 /// The extractor for each `narrowable` section.
 fn narrowable_fold(section: NarrowableSection) -> Fold {
     match section {
@@ -128,6 +136,7 @@ fn bundle_folds<S: BundleSection>(fold: fn(S) -> Fold) -> Vec<(&'static str, &'s
 /// the digest has no fold for this tool at all.
 fn fold_report(tool: ToolName, report: &Value, base: &Path) -> Option<Vec<(Source, Extraction)>> {
     let sections = match tool {
+        ToolName::Forwarding => bundle_folds(forwarding_fold),
         ToolName::Reach => bundle_folds(reach_fold),
         ToolName::Narrowable => bundle_folds(narrowable_fold),
         _ => return extract(tool, report, base).map(|e| vec![(Source::tool(tool), e)]),
@@ -335,7 +344,7 @@ fn render_entity_rows(out: &mut String, rows: &[EntityRow], cwd: &Path, target_a
         }
         let entity = display_path(&row.path, cwd);
         let lead = fragments[0].1;
-        let detail_arg = if file_scoped(lead.tool) {
+        let detail_arg = if file_scoped(lead) {
             &entity
         } else {
             target_args
@@ -367,13 +376,17 @@ fn drill_down(source: Source, path_args: &str) -> String {
     )
 }
 
-/// Whether the analyzer accepts a single file as its target, so a
-/// row's drill-down can point at the file itself instead of re-running
-/// the tool over the whole profile target.
-fn file_scoped(tool: ToolName) -> bool {
+/// Whether the source reads one file at a time, so a row's drill-down
+/// can point at the file itself instead of re-running the tool over the
+/// whole profile target. `forwarding`'s `wrapper` section is per-file;
+/// its `delegation` section follows chains across files.
+fn file_scoped(source: Source) -> bool {
     matches!(
-        tool,
-        ToolName::Complexity | ToolName::Cohesion | ToolName::Similarity | ToolName::Wrapper
+        (source.tool, source.section),
+        (
+            ToolName::Complexity | ToolName::Cohesion | ToolName::Similarity,
+            None
+        ) | (ToolName::Forwarding, Some("wrapper"))
     )
 }
 
@@ -399,8 +412,6 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Complexity => complexity(report, base),
         ToolName::Cohesion => cohesion(report, base),
         ToolName::Similarity => similarity(report, base),
-        ToolName::Wrapper => wrapper(report, base),
-        ToolName::Delegation => delegation(report, base),
         ToolName::Hotspot => hotspot(report, base),
         ToolName::Risk => risk(report, base),
         ToolName::Hubs => hubs(report, base),
@@ -414,7 +425,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Cycles => cycles(report),
         ToolName::Layers => layers(report),
         // Bundles are folded per section by `fold_report`, never whole.
-        ToolName::Narrowable | ToolName::Reach => return None,
+        ToolName::Forwarding | ToolName::Narrowable | ToolName::Reach => return None,
         ToolName::Footprint
         | ToolName::FunctionGraph
         | ToolName::GraphQuery
@@ -1437,12 +1448,10 @@ mod tests {
     use super::*;
 
     /// Every tool the digest folds, for shape-robustness sweeps.
-    const FOLDED: [ToolName; 17] = [
+    const FOLDED: [ToolName; 15] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Similarity,
-        ToolName::Wrapper,
-        ToolName::Delegation,
         ToolName::Hotspot,
         ToolName::Risk,
         ToolName::Hubs,
@@ -2118,7 +2127,6 @@ mod tests {
     #[case(ToolName::Cycles, json!({ "summary": { "scc_count": 0, "largest": 0 } }))]
     #[case(ToolName::Coupling, json!({ "cycle_count": 0, "modules": [ { "path": "crate::a", "fan_in": 0, "ifc": 0 } ] }))]
     #[case(ToolName::CoChange, json!({ "pairs": [] }))]
-    #[case(ToolName::Delegation, json!({ "chains": [], "summary": { "lasagna_module_count": 0 } }))]
     #[case(ToolName::HiddenCoupling, json!({ "hidden_coupling": [], "suspect_dependencies": [] }))]
     #[case(ToolName::Communities, json!({ "misfiled": [], "spanning": [] }))]
     #[case(ToolName::ContextSpan, json!({ "modules": [ { "path": "crate::a", "transitive": 0, "files": 0 } ] }))]
@@ -2155,11 +2163,33 @@ mod tests {
         }
         let folds = bundle_folds(reach_fold)
             .into_iter()
-            .chain(bundle_folds(narrowable_fold));
+            .chain(bundle_folds(narrowable_fold))
+            .chain(bundle_folds(forwarding_fold));
         for (key, _, fold) in folds {
             let extraction = fold(&report, &base());
             assert!(extraction.files.is_empty(), "{key}: {extraction:?}");
         }
+    }
+
+    #[test]
+    fn a_clean_delegation_section_digests_to_nothing() {
+        let report = json!({ "chains": [], "summary": { "lasagna_module_count": 0 } });
+        assert_eq!(delegation(&report, &base()), Extraction::default());
+    }
+
+    /// The per-file `wrapper` section drills down into the file; the
+    /// cross-file `delegation` section keeps the profile target.
+    #[rstest]
+    #[case(ToolName::Forwarding, Some("wrapper"), true)]
+    #[case(ToolName::Forwarding, Some("delegation"), false)]
+    #[case(ToolName::Complexity, None, true)]
+    #[case(ToolName::Reach, Some("untested"), false)]
+    fn file_scoped_follows_the_section(
+        #[case] tool: ToolName,
+        #[case] section: Option<&'static str>,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(file_scoped(Source { tool, section }), expected);
     }
 
     #[test]
@@ -2325,12 +2355,14 @@ mod tests {
                 }),
             ),
             (
-                ToolName::Wrapper,
+                ToolName::Forwarding,
                 json!({
-                    "files": names[30..45]
-                        .iter()
-                        .map(|name| json!({ "file": name, "wrappers": [ { "name": "w" } ] }))
-                        .collect::<Vec<_>>(),
+                    "wrapper": {
+                        "files": names[30..45]
+                            .iter()
+                            .map(|name| json!({ "file": name, "wrappers": [ { "name": "w" } ] }))
+                            .collect::<Vec<_>>(),
+                    },
                 }),
             ),
         ];
@@ -2350,7 +2382,7 @@ mod tests {
     #[test]
     fn render_separates_corpus_quiet_and_unfolded_tools() {
         let sections = vec![
-            (ToolName::Wrapper, json!({ "files": [] })),
+            (ToolName::Forwarding, json!({ "wrapper": { "files": [] } })),
             (
                 ToolName::Layers,
                 json!({ "summary": { "module_cycle_count": 2, "cyclic_module_count": 15, "skip_pair_count": 91 } }),
@@ -2377,7 +2409,7 @@ mod tests {
             "got: {out}",
         );
         assert!(
-            out.contains("\nNothing to report from: wrapper.\n"),
+            out.contains("\nNothing to report from: forwarding wrapper.\n"),
             "got: {out}"
         );
     }
@@ -2435,8 +2467,8 @@ mod tests {
                 json!({ "files": [ { "file": "dense.rs", "units": [ { "label": "m", "lcom4": 4 } ] } ] }),
             ),
             (
-                ToolName::Wrapper,
-                json!({ "files": [ { "file": "dense.rs", "wrappers": [ { "name": "w" } ] } ] }),
+                ToolName::Forwarding,
+                json!({ "wrapper": { "files": [ { "file": "dense.rs", "wrappers": [ { "name": "w" } ] } ] } }),
             ),
             (
                 ToolName::Similarity,

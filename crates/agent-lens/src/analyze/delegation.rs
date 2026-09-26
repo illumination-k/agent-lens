@@ -1,4 +1,4 @@
-//! `analyze delegation` — chains of functions that only forward, and the
+//! `analyze forwarding --section delegation` — chains of functions that only forward, and the
 //! modules built out of them.
 //!
 //! `analyze wrapper` reports the one-hop case: a function whose body is
@@ -104,13 +104,15 @@ const NOTE: &str = "Candidates, not verdicts: a row says every hop between the h
      their idioms are not modelled.";
 
 analyzer_options! {
-    /// `analyze delegation` flags, and the `[profile.<name>.delegation]` table.
+    /// Options of the `delegation` section of `analyze forwarding`; the
+    /// `forwarding` options and the `[profile.<name>.forwarding]` table map
+    /// onto them.
     pub struct DelegationOptions {
         @shared(ranking, diff);
     }
 }
 
-/// Analyzer entry point for `analyze delegation`.
+/// Analyzer for the `delegation` section of `analyze forwarding`.
 #[derive(Debug, Clone)]
 pub struct DelegationAnalyzer {
     builder: CallGraphBuilder,
@@ -131,9 +133,8 @@ impl Default for DelegationAnalyzer {
 }
 
 impl DelegationAnalyzer {
-    /// Apply a whole [`DelegationOptions`] group. The CLI flags and the
-    /// `[profile.<name>.delegation]` table are the same type, so this is
-    /// the only seam between parsed options and the analyzer.
+    /// Apply a whole [`DelegationOptions`] group — the seam `analyze forwarding` hands
+    /// its `delegation` section options through.
     pub fn with_options(self, opts: DelegationOptions) -> Self {
         let diff = opts.diff_scope();
         self.with_top(opts.top).with_diff_scope(diff)
@@ -912,7 +913,7 @@ fn render_audit(out: &mut String, audit: &Audit) {
     let _ = writeln!(
         out,
         "\nClassified {} non-test function(s): {} delegator(s), of which {} forward a single hop \
-         (that is `analyze wrapper`'s report) and {} sit inside a forwarding cycle. {} forward but \
+         (that is the `wrapper` section's report) and {} sit inside a forwarding cycle. {} forward but \
          were left unclassified for want of a body fact; {} exempt as a module facade, {} as \
          deprecated.",
         audit.function_count,
