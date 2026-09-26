@@ -324,6 +324,17 @@ impl GraphLanguage {
         }
     }
 
+    /// Whether a call's syntactic shape alone decides if it can reach a
+    /// method or only a free function. In Go a bare `f()` never names a
+    /// method (there is no implicit receiver) and `v.f()` on a value
+    /// that is no import alias never names a package-level function, so
+    /// the name fallback drops the other kind. Python's module objects,
+    /// TypeScript's object-literal members and namespaces keep the other
+    /// languages out: there the same shape can reach either kind.
+    pub(crate) fn call_shape_decides_owner(self) -> bool {
+        matches!(self, Self::Go)
+    }
+
     /// Names the language defines as bare-callable functions, owned by
     /// each adapter for the same reason as
     /// [`Self::ubiquitous_method_names`]. Consulted on the plain-call

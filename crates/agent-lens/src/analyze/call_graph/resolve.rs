@@ -125,6 +125,10 @@ pub(crate) struct Resolver {
     qualified: HashMap<String, Vec<String>>,
     last_segment: HashMap<String, Vec<String>>,
     id_to_qualified: HashMap<String, String>,
+    /// Ids of nodes declared with an owner (a method, not a free
+    /// function). Read where the call's shape decides which of the two
+    /// it can reach — see [`GraphLanguage::call_shape_decides_owner`].
+    methods: HashSet<String>,
 }
 
 impl Resolver {
@@ -132,7 +136,11 @@ impl Resolver {
         let mut qualified: HashMap<String, Vec<String>> = HashMap::new();
         let mut last_segment: HashMap<String, Vec<String>> = HashMap::new();
         let mut id_to_qualified: HashMap<String, String> = HashMap::new();
+        let mut methods = HashSet::new();
         for node in nodes {
+            if node.impl_owner.is_some() {
+                methods.insert(node.id.clone());
+            }
             qualified
                 .entry(node.qualified_name.clone())
                 .or_default()
@@ -147,6 +155,7 @@ impl Resolver {
             qualified,
             last_segment,
             id_to_qualified,
+            methods,
         }
     }
 
@@ -213,6 +222,13 @@ impl Resolver {
         let Some(ids) = self.last_segment.get(callee_name) else {
             return ResolvedCall::unresolved();
         };
+        // A bare `Domain(b)` can name a function (or be a conversion to
+        // the type `Domain`), never a method: Go has no implicit
+        // receiver, so `UUID.Domain` is out of reach of that call.
+        let ids = &self.with_owner_shape(ids, false, language);
+        if ids.is_empty() {
+            return ResolvedCall::unresolved();
+        }
         // When the callee was written as a multi-segment path like
         // `Foo::new`, restrict the fallback to candidates whose
         // qualified name ends with that path. Catches calls reaching a
@@ -301,7 +317,31 @@ impl Resolver {
         let Some(ids) = self.last_segment.get(callee_name) else {
             return ResolvedCall::unresolved();
         };
-        self.resolve_with_crate_narrowing(ids, site)
+        // `wg.Add(1)` on a local value is a method call; a package-level
+        // `tag.Add` shares the name but no receiver reaches it.
+        let ids = self.with_owner_shape(ids, true, language);
+        if ids.is_empty() {
+            return ResolvedCall::unresolved();
+        }
+        self.resolve_with_crate_narrowing(&ids, site)
+    }
+
+    /// `ids` kept to methods (`method == true`) or to free functions,
+    /// where the language lets the call's shape decide between the two;
+    /// every id otherwise.
+    fn with_owner_shape(
+        &self,
+        ids: &[String],
+        method: bool,
+        language: GraphLanguage,
+    ) -> Vec<String> {
+        if !language.call_shape_decides_owner() {
+            return ids.to_vec();
+        }
+        ids.iter()
+            .filter(|id| self.methods.contains(id.as_str()) == method)
+            .cloned()
+            .collect()
     }
 
     fn resolve_with_crate_narrowing(&self, ids: &[String], site: &CallShape) -> ResolvedCall {
@@ -610,14 +650,22 @@ mod tests {
         }
     }
 
+    /// A node whose owner is the segment before the name when that
+    /// segment is type-cased (`crate::m::W::clone` is a method of `W`,
+    /// `crate::m::helper` a free function).
     fn node(qualified_name: &str) -> CallGraphNode {
+        let impl_owner = qualified_name
+            .rsplit("::")
+            .nth(1)
+            .filter(|owner| owner.starts_with(char::is_uppercase))
+            .map(ToOwned::to_owned);
         CallGraphNode {
             id: format!("src/lib.rs:{qualified_name}:1"),
             name: name_last_segment(qualified_name).to_owned(),
             qualified_name: qualified_name.to_owned(),
             file: "src/lib.rs".to_owned(),
             module: "crate::m".to_owned(),
-            impl_owner: None,
+            impl_owner,
             owner_kind: None,
             start_line: 1,
             end_line: 2,
@@ -686,7 +734,7 @@ mod tests {
     ) {
         let nodes: Vec<CallGraphNode> = ["append", "len", "parseInt", "drop", "with_children"]
             .into_iter()
-            .map(|name| node(&format!("crate::other::W::{name}")))
+            .map(|name| node(&format!("crate::other::{name}")))
             .collect();
         let resolver = Resolver::new(&nodes);
 
@@ -787,7 +835,7 @@ mod tests {
     /// nothing binds it locally.
     #[test]
     fn the_same_name_resolves_where_it_is_not_locally_bound() {
-        let nodes = vec![node("other::W::emit")];
+        let nodes = vec![node("other::emit")];
         let resolver = Resolver::new(&nodes);
 
         let call = resolver.resolve(&site("emit"), GraphLanguage::Go);
@@ -800,7 +848,7 @@ mod tests {
     /// that the callee is shadowed — those sites keep resolving.
     #[test]
     fn unknown_local_binding_facts_do_not_suppress_resolution() {
-        let nodes = vec![node("other::W::emit")];
+        let nodes = vec![node("other::emit")];
         let resolver = Resolver::new(&nodes);
         let unknown = CallShape {
             callee_is_locally_bound: SyntaxFact::Unknown,
@@ -828,6 +876,64 @@ mod tests {
         let call = resolver.resolve(&receiver, GraphLanguage::Go);
 
         assert_eq!(call.resolution, Resolution::Resolved);
+    }
+
+    /// In Go a bare call reaches only free functions and a receiver
+    /// call only methods, so the name fallback drops the other kind;
+    /// the other languages keep both, since there the shape does not
+    /// decide it.
+    #[rstest]
+    #[case::go_bare_call_skips_method(GraphLanguage::Go, false, "crate::m::UUID::Domain", None)]
+    #[case::go_receiver_call_skips_function(GraphLanguage::Go, true, "crate::tag::Add", None)]
+    #[case::go_bare_call_reaches_function(
+        GraphLanguage::Go,
+        false,
+        "crate::tag::Add",
+        Some("crate::tag::Add")
+    )]
+    #[case::go_receiver_call_reaches_method(
+        GraphLanguage::Go,
+        true,
+        "crate::m::UUID::Domain",
+        Some("crate::m::UUID::Domain")
+    )]
+    #[case::python_bare_call_keeps_method(
+        GraphLanguage::Python,
+        false,
+        "crate::m::UUID::Domain",
+        Some("crate::m::UUID::Domain")
+    )]
+    #[case::typescript_receiver_call_keeps_function(
+        GraphLanguage::TypeScript,
+        true,
+        "crate::tag::Add",
+        Some("crate::tag::Add")
+    )]
+    fn go_call_shape_decides_method_or_function(
+        #[case] language: GraphLanguage,
+        #[case] receiver: bool,
+        #[case] defined: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let resolver = Resolver::new(&[node(defined)]);
+        let name = name_last_segment(defined);
+        let site = if receiver {
+            receiver_site(name)
+        } else {
+            CallShape {
+                caller_module: SyntaxFact::Known("crate::other".to_owned()),
+                ..site(name)
+            }
+        };
+
+        let call = resolver.resolve(&site, language);
+
+        assert_eq!(
+            call.to
+                .map(|id| resolver.id_to_qualified[&id].clone())
+                .as_deref(),
+            expected
+        );
     }
 
     /// `a.parse()` after `from crate import a`: the receiver is an

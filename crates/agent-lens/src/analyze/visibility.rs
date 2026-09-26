@@ -1386,7 +1386,7 @@ mod tests {
     )]
     #[case::sub_package(
         "pkg/sub/caller.go",
-        "package sub\n\nfunc CallsTarget() int { return pkg.Target() }\n",
+        "package sub\n\nimport \"example.com/pkg\"\n\nfunc CallsTarget() int { return pkg.Target() }\n",
         None
     )]
     fn go_exports_narrow_only_for_callers_in_the_very_same_package(
