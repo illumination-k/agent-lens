@@ -445,7 +445,12 @@ fn module_graph_roots(targets: &[PathBuf], files: &[PathBuf]) -> Vec<PathBuf> {
     for file in files {
         match file.extension().and_then(|e| e.to_str()) {
             Some("rs") => roots.extend(rust_crate_roots(crates.lookup(file).crate_root)),
-            Some("go") => roots.extend(nearest_ancestor_holding(file, "go.mod")),
+            // A `go.work` workspace is one graph, so an import between
+            // two of its modules is an edge; a lone module is its own.
+            Some("go") => roots.extend(
+                nearest_ancestor_holding(file, "go.work")
+                    .or_else(|| nearest_ancestor_holding(file, "go.mod")),
+            ),
             _ => {}
         }
     }
@@ -772,6 +777,19 @@ mod tests {
             module_graph_roots(&[], &[file]),
             [dir.path().join("svc")],
             "the nearest go.mod directory is the module root",
+        );
+    }
+
+    #[test]
+    fn a_go_workspace_contributes_its_go_work_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.work", "go 1.23\n\nuse ./svc\n");
+        write_file(dir.path(), "svc/go.mod", "module example.com/svc\n");
+        let file = write_file(dir.path(), "svc/pkg/a.go", "package pkg\n");
+        assert_eq!(
+            module_graph_roots(&[], &[file]),
+            [dir.path().to_path_buf()],
+            "a go.work above the module roots the whole workspace",
         );
     }
 

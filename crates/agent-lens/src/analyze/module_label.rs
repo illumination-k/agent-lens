@@ -17,7 +17,7 @@
 //! | --- | --- | --- |
 //! | Rust | `crate` | `crate::analyze::coupling` |
 //! | Go (with `go.mod`) | `github.com/x/proj` | `github.com/x/proj/pkg/util` |
-//! | Go (no `go.mod`) | `.` | `pkg/util` |
+//! | Go (no `go.mod`, or a `go.work` spanning modules) | `.` | `pkg/util` |
 //! | TypeScript / JavaScript | `.` | `components/Chat` |
 //! | Python | `.` | `util.text` |
 

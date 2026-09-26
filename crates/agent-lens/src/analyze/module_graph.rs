@@ -123,8 +123,9 @@ impl GraphPolicy {
 /// directory.
 ///
 /// A recognised source extension picks the backend directly. Otherwise a
-/// directory is probed in order: `go.mod` first (the unambiguous Go
-/// module marker — without this check a Go repo root would fall through
+/// directory is probed in order: `go.mod` or `go.work` first (the
+/// unambiguous Go markers; `go.work` roots a multi-module workspace whose
+/// root has no module of its own) — without this check a Go repo root would fall through
 /// to the Rust crate-root resolver and fail with a confusing "no usable
 /// Rust crate root"), then a Rust crate root, then Python as the last
 /// resort. Python goes last because it has no root marker to test: any
@@ -160,7 +161,7 @@ fn build_graph_uncached(
     }
 
     if path.is_dir() {
-        if path.join("go.mod").is_file() {
+        if path.join("go.mod").is_file() || path.join("go.work").is_file() {
             return build_go_graph(path, policy, filter);
         }
         return match resolve_crate_root(path) {
@@ -300,6 +301,42 @@ mod tests {
         let graph = build_graph(dir.path(), policy, &AnalyzePathFilter::new()).unwrap();
         assert_eq!(graph.root, dir.path());
         assert!(!graph.modules.is_empty());
+    }
+
+    /// A `go.work` root with no `go.mod` of its own is one Go graph over
+    /// every module under it, so an import of a sibling module is an edge.
+    #[test]
+    fn go_work_root_spans_its_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "go.work",
+            "go 1.23\n\nuse (\n\t./app\n\t./lib\n)\n",
+        );
+        write(dir.path(), "app/go.mod", "module example.com/app\n");
+        write(
+            dir.path(),
+            "app/main.go",
+            "package main\n\nimport \"example.com/lib/util\"\n\nfunc main() { util.Run() }\n",
+        );
+        write(dir.path(), "lib/go.mod", "module example.com/lib\n");
+        write(
+            dir.path(),
+            "lib/util/util.go",
+            "package util\n\nfunc Run() {}\n",
+        );
+        // Without the `go.work` probe the Rust resolver would claim this.
+        write(dir.path(), "src/lib.rs", "pub fn f() {}\n");
+
+        let graph = build_graph(dir.path(), COUPLING, &AnalyzePathFilter::new()).unwrap();
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from.as_str() == "crate::app" && e.to.as_str() == "crate::lib::util"),
+            "{:?}",
+            graph.edges,
+        );
     }
 
     #[test]

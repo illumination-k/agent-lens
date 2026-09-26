@@ -5,7 +5,12 @@
 //! `import "..."` statement that resolves under the local module
 //! (declared in `go.mod`) becomes a [`EdgeKind::Use`] edge between two
 //! package nodes. Imports of the standard library and external modules
-//! are dropped because the analyzer is single-module by design.
+//! are dropped.
+//!
+//! A package's import path comes from the nearest `go.mod` above its
+//! directory, so a scan may span several modules — a `go.work` workspace,
+//! or a repository with nested modules — and an import of a sibling
+//! module's package still resolves to that package.
 //!
 //! The mapping from filesystem layout to [`ModulePath`] mirrors the
 //! Python adapter: the root is `crate`, and each subdirectory adds a
@@ -18,7 +23,7 @@
 //! Like the Python adapter, this module only extracts edges; metric
 //! aggregation lives in `lens-domain`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lens_domain::{CouplingEdge, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension};
@@ -146,16 +151,11 @@ pub fn build_module_tree(
 /// silently dropped; self-loops and duplicates are not filtered here
 /// (`lens-domain::compute_report` handles that).
 pub fn extract_edges(packages: &[GoPackage]) -> Vec<CouplingEdge> {
-    let module_prefix = module_prefix(packages);
     let known: HashSet<&ModulePath> = packages.iter().map(|p| &p.path).collect();
+    let mut owners = ModuleOwners::default();
     let go_to_module: HashMap<String, ModulePath> = packages
         .iter()
-        .map(|p| {
-            (
-                go_path_for(&p.path, module_prefix.as_deref()),
-                p.path.clone(),
-            )
-        })
+        .map(|p| (owners.import_path(p), p.path.clone()))
         .collect();
 
     let mut edges = Vec::new();
@@ -266,6 +266,78 @@ fn go_path_for(module_path: &ModulePath, module_prefix: Option<&str>) -> String 
     }
 }
 
+/// The `go.mod` owning each directory, memoised: every package in a
+/// module shares the same answer, so the ancestor walk runs once per
+/// directory rather than once per package.
+#[derive(Default)]
+struct ModuleOwners {
+    by_dir: HashMap<PathBuf, Option<(PathBuf, String)>>,
+}
+
+impl ModuleOwners {
+    /// The package's Go import path: its owning module's path plus the
+    /// package directory below that module. Without an owning `go.mod`
+    /// it falls back to the package's path relative to the scan root.
+    fn import_path(&mut self, package: &GoPackage) -> String {
+        let dir = package_dir(&package.file);
+        let Some((module_dir, module)) = self.owner(dir) else {
+            return go_path_for(&package.path, None);
+        };
+        let rel = dir.strip_prefix(&module_dir).unwrap_or(Path::new(""));
+        let segments = package_segments(rel);
+        if segments.is_empty() {
+            module
+        } else {
+            format!("{module}/{}", segments.join("/"))
+        }
+    }
+
+    /// The nearest directory at or above `dir` whose `go.mod` declares a
+    /// module, with that module path.
+    fn owner(&mut self, dir: &Path) -> Option<(PathBuf, String)> {
+        if let Some(cached) = self.by_dir.get(dir) {
+            return cached.clone();
+        }
+        let found = match read_module_directive(dir) {
+            Some(module) => Some((dir.to_path_buf(), module)),
+            None => dir.parent().and_then(|parent| self.owner(parent)),
+        };
+        self.by_dir.insert(dir.to_path_buf(), found.clone());
+        found
+    }
+}
+
+/// A package's directory: `file` itself, or its parent when the package
+/// is a single-file root.
+fn package_dir(file: &Path) -> &Path {
+    if file.extension().and_then(std::ffi::OsStr::to_str) == Some("go") {
+        file.parent().unwrap_or(Path::new(""))
+    } else {
+        file
+    }
+}
+
+/// The `module` directive of `dir/go.mod`, if there is one to read.
+///
+/// A `go.mod` that exists but cannot be read is logged: losing a module
+/// path degrades import resolution for every package in it. A missing
+/// one is the ordinary case and stays quiet.
+fn read_module_directive(dir: &Path) -> Option<String> {
+    let go_mod = dir.join("go.mod");
+    match std::fs::read_to_string(&go_mod) {
+        Ok(text) => parse_module_directive(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            tracing::warn!(
+                path = %go_mod.display(),
+                %error,
+                "go: cannot read go.mod; import paths will resolve without the module prefix",
+            );
+            None
+        }
+    }
+}
+
 /// Resolve a Go import path string to a known [`ModulePath`] in the
 /// scanned tree. Imports outside the local module return `None`.
 ///
@@ -279,41 +351,30 @@ fn resolve_import(import: &str, go_to_module: &HashMap<String, ModulePath>) -> O
     go_to_module.get(import).cloned()
 }
 
-/// Read `go.mod` from the deepest directory shared by `packages` (the
-/// workspace root) and pluck the `module ...` line out of it. Returns
-/// `None` when no `go.mod` is found, the file can't be read, or the
-/// file is missing the `module` declaration entirely.
-///
-/// Losing the prefix is not fatal — [`go_path_for`] falls back to
-/// relative paths — but it does degrade import resolution across the
-/// whole scan, so a `go.mod` that exists and can't be read is logged.
-/// A missing one is the normal single-file / test case and stays quiet.
+/// The module owning the deepest directory shared by `packages` (the
+/// scan root), read from the nearest `go.mod` at or above it. Returns
+/// `None` when there is none — including a `go.work` workspace whose
+/// root holds no `go.mod` of its own, where no single module path names
+/// every package.
 ///
 /// Callers outside edge extraction use this to name packages the way Go
 /// names them: prefixed with the module path, so a report row reads as
-/// the import path it corresponds to.
+/// the import path it corresponds to. Edge resolution does not depend on
+/// it; each package's own module is looked up separately.
 pub fn module_prefix(packages: &[GoPackage]) -> Option<String> {
-    let mut roots: BTreeSet<&Path> = packages.iter().map(|p| p.file.as_path()).collect();
-    while let Some(dir) = roots.pop_first() {
-        let go_mod = dir.join("go.mod");
-        match std::fs::read_to_string(&go_mod) {
-            Ok(text) => {
-                if let Some(prefix) = parse_module_directive(&text) {
-                    return Some(prefix);
-                }
+    let mut dirs = packages.iter().map(|p| package_dir(&p.file));
+    let first = dirs.next()?;
+    let mut common = first.to_path_buf();
+    for dir in dirs {
+        while !dir.starts_with(&common) {
+            if !common.pop() {
+                break;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                path = %go_mod.display(),
-                %error,
-                "go: cannot read go.mod; import paths will resolve without the module prefix",
-            ),
-        }
-        if let Some(parent) = dir.parent() {
-            roots.insert(parent);
         }
     }
-    None
+    ModuleOwners::default()
+        .owner(&common)
+        .map(|(_, module)| module)
 }
 
 /// Pluck the module name out of a `go.mod` body's `module ...`
@@ -743,6 +804,53 @@ mod tests {
                 .any(|e| e.from.as_str() == "crate::pkg::util" && e.to.as_str() == "crate"),
             "import of the exact module prefix must resolve to crate (root); got {edges:?}",
         );
+    }
+
+    /// A scan spanning several modules (a `go.work` workspace, or a
+    /// nested module) resolves each package against its own `go.mod`, so
+    /// an import of a sibling module's package is an edge, while no single
+    /// module prefix names the scan.
+    #[test]
+    fn imports_across_modules_resolve_through_each_modules_go_mod() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(root.path(), "go.work", "go 1.23\n\nuse (./app ./lib)\n");
+        write(root.path(), "app/go.mod", "module example.com/app\n");
+        write(
+            root.path(),
+            "app/cmd/main.go",
+            "package main\n\nimport (\n\t\"example.com/lib\"\n\t\"example.com/lib/util\"\n\t\"example.com/app/internal\"\n)\n",
+        );
+        write(root.path(), "app/internal/x.go", "package internal\n");
+        write(root.path(), "lib/go.mod", "module example.com/lib\n");
+        write(root.path(), "lib/lib.go", "package lib\n");
+        write(root.path(), "lib/util/util.go", "package util\n");
+
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
+        let mut edges = extract_edges(&modules);
+        edges.sort_by(|a, b| a.to.cmp(&b.to));
+        assert_eq!(
+            edges,
+            vec![
+                edge("crate::app::cmd", "crate::app::internal", "internal"),
+                edge("crate::app::cmd", "crate::lib", "lib"),
+                edge("crate::app::cmd", "crate::lib::util", "util"),
+            ],
+        );
+        assert_eq!(module_prefix(&modules), None);
+        // Two packages whose common ancestor is two levels up.
+        let far_apart: Vec<GoPackage> = modules
+            .iter()
+            .filter(|p| matches!(p.path.as_str(), "crate::app::cmd" | "crate::lib"))
+            .cloned()
+            .collect();
+        assert_eq!(far_apart.len(), 2);
+        assert_eq!(module_prefix(&far_apart), None);
+        // One module alone keeps its prefix.
+        let app: Vec<GoPackage> = modules
+            .into_iter()
+            .filter(|p| p.path.as_str().starts_with("crate::app"))
+            .collect();
+        assert_eq!(module_prefix(&app).as_deref(), Some("example.com/app"));
     }
 
     /// `go_path_for` keeps `crate` as a special case: when the module
