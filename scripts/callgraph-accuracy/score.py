@@ -108,10 +108,19 @@ def _oracle_pairs(oracle: dict, index: NodeIndex) -> tuple[dict[Pair, str], dict
     pairs: dict[Pair, str] = {}
     lines: dict[Pair, set[int]] = defaultdict(set)
     unmapped: Counter = Counter()
+    innermost_caller = oracle.get("caller_is_innermost_function", False)
     for e in oracle["edges"]:
-        caller, reason = index.innermost(e["caller_file"], e["call_line"])
-        if caller is None:
-            caller, _ = index.innermost(e["caller_file"], e["caller_def_line"])
+        if innermost_caller:
+            # caller_def_line is the innermost function around the call,
+            # anonymous ones included: its node, else the node enclosing it.
+            # (By call_line, a callback starting on the call's line would win.)
+            caller, reason = index.definition(e["caller_file"], e["caller_def_line"])
+            if caller is None:
+                caller, reason = index.innermost(e["caller_file"], e["caller_def_line"])
+        else:
+            caller, reason = index.innermost(e["caller_file"], e["call_line"])
+            if caller is None:
+                caller, _ = index.innermost(e["caller_file"], e["caller_def_line"])
         if caller is None:
             unmapped[f"caller_{reason}"] += 1
             continue
@@ -202,6 +211,10 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
     """Return raw counts (summable across targets) plus the disagreement list."""
     if source_root is None and oracle.get("root"):
         source_root = Path(oracle["root"])
+    # A call in module-level code (a Rust `const` / `static` initialiser, a
+    # TS top-level statement) has no caller node: outside every edge set.
+    module_level = sum(e["resolution"] == "resolved" for e in graph["edges"] if e["from"] is None)
+    graph = graph | {"edges": [e for e in graph["edges"] if e["from"] is not None]}
     index = NodeIndex(graph, source_root)
     oracle_pairs, oracle_lines, unmapped = _oracle_pairs(oracle, index)
     resolved, candidate_sets = _agent_lens_edges(graph)
@@ -217,7 +230,10 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
     # A type-checker oracle lists the files it type-checked; a caller in any
     # other file (excluded by a build constraint) is out of its scope.
     analyzed: set[str] | None = set(oracle["analyzed_files"]) if "analyzed_files" in oracle else None
-    out_of_scope = _out_of_scope(index.nodes, executed, analyzed)
+    # Functions the oracle saw but could not resolve (cfg-inactive Rust code).
+    unanalyzed = {index.definition(f["file"], f["def_line"])[0] for f in oracle.get("unanalyzed_functions", [])}
+    unanalyzed.discard(None)
+    out_of_scope = _out_of_scope(index.nodes, executed, analyzed, unanalyzed)
     applied, stale, adjudicated = _apply_adjudications(adjudications or [], graph, resolved, oracle_pairs, out_of_scope)
 
     # Precision side: every agent-lens resolved pair, per method.
@@ -286,15 +302,18 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
         "adjudicated": dict(applied),
         "stale_adjudications": len(stale),
         "unadjudicated": len(disagreements),
+        "module_level_resolved": module_level,
         "disagreements": disagreements,
     }
 
 
-def _out_of_scope(nodes: dict, executed: set[str] | None, analyzed: set[str] | None):
+def _out_of_scope(nodes: dict, executed: set[str] | None, analyzed: set[str] | None, unanalyzed: set[str] = frozenset()):
     """Return a function giving why a caller node is outside the oracle's view, or None."""
 
     def reason(node_id: str) -> str | None:
         if analyzed is not None and nodes[node_id]["file"] not in analyzed:
+            return "caller_not_analyzed"
+        if node_id in unanalyzed:
             return "caller_not_analyzed"
         if executed is not None and node_id not in executed:
             return "caller_not_executed"
@@ -375,8 +394,8 @@ def merge(results: list[dict]) -> dict:
         out["adjudicated"].update(r["adjudicated"])
     out["unmapped"] = dict(out["unmapped"])
     out["adjudicated"] = dict(out["adjudicated"])
-    for key in ("oracle_edges", "stale_adjudications", "unadjudicated"):
-        out[key] = sum(r[key] for r in results)
+    for key in ("oracle_edges", "stale_adjudications", "unadjudicated", "module_level_resolved"):
+        out[key] = sum(r.get(key, 0) for r in results)
     first = results[0] if results else {}
     for key in ("language", "oracle", "kind"):
         values = {r.get(key) for r in results}
@@ -452,6 +471,7 @@ def render(result: dict, title: str) -> str:
     rows += [["adjudicated", v, result["adjudicated"].get(v, 0)] for v in VERDICTS]
     rows += [["stale adjudication", "matches no disagreement", result["stale_adjudications"]]]
     rows += [["unadjudicated disagreement", "agent-lens only + oracle only", result["unadjudicated"]]]
+    rows += [["resolved edge excluded", "no caller node (module-level code)", result.get("module_level_resolved", 0)]]
     lines += _md_table(["bucket", "reason", "count"], rows)
     return "\n".join(lines) + "\n"
 

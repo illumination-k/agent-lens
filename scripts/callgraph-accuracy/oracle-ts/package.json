@@ -1,0 +1,12 @@
+{
+  "name": "callgraph-accuracy-oracle-ts",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript type-checker oracle of the call-graph accuracy benchmark (docs/callgraph-accuracy.md)",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "typescript": "5.9.3"
+  }
+}
