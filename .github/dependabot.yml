@@ -65,3 +65,17 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # The Go oracle of the call-graph accuracy benchmark (#579) pins
+  # golang.org/x/tools; keep it current.
+  - package-ecosystem: "gomod"
+    directory: "/scripts/callgraph-accuracy/oracle-go"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    groups:
+      gomod:
+        patterns:
+          - "*"

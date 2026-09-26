@@ -12,6 +12,7 @@ on:
       - "mise.rust.toml"
       - "mise.base.toml"
       - ".github/workflows/ci_rust.yml"
+      - "scripts/callgraph-accuracy/**"
   pull_request:
     paths:
       - "**/*.rs"
@@ -22,6 +23,7 @@ on:
       - "mise.rust.toml"
       - "mise.base.toml"
       - ".github/workflows/ci_rust.yml"
+      - "scripts/callgraph-accuracy/**"
 
 jobs:
   ci:

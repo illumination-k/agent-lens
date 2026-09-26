@@ -37,3 +37,6 @@ result-*
 mutants.out/
 mutants.out.old/
 mutants.out.*/
+
+# Python (callgraph-accuracy harness)
+__pycache__/

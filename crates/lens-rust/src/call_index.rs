@@ -225,6 +225,10 @@ struct CallVisitor {
     /// `Item::Impl` and popped on exit.
     impl_owners: Vec<Option<String>>,
     alias_scopes: Vec<BTreeMap<String, String>>,
+    /// Names of the `mod` items declared in each module being walked,
+    /// innermost last — what a bare leading `use` segment may name
+    /// relative to the current module (see [`use_aliases_for`]).
+    child_modules: Vec<HashSet<String>>,
     /// Callable names bound in each enclosing function's own scope, one
     /// entry per function scope — see [`local_callable_bindings`]. Only
     /// the innermost entry applies: a nested `fn` does not see the outer
@@ -242,6 +246,7 @@ impl CallVisitor {
             modules: vec![base_module.to_owned()],
             impl_owners: Vec::new(),
             alias_scopes: Vec::new(),
+            child_modules: Vec::new(),
             local_callables: Vec::new(),
             sites: Vec::new(),
         }
@@ -257,6 +262,15 @@ impl CallVisitor {
     /// "skip this subtree" hook.
     fn visit_items(&mut self, items: &[Item]) {
         self.alias_scopes.push(BTreeMap::new());
+        self.child_modules.push(
+            items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Mod(item_mod) => Some(item_mod.ident.to_string()),
+                    _ => None,
+                })
+                .collect(),
+        );
         for item in items {
             if let Item::Use(item_use) = item {
                 self.add_aliases_from_use(item_use);
@@ -267,6 +281,7 @@ impl CallVisitor {
                 self.visit_item_filtered(item);
             }
         }
+        self.child_modules.pop();
         self.alias_scopes.pop();
     }
 
@@ -358,7 +373,9 @@ impl CallVisitor {
     }
 
     fn add_aliases_from_use(&mut self, item_use: &ItemUse) {
-        let aliases = use_aliases_for(self.current_module(), &item_use.tree);
+        let no_children = HashSet::new();
+        let child_modules = self.child_modules.last().unwrap_or(&no_children);
+        let aliases = use_aliases_for(self.current_module(), child_modules, &item_use.tree);
         let Some(scope) = self.alias_scopes.last_mut() else {
             return;
         };
@@ -609,65 +626,70 @@ impl<'ast> Visit<'ast> for LocalBindingCollector {
     }
 }
 
-fn use_aliases_for(current_module: &str, tree: &UseTree) -> Vec<UseAlias> {
-    let mut aliases = Vec::new();
-    let mut prefix = Vec::new();
-    walk_use_tree(current_module, tree, &mut prefix, &mut aliases);
-    aliases
+/// Every name a `use` item binds, as an alias of its absolute target.
+///
+/// `child_modules` are the `mod` items declared beside the `use`: under
+/// 2018 uniform paths a leading segment naming one of them (`use
+/// geo::area;` next to `mod geo;`) is relative to the current module, as
+/// if it were spelled `self::geo::area`. Any other bare leading segment
+/// names an extern crate, which no workspace node can match, so it
+/// contributes no alias.
+fn use_aliases_for(
+    current_module: &str,
+    child_modules: &HashSet<String>,
+    tree: &UseTree,
+) -> Vec<UseAlias> {
+    let mut leaves = Vec::new();
+    walk_use_tree(tree, &mut Vec::new(), &mut leaves);
+    leaves
+        .into_iter()
+        .filter_map(|(alias, mut segments)| {
+            if segments
+                .first()
+                .is_some_and(|first| child_modules.contains(first))
+            {
+                segments.insert(0, "self".to_owned());
+            }
+            absolutize_use_segments(current_module, &segments)
+                .map(|target| UseAlias { alias, target })
+        })
+        .collect()
 }
 
+/// Collect `(bound name, path segments as written)` for every leaf of a
+/// `use` tree; a glob binds `*`.
 fn walk_use_tree(
-    current_module: &str,
     tree: &UseTree,
     prefix: &mut Vec<String>,
-    aliases: &mut Vec<UseAlias>,
+    leaves: &mut Vec<(String, Vec<String>)>,
 ) {
     match tree {
         UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
-            walk_use_tree(current_module, &path.tree, prefix, aliases);
+            walk_use_tree(&path.tree, prefix, leaves);
             prefix.pop();
         }
-        UseTree::Name(name) => {
-            record_use_leaf(
-                current_module,
-                prefix,
-                &name.ident.to_string(),
-                None,
-                aliases,
-            );
-        }
-        UseTree::Rename(rename) => {
-            record_use_leaf(
-                current_module,
-                prefix,
-                &rename.ident.to_string(),
-                Some(rename.rename.to_string()),
-                aliases,
-            );
-        }
-        UseTree::Glob(_) => {
-            if let Some(target) = absolutize_use_segments(current_module, prefix) {
-                aliases.push(UseAlias {
-                    alias: "*".to_owned(),
-                    target,
-                });
-            }
-        }
+        UseTree::Name(name) => record_use_leaf(prefix, &name.ident.to_string(), None, leaves),
+        UseTree::Rename(rename) => record_use_leaf(
+            prefix,
+            &rename.ident.to_string(),
+            Some(rename.rename.to_string()),
+            leaves,
+        ),
+        UseTree::Glob(_) => leaves.push(("*".to_owned(), prefix.clone())),
         UseTree::Group(group) => {
             for item in &group.items {
-                walk_use_tree(current_module, item, prefix, aliases);
+                walk_use_tree(item, prefix, leaves);
             }
         }
     }
 }
 
 fn record_use_leaf(
-    current_module: &str,
     prefix: &[String],
     tail: &str,
     rename: Option<String>,
-    aliases: &mut Vec<UseAlias>,
+    leaves: &mut Vec<(String, Vec<String>)>,
 ) {
     let mut target_segments = prefix.to_vec();
     let alias = if tail == "self" {
@@ -679,9 +701,7 @@ fn record_use_leaf(
         target_segments.push(tail.to_owned());
         rename.unwrap_or_else(|| tail.to_owned())
     };
-    if let Some(target) = absolutize_use_segments(current_module, &target_segments) {
-        aliases.push(UseAlias { alias, target });
-    }
+    leaves.push((alias, target_segments));
 }
 
 fn absolutize_use_segments(current_module: &str, segments: &[String]) -> Option<String> {
@@ -1252,6 +1272,41 @@ fn caller() {
             }]
         );
         assert!(sites[1].visible_aliases.is_empty());
+    }
+
+    /// 2018 uniform paths: a `use` whose leading segment is a `mod`
+    /// declared beside it is relative to the current module, exactly as
+    /// if written `self::…`. A bare extern-crate path binds no alias —
+    /// no workspace node can match it. Regression for #579, where
+    /// `use geo::area as surface;` left `surface()` unresolved.
+    #[rstest]
+    #[case::file_module(
+        "mod geo;\nuse geo::area as surface;\nuse serde::Serialize;\nfn caller() { surface(); }\n",
+        "shapes::geo::area"
+    )]
+    #[case::inline_module(
+        "mod outer {\n    mod inner {}\n    use inner::area as surface;\n    fn caller() { surface(); }\n}\n",
+        "shapes::outer::inner::area"
+    )]
+    #[case::block_scoped_use(
+        "mod geo;\nfn caller() { use geo::area as surface; surface(); }\n",
+        "shapes::geo::area"
+    )]
+    fn use_paths_through_a_child_module_are_absolutized(#[case] src: &str, #[case] target: &str) {
+        let sites = extract_call_sites_with_options_and_base_module(
+            src,
+            CallIndexOptions::default(),
+            "shapes",
+        )
+        .unwrap();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(
+            sites[0].visible_aliases,
+            [UseAlias {
+                alias: "surface".to_owned(),
+                target: target.to_owned(),
+            }]
+        );
     }
 
     #[test]
