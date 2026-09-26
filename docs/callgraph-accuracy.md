@@ -236,7 +236,7 @@ replaced by an indicator (below).
 `O` is the set of mapped oracle pairs (caller node, callee node); `R_m` the
 agent-lens `resolved` pairs with resolution method `m` (`lexical`,
 `self_method`, `last_segment`, `path_suffix`, `crate_narrowed`, and for
-TypeScript `binding`). A resolved edge with no caller node (a call in
+TypeScript and Python `binding`). A resolved edge with no caller node (a call in
 module-level code: a Rust `const` initialiser) is outside every set and only
 counted (`resolved edge excluded`).
 

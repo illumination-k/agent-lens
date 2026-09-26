@@ -1,12 +1,15 @@
 //! Python function and call-shape extraction for the function-graph
 //! analyzer.
 //!
-//! This stays syntax-only. Free functions and class methods become
-//! [`FunctionShape`]s qualified at the lexical module path the caller
-//! supplies. Each call expression inside a function body becomes a
-//! [`CallShape`] tagged with the imports visible at its file. No type
-//! inference is attempted: `self.method(...)` and `obj.method(...)` are
-//! left as receiver calls so the resolver keeps them unresolved.
+//! Free functions and class methods become [`FunctionShape`]s qualified
+//! at the lexical module path the caller supplies. Each call expression
+//! inside a function body becomes a [`CallShape`] tagged with the imports
+//! visible at its file. The callee's leading name is bound through the
+//! module's scopes ([`crate::semantic`]), so a call through an import, to
+//! a module-level `def`, or to a builtin carries a
+//! [`CallShape::callee_binding`], and one through a local carries the
+//! local's shape. No type inference is attempted: `self.method(...)` and
+//! `obj.method(...)` stay receiver calls.
 //!
 //! The treatment of imports mirrors `lens-ts`: aliases imported as a whole
 //! module (`import os`, `import os as o`) participate as namespace aliases
@@ -16,9 +19,9 @@
 use std::collections::HashSet;
 
 use lens_domain::{
-    ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus,
-    LineIndex, OwnerKind, OwnerShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
-    callee_names_local_binding, qualify_module, starts_uppercase,
+    ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, ImportShape,
+    LexicalResolutionStatus, LineIndex, OwnerKind, OwnerShape, ReceiverExprKind, SignatureShape,
+    SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{
@@ -27,7 +30,9 @@ use ruff_python_ast::{
 use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 
+use crate::module_path::{dotted_to_module_path, resolve_from_base, top_segment};
 use crate::parser::{PythonParseError, function_body_tree};
+use crate::semantic::{ModuleBindings, Referent, bind_module};
 use crate::walk::{FnSite, walk_module_fns};
 
 /// Extract neutral function-shape facts for Python.
@@ -71,19 +76,29 @@ pub fn extract_call_shapes_with_module(
             (exported.is_none()).then(|| alias.clone())
         })
         .collect();
+    let file = FileFacts {
+        source,
+        module,
+        line_index: &lines,
+        imports: &imports,
+        namespace_aliases: &namespace_aliases,
+        bindings: &bind_module(&parsed.body, module),
+    };
     let mut out = Vec::new();
     walk_module_fns(&parsed.body, &mut |site| {
-        collect_calls_in_function(
-            &site,
-            source,
-            module,
-            &imports,
-            &namespace_aliases,
-            &lines,
-            &mut out,
-        );
+        collect_calls_in_function(&site, &file, &mut out);
     });
     Ok(out)
+}
+
+/// The facts every call site in one file shares.
+struct FileFacts<'a, 'b> {
+    source: &'a str,
+    module: &'a str,
+    line_index: &'a LineIndex,
+    imports: &'a [ImportShape],
+    namespace_aliases: &'a HashSet<String>,
+    bindings: &'a ModuleBindings<'b>,
 }
 
 fn function_shape(site: &FnSite<'_>, module: &str, lines: &LineIndex) -> FunctionShape {
@@ -123,28 +138,18 @@ fn function_shape(site: &FnSite<'_>, module: &str, lines: &LineIndex) -> Functio
 
 fn collect_calls_in_function(
     site: &FnSite<'_>,
-    source: &str,
-    module: &str,
-    imports: &[ImportShape],
-    namespace_aliases: &HashSet<String>,
-    lines: &LineIndex,
+    file: &FileFacts<'_, '_>,
     out: &mut Vec<CallShape>,
 ) {
     let display_name = site.func.name.as_str();
     let caller_qualified = match site.owner {
-        Some(class) => qualify_module(module, &format!("{class}::{display_name}")),
-        None => qualify_module(module, display_name),
+        Some(class) => qualify_module(file.module, &format!("{class}::{display_name}")),
+        None => qualify_module(file.module, display_name),
     };
-    let locally_bound = local_callable_bindings(site.func);
     let mut visitor = FunctionBodyCallVisitor {
-        source,
-        module,
+        file,
         caller_qualified_name: caller_qualified,
         caller_owner: site.owner.map(ToOwned::to_owned),
-        line_index: lines,
-        imports,
-        namespace_aliases,
-        locally_bound,
         out: Vec::new(),
     };
     for body_stmt in &site.func.body {
@@ -153,100 +158,14 @@ fn collect_calls_in_function(
     out.extend(visitor.out);
 }
 
-/// Names bound to a callable inside `func`'s own scope: nested `def`s and
-/// `lambda`s held in a local, plus parameters annotated as `Callable`.
-///
-/// The walker keeps a function body atomic, so a nested `def` is never a
-/// graph node of its own and a call to it has no workspace target. Left
-/// to the resolver's name fallback, that call would instead land on
-/// whichever unrelated module happens to define the same name.
-///
-/// Bindings are collected body-wide rather than from the point of
-/// definition: a call that precedes its binding and means the outer name
-/// is rare, and losing an edge beats fabricating one.
-fn local_callable_bindings(func: &StmtFunctionDef) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for param in func.parameters.iter() {
-        if param.annotation().is_some_and(annotation_is_callable) {
-            names.insert(param.name().as_str().to_owned());
-        }
-    }
-    let mut collector = LocalBindingCollector { out: &mut names };
-    for stmt in &func.body {
-        collector.visit_stmt(stmt);
-    }
-    names
-}
-
-/// `Callable`, `typing.Callable[[int], None]`, `collections.abc.Callable`.
-fn annotation_is_callable(annotation: &Expr) -> bool {
-    match annotation {
-        Expr::Name(ExprName { id, .. }) => id.as_str() == "Callable",
-        Expr::Attribute(ExprAttribute { attr, .. }) => attr.as_str() == "Callable",
-        Expr::Subscript(subscript) => annotation_is_callable(&subscript.value),
-        // `"Callable[[int], None]"` as a string annotation.
-        Expr::StringLiteral(literal) => literal.value.to_str().starts_with("Callable"),
-        _ => false,
-    }
-}
-
-struct LocalBindingCollector<'a> {
-    out: &'a mut HashSet<String>,
-}
-
-impl<'ast> Visitor<'ast> for LocalBindingCollector<'_> {
-    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
-        match stmt {
-            Stmt::FunctionDef(nested) => {
-                self.out.insert(nested.name.as_str().to_owned());
-                // A nested `def`'s own body binds names in its scope, not
-                // in this one, so stop here.
-                return;
-            }
-            Stmt::Assign(assign) => {
-                if matches!(assign.value.as_ref(), Expr::Lambda(_)) {
-                    for target in &assign.targets {
-                        if let Expr::Name(name) = target {
-                            self.out.insert(name.id.to_string());
-                        }
-                    }
-                }
-            }
-            Stmt::AnnAssign(assign) => {
-                let binds_callable = assign
-                    .value
-                    .as_ref()
-                    .is_some_and(|value| matches!(value.as_ref(), Expr::Lambda(_)))
-                    || annotation_is_callable(&assign.annotation);
-                if binds_callable && let Expr::Name(name) = assign.target.as_ref() {
-                    self.out.insert(name.id.to_string());
-                }
-            }
-            _ => {}
-        }
-        ruff_python_ast::visitor::walk_stmt(self, stmt);
-    }
-
-    // Lambda bodies are expressions in this scope's statements, but their
-    // parameters are not; nothing in an expression binds a name here.
-    fn visit_expr(&mut self, _expr: &'ast Expr) {}
-}
-
-struct FunctionBodyCallVisitor<'a> {
-    source: &'a str,
-    module: &'a str,
+struct FunctionBodyCallVisitor<'f, 'a, 'b> {
+    file: &'f FileFacts<'a, 'b>,
     caller_qualified_name: String,
     caller_owner: Option<String>,
-    line_index: &'a LineIndex,
-    imports: &'a [ImportShape],
-    namespace_aliases: &'a HashSet<String>,
-    /// Callable names bound in this function's own scope — see
-    /// [`local_callable_bindings`].
-    locally_bound: HashSet<String>,
     out: Vec<CallShape>,
 }
 
-impl<'a, 'ast> Visitor<'ast> for FunctionBodyCallVisitor<'a> {
+impl<'ast> Visitor<'ast> for FunctionBodyCallVisitor<'_, '_, '_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         if let Expr::Call(call) = expr {
             let shape = self.call_shape(call);
@@ -256,31 +175,60 @@ impl<'a, 'ast> Visitor<'ast> for FunctionBodyCallVisitor<'a> {
     }
 }
 
-impl FunctionBodyCallVisitor<'_> {
+impl FunctionBodyCallVisitor<'_, '_, '_> {
     /// The visitor already owns every caller-side fact a call shape
     /// needs, so this reads them off `self` instead of taking them as a
     /// parameter list.
     fn call_shape(&self, call: &ExprCall) -> CallShape {
-        let facts = callee_facts(&call.func, self.namespace_aliases);
-        let line = self.line_index.line(call.range.start().to_u32());
-        let callee_is_locally_bound = callee_names_local_binding(
-            facts.receiver,
-            facts.path_segments.as_deref(),
-            &self.locally_bound,
-        );
+        let facts = callee_facts(&call.func, self.file.namespace_aliases);
+        let line = self.file.line_index.line(call.range.start().to_u32());
+        let referent = callee_head(&call.func).and_then(|head| self.file.bindings.referent(head));
+        let segments = facts.path_segments.as_deref();
+        // A local callable shadows every definition outside the function,
+        // but only a bare call names the binding itself: `emit.run()`
+        // names a method on whatever the local holds.
+        let callee_is_locally_bound =
+            matches!(segments, Some([_])) && referent == Some(Referent::LocalCallable);
+        // `client.connect()` on a parameter or local, or on a module-level
+        // value, calls a method on that value — never a free function
+        // reachable by name — even when the value's name is uppercase or
+        // shadows an import.
+        let receiver = match (facts.receiver, referent, segments) {
+            (
+                ReceiverExprKind::None | ReceiverExprKind::Expression,
+                Some(Referent::LocalValue | Referent::LocalCallable | Referent::ModuleValue),
+                Some([_, _, ..]),
+            ) => ReceiverExprKind::LocalValue,
+            (receiver, ..) => receiver,
+        };
+        let callee_binding = match (referent, segments) {
+            (Some(Referent::Builtin), _) => SyntaxFact::Known(CalleeBinding::External),
+            (Some(Referent::Import(target)), Some([_, tail @ ..])) => {
+                let mut path = target.to_owned();
+                for segment in tail {
+                    path.push_str("::");
+                    path.push_str(segment);
+                }
+                SyntaxFact::Known(CalleeBinding::Declaration(path))
+            }
+            (Some(Referent::ModuleDefinition), Some(segments)) => SyntaxFact::Known(
+                CalleeBinding::Declaration(qualify_module(self.file.module, &segments.join("::"))),
+            ),
+            _ => SyntaxFact::Unknown,
+        };
         // Positional arguments first, then keywords — the order Python
         // syntax itself enforces at a call site.
         let mut arguments: Vec<ArgumentShape> = call
             .arguments
             .args
             .iter()
-            .map(|arg| argument_shape(self.source, arg))
+            .map(|arg| argument_shape(self.file.source, arg))
             .collect();
         arguments.extend(call.arguments.keywords.iter().map(|keyword| {
             match keyword.arg.as_ref() {
                 Some(name) => ArgumentShape::Keyword {
                     name: name.as_str().to_owned(),
-                    value: Box::new(argument_shape(self.source, &keyword.value)),
+                    value: Box::new(argument_shape(self.file.source, &keyword.value)),
                 },
                 // `**kwargs` unpacking: no positions line up past it.
                 None => ArgumentShape::Spread,
@@ -288,18 +236,18 @@ impl FunctionBodyCallVisitor<'_> {
         }));
         CallShape {
             caller_qualified_name: SyntaxFact::Known(Some(self.caller_qualified_name.clone())),
-            caller_module: SyntaxFact::Known(self.module.to_owned()),
+            caller_module: SyntaxFact::Known(self.file.module.to_owned()),
             caller_owner: SyntaxFact::Known(self.caller_owner.clone()),
             callee_display_name: SyntaxFact::Known(facts.name),
             callee_path_segments: facts
                 .path_segments
                 .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
-            receiver_expr_kind: SyntaxFact::Known(facts.receiver),
+            receiver_expr_kind: SyntaxFact::Known(receiver),
             arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
-            callee_binding: SyntaxFact::Unknown,
+            callee_binding,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
-            visible_imports: self.imports.to_vec(),
+            visible_imports: self.file.imports.to_vec(),
             line,
         }
     }
@@ -392,6 +340,16 @@ fn callee_facts(callee: &Expr, namespace_aliases: &HashSet<String>) -> CalleeFac
     }
 }
 
+/// The name a callee expression starts from: `f` in `f()`, `a` in
+/// `a.b.c()`; `None` for a computed callee.
+fn callee_head(callee: &Expr) -> Option<&ExprName> {
+    match callee {
+        Expr::Name(name) => Some(name),
+        Expr::Attribute(attr) => callee_head(&attr.value),
+        _ => None,
+    }
+}
+
 fn expression_path(expr: &Expr) -> Option<Vec<String>> {
     match expr {
         Expr::Name(name) => Some(vec![name.id.to_string()]),
@@ -463,43 +421,6 @@ fn import_shape(
     ImportShape::known(imported_module, local_alias, exported_symbol)
 }
 
-/// Resolve the lexical base module of a `from X import ...` statement.
-///
-/// Returns `None` when a relative import outruns the available depth
-/// (e.g. `from ... import x` in a top-level file).
-fn resolve_from_base(current: &str, level: u32, module: Option<&str>) -> Option<String> {
-    let mut segments: Vec<String> = if level == 0 || current.is_empty() {
-        Vec::new()
-    } else {
-        current.split("::").map(ToOwned::to_owned).collect()
-    };
-    if level != 0 {
-        let pops = level as usize;
-        if pops > segments.len() {
-            return None;
-        }
-        segments.truncate(segments.len() - pops);
-    }
-    if let Some(module) = module
-        && !module.is_empty()
-    {
-        segments.extend(module.split('.').map(ToOwned::to_owned));
-    }
-    Some(segments.join("::"))
-}
-
-fn dotted_to_module_path(dotted: &str) -> String {
-    dotted
-        .split('.')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("::")
-}
-
-fn top_segment(dotted: &str) -> &str {
-    dotted.split('.').next().unwrap_or(dotted)
-}
-
 fn function_span(func: &StmtFunctionDef, lines: &LineIndex) -> SourceSpan {
     let start_line = lines.line(func.range.start().to_u32());
     // `range.end()` lands at the position just past the last byte of the
@@ -546,6 +467,11 @@ mod tests {
         "def caller(flag):\n    if flag:\n        emit = lambda x: x\n    emit(1)\n",
         true
     )]
+    #[case::call_before_binding("def caller():\n    emit(1)\n    emit = lambda x: x\n", true)]
+    #[case::closure_sees_outer_local(
+        "def caller():\n    emit = lambda x: x\n    def inner():\n        emit(1)\n",
+        true
+    )]
     #[case::plain_local("def caller():\n    emit = compute()\n    emit(1)\n", false)]
     #[case::value_param("def caller(emit: int):\n    emit(1)\n", false)]
     #[case::unbound_name("def caller():\n    emit(1)\n", false)]
@@ -555,6 +481,121 @@ mod tests {
             .find(|call| call.callee_name() == Some("emit"))
             .expect("emit call site");
         assert_eq!(call.callee_is_locally_bound(), expected);
+    }
+
+    /// The callee's leading name is bound through the module's scopes:
+    /// imports expand to the imported path, module-level `def`s and
+    /// classes qualify at the module, builtins are external, and a
+    /// local, a later module-level rebinding, or a name nothing binds
+    /// leaves the binding unknown.
+    #[rstest]
+    #[case::from_import(
+        "from pkg.sub import run\ndef caller():\n    run()\n",
+        "run",
+        Some("pkg::sub::run")
+    )]
+    #[case::aliased_from_import(
+        "from pkg import run as go\ndef caller():\n    go()\n",
+        "go",
+        Some("pkg::run")
+    )]
+    #[case::relative_import(
+        "from . import util\ndef caller():\n    util.run()\n",
+        "run",
+        Some("pkg::util::run")
+    )]
+    #[case::module_import(
+        "import pkg.sub as s\ndef caller():\n    s.run()\n",
+        "run",
+        Some("pkg::sub::run")
+    )]
+    #[case::submodule_import(
+        "import pkg.sub\ndef caller():\n    pkg.sub.run()\n",
+        "run",
+        Some("pkg::sub::run")
+    )]
+    #[case::import_in_body(
+        "def caller():\n    import pkg\n    pkg.run()\n",
+        "run",
+        Some("pkg::run")
+    )]
+    #[case::module_def(
+        "def caller():\n    helper()\ndef helper():\n    pass\n",
+        "helper",
+        Some("pkg::main::helper")
+    )]
+    #[case::class_path(
+        "def caller():\n    Svc.create()\nclass Svc:\n    pass\n",
+        "create",
+        Some("pkg::main::Svc::create")
+    )]
+    #[case::builtin("def caller(xs):\n    len(xs)\n", "len", Some("<external>"))]
+    #[case::shadowed_builtin(
+        "def len(x):\n    pass\ndef caller(xs):\n    len(xs)\n",
+        "len",
+        Some("pkg::main::len")
+    )]
+    #[case::param_shadows_import("from pkg import run\ndef caller(run):\n    run()\n", "run", None)]
+    #[case::module_value("run = make()\ndef caller():\n    run()\n", "run", None)]
+    #[case::global_statement(
+        "def caller():\n    global run\n    run = make()\n    run()\ndef run():\n    pass\n",
+        "run",
+        Some("pkg::main::run")
+    )]
+    #[case::class_scope_invisible_to_methods(
+        "class C:\n    def run(self):\n        pass\n    def caller(self):\n        run()\n",
+        "run",
+        None
+    )]
+    #[case::comprehension_target("def caller(fs):\n    [run() for run in fs]\n", "run", None)]
+    #[case::unbound("def caller():\n    run()\n", "run", None)]
+    fn callee_bindings(#[case] src: &str, #[case] callee: &str, #[case] expected: Option<&str>) {
+        let call = calls(src, "pkg::main")
+            .into_iter()
+            .find(|call| call.callee_name() == Some(callee))
+            .expect("call site");
+        let binding = call.callee_binding().map(|binding| match binding {
+            CalleeBinding::Declaration(target) => target.as_str(),
+            CalleeBinding::External => "<external>",
+        });
+        assert_eq!(binding, expected);
+    }
+
+    /// A receiver bound to a value — a parameter, a local, a module-level
+    /// assignment — is a method call whatever its case; an import or a
+    /// class keeps the path reading.
+    #[rstest]
+    #[case::uppercase_local(
+        "def caller():\n    Cls = pick()\n    Cls.run()\n",
+        ReceiverExprKind::LocalValue
+    )]
+    #[case::param_shadows_namespace(
+        "import graph\ndef caller(graph):\n    graph.run()\n",
+        ReceiverExprKind::LocalValue
+    )]
+    #[case::module_value(
+        "client = Client()\ndef caller():\n    client.run()\n",
+        ReceiverExprKind::LocalValue
+    )]
+    #[case::namespace_import(
+        "import graph\ndef caller():\n    graph.run()\n",
+        ReceiverExprKind::None
+    )]
+    #[case::module_class(
+        "class Svc:\n    pass\ndef caller():\n    Svc.run()\n",
+        ReceiverExprKind::None
+    )]
+    #[case::unbound_lowercase("def caller():\n    client.run()\n", ReceiverExprKind::Expression)]
+    #[case::self_receiver(
+        "class S:\n    def caller(self):\n        self.run()\n",
+        ReceiverExprKind::SelfValue
+    )]
+    fn receivers_follow_their_binding(#[case] src: &str, #[case] expected: ReceiverExprKind) {
+        let call = calls(src, "m")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("run"))
+            .expect("run call site");
+        assert_eq!(call.receiver_expr_kind, SyntaxFact::Known(expected));
     }
 
     /// A `lambda`'s own parameters bind in the lambda's scope, not the

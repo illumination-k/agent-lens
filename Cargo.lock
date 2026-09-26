@@ -476,6 +476,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -819,6 +829,8 @@ dependencies = [
  "rstest",
  "ruff_python_ast",
  "ruff_python_parser",
+ "ruff_python_semantic",
+ "ruff_python_stdlib",
  "ruff_text_size",
  "tempfile",
  "thiserror",
@@ -1709,6 +1721,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruff_cache"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8ab0acb25da72c3432190"
+dependencies = [
+ "filetime",
+ "glob",
+ "globset",
+ "itertools 0.14.0",
+ "regex",
+ "seahash",
+]
+
+[[package]]
+name = "ruff_index"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8ab0acb25da72c3432190"
+dependencies = [
+ "get-size2",
+ "ruff_macros",
+]
+
+[[package]]
+name = "ruff_macros"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8ab0acb25da72c3432190"
+dependencies = [
+ "heck",
+ "itertools 0.14.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "ruff_python_trivia",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "ruff_python_ast"
 version = "0.0.0"
 source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8ab0acb25da72c3432190"
@@ -1746,6 +1794,33 @@ dependencies = [
  "unicode-ident",
  "unicode-normalization",
  "unicode_names2",
+]
+
+[[package]]
+name = "ruff_python_semantic"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8ab0acb25da72c3432190"
+dependencies = [
+ "bitflags",
+ "is-macro",
+ "ruff_cache",
+ "ruff_index",
+ "ruff_macros",
+ "ruff_python_ast",
+ "ruff_python_parser",
+ "ruff_python_stdlib",
+ "ruff_text_size",
+ "rustc-hash",
+ "smallvec",
+]
+
+[[package]]
+name = "ruff_python_stdlib"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8ab0acb25da72c3432190"
+dependencies = [
+ "bitflags",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -1842,6 +1917,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "seahash"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "self_cell"
