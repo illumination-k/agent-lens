@@ -40,17 +40,22 @@ impl ResolvedProfile {
     pub(super) fn resolve(
         selector: ProfileSelectorArgs,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let config_path = match selector.config {
-            Some(path) => path,
+        // An explicit `--config` is that one file; discovery stacks every
+        // `agent-lens.toml` from the cwd up, nearest first.
+        let chain = match selector.config {
+            Some(path) => vec![path],
             None => {
                 let cwd = std::env::current_dir()?;
-                config::discover(&cwd).ok_or(ConfigError::NotFound { start: cwd })?
+                let chain = config::discover_all(&cwd);
+                if chain.is_empty() {
+                    return Err(ConfigError::NotFound { start: cwd }.into());
+                }
+                chain
             }
         };
-        let config = config::load(&config_path)?;
-        let profile = config.profile(&selector.profile)?.clone();
-        let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-        let targets = profile.resolved_paths(config_dir);
+        let found = config::find_profile(&chain, &selector.profile)?;
+        let targets = found.profile.resolved_paths(found.config_dir());
+        let profile = found.profile;
         // Reported one path at a time, naming the entry as the profile
         // spelled it: with several paths in play, "does not exist" is
         // useless unless it says which one.

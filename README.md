@@ -220,11 +220,17 @@ min-lines = 8
 ```
 
 ```bash
-agent-lens run web                       # from the nearest agent-lens.toml
+agent-lens run web                       # nearest agent-lens.toml defining `web`
 agent-lens run web --config path/to/agent-lens.toml
 agent-lens run web --format json         # override the profile's format
 agent-lens run web --digest              # entity-joined rollup, not sections
 ```
+
+In a monorepo, configs nest: every `agent-lens.toml` from the current
+directory up is read, and a profile comes whole from the nearest file that
+defines it. A package's own config adds or overrides profiles while the
+root's stay runnable from inside the package, and each profile's `path`
+resolves against the directory of the file that defined it.
 
 Keys are kebab-case and match the CLI flags. Unknown keys — a typo, or an
 option set on the wrong tool — are rejected at parse time rather than silently
