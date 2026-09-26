@@ -481,25 +481,24 @@ fastrand (`std`, `alloc`):
 
 plus `as_ptr` / `as_mut_ptr` in Rust's ubiquitous method names.
 
-The five discovery targets are pinned in
-`scripts/callgraph-accuracy/targets-rust-discovery.toml`
-(`run.py --targets-file scripts/callgraph-accuracy/targets-rust-discovery.toml`).
+Per repository, after the fixes (the five discovery targets are not in
+`targets.toml`; their precision counts every agent-lens-only pair as a false
+positive, since none is adjudicated):
 
-Per repository (the five discovery targets are not in `targets.toml`; no
-disagreement is adjudicated, so precision counts every agent-lens-only pair
-as a false positive):
+| Repository                  | Commit    | Precision         | Static recall     | Static pairs only in a candidate set | Dynamic recall |
+| --------------------------- | --------- | ----------------- | ----------------- | ------------------------------------ | -------------- |
+| dtolnay/semver 1.0.28       | `5368cdf` | 1.000 (157 / 157) | 0.762 (157 / 206) | 13                                   | 0 / 0          |
+| rust-lang/log 0.4.34        | `8034743` | 0.796 (144 / 181) | 0.491 (131 / 267) | 85                                   | 13 / 606       |
+| rayon-rs/either 1.18.0      | `ce6f07f` | 1.000 (11 / 11)   | 0.526 (10 / 19)   | 0                                    | 1 / 1          |
+| smol-rs/fastrand v2.5.0     | `7a1cc2c` | 0.991 (107 / 108) | 0.939 (107 / 114) | 0                                    | 0 / 0          |
+| rust-lang/glob v0.3.4       | `cfa2a58` | 0.962 (51 / 53)   | 0.823 (51 / 62)   | 0                                    | 0 / 0          |
+| seanmonstar/httparse v1.9.5 | `97c7e6e` | 1.000 (247 / 247) | 0.870 (247 / 284) | 4                                    | 0 / 0          |
+| rapidfuzz/strsim-rs v0.11.1 | `f72cd1c` | 1.000 (123 / 123) | 0.961 (123 / 128) | 0                                    | 0 / 0          |
+| semver + log (micro-avg.)   |           | 0.891 (301 / 338) | 0.609 (288 / 473) | 98                                   | 13 / 606       |
 
-| Repository                  | Commit    | Precision (before) | Precision (after) | Static recall (before) | Static recall (after) |
-| --------------------------- | --------- | ------------------ | ----------------- | ---------------------- | --------------------- |
-| dtolnay/semver 1.0.28       | `5368cdf` | 1.000 (147 / 147)  | 1.000 (157 / 157) | 0.714 (147 / 206)      | 0.762 (157 / 206)     |
-| rust-lang/log 0.4.34        | `8034743` | 0.847 (122 / 144)  | 0.796 (144 / 181) | 0.423 (113 / 267)      | 0.491 (131 / 267)     |
-| rayon-rs/either 1.18.0      | `ce6f07f` | 1.000 (6 / 6)      | 1.000 (11 / 11)   | 0.263 (5 / 19)         | 0.526 (10 / 19)       |
-| smol-rs/fastrand v2.5.0     | `7a1cc2c` | 0.906 (48 / 53)    | 0.991 (107 / 108) | 0.421 (48 / 114)       | 0.939 (107 / 114)     |
-| rust-lang/glob v0.3.4       | `cfa2a58` | 0.941 (32 / 34)    | 0.962 (51 / 53)   | 0.516 (32 / 62)        | 0.823 (51 / 62)       |
-| seanmonstar/httparse v1.9.5 | `97c7e6e` | 0.970 (227 / 234)  | 1.000 (247 / 247) | 0.799 (227 / 284)      | 0.870 (247 / 284)     |
-| rapidfuzz/strsim-rs v0.11.1 | `f72cd1c` | 1.000 (33 / 33)    | 1.000 (123 / 123) | 0.258 (33 / 128)       | 0.961 (123 / 128)     |
-| semver + log (micro-avg.)   |           | 0.924 (269 / 291)  | 0.891 (301 / 338) | 0.550 (260 / 473)      | 0.609 (288 / 473)     |
-| five discovery targets      |           | 0.961 (346 / 360)  | 0.994 (539 / 542) | 0.568 (345 / 607)      | 0.886 (538 / 607)     |
+Against "Rust and TypeScript" above, semver + log went from precision 0.924 and static
+recall 0.550. On the five discovery targets, the fixes raised precision from
+0.961 to 0.994 and static recall from 0.568 to 0.886.
 
 log's precision fell because its macro arguments are now visible, not
 because a resolution changed: the new false positives are receiver calls
