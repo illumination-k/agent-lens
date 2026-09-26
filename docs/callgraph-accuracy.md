@@ -65,7 +65,7 @@ this table in sync when the resolver changes):
 
 | Construct                             | Rust                                                                          | Go                                                             | Python                                   | TypeScript                                         |
 | ------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------- |
-| calls in a closure / lambda body      | attributed to the enclosing fn                                                | **dropped** (no edge from any node)                            | attributed to the enclosing function     | attributed to the closure's own `::closure#N` node |
+| calls in a closure / lambda body      | attributed to the enclosing fn                                                | attributed to the enclosing function                           | attributed to the enclosing function     | attributed to the closure's own `::closure#N` node |
 | calls in a nested named fn / def      | **dropped**                                                                   | n/a                                                            | attributed to the enclosing function     | attributed to the nested function's own node       |
 | calling the closure / nested fn       | `unresolved`                                                                  | `unresolved` (named variable) or `anonymous` (`func(){...}()`) | `unresolved`                             | `unresolved`                                       |
 | `A()` on a class                      | n/a                                                                           | n/a                                                            | `unresolved` (no `__init__` edge)        | `new A()`: no call site at all                     |
@@ -73,9 +73,9 @@ this table in sync when the resolver changes):
 | method on an interface / trait object | `resolved` via `last_segment` if one impl has that name, else a candidate set | same                                                           | same                                     | same                                               |
 | decorated def                         | n/a                                                                           | n/a                                                            | node spans from the first decorator line | node spans from the first decorator line           |
 
-So a Go oracle edge whose call site is inside a func literal is attributed to
-the enclosing named function (by the oracle, which keeps the real call line)
-and counts as missed by agent-lens, under `of which no call site`.
+A Go oracle edge whose call site is inside a func literal is attributed to
+the enclosing named function by both sides (the oracle keeps the real call
+line).
 
 Where the oracles fall short of the definition:
 
@@ -255,7 +255,7 @@ counted (`resolved edge excluded`).
   ambiguous edge's candidates from that caller but not resolved; `missed` =
   neither. `of which no call site` counts the missed pairs where agent-lens
   recorded no call site at all on the oracle's call line in that caller
-  (implicit calls such as `__iter__`, dropped Go closure bodies); the rest of
+  (implicit calls such as `__iter__`, calls in Rust macro arguments); the rest of
   `missed` are call sites agent-lens saw but left unresolved.
 - **Candidate sets**, per method over `ambiguous` edges whose caller is in the
   oracle's view (same scope as precision; the others are counted as
@@ -341,20 +341,66 @@ callees, 1 callee and 3 callers with no enclosing node).
 
 What the misses are, from reading the disagreements:
 
-- Go static misses without a call site (84 of 271; every one sampled) are calls inside func
-  literals, which agent-lens drops; the rest are method calls on a typed
+- Go static misses without a call site (84 of 271; every one sampled) were calls inside func
+  literals, which agent-lens dropped (fixed since: see "Go" below); the rest are method calls on a typed
   package variable or local (`CommandLine.StringP(...)`, `err.Unwrap()`) left
   unresolved.
 - Go false positives: a method on a call expression's result read as the
   package-level function of that name (`(expr).String()`,
   `s.statelessCompare(step).Equal()`), and `last_segment` binding a stdlib
   method (`reflect.Type.Name`, `time.Time.IsZero`, `reflect.Value.IsNil`) to
-  the only in-repo method with that name.
+  the only in-repo method with that name. All but `reflect.Type.Name` are
+  fixed since (see "Go" below).
 - Python static misses are almost all `mi.foo(...)` in more-itertools' tests:
   `import more_itertools as mi` over an `__init__.py` that re-exports with
   `from .more import *` (the barrel gap pinned in the metamorphic tests).
 - Python unobserved `last_segment` edges are mostly shadowed names: a local, a
   parameter or an `itertools` import bound to a same-named in-repo function.
+
+### Go
+
+Measured 2026-09-26 on pflag and go-cmp after four Go fixes, found by running
+the oracle over google/uuid `0f11ee6` (v1.6.0), BurntSushi/toml `d97def5`
+(v1.5.0), samber/lo `203faca` (v1.51.0), gorilla/mux `b4617d0` (v1.8.1) and
+spf13/cast `40e8e07` (v1.9.2):
+
+- calls inside a func literal are attributed to the enclosing function
+  instead of dropped;
+- a method on a value that is no plain path (`NewDecoder(r).Decode(v)`,
+  `net.IP(b).String()`) is a receiver call, not a bare call to the
+  package-level function named like it;
+- the name fallback keeps a bare call to free functions (`Domain(b)` is a
+  conversion or a function, never `UUID.Domain`) and a receiver call to
+  methods (`wg.Add(1)` is never the package-level `tag.Add`);
+- an explicit single type argument (`Empty[K]()`) names the generic
+  function instead of reading as an index;
+
+plus `IsNil` / `IsZero` in Go's ubiquitous method names.
+
+Per repository, after the fixes (the five discovery targets are not in
+`targets.toml`; their precision counts every agent-lens-only pair as a false
+positive, since none is adjudicated):
+
+| Repository                  | Commit    | Precision           | Static recall       | Static pairs only in a candidate set | Dynamic recall |
+| --------------------------- | --------- | ------------------- | ------------------- | ------------------------------------ | -------------- |
+| spf13/pflag v1.0.10         | `0491e57` | 0.985 (1098 / 1115) | 0.841 (1094 / 1301) | 30                                   | 4 / 837        |
+| google/go-cmp v0.7.0        | `9b12f36` | 1.000 (376 / 376)   | 0.830 (376 / 453)   | 63                                   | 0 / 222        |
+| google/uuid v1.6.0          | `0f11ee6` | 1.000 (159 / 159)   | 0.828 (159 / 192)   | 8                                    | 0 / 5          |
+| BurntSushi/toml v1.5.0      | `d97def5` | 0.972 (692 / 712)   | 0.889 (690 / 776)   | 65                                   | 2 / 87         |
+| samber/lo v1.51.0           | `203faca` | 0.993 (144 / 145)   | 0.706 (144 / 204)   | 7                                    | 0 / 3          |
+| gorilla/mux v1.8.1          | `b4617d0` | 0.981 (358 / 365)   | 0.669 (358 / 535)   | 177                                  | 0 / 66         |
+| spf13/cast v1.9.2           | `40e8e07` | 0.887 (94 / 106)    | 0.803 (94 / 117)    | 0                                    | 0 / 37         |
+| pflag + go-cmp (micro-avg.) |           | 0.989 (1474 / 1491) | 0.838 (1470 / 1754) | 93                                   | 4 / 1059       |
+
+Against the baseline above, pflag + go-cmp went from precision 0.973 and
+static recall 0.536. On the five discovery targets, the fixes raised
+precision from 0.968 to 0.973 and static recall from 0.678 to 0.792. What is
+left there: `reflect.Value.Type` bound to an in-repo `Type` method by
+`crate_narrowed` (toml), `Get` on an `http.Header` (mux), edges to
+`zz_generated.go`, which the oracle excludes as generated (cast, all 12 of
+its false positives), and lo's self-edges on generic functions
+(`Contains → Contains`), which come from the oracle collapsing instantiation
+wrappers.
 
 ### Rust and TypeScript
 

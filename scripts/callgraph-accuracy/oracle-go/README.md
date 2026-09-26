@@ -21,9 +21,7 @@ Needs Go 1.25 or newer. Logs and the drop counts go to stderr.
 - **Caller** is the enclosing _named_ function. A call inside a function literal
   is attributed to the literal's outermost named parent (`caller_def_line`),
   while `call_line` stays the real call site. The stderr line reports how many
-  edges come from inside a literal: agent-lens does not attribute those calls
-  to anything today, so they are the first place to look when recall on Go is
-  low.
+  edges come from inside a literal; agent-lens attributes them the same way.
 - **Callee** is a named function or method. Generic instances map to their
   generic declaration. Synthetic callees (method-value `$bound`, `$thunk`,
   promoted-method wrappers, instantiation wrappers) are collapsed into the named
