@@ -61,6 +61,12 @@ impl FunctionVisitor for WrapperCollector {
         if item.is_constructor {
             return;
         }
+        // An inline callback (`xs.map((x) => f(x))`) has no name and no
+        // callers; collapsing it to `xs.map(f)` loses `this` for a method
+        // callee and passes the callback's extra arguments to any other.
+        if item.is_argument {
+            return;
+        }
         let params = collect_param_idents(item.params);
         let Some(tail) = single_block_tail(item.body) else {
             return;
@@ -477,5 +483,38 @@ class Child extends Parent {
         let findings = run(src);
         assert_eq!(names(&findings), ["setup::closure#1"]);
         assert_eq!(findings[0].callee, "b");
+    }
+
+    /// An anonymous function passed as an argument has no name to call
+    /// it by, and its bare-reference rewrite is a `TypeError` or silently
+    /// wrong in JS (issue #495), so none of these is a wrapper.
+    #[rstest]
+    #[case::bound_method("function keep(fs, t) { return fs.filter((f) => t.has(f)); }")]
+    #[case::param_method(
+        "function any(fs, ps) { return fs.filter((f) => ps.some((p) => f.startsWith(p))); }"
+    )]
+    #[case::namespaced_fn("function enc(rs) { return rs.map((r) => JSON.stringify(r)); }")]
+    #[case::free_fn(
+        "function dbl(x) { return x * 2; }\nfunction all(xs) { return xs.map((x) => dbl(x)); }"
+    )]
+    #[case::function_expression(
+        "function all(xs) { return xs.map(function (x) { return dbl(x); }); }"
+    )]
+    #[case::parenthesized("function all(xs) { return xs.map(((x) => dbl(x))); }")]
+    #[case::new_expression("function wait() { return new Promise((r) => setTimeout(r)); }")]
+    #[case::module_scope("app.listen((port) => log(port));")]
+    #[case::harness_callback("it(\"runs\", () => check());")]
+    fn inline_argument_callback_is_not_a_wrapper(#[case] src: &str) {
+        let findings = run(src);
+        assert!(findings.is_empty(), "got: {:?}", names(&findings));
+    }
+
+    #[test]
+    fn named_closure_inside_argument_callback_is_still_a_wrapper() {
+        // Only the argument itself is anonymous; a `const` bound inside
+        // its body is a nested closure like any other.
+        let src = "xs.forEach((x) => { const shim = (y) => b(y); });\n";
+        let findings = run(src);
+        assert_eq!(names(&findings), ["closure#1::closure#1"]);
     }
 }

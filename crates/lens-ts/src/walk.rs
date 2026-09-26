@@ -54,6 +54,12 @@ pub(crate) struct FunctionItem<'a> {
     /// skip mandatory boilerplate (`super(...)`) that structurally looks
     /// like a thin forwarding call.
     pub is_constructor: bool,
+    /// True for a function written inline as a call argument
+    /// (`xs.map((x) => f(x))`, `it("adds", () => …)`). It has no name to
+    /// call it by, so `wrapper` skips it: the only collapse left is a bare
+    /// reference (`xs.map(f)`), which in JS drops `this` or leaks the
+    /// extra callback arguments into the callee.
+    pub is_argument: bool,
     /// Byte offset of the outermost token a leading JSDoc comment would
     /// attach to — the `export` / `const` / decorator start for wrapped
     /// declarations, the item itself otherwise. `None` for nested
@@ -195,6 +201,7 @@ fn walk_class<V: FunctionVisitor>(class: &Class, line_index: &LineIndex, visitor
                 body,
                 params: &m.value.params,
                 is_constructor: matches!(m.kind, MethodDefinitionKind::Constructor),
+                is_argument: false,
                 doc_attach_start: Some(m.span.start),
             });
             scan_nested_functions(&qualified, body, line_index, visitor);
@@ -226,6 +233,7 @@ fn visit_function<V: FunctionVisitor>(
         body,
         params: &func.params,
         is_constructor: false,
+        is_argument: false,
         doc_attach_start: Some(attach_start),
     });
     scan_nested_functions(&name, body, line_index, visitor);
@@ -251,6 +259,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                 body: &arrow.body,
                 params: &arrow.params,
                 is_constructor: false,
+                is_argument: false,
                 doc_attach_start: Some(attach_start),
             });
             scan_nested_functions(&name, &arrow.body, line_index, visitor);
@@ -264,6 +273,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                     body,
                     params: &f.params,
                     is_constructor: false,
+                    is_argument: false,
                     doc_attach_start: Some(attach_start),
                 });
                 scan_nested_functions(&name, body, line_index, visitor);
@@ -342,6 +352,7 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
         params: &FormalParameters,
         body: &FunctionBody,
         start: u32,
+        is_argument: bool,
     ) {
         self.counter += 1;
         let segment = synthetic_segment(callee, self.counter, title);
@@ -356,6 +367,7 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
             body,
             params,
             is_constructor: false,
+            is_argument,
             doc_attach_start: None,
         });
         scan_nested_functions(&name, body, self.line_index, self.visitor);
@@ -365,7 +377,14 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
 impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: ScopeFlags) {
         if let Some(body) = &func.body {
-            self.emit(CLOSURE_CALLEE, None, &func.params, body, func.span.start);
+            self.emit(
+                CLOSURE_CALLEE,
+                None,
+                &func.params,
+                body,
+                func.span.start,
+                false,
+            );
         }
     }
 
@@ -376,7 +395,17 @@ impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
             &arrow.params,
             &arrow.body,
             arrow.span.start,
+            false,
         );
+    }
+
+    /// A function written inline as an argument (`xs.map((x) => f(x))`,
+    /// `new Promise((resolve) => …)`) is emitted with `is_argument` set;
+    /// any other argument takes the default walk.
+    fn visit_arguments(&mut self, args: &oxc_allocator::Vec<'a, Argument<'a>>) {
+        for arg in args {
+            self.visit_argument_as(CLOSURE_CALLEE, None, arg);
+        }
     }
 
     /// A callback registered with a test harness is named after the call
@@ -392,12 +421,21 @@ impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
         let title = call_title(call);
         self.visit_expression(&call.callee);
         for arg in &call.arguments {
-            match arg.as_expression().and_then(callback_shape) {
-                Some((params, body, start)) => {
-                    self.emit(callee, title.as_deref(), params, body, start);
-                }
-                None => self.visit_argument(arg),
-            }
+            self.visit_argument_as(callee, title.as_deref(), arg);
+        }
+    }
+}
+
+impl<'a, V: FunctionVisitor> NestedScanner<'_, V> {
+    /// Emit `arg` as an argument unit named after `callee` when it is
+    /// written as a function; walk it for nested functions otherwise.
+    fn visit_argument_as(&mut self, callee: &str, title: Option<&str>, arg: &Argument<'a>) {
+        match arg.as_expression().and_then(callback_shape) {
+            Some((params, body, start)) => self.emit(callee, title, params, body, start, true),
+            None => match arg {
+                Argument::SpreadElement(spread) => self.visit_spread_element(spread),
+                _ => self.visit_expression(arg.to_expression()),
+            },
         }
     }
 }
@@ -408,7 +446,7 @@ impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
 fn callback_shape<'b, 'a>(
     expr: &'b Expression<'a>,
 ) -> Option<(&'b FormalParameters<'a>, &'b FunctionBody<'a>, u32)> {
-    match expr {
+    match expr.without_parentheses() {
         Expression::ArrowFunctionExpression(arrow) => {
             Some((&arrow.params, &arrow.body, arrow.span.start))
         }
