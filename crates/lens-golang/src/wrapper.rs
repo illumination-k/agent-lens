@@ -309,6 +309,9 @@ mod tests {
         assert_eq!(got[0].callee, "target");
         assert_eq!(got[0].start_line, 2);
         assert_eq!(got[0].end_line, 2);
+        // A plain forward keeps `adapters` empty: peeling must not
+        // invent labels for a call with no conversion chain.
+        assert!(got[0].adapters.is_empty());
     }
 
     #[test]
@@ -366,40 +369,21 @@ mod tests {
     }
 
     #[test]
-    fn detects_wrapper_behind_trivial_string_adapter() {
-        // `target(x).String()` forwards `x` and then applies a
-        // semantically-empty conversion. Before adapter peeling this
-        // was invisible because `core_call` required the tail to be a
-        // bare call. The adapter must be recorded on the finding.
-        let src = "package p\nfunc Wrap(x int) string { return target(x).String() }\n";
-        let got = find_wrappers(src).unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].name, "Wrap");
-        assert_eq!(got[0].callee, "target");
-        assert_eq!(got[0].adapters, vec![".String()".to_owned()]);
-    }
-
-    #[test]
     fn detects_wrapper_behind_chained_trivial_adapters() {
+        // `target(x).Bytes().String()` forwards `x` and then applies
+        // semantically-empty conversions. Before adapter peeling this
+        // was invisible because `core_call` required the tail to be a
+        // bare call. The adapters must be recorded on the finding.
         let src = "package p\nfunc Wrap(x int) string { return target(x).Bytes().String() }\n";
         let got = find_wrappers(src).unwrap();
         assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "Wrap");
         assert_eq!(got[0].callee, "target");
         // Source order: `.Bytes()` applied first, then `.String()`.
         assert_eq!(
             got[0].adapters,
             vec![".Bytes()".to_owned(), ".String()".to_owned()],
         );
-    }
-
-    #[test]
-    fn empty_adapters_for_bare_forwarding_call() {
-        // A plain forward keeps `adapters` empty — peeling must not
-        // invent labels for a call with no conversion chain.
-        let src = "package p\nfunc Wrap(x int) int { return target(x) }\n";
-        let got = find_wrappers(src).unwrap();
-        assert_eq!(got.len(), 1);
-        assert!(got[0].adapters.is_empty());
     }
 
     #[test]

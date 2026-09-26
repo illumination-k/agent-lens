@@ -133,6 +133,16 @@ echo "Running cargo-mutants against diff base: $base"
 cargo mutants --workspace --no-shuffle --iterate --jobs "$jobs" --in-diff target/mutants-diff.patch
 '''
 
+# Not `mutants:rust:*`: a whole package's mutation run plus one coverage run
+# per test, far slower than the diff-scoped run.
+[tasks."mutants:minimize"]
+description = "Report a package's redundant tests with mutrim (cargo-mutants kills + per-test coverage; slow, needs mutrim on PATH)"
+usage = '''
+arg "<package>" help="Workspace package whose tests to minimize, e.g. lens-golang"
+flag "-j --jobs <jobs>" help="Number of cargo-mutants jobs to run in parallel" default="2"
+'''
+run = 'scripts/mutants-minimize.sh "$usage_package" "${usage_jobs:-2}"'
+
 [tasks."test:callgraph-accuracy"]
 description = "Unit-test the call-graph accuracy scorer and the Python and Rust oracles (scripts/callgraph-accuracy)"
 # The oracle tests run pytest under the profiler; uv supplies it (they skip
