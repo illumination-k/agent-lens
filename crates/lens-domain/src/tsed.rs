@@ -246,6 +246,14 @@ mod tests {
         assert!((sim - 0.8).abs() < 1e-9, "got {sim}");
     }
 
+    #[test]
+    fn distance_cutoff_edge_cases() {
+        let opts = TSEDOptions::default();
+        assert_eq!(tsed_distance_cutoff(3, 3, 0.0, &opts), None);
+        assert_eq!(tsed_distance_cutoff(0, 0, 0.5, &opts), None);
+        assert_eq!(tsed_distance_cutoff(0, 5, 0.5, &opts), Some(-1.0));
+    }
+
     /// `max_size == 0` is only reachable through the precomputed-sizes API,
     /// where the caller can legitimately pass empty subtree-size tables for
     /// trees that have been pruned to zero nodes. The contract is that two

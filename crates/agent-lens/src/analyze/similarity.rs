@@ -3272,12 +3272,16 @@ fn beta(x: i32) -> i32 {
         assert_json_pair_report(&out);
     }
 
+    /// `A B C D` against `D C X Y`: the unigram bound counts Block, C and
+    /// D (3 of 5) but only Block and one of them line up in order (2 of
+    /// 5), so the two readings differ and the test sees which one ran.
     #[rstest]
-    #[case::below_bound(0.9, true)]
-    #[case::within_bound(0.1, false)]
+    #[case::bound_rules_out(0.9, 0.6)]
+    #[case::bound_equal_to_min_scores_exactly(0.6, 0.4)]
+    #[case::bound_above_min_scores_exactly(0.1, 0.4)]
     fn bounded_lcs_skips_only_pairs_the_unigram_bound_rules_out(
         #[case] min_body: f64,
-        #[case] expect_bound: bool,
+        #[case] expected: f64,
     ) {
         let body = |labels: &[&str]| {
             TokenProfile::from_tree(
@@ -3292,13 +3296,10 @@ fn beta(x: i32) -> i32 {
                 false,
             )
         };
-        let a = body(&["Let", "Let", "If", "Return"]);
-        let b = body(&["Loop", "Call", "Call", "Return"]);
-        let upper = lcs_similarity_upper_bound(&a, &b);
-        let exact = lcs_similarity(&a, &b);
+        let a = body(&["A", "B", "C", "D"]);
+        let b = body(&["D", "C", "X", "Y"]);
         let got = bounded_lcs_similarity(&a, &b, min_body);
-        assert_eq!(got, if expect_bound { upper } else { exact });
-        assert!(got < min_body || !expect_bound);
+        assert!((got - expected).abs() < 1e-12, "got {got}");
     }
 
     /// The token method must surface the same near-duplicate pair the

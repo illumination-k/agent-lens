@@ -164,11 +164,6 @@ fn ratio(common: usize, a: &TokenProfile, b: &TokenProfile) -> f64 {
 /// Bit-parallel LCS length: one bit per position of `pattern`, cleared
 /// once that position is matched in the current best alignment.
 fn lcs_length(pattern: &[u64], text: &[u64]) -> usize {
-    let (pattern, text) = if pattern.len() <= text.len() {
-        (pattern, text)
-    } else {
-        (text, pattern)
-    };
     if pattern.is_empty() {
         return 0;
     }
@@ -430,6 +425,23 @@ mod tests {
             1.0,
             "the unigram bound cannot see order"
         );
+        let other = seq(&["A", "B", "X", "Y", "Z", "W"]);
+        // Block, A and B are shared: 3 of 7.
+        assert!((lcs_similarity_upper_bound(&forward, &other) - 3.0 / 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn idf_weights_tiny_bodies_by_unigram_document_frequency() {
+        // Below the k-gram width, so the unigram weights decide the score.
+        let a = seq(&["Let"]);
+        let b = seq(&["Call"]);
+        let bare: Vec<TokenProfile> = (0..3).map(|_| seq(&[])).collect();
+        let idf = TokenIdf::from_profiles(bare.iter().chain([&a, &b]));
+        // N = 5; Block is in all 5 bodies, Let and Call in one each.
+        let weight = |df: f64| (6.0 / (1.0 + df)).ln() + 1.0;
+        let expected = weight(5.0) / (weight(5.0) + 2.0 * weight(1.0));
+        let got = weighted_token_similarity(&a, &b, &idf);
+        assert!((got - expected).abs() < 1e-12, "got {got}, want {expected}");
     }
 
     #[test]

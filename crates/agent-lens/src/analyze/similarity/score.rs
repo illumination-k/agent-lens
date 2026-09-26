@@ -126,7 +126,7 @@ pub(super) fn score_candidate_pair(
     let mut bound_pruned = false;
     let body_similarity = if exact_match {
         1.0
-    } else if let Some(upper) = body_upper_bound_below_needed(
+    } else if let Some(upper) = body_upper_bound(
         profile_a,
         profile_b,
         body_a,
@@ -134,7 +134,7 @@ pub(super) fn score_candidate_pair(
         opts,
         weights.body_needed(threshold, signature_similarity),
     )
-    .filter(|&upper| weights.blend(upper, signature_similarity) < threshold)
+    .filter(|&upper| clearly_below_threshold(weights.blend(upper, signature_similarity), threshold))
     {
         bound_pruned = true;
         upper
@@ -168,16 +168,26 @@ pub(super) fn score_candidate_pair(
     })
 }
 
-/// Relative slack on the distance cutoff, so floating-point rounding in
-/// the bound can only ever keep a pair for the exact score, never drop
-/// one the exact score would have kept.
-const CUTOFF_SLACK: f64 = 1e-9;
+/// Slack under the threshold an upper-bound score must clear before the
+/// exact score is skipped, so floating-point rounding in the bound can
+/// only ever keep a pair for the exact score, never drop one the exact
+/// score would have kept.
+const SCORE_SLACK: f64 = 1e-9;
 
-/// An upper bound on the pair's TSED body score when that bound is
-/// already below `needed`, from the traversal-string lower bound on the
-/// edit distance ([`edit_distance_lower_bound`]). `None` means the pair
-/// may still reach `needed` and must be scored exactly.
-fn body_upper_bound_below_needed(
+/// Whether an upper bound on a pair's score rules the threshold out.
+/// Listed in `.cargo/mutants.toml`'s `exclude_re`: the slack only moves
+/// the verdict for scores within rounding error of the threshold, which
+/// no fixture can pin.
+fn clearly_below_threshold(upper_score: f64, threshold: f64) -> bool {
+    upper_score < threshold - SCORE_SLACK
+}
+
+/// An upper bound on the pair's TSED body score from the traversal-string
+/// lower bound on the edit distance ([`edit_distance_lower_bound`]),
+/// when that lower bound already exceeds the distance `needed` allows.
+/// `None` means the pair may still reach `needed` and must be scored
+/// exactly.
+fn body_upper_bound(
     profile_a: &TreeProfile,
     profile_b: &TreeProfile,
     body_a: &TreeNode,
@@ -187,7 +197,6 @@ fn body_upper_bound_below_needed(
 ) -> Option<f64> {
     let (size_a, size_b) = (profile_a.size, profile_b.size);
     let cutoff = tsed_distance_cutoff(size_a, size_b, needed, opts)?;
-    let cutoff = cutoff + CUTOFF_SLACK * (size_a.max(size_b) as f64 + 1.0);
     let compare_values = opts.apted.compare_values;
     let bound = edit_distance_lower_bound(
         profile_a.traversal(body_a, compare_values),
@@ -196,10 +205,7 @@ fn body_upper_bound_below_needed(
         cutoff,
     );
     match bound {
-        DistanceBound::Exceeds(lower) => {
-            let upper = tsed_from_distance(size_a, size_b, lower, opts);
-            (upper < needed).then_some(upper)
-        }
+        DistanceBound::Exceeds(lower) => Some(tsed_from_distance(size_a, size_b, lower, opts)),
         DistanceBound::Within(_) => None,
     }
 }
@@ -473,6 +479,52 @@ mod tests {
 
         assert_eq!(stats.pairs.len(), 1);
         assert_eq!(stats.below_threshold_count, 0);
+    }
+
+    #[test]
+    fn score_stats_count_bound_pruned_pairs_through_record_and_merge() {
+        let pruned = |i| PairScore {
+            i,
+            j: i + 1,
+            components: SimilarityComponents {
+                similarity: 0.1,
+                body_similarity: 0.1,
+                signature_similarity: None,
+                type_overlap: None,
+                identifier_overlap: None,
+                doc_overlap: None,
+                same_trait: false,
+            },
+            exact_match: false,
+            bound_pruned: true,
+        };
+        let mut left = ScoreStats::default();
+        left.record(pruned(0), 0.85);
+        let mut right = ScoreStats::default();
+        right.record(pruned(2), 0.85);
+        right.record(pruned(4), 0.85);
+        assert_eq!(left.bound_pruned_count, 1);
+        let merged = ScoreStats::merge(left, right);
+        assert_eq!(merged.bound_pruned_count, 3);
+        assert_eq!(merged.below_threshold_count, 3);
+    }
+
+    #[test]
+    fn body_needed_subtracts_the_weighted_signature_score() {
+        let weights = ScoreWeights {
+            body: 0.8,
+            signature: 0.2,
+        };
+        // (0.85 - 0.2 * 0.5) / 0.8
+        assert!((weights.body_needed(0.85, 0.5) - 0.9375).abs() < 1e-12);
+        assert_eq!(
+            ScoreWeights {
+                body: 0.0,
+                signature: 1.0
+            }
+            .body_needed(0.85, 0.5),
+            f64::NEG_INFINITY
+        );
     }
 
     #[test]
