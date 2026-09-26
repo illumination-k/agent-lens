@@ -8,7 +8,7 @@
 //!
 //! - **Function levels** (`L`) — `level(f) = 1 + max(level of its
 //!   callees)`, by a topological pass over the SCC condensation from
-//!   [`super::call_graph::algo`], so a call cycle collapses to one node
+//!   [`lens_domain::graph_algo`], so a call cycle collapses to one node
 //!   and its members share a level. Level 1 is leaf code that calls
 //!   nothing; the highest level is the entry side.
 //! - **Module levels** (`M`) — the same pass over the module graph
@@ -57,7 +57,6 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::{Condensation, condense};
 use super::call_graph::model::{
     ModuleResolutionSummary, NodeVisibility, Resolution, ResolutionMethod,
 };
@@ -66,6 +65,7 @@ use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::{Condensation, condense};
 
 const SCHEMA_VERSION: u32 = 1;
 

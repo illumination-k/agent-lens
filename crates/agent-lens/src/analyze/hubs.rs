@@ -32,9 +32,6 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::{
-    PAGERANK_DAMPING, PAGERANK_ITERATIONS, pagerank, percentile_buckets,
-};
 use super::call_graph::model::{
     CallGraphNode, ModuleResolutionSummary, Resolution, ResolutionMethod,
 };
@@ -43,6 +40,9 @@ use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::{
+    PAGERANK_DAMPING, PAGERANK_ITERATIONS, pagerank, percentile_buckets,
+};
 
 const SCHEMA_VERSION: u32 = 1;
 

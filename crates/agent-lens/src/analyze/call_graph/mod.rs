@@ -5,13 +5,12 @@
 //! `FunctionComplexity` facts. `analyze function-graph` serializes the
 //! graph verbatim; the planned analyzer family (hubs, cycles, impact,
 //! …) consumes the same [`CallGraph`] plus the traversal algorithms in
-//! [`algo`] instead of re-deriving the pipeline per analyzer.
+//! [`lens_domain::graph_algo`] instead of re-deriving the pipeline per analyzer.
 //!
 //! The graph is static and heuristic: no type inference, macro
 //! expansion, cross-crate resolution, runtime timing, or git history
 //! traversal is attempted here.
 
-pub(crate) mod algo;
 #[cfg(test)]
 mod metamorphic_tests;
 pub(crate) mod model;
@@ -90,7 +89,7 @@ impl CallGraph {
 
     /// Adjacency over resolved edges only, by node index, neighbor
     /// lists sorted and deduplicated. This is the traversal substrate
-    /// for [`algo::condense`] / [`algo::bfs`]; unresolved, ambiguous,
+    /// for [`lens_domain::graph_algo::condense`] / [`lens_domain::graph_algo::bfs`]; unresolved, ambiguous,
     /// and anonymous edges are invisible to it — consult
     /// [`CallGraphNode::outgoing_calls`] and
     /// [`CallGraph::module_summary`] for how much of the graph that
@@ -1030,6 +1029,7 @@ fn apply_static_degrees(nodes: &mut [CallGraphNode], edges: &[CallGraphEdge]) {
 mod tests {
     use super::*;
     use crate::test_support::write_file;
+    use lens_domain::graph_algo;
     use model::CallGraphEdge;
     use rstest::rstest;
 
@@ -1368,10 +1368,10 @@ mod tests {
         assert_eq!(adjacency[b], vec![a, c]);
         assert!(adjacency[c].is_empty());
 
-        let condensation = algo::condense(&adjacency);
+        let condensation = graph_algo::condense(&adjacency);
         assert_eq!(condensation.components, vec![vec![c], vec![a, b]]);
 
-        let callers_of_c: Vec<usize> = algo::reverse_bfs(&adjacency, &[c])
+        let callers_of_c: Vec<usize> = graph_algo::reverse_bfs(&adjacency, &[c])
             .into_iter()
             .map(|v| v.node)
             .collect();

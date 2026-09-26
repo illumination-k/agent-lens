@@ -2,7 +2,7 @@
 //! suggestions.
 //!
 //! Runs the iterative Tarjan condensation from
-//! [`super::call_graph::algo`] over the **resolved** edges of the
+//! [`lens_domain::graph_algo`] over the **resolved** edges of the
 //! shared call graph and reports every strongly connected component
 //! with two or more members: functions that call each other in a
 //! cycle, directly or transitively, and therefore must be understood,
@@ -32,11 +32,11 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::{WeightedEdge, condense, greedy_feedback_arcs};
 use super::call_graph::model::Resolution;
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::{WeightedEdge, condense, greedy_feedback_arcs};
 
 const SCHEMA_VERSION: u32 = 1;
 
