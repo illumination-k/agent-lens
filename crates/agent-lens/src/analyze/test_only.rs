@@ -60,7 +60,6 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::bfs;
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
@@ -69,6 +68,7 @@ use super::options::analyzer_options;
 use super::runner::render_report;
 use super::unreachable::{EntryKind, entry_kind_of, identifiers};
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::bfs;
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -1038,15 +1038,15 @@ mod tests {
 
     #[test]
     fn a_mention_in_a_production_body_is_the_raw_reference_caveat() {
-        // `format!` arguments produce no call edge, so the graph sees
-        // only the test caller; the scan says production code writes
+        // `vec![x; n]` arguments, which are no expression list, produce
+        // no call edge, so the graph sees only the test caller; the scan says production code writes
         // the name.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
             "src/lib.rs",
             "fn fixture() -> usize { 1 }\n\
-             pub fn api() -> String { format!(\"{}\", fixture()) }\n\
+             pub fn api() -> Vec<usize> { vec![fixture(); 2] }\n\
              #[cfg(test)]\n\
              mod tests {\n\
                  #[test]\n\
@@ -1205,7 +1205,7 @@ mod tests {
 
     #[test]
     fn a_caveated_rows_callees_inherit_the_doubt() {
-        // `hidden` is written inside a production `format!` (a possible
+        // `hidden` is written inside a production `vec![x; n]` (a possible
         // hidden caller), and `helper` is only reachable through
         // `hidden` — so if `hidden` is production-live, `helper` is
         // too, and its row must say so.
@@ -1215,7 +1215,7 @@ mod tests {
             "src/lib.rs",
             "fn helper() -> usize { 1 }\n\
              fn hidden() -> usize { helper() }\n\
-             pub fn api() -> String { format!(\"x{}\", hidden()) }\n\
+             pub fn api() -> Vec<usize> { vec![hidden(); 2] }\n\
              #[cfg(test)]\n\
              mod tests {\n\
                  #[test]\n\
@@ -1362,7 +1362,7 @@ mod tests {
             "src/lib.rs",
             "fn inner() -> usize { 1 }\n\
              fn hidden() -> usize { inner() }\n\
-             pub fn api() -> String { format!(\"x{}\", hidden()) }\n\
+             pub fn api() -> Vec<usize> { vec![hidden(); 2] }\n\
              #[cfg(test)]\n\
              mod tests {\n\
                  #[test]\n\

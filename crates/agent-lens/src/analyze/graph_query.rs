@@ -37,11 +37,11 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use super::call_graph::algo::{self, BfsVisit};
 use super::call_graph::model::{CallGraphNode, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders, match_symbol};
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_domain::graph_algo::{self, BfsVisit};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -413,17 +413,21 @@ impl Report {
         let adjacency = graph.resolved_adjacency();
         match spec.query {
             GraphQueryKind::Callers => {
-                report.fill_traversal(graph, algo::reverse_bfs(&adjacency, &[seed]), None);
+                report.fill_traversal(graph, graph_algo::reverse_bfs(&adjacency, &[seed]), None);
             }
             GraphQueryKind::Callees => {
-                report.fill_traversal(graph, algo::bfs(&adjacency, &[seed]), None);
+                report.fill_traversal(graph, graph_algo::bfs(&adjacency, &[seed]), None);
             }
             GraphQueryKind::Neighborhood => match report.direction {
                 GraphDirection::In => {
-                    report.fill_traversal(graph, algo::reverse_bfs(&adjacency, &[seed]), None);
+                    report.fill_traversal(
+                        graph,
+                        graph_algo::reverse_bfs(&adjacency, &[seed]),
+                        None,
+                    );
                 }
                 GraphDirection::Out => {
-                    report.fill_traversal(graph, algo::bfs(&adjacency, &[seed]), None);
+                    report.fill_traversal(graph, graph_algo::bfs(&adjacency, &[seed]), None);
                 }
                 GraphDirection::Both => report.fill_neighborhood(graph, &adjacency, seed),
             },
@@ -510,8 +514,8 @@ impl Report {
         let depth_cap = self.depth.unwrap_or(usize::MAX);
         let mut merged: BTreeMap<usize, (usize, bool, bool)> = BTreeMap::new();
         let reached = [
-            (algo::bfs(adjacency, &[seed]), false),
-            (algo::reverse_bfs(adjacency, &[seed]), true),
+            (graph_algo::bfs(adjacency, &[seed]), false),
+            (graph_algo::reverse_bfs(adjacency, &[seed]), true),
         ];
         for (visits, inward) in reached {
             for visit in visits {
@@ -558,7 +562,7 @@ impl Report {
         seed: usize,
         target: usize,
     ) {
-        let Some(chain) = algo::shortest_path(adjacency, seed, target, self.depth) else {
+        let Some(chain) = graph_algo::shortest_path(adjacency, seed, target, self.depth) else {
             self.status = QueryStatus::NoPath;
             return;
         };

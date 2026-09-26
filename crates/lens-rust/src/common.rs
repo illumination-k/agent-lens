@@ -63,6 +63,47 @@ pub(crate) fn type_path_last_ident(ty: &Type) -> Option<String> {
     }
 }
 
+/// The owner name of an `impl` block's self type. A path gives its last
+/// segment, as [`type_path_last_ident`] does; a reference, pointer or
+/// parenthesised type the name of what it points at (`impl Write for
+/// &mut W` is a `W` method); a slice, array or tuple a bracketed name of
+/// its elements (`[u8]`, `[u8;_]`, `(A,B)`), so `impl Extend<..> for (A, B)` still
+/// declares methods rather than free functions. `None` only for a type
+/// with no such name (a macro type, `_`).
+pub(crate) fn impl_self_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(_) => type_path_last_ident(ty),
+        Type::Reference(reference) => impl_self_type_name(&reference.elem),
+        Type::Ptr(ptr) => impl_self_type_name(&ptr.elem),
+        Type::Paren(paren) => impl_self_type_name(&paren.elem),
+        Type::Group(group) => impl_self_type_name(&group.elem),
+        Type::Slice(slice) => Some(format!("[{}]", element_name(&slice.elem))),
+        Type::Array(array) => Some(format!("[{};_]", element_name(&array.elem))),
+        Type::Tuple(tuple) => Some(format!(
+            "({})",
+            tuple
+                .elems
+                .iter()
+                .map(element_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        )),
+        Type::TraitObject(object) => object.bounds.iter().find_map(|bound| match bound {
+            syn::TypeParamBound::Trait(bound) => bound
+                .path
+                .segments
+                .last()
+                .map(|segment| format!("dyn {}", segment.ident)),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn element_name(ty: &Type) -> String {
+    impl_self_type_name(ty).unwrap_or_else(|| "_".to_owned())
+}
+
 /// One function-shaped site discovered while walking a Rust file:
 /// a free `fn`, an inherent `impl` method, or a trait default method.
 pub(crate) struct FnSite<'a> {
@@ -192,7 +233,7 @@ fn walk_impl<F>(item_impl: &ItemImpl, in_test_context: bool, visit: &mut F)
 where
     F: FnMut(FnSite<'_>),
 {
-    let owner = type_path_last_ident(&item_impl.self_ty);
+    let owner = impl_self_type_name(&item_impl.self_ty);
     let is_trait_impl = item_impl.trait_.is_some();
     let trait_name = impl_trait_last_ident(item_impl);
     for impl_item in &item_impl.items {
@@ -280,6 +321,34 @@ mod tests {
     fn returns_none_for_tuple_type() {
         let ty: Type = parse_str("(Foo, Bar)").unwrap();
         assert_eq!(type_path_last_ident(&ty), None);
+    }
+
+    #[rstest::rstest]
+    #[case::path("crate::Foo<T>", Some("Foo"))]
+    #[case::reference("&'a mut W", Some("W"))]
+    #[case::pointer("*const Foo", Some("Foo"))]
+    #[case::paren("(Foo)", Some("Foo"))]
+    #[case::slice("[u8]", Some("[u8]"))]
+    #[case::array("[Foo; 4]", Some("[Foo;_]"))]
+    #[case::tuple("(A, B)", Some("(A,B)"))]
+    #[case::unit("()", Some("()"))]
+    #[case::trait_object("dyn Any + Send", Some("dyn Any"))]
+    #[case::never("!", None)]
+    fn impl_self_type_names_every_owner(#[case] ty: &str, #[case] expected: Option<&str>) {
+        let ty: Type = parse_str(ty).unwrap();
+        assert_eq!(impl_self_type_name(&ty).as_deref(), expected);
+    }
+
+    /// A type that reached the `impl` through a macro's `$t:ty` arrives
+    /// wrapped in an invisible group.
+    #[test]
+    fn impl_self_type_name_sees_through_a_macro_group() {
+        let ty = Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
+            group_token: Default::default(),
+            elem: Box::new(parse_str("Foo").unwrap()),
+        });
+        assert_eq!(impl_self_type_name(&ty).as_deref(), Some("Foo"));
     }
 
     #[test]

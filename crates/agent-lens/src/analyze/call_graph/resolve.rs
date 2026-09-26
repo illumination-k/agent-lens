@@ -91,33 +91,61 @@ impl ResolvedCall {
 }
 
 /// Attributes call sites to their enclosing function node by exact
-/// (file, qualified name) match.
+/// (file, qualified name) match, and by line span where one file
+/// declares that name twice.
 pub(crate) struct CallerIndex {
-    by_file_and_qualified_name: HashMap<(String, String), Vec<String>>,
+    by_file_and_qualified_name: HashMap<(String, String), Vec<CallerSpan>>,
+}
+
+struct CallerSpan {
+    id: String,
+    start_line: usize,
+    end_line: usize,
 }
 
 impl CallerIndex {
     pub(crate) fn new(nodes: &[CallGraphNode]) -> Self {
-        let mut by_file_and_qualified_name: HashMap<(String, String), Vec<String>> = HashMap::new();
+        let mut by_file_and_qualified_name: HashMap<(String, String), Vec<CallerSpan>> =
+            HashMap::new();
         for node in nodes {
             by_file_and_qualified_name
                 .entry((node.file.clone(), node.qualified_name.clone()))
                 .or_default()
-                .push(node.id.clone());
+                .push(CallerSpan {
+                    id: node.id.clone(),
+                    start_line: node.start_line,
+                    end_line: node.end_line,
+                });
         }
         Self {
             by_file_and_qualified_name,
         }
     }
 
-    pub(crate) fn resolve_in_file(&self, file: &str, qualified_name: &str) -> Option<String> {
-        let ids = self
+    /// The node a call on `line` of `file` inside `qualified_name` is
+    /// made from. One file can declare the same name twice — Rust's
+    /// `impl Display for Version` and `impl Debug for Version` both
+    /// define `Version::fmt` — and then the span containing the call
+    /// picks the caller.
+    pub(crate) fn resolve_in_file(
+        &self,
+        file: &str,
+        qualified_name: &str,
+        line: usize,
+    ) -> Option<String> {
+        let spans = self
             .by_file_and_qualified_name
             .get(&(file.to_owned(), qualified_name.to_owned()))?;
-        if ids.len() == 1 {
-            return ids.first().cloned();
+        if let [only] = spans.as_slice() {
+            return Some(only.id.clone());
         }
-        None
+        let mut containing = spans
+            .iter()
+            .filter(|span| span.start_line <= line && line <= span.end_line);
+        match (containing.next(), containing.next()) {
+            (Some(span), None) => Some(span.id.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -224,8 +252,11 @@ impl Resolver {
         };
         // A bare `Domain(b)` can name a function (or be a conversion to
         // the type `Domain`), never a method: Go has no implicit
-        // receiver, so `UUID.Domain` is out of reach of that call.
-        let ids = &self.with_owner_shape(ids, false, language);
+        // receiver, so `UUID.Domain` is out of reach of that call, and
+        // Rust needs a `Self::` / `Type::` path to reach an associated
+        // function.
+        let qualified_path = site.callee_path().is_some_and(|path| path.contains("::"));
+        let ids = &self.with_owner_shape(ids, false, language, qualified_path);
         if ids.is_empty() {
             return ResolvedCall::unresolved();
         }
@@ -238,12 +269,7 @@ impl Resolver {
         if let Some(callee_path) = site.callee_path()
             && callee_path.contains("::")
         {
-            let mut narrowed = self.narrow_by_path_suffix(ids, &callee_path);
-            if narrowed.is_empty()
-                && let Some(expanded) = import_expanded_path(site, &callee_path)
-            {
-                narrowed = self.narrow_by_import_path(ids, &expanded);
-            }
+            let narrowed = self.narrow_by_path(ids, site, &callee_path, language);
             return if narrowed.is_empty() {
                 ResolvedCall::unresolved()
             } else {
@@ -251,6 +277,28 @@ impl Resolver {
             };
         }
         resolve_ids(ids, ResolutionMethod::LastSegment)
+    }
+
+    /// `ids` narrowed to the ones a multi-segment `callee_path` can
+    /// name: by suffix, then through the import binding its head, then
+    /// (Rust) by the type anywhere in the crate the path starts with.
+    fn narrow_by_path(
+        &self,
+        ids: &[String],
+        site: &CallShape,
+        callee_path: &str,
+        language: GraphLanguage,
+    ) -> Vec<String> {
+        let mut narrowed = self.narrow_by_path_suffix(ids, callee_path);
+        if narrowed.is_empty()
+            && let Some(expanded) = import_expanded_path(site, callee_path)
+        {
+            narrowed = self.narrow_by_import_path(ids, &expanded);
+        }
+        if narrowed.is_empty() && language == GraphLanguage::Rust {
+            narrowed = self.narrow_by_type_in_crate(ids, callee_path);
+        }
+        narrowed
     }
 
     fn resolve_self_method(&self, site: &CallShape, callee_name: &str) -> ResolvedCall {
@@ -336,7 +384,7 @@ impl Resolver {
         ) {
             self.with_owner(ids, true)
         } else {
-            self.with_owner_shape(ids, true, language)
+            self.with_owner_shape(ids, true, language, false)
         };
         if ids.is_empty() {
             return ResolvedCall::unresolved();
@@ -352,8 +400,9 @@ impl Resolver {
         ids: &[String],
         method: bool,
         language: GraphLanguage,
+        qualified_path: bool,
     ) -> Vec<String> {
-        if !language.call_shape_decides_owner() {
+        if !language.call_shape_decides_owner(qualified_path) {
             return ids.to_vec();
         }
         self.with_owner(ids, method)
@@ -410,6 +459,36 @@ impl Resolver {
                         qualified.contains("::")
                             && (expanded == qualified
                                 || expanded.ends_with(&format!("::{qualified}")))
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Candidates named `Type::name` anywhere in `krate`, for a Rust
+    /// path `krate::Type::name`. A type at a crate's root is usually a
+    /// re-export, so the path says where the type is visible, not where
+    /// its `impl` sits: `fastrand::Rng::new()` reaches `impl Rng` in
+    /// `fastrand::global_rng`, which the plain suffix match cannot see.
+    /// A longer path spells out the module and gets no such leeway (a
+    /// `m::inner::Error` re-exported from a dependency is no workspace
+    /// `Error`), and only a type-cased segment before the name
+    /// qualifies, so `krate::module::func` stays with the suffix match.
+    fn narrow_by_type_in_crate(&self, ids: &[String], callee_path: &str) -> Vec<String> {
+        let segments: Vec<&str> = callee_path.split("::").collect();
+        let [krate, owner, name] = segments.as_slice() else {
+            return Vec::new();
+        };
+        if !owner.starts_with(char::is_uppercase) {
+            return Vec::new();
+        }
+        let suffix = format!("::{owner}::{name}");
+        ids.iter()
+            .filter(|id| {
+                self.id_to_qualified
+                    .get(id.as_str())
+                    .is_some_and(|qualified| {
+                        qualified.ends_with(&suffix) && qualified_in_crate(qualified, krate)
                     })
             })
             .cloned()
@@ -963,11 +1042,25 @@ mod tests {
         assert_eq!(call.resolution, Resolution::Resolved);
     }
 
-    /// In Go a bare call reaches only free functions and a receiver
-    /// call only methods, so the name fallback drops the other kind;
-    /// the other languages keep both, since there the shape does not
-    /// decide it.
+    /// In Go and Rust a bare call reaches only free functions and a
+    /// receiver call only methods, so the name fallback drops the other
+    /// kind; the other languages keep both, since there the shape does
+    /// not decide it.
     #[rstest]
+    #[case::rust_receiver_call_skips_function(GraphLanguage::Rust, true, "crate::smoke::u8", None)]
+    #[case::rust_bare_call_skips_method(GraphLanguage::Rust, false, "crate::m::Rng::u8", None)]
+    #[case::rust_receiver_call_reaches_method(
+        GraphLanguage::Rust,
+        true,
+        "crate::m::Rng::u8",
+        Some("crate::m::Rng::u8")
+    )]
+    #[case::rust_bare_call_reaches_function(
+        GraphLanguage::Rust,
+        false,
+        "crate::smoke::u8",
+        Some("crate::smoke::u8")
+    )]
     #[case::go_bare_call_skips_method(GraphLanguage::Go, false, "crate::m::UUID::Domain", None)]
     #[case::go_receiver_call_skips_function(GraphLanguage::Go, true, "crate::tag::Add", None)]
     #[case::go_bare_call_reaches_function(
@@ -994,7 +1087,7 @@ mod tests {
         "crate::tag::Add",
         Some("crate::tag::Add")
     )]
-    fn go_call_shape_decides_method_or_function(
+    fn call_shape_decides_method_or_function(
         #[case] language: GraphLanguage,
         #[case] receiver: bool,
         #[case] defined: &str,
@@ -1019,6 +1112,46 @@ mod tests {
                 .as_deref(),
             expected
         );
+    }
+
+    /// A Rust path keeps methods in reach whatever its length: `Rng::u8`
+    /// names the associated function, and `fastrand::Rng::new` reaches
+    /// `impl Rng` wherever in the `fastrand` crate it sits. A longer path
+    /// spells out its module and a lowercase segment before the name is
+    /// a module, so neither gets the crate-wide match.
+    #[rstest]
+    #[case::type_path("Rng::u8", "crate::m::Rng::u8", Some("crate::m::Rng::u8"))]
+    #[case::root_reexport(
+        "fastrand::Rng::new",
+        "fastrand::global_rng::Rng::new",
+        Some("fastrand::global_rng::Rng::new")
+    )]
+    #[case::other_crate("other::Rng::new", "fastrand::global_rng::Rng::new", None)]
+    #[case::spelled_out_module("fastrand::inner::Rng::new", "fastrand::global_rng::Rng::new", None)]
+    #[case::module_path("fastrand::global::new", "fastrand::x::global::new", None)]
+    fn rust_paths_reach_methods(
+        #[case] path: &str,
+        #[case] defined: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let resolver = Resolver::new(&[node(defined)]);
+        let call_site = CallShape {
+            caller_module: SyntaxFact::Known("fastrand::tests".to_owned()),
+            ..site(path)
+        };
+
+        let call = resolver.resolve(&call_site, GraphLanguage::Rust);
+
+        assert_eq!(
+            call.to
+                .map(|id| resolver.id_to_qualified[&id].clone())
+                .as_deref(),
+            expected,
+            "{path}"
+        );
+        if expected.is_some() {
+            assert_eq!(call.method, Some(ResolutionMethod::PathSuffix));
+        }
     }
 
     /// `a.parse()` after `from crate import a`: the receiver is an

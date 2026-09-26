@@ -5,13 +5,12 @@
 //! `FunctionComplexity` facts. `analyze function-graph` serializes the
 //! graph verbatim; the planned analyzer family (hubs, cycles, impact,
 //! …) consumes the same [`CallGraph`] plus the traversal algorithms in
-//! [`algo`] instead of re-deriving the pipeline per analyzer.
+//! [`lens_domain::graph_algo`] instead of re-deriving the pipeline per analyzer.
 //!
 //! The graph is static and heuristic: no type inference, macro
 //! expansion, cross-crate resolution, runtime timing, or git history
 //! traversal is attempted here.
 
-pub(crate) mod algo;
 #[cfg(test)]
 mod metamorphic_tests;
 pub(crate) mod model;
@@ -90,7 +89,7 @@ impl CallGraph {
 
     /// Adjacency over resolved edges only, by node index, neighbor
     /// lists sorted and deduplicated. This is the traversal substrate
-    /// for [`algo::condense`] / [`algo::bfs`]; unresolved, ambiguous,
+    /// for [`lens_domain::graph_algo::condense`] / [`lens_domain::graph_algo::bfs`]; unresolved, ambiguous,
     /// and anonymous edges are invisible to it — consult
     /// [`CallGraphNode::outgoing_calls`] and
     /// [`CallGraph::module_summary`] for how much of the graph that
@@ -904,7 +903,7 @@ fn build_edges(
         for site in file.calls.iter() {
             let from = site
                 .caller_qualified_name()
-                .and_then(|caller| caller_index.resolve_in_file(&file.file, caller));
+                .and_then(|caller| caller_index.resolve_in_file(&file.file, caller, site.line));
             if site.caller_qualified_name().is_some() && from.is_none() {
                 continue;
             }
@@ -1030,6 +1029,7 @@ fn apply_static_degrees(nodes: &mut [CallGraphNode], edges: &[CallGraphEdge]) {
 mod tests {
     use super::*;
     use crate::test_support::write_file;
+    use lens_domain::graph_algo;
     use model::CallGraphEdge;
     use rstest::rstest;
 
@@ -1368,10 +1368,10 @@ mod tests {
         assert_eq!(adjacency[b], vec![a, c]);
         assert!(adjacency[c].is_empty());
 
-        let condensation = algo::condense(&adjacency);
+        let condensation = graph_algo::condense(&adjacency);
         assert_eq!(condensation.components, vec![vec![c], vec![a, b]]);
 
-        let callers_of_c: Vec<usize> = algo::reverse_bfs(&adjacency, &[c])
+        let callers_of_c: Vec<usize> = graph_algo::reverse_bfs(&adjacency, &[c])
             .into_iter()
             .map(|v| v.node)
             .collect();
@@ -1522,6 +1522,59 @@ mod tests {
         assert!(
             target.is_some_and(|t| t.ends_with("helper")),
             "got {target:?}",
+        );
+    }
+
+    /// `impl Display for V` and `impl Debug for V` both declare
+    /// `V::fmt` in one file; each call is attributed to the `fmt` whose
+    /// body holds it rather than dropped for want of a unique caller.
+    #[test]
+    fn same_named_callers_in_one_file_are_told_apart_by_span() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub struct V;
+             fn pad() {}
+             fn digits() {}
+             impl std::fmt::Display for V {
+                 fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                     pad();
+                     Ok(())
+                 }
+             }
+             impl std::fmt::Debug for V {
+                 fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                     digits();
+                     Ok(())
+                 }
+             }
+",
+        );
+
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
+        let mut edges: Vec<(String, String)> = graph
+            .edges
+            .iter()
+            .filter(|e| e.resolution == Resolution::Resolved)
+            .filter_map(|e| Some((e.from.clone()?, e.to.clone()?)))
+            .collect();
+        edges.sort();
+        assert_eq!(
+            edges,
+            [
+                (
+                    "src/lib.rs:V::fmt:11".to_owned(),
+                    "src/lib.rs:digits:3".to_owned()
+                ),
+                (
+                    "src/lib.rs:V::fmt:5".to_owned(),
+                    "src/lib.rs:pad:2".to_owned()
+                ),
+            ],
+            "got {edges:?}"
         );
     }
 

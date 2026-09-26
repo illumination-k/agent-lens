@@ -2,34 +2,34 @@
 //!
 //! These operate on plain adjacency lists (`Vec<Vec<usize>>`, indices
 //! `0..n`) so any analyzer can run them against
-//! [`super::CallGraph::resolved_adjacency`] or a derived subgraph.
+//! the call graph's resolved adjacency or a derived subgraph.
 //! Both algorithms are deterministic regardless of input neighbor
 //! order, and [`condense`] is iterative: at function granularity a
 //! recursive Tarjan (like the private module-level one in
-//! `lens-domain/src/coupling.rs`) risks stack overflow on deep call
+//! [`crate::coupling`]) risks stack overflow on deep call
 //! chains.
 
 const UNVISITED: usize = usize::MAX;
 
 /// Strongly-connected-component condensation of a directed graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Condensation {
+pub struct Condensation {
     /// SCCs in reverse topological order (every edge in the condensed
     /// DAG points from a higher component index to a lower one).
     /// Members of each component are sorted ascending. A node with a
     /// self-loop still forms a size-1 component; callers that care
     /// about self-recursion must inspect the original adjacency.
-    pub(crate) components: Vec<Vec<usize>>,
+    pub components: Vec<Vec<usize>>,
     /// `component_of[v]` is the index into `components` containing `v`.
-    pub(crate) component_of: Vec<usize>,
+    pub component_of: Vec<usize>,
     /// Condensed DAG adjacency over component indices, sorted and
     /// deduplicated, self-edges removed.
-    pub(crate) edges: Vec<Vec<usize>>,
+    pub edges: Vec<Vec<usize>>,
 }
 
 /// Iterative Tarjan SCC over `adjacency` (nodes `0..adjacency.len()`,
 /// neighbor values must be in range).
-pub(crate) fn condense(adjacency: &[Vec<usize>]) -> Condensation {
+pub fn condense(adjacency: &[Vec<usize>]) -> Condensation {
     let mut tarjan = Tarjan::new(adjacency.len());
     for root in 0..adjacency.len() {
         tarjan.visit_tree_rooted_at(root, adjacency);
@@ -169,10 +169,10 @@ fn condensed_edges(
 
 /// A weighted directed edge handed to [`greedy_feedback_arcs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WeightedEdge {
-    pub(crate) from: usize,
-    pub(crate) to: usize,
-    pub(crate) weight: usize,
+pub struct WeightedEdge {
+    pub from: usize,
+    pub to: usize,
+    pub weight: usize,
 }
 
 /// Approximate minimum-weight feedback arc set via the Eades–Lin–Smyth
@@ -187,7 +187,7 @@ pub(crate) struct WeightedEdge {
 /// returned). The result is deterministic — ties are broken by the
 /// lowest vertex index — and advisory: a cheapest edge by weight can
 /// still be load-bearing in the design.
-pub(crate) fn greedy_feedback_arcs(node_count: usize, edges: &[WeightedEdge]) -> Vec<usize> {
+pub fn greedy_feedback_arcs(node_count: usize, edges: &[WeightedEdge]) -> Vec<usize> {
     let n = node_count;
     let mut out_edges: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     let mut in_edges: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
@@ -263,10 +263,10 @@ pub(crate) fn greedy_feedback_arcs(node_count: usize, edges: &[WeightedEdge]) ->
 
 /// One node reached by a breadth-first traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BfsVisit {
-    pub(crate) node: usize,
+pub struct BfsVisit {
+    pub node: usize,
     /// Minimum edge distance from the nearest start node.
-    pub(crate) depth: usize,
+    pub depth: usize,
 }
 
 /// Breadth-first traversal from `starts` following edges forward.
@@ -275,7 +275,7 @@ pub(crate) struct BfsVisit {
 /// index, so the output order is deterministic regardless of the
 /// adjacency's neighbor order. Start nodes appear at depth 0
 /// (deduplicated); out-of-range start indices are ignored.
-pub(crate) fn bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<BfsVisit> {
+pub fn bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<BfsVisit> {
     let n = adjacency.len();
     let mut seen = vec![false; n];
     let mut level: Vec<usize> = starts.iter().copied().filter(|&v| v < n).collect();
@@ -306,7 +306,7 @@ pub(crate) fn bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<BfsVisit> {
 
 /// Breadth-first traversal from `starts` following edges backwards
 /// (callers of callers, for blast-radius queries).
-pub(crate) fn reverse_bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<BfsVisit> {
+pub fn reverse_bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<BfsVisit> {
     bfs(&reverse_adjacency(adjacency), starts)
 }
 
@@ -320,7 +320,7 @@ pub(crate) fn reverse_bfs(adjacency: &[Vec<usize>], starts: &[usize]) -> Vec<Bfs
 /// order. `max_depth` caps the number of edges explored (`None` is
 /// unbounded); returns `None` when no chain exists within the cap or an
 /// endpoint is out of range. `from == to` yields the single-node chain.
-pub(crate) fn shortest_path(
+pub fn shortest_path(
     adjacency: &[Vec<usize>],
     from: usize,
     to: usize,
@@ -385,7 +385,7 @@ pub(crate) fn shortest_path(
 /// rounds run, and every accumulation walks nodes and edge lists in
 /// index order, so the same graph yields bit-identical scores on every
 /// run. Scores sum to ~1.0 (floating-point error aside).
-pub(crate) fn pagerank(
+pub fn pagerank(
     weighted_adjacency: &[Vec<(usize, f64)>],
     damping: f64,
     iterations: usize,
@@ -439,7 +439,7 @@ pub(crate) fn pagerank(
 /// rather than balloons: `None` means the condensation had more than
 /// `max_components` components and callers should report VFI as
 /// unavailable instead of substituting a cheaper approximation.
-pub(crate) fn transitive_caller_counts(
+pub fn transitive_caller_counts(
     adjacency: &[Vec<usize>],
     max_components: usize,
 ) -> Option<Vec<usize>> {
@@ -517,17 +517,17 @@ pub(crate) fn transitive_caller_counts(
 
 /// PageRank damping factor (standard value). Shared so every analyzer
 /// that reports a PageRank number reports the *same* number.
-pub(crate) const PAGERANK_DAMPING: f64 = 0.85;
+pub const PAGERANK_DAMPING: f64 = 0.85;
 
 /// Fixed PageRank iteration count. No epsilon-based early exit: a fixed
 /// count is what makes the scores bit-stable across runs.
-pub(crate) const PAGERANK_ITERATIONS: usize = 100;
+pub const PAGERANK_ITERATIONS: usize = 100;
 
 /// Percentile bucket (1–100) of each score within the whole score set:
 /// the share of scores at or below it. Ties share a bucket, so the
 /// output is independent of node order. Buckets rather than raw scores
 /// because the PageRank distribution is heavy-tailed.
-pub(crate) fn percentile_buckets(scores: &[f64]) -> Vec<u32> {
+pub fn percentile_buckets(scores: &[f64]) -> Vec<u32> {
     let mut sorted: Vec<f64> = scores.to_vec();
     sorted.sort_by(f64::total_cmp);
     scores
@@ -540,7 +540,7 @@ pub(crate) fn percentile_buckets(scores: &[f64]) -> Vec<u32> {
 }
 
 /// Reverse every edge, keeping neighbor lists sorted.
-pub(crate) fn reverse_adjacency(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {
+pub fn reverse_adjacency(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let mut reversed: Vec<Vec<usize>> = vec![Vec::new(); adjacency.len()];
     for (v, neighbors) in adjacency.iter().enumerate() {
         for &w in neighbors {

@@ -325,14 +325,22 @@ impl GraphLanguage {
     }
 
     /// Whether a call's syntactic shape alone decides if it can reach a
-    /// method or only a free function. In Go a bare `f()` never names a
-    /// method (there is no implicit receiver) and `v.f()` on a value
-    /// that is no import alias never names a package-level function, so
-    /// the name fallback drops the other kind. Python's module objects,
+    /// method or only a free function; `qualified_path` is whether a
+    /// non-receiver call was written as a multi-segment path. In Go a
+    /// bare `f()` never names a method (there is no implicit receiver)
+    /// and `v.f()` on a value that is no import alias never names a
+    /// package-level function, so the name fallback drops the other
+    /// kind. Rust is the same except for paths: `rng.u8(..)` is never
+    /// the free `fn u8` and a bare `u8(..)` never `Rng::u8`, but
+    /// `Rng::u8` and `m::u8` share a shape. Python's module objects,
     /// TypeScript's object-literal members and namespaces keep the other
     /// languages out: there the same shape can reach either kind.
-    pub(crate) fn call_shape_decides_owner(self) -> bool {
-        matches!(self, Self::Go)
+    pub(crate) fn call_shape_decides_owner(self, qualified_path: bool) -> bool {
+        match self {
+            Self::Go => true,
+            Self::Rust => !qualified_path,
+            Self::TypeScript | Self::Python => false,
+        }
     }
 
     /// Names the language defines as bare-callable functions, owned by
