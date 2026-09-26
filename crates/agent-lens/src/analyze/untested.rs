@@ -654,8 +654,8 @@ mod tests {
     #[test]
     fn an_ambiguous_call_from_a_test_flags_its_candidates_as_possibly_reached() {
         let dir = tempfile::tempdir().unwrap();
-        // Two same-named methods on different owners: a bare `target()`
-        // call from the test cannot pick one, so both stay untested but
+        // Two same-named methods on different owners: a `.target()`
+        // call on a receiver of unknown type cannot pick one, so both stay untested but
         // are flagged rather than asserted unreachable. `quiet` shares
         // their module and is named by nothing, so the flag has to
         // separate the two kinds of row.
@@ -669,7 +669,7 @@ mod tests {
              #[cfg(test)]\n\
              mod tests {\n\
              #[test]\n\
-             fn t() { target(); }\n\
+             fn t() { crate::A.target(); }\n\
              }\n",
         );
 

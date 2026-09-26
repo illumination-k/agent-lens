@@ -19,8 +19,8 @@
 //! Soundness runs the *opposite* way from `analyze unreachable`: fan-in
 //! counts resolved call edges only, so "one caller" is a claim about
 //! what the graph could see, and a hidden second caller (a macro body —
-//! a call written inside `format!`/`write!` arguments produces no call
-//! edge — an unresolved call site, a raw name reference) makes inlining
+//! a call its expansion makes, or one in `vec![x; n]`-style arguments,
+//! produces no call edge — an unresolved call site, a raw name reference) makes inlining
 //! wrong.
 //! Every way the graph is known to under-count callers therefore
 //! demotes a row with a caveat rather than silently listing it, and
@@ -91,8 +91,9 @@ const NOTE: &str = "Each row is a function with exactly one resolved production 
      simple enough (per the thresholds echoed below) that inlining it into that caller is a \
      candidate edit, not a verdict: a single-caller function can be a deliberate, well-named \
      extraction, and keeping it is often right. Fan-in counts resolved call edges only, so \
-     \"one caller\" is what the graph could see — a macro body (a call inside `format!` or \
-     `write!` arguments produces no call edge), an unresolved call site, or a raw name reference \
+     \"one caller\" is what the graph could see — a macro body (a call a macro's expansion makes, \
+     or one in arguments that are no expression list, produces no call edge), an unresolved call \
+     site, or a raw name reference \
      can hide a second caller, and inlining then breaks it. A raw-name scan backs the claim up: a row whose bare \
      name is written anywhere outside its definition and its known callers carries the \
      raw-reference caveat with the occurrence count. Only files the graph scanned are searched, \
@@ -1409,16 +1410,16 @@ mod tests {
 
     #[test]
     fn a_caller_hidden_in_a_macro_body_demotes_with_raw_reference() {
-        // `format!` arguments produce no call edge, so `shorten` looks
-        // single-caller to the graph; the raw-name scan is what says
-        // otherwise.
+        // `vec![x; n]` arguments, which are no expression list, produce
+        // no call edge, so `shorten` looks single-caller to the graph;
+        // the raw-name scan is what says otherwise.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
             "src/lib.rs",
             "fn shorten(s: &str) -> &str { s }\n\
              pub fn caller(s: &str) { let _ = shorten(s); }\n\
-             pub fn formats(s: &str) -> String { format!(\"x {}\", shorten(s)) }\n",
+             pub fn formats(s: &str) -> Vec<&str> { vec![shorten(s); 2] }\n",
         );
 
         let report = analyze_json(dir.path());
@@ -1486,7 +1487,7 @@ mod tests {
             "src/lib.rs",
             "fn shorten(s: &str) -> &str { s }\n\
              pub fn caller(s: &str) { let _ = shorten(s); }\n\
-             pub fn formats(s: &str) -> String { format!(\"x {}\", shorten(s)) }\n",
+             pub fn formats(s: &str) -> Vec<&str> { vec![shorten(s); 2] }\n",
         );
 
         let md = SingleUseAnalyzer::new()

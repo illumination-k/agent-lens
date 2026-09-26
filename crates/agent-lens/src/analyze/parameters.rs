@@ -1574,9 +1574,10 @@ mod tests {
 
     #[test]
     fn a_raw_name_reference_outside_known_callers_demotes() {
-        // The call inside `format!` arguments produces no call edge, so
-        // the graph sees two constant sites; the raw-name scan is what
-        // says a hidden site can pass something else.
+        // The call inside `vec![x; n]`, whose arguments are no
+        // expression list, produces no call edge, so the graph sees two
+        // constant sites; the raw-name scan is what says a hidden site
+        // can pass something else.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -1584,7 +1585,7 @@ mod tests {
             "fn emit(level: u32) -> u32 { level }\n\
              pub fn a() { emit(3); }\n\
              pub fn b() { emit(3); }\n\
-             pub fn c() -> String { format!(\"{}\", emit(9)) }\n",
+             pub fn c() -> Vec<u32> { vec![emit(9); 2] }\n",
         );
 
         let report = analyze_json(dir.path());
