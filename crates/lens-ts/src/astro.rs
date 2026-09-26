@@ -28,22 +28,21 @@ pub(crate) fn mask(source: &str) -> String {
     let mut out = source.as_bytes().to_vec();
     let mut kept = regions.iter().peekable();
     let mut terminate = false;
-    let mut i = 0;
-    while i < out.len() {
-        if let Some(region) = kept.next_if(|r| r.start <= i) {
-            i = i.max(region.end);
+    for (i, byte) in out.iter_mut().enumerate() {
+        while kept.next_if(|r| r.end <= i).is_some() {
             terminate = true;
+        }
+        if kept.peek().is_some_and(|r| r.start <= i) {
             continue;
         }
-        match out[i] {
+        match *byte {
             b'\n' | b'\r' => {}
             _ if terminate => {
-                out[i] = b';';
+                *byte = b';';
                 terminate = false;
             }
-            _ => out[i] = b' ',
+            _ => *byte = b' ',
         }
-        i += 1;
     }
     // Every non-ASCII byte lies either in a kept region, where it is
     // untouched, or outside, where it became ASCII; the result stays
