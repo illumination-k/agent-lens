@@ -25,7 +25,12 @@ trap cleanup EXIT
 
 rm -rf "$CRITERION_HOME"
 git worktree add --detach "$worktree" "$ref" >/dev/null
-(cd "$worktree" && cargo bench --workspace --all-features --bench '*' -- --save-baseline base)
+# The ref builds into a target directory of its own. Cargo names a workspace
+# crate by its path relative to the workspace, and judges it fresh by mtime, so
+# in a shared target the ref's artifacts (built after this tree was checked
+# out) would pass for this tree's and be linked in place of its changes.
+(cd "$worktree" && CARGO_TARGET_DIR="$CARGO_TARGET_DIR/bench-base" \
+	cargo bench --workspace --all-features --bench '*' -- --save-baseline base)
 cargo bench --workspace --all-features --bench '*' -- --baseline-lenient base
 
 # One markdown row per compared benchmark; the verdict is the last cell.

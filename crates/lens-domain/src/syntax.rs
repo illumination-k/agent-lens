@@ -673,6 +673,16 @@ mod tests {
     }
 
     #[test]
+    fn callee_binding_reads_only_a_known_binding() {
+        let bound = CallShape {
+            callee_binding: SyntaxFact::Known(CalleeBinding::External),
+            ..call_shape()
+        };
+        assert_eq!(bound.callee_binding(), Some(&CalleeBinding::External));
+        assert_eq!(call_shape().callee_binding(), None);
+    }
+
+    #[test]
     fn callee_names_local_binding_matches_only_bare_calls_on_a_bound_name() {
         let bound: std::collections::HashSet<String> = ["emit".to_owned()].into_iter().collect();
         let empty = std::collections::HashSet::new();

@@ -35,14 +35,6 @@ pub struct ModuleResolver {
     cwd: PathBuf,
 }
 
-impl std::fmt::Debug for ModuleResolver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ModuleResolver")
-            .field("workspace", &self.workspace)
-            .finish_non_exhaustive()
-    }
-}
-
 impl ModuleResolver {
     /// A resolver for the project `start` (a file or directory) lives
     /// in. The JS/TS workspace, if any, is discovered from `start`'s
@@ -85,10 +77,9 @@ impl ModuleResolver {
         }
         let specifier = strip_query(specifier);
         // A member's source beats whatever an install linked into
-        // `node_modules`, which is its build output at best.
-        if !is_relative_specifier(specifier)
-            && let Some(found) = self.workspace.resolve(specifier)
-        {
+        // `node_modules`, which is its build output at best. (Only a bare
+        // specifier can name a member.)
+        if let Some(found) = self.workspace.resolve(specifier) {
             return Some(found);
         }
         let absolute = if importer.is_absolute() {
@@ -302,11 +293,23 @@ mod tests {
         assert_eq!(is_followable_specifier(specifier), expected);
     }
 
-    #[test]
-    fn normalize_path_folds_dot_components() {
-        assert_eq!(
-            normalize_path(Path::new("src/./routes/../main.ts")),
-            PathBuf::from("src/main.ts")
-        );
+    #[rstest]
+    #[case("src/./routes/../main.ts", "src/main.ts")]
+    // `components()` keeps only a leading `.`; it is folded too.
+    #[case("./src/main.ts", "src/main.ts")]
+    #[case("../main.ts", "../main.ts")]
+    #[case(".", ".")]
+    fn normalize_path_folds_dot_components(#[case] path: &str, #[case] expected: &str) {
+        assert_eq!(normalize_path(Path::new(path)), PathBuf::from(expected));
+    }
+
+    #[rstest]
+    #[case("./util", true)]
+    #[case("../util", true)]
+    #[case(".", true)]
+    #[case("@acme/ui", false)]
+    #[case(".hidden", false)]
+    fn relative_specifiers(#[case] specifier: &str, #[case] expected: bool) {
+        assert_eq!(is_relative_specifier(specifier), expected);
     }
 }

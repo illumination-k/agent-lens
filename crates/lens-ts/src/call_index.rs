@@ -828,6 +828,17 @@ mod tests {
         "util::helper",
         Some("app::util::helper")
     )]
+    #[case::parenthesized_callee(
+        "function helper() {} function f() { (helper)(); }",
+        "helper",
+        Some("app::main::helper")
+    )]
+    // Calling the namespace object itself names no function.
+    #[case::namespace_called_directly(
+        "import * as util from './util'; function f() { util(); }",
+        "util",
+        None
+    )]
     #[case::default_import("import h from './util'; function f() { h(); }", "h", None)]
     #[case::bare_import_without_context(
         "import { h } from 'lib'; function f() { h(); }",
@@ -840,6 +851,27 @@ mod tests {
             SyntaxFact::Known(CalleeBinding::Declaration(target.to_owned()))
         });
         assert_eq!(binding_of(source, callee), expected);
+    }
+
+    /// Only a default or namespace import into the workspace is a
+    /// namespace alias, making `alias.member()` a path call; a named
+    /// import's `.member()` is a call on a value, and an unsettled
+    /// namespace is no known module.
+    #[rstest]
+    #[case::namespace("import * as api from './api'; function f() { api.get(); }", false)]
+    #[case::default("import api from './api'; function f() { api.get(); }", false)]
+    #[case::named_value("import { api } from './api'; function f() { api.get(); }", true)]
+    #[case::unsettled_namespace("import * as api from 'lib'; function f() { api.get(); }", true)]
+    fn namespace_aliases_are_workspace_default_or_namespace_imports(
+        #[case] source: &str,
+        #[case] receiver_call: bool,
+    ) {
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "app::main")
+            .unwrap()
+            .into_iter()
+            .find(|call| call.callee_name() == Some("get"))
+            .expect("get call");
+        assert_eq!(call.has_receiver_expression(), receiver_call);
     }
 
     #[rstest]
@@ -886,7 +918,9 @@ mod tests {
         };
         let source = "import { query } from '@/lib/db';\n\
                       import { useState } from 'react';\n\
-                      function f() { query(); useState(); }\n";
+                      import { gone } from './missing';\n\
+                      import { lost } from '../missing';\n\
+                      function f() { query(); useState(); gone(); lost(); }\n";
         let calls =
             extract_call_shapes_with_imports(source, Dialect::Ts, "src::main", &context).unwrap();
         let binding = |name: &str| {
@@ -905,14 +939,31 @@ mod tests {
             binding("useState"),
             Some(SyntaxFact::Known(CalleeBinding::External))
         );
+        // A relative import the resolver cannot find is not external: it
+        // keeps the lexical guess, as without a context.
+        for (callee, target) in [("gone", "src::missing::gone"), ("lost", "missing::lost")] {
+            assert_eq!(
+                binding(callee),
+                Some(SyntaxFact::Known(CalleeBinding::Declaration(
+                    target.to_owned()
+                ))),
+                "{callee}",
+            );
+        }
+        let imports = &calls[0].visible_imports;
         assert_eq!(
-            calls[0].visible_imports,
-            vec![ImportShape::known(
+            imports[0],
+            ImportShape::known(
                 "src::lib::db::query".to_owned(),
                 Some("query".to_owned()),
                 Some("query".to_owned()),
-            )],
-            "only the workspace import is a lexical import fact",
+            ),
+        );
+        assert!(
+            !imports
+                .iter()
+                .any(|import| import.local_alias == SyntaxFact::Known(Some("useState".to_owned()))),
+            "an external import is no lexical import fact",
         );
     }
 
