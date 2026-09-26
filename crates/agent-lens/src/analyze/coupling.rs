@@ -16,7 +16,7 @@
 //! becomes a node and `use` / qualified-path references become `Use`
 //! edges. For TypeScript / JavaScript the entry point is a single
 //! source file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
-//! `.cjs`) and the graph is grown by following relative `import` /
+//! `.cjs`, experimentally `.astro`) and the graph is grown by following relative `import` /
 //! `export … from` specifiers; one source file is one module. For Go the
 //! entry point is a `.go` file or a directory containing `go.mod`, and
 //! one package is one module. For Python the entry point is a `.py` file

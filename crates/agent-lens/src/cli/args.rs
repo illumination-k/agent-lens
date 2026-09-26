@@ -572,7 +572,8 @@ pub(super) enum AnalyzeCommand {
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one, a TypeScript / JavaScript entry file
     /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
-    /// `.cjs`) whose relative imports define the module graph, a
+    /// `.cjs`, or an experimental `.astro` component) whose relative
+    /// imports define the module graph, a
     /// `.go` file or Go module directory (containing `go.mod`), or a
     /// `.py` file or package directory whose in-tree imports define the
     /// module graph. The graph grows outwards from that one entry, so

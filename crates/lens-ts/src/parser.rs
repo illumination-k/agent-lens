@@ -27,7 +27,7 @@ use lens_domain::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::Parser;
+use oxc_parser::{ParseOptions, Parser, ParserReturn};
 use oxc_span::SourceType;
 
 use crate::attrs::{name_looks_like_test_class, name_looks_like_test_function};
@@ -62,7 +62,17 @@ pub enum Dialect {
     Mjs,
     /// `.cjs` — JavaScript CommonJS module.
     Cjs,
+    /// `.astro` — Astro component (experimental). Only the frontmatter
+    /// and `<script>` bodies are analyzed, as one TypeScript module; the
+    /// template is blanked out (see [`crate::astro`]).
+    Astro,
 }
+
+/// Extensions of every file the TS adapter reads, in the order an
+/// extensionless relative import tries them.
+pub(crate) const MODULE_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "astro",
+];
 
 impl Dialect {
     /// Resolve a [`Dialect`] from a bare file extension (no leading dot).
@@ -77,6 +87,7 @@ impl Dialect {
             "jsx" => Some(Self::Jsx),
             "mjs" => Some(Self::Mjs),
             "cjs" => Some(Self::Cjs),
+            "astro" => Some(Self::Astro),
             _ => None,
         }
     }
@@ -105,7 +116,28 @@ impl Dialect {
             Self::Jsx => SourceType::jsx(),
             Self::Mjs => SourceType::mjs(),
             Self::Cjs => SourceType::cjs(),
+            Self::Astro => SourceType::ts().with_module(true),
         }
+    }
+
+    /// Parse `source` as this dialect. An `.astro` source is masked down
+    /// to its script regions first, with top-level `return` allowed as
+    /// Astro's frontmatter does (`return Astro.redirect(...)`); spans
+    /// still index into the original `source`.
+    pub(crate) fn parse<'a>(self, alloc: &'a Allocator, source: &'a str) -> ParserReturn<'a> {
+        let (text, options) = match self {
+            Self::Astro => (
+                alloc.alloc_str(&crate::astro::mask(source)),
+                ParseOptions {
+                    allow_return_outside_function: true,
+                    ..ParseOptions::default()
+                },
+            ),
+            _ => (source, ParseOptions::default()),
+        };
+        Parser::new(alloc, text, self.source_type())
+            .with_options(options)
+            .parse()
     }
 }
 
@@ -173,7 +205,7 @@ impl LanguageParser for TypeScriptParser {
 
     fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
         let alloc = Allocator::default();
-        let ret = Parser::new(&alloc, source, self.dialect.source_type()).parse();
+        let ret = self.dialect.parse(&alloc, source);
         if !ret.diagnostics.is_empty() {
             let err = TsParseError::from_diagnostics(
                 ret.diagnostics
@@ -197,7 +229,7 @@ impl LanguageParser for TypeScriptParser {
 
 fn extract_with(source: &str, dialect: Dialect) -> Result<Vec<FunctionDef>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.diagnostics
@@ -878,10 +910,34 @@ class TestThing {
             ("jsx", Dialect::Jsx),
             ("mjs", Dialect::Mjs),
             ("cjs", Dialect::Cjs),
+            ("astro", Dialect::Astro),
         ] {
             assert_eq!(Dialect::from_extension(ext), Some(expected));
         }
         assert_eq!(Dialect::from_extension("rs"), None);
+    }
+
+    #[test]
+    fn astro_functions_keep_their_component_line_numbers() {
+        let src = "---
+import { slugify } from \"../lib/util\";
+if (!Astro.url) return Astro.redirect(\"/\");
+function label(t: string) {
+  return slugify(t);
+}
+---
+<h1>{label(\"x\")}</h1>
+<script>
+  function wire() {}
+</script>
+";
+        let mut parser = TypeScriptParser::with_dialect(Dialect::Astro);
+        let functions = parser.extract_functions(src).unwrap();
+        let spans: Vec<_> = functions
+            .iter()
+            .map(|f| (f.name.as_str(), f.start_line, f.end_line))
+            .collect();
+        assert_eq!(spans, [("label", 4, 6), ("wire", 10, 10)]);
     }
 
     #[test]

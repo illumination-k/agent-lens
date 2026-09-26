@@ -11,7 +11,6 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::Parser;
 use oxc_span::GetSpan;
 
 use lens_domain::{
@@ -27,7 +26,7 @@ use crate::walk::method_key_name;
 /// Extract every `interface` / `type` alias / `enum` in `source`.
 pub fn extract_type_defs(source: &str, dialect: Dialect) -> Result<Vec<TypeShape>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.diagnostics

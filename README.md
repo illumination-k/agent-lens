@@ -447,11 +447,19 @@ Adding a language means writing one adapter crate and wiring it into the
 | ----------------------- | ------------------------------------------------------------- | ------------- |
 | Rust                    | [`syn`](https://docs.rs/syn)                                  | `lens-rust`   |
 | TypeScript / JavaScript | [oxc](https://oxc.rs/) (`oxc_parser`, `oxc_ast`)              | `lens-ts`     |
+| Astro (experimental)    | `tree-sitter-astro-next` to locate scripts, then oxc          | `lens-ts`     |
 | Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser)    | `lens-py`     |
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
 
 Supported source extensions: `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
-`.jsx`, `.mjs`, `.cjs`; `.py`; `.go`.
+`.jsx`, `.mjs`, `.cjs`, `.astro`; `.py`; `.go`.
+
+`.astro` support is **experimental**: only the frontmatter and JavaScript
+`<script>` bodies are analyzed, as one TypeScript module whose line numbers
+are the component's own. The template — `{expr}` interpolations and
+`<Component />` usages — is not analyzed, so a function called only from the
+template looks unused to the call-graph analyzers, and a component imported
+only for the template still counts as a module dependency.
 
 A file the parser cannot handle — usually syntax newer than the bundled
 grammars — fails the run only when it was named explicitly. Files found by

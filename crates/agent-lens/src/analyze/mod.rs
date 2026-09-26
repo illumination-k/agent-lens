@@ -133,7 +133,7 @@ pub enum OutputFormat {
 /// sync when a new language gets wired up; analyzers only need to add a
 /// `match` arm for the new variant. The TypeScript variant carries a
 /// [`lens_ts::Dialect`] so the same dispatch covers `.ts` / `.tsx` /
-/// `.jsx` / `.js` / `.mjs` / `.cjs` without re-deriving it at every call
+/// `.jsx` / `.js` / `.mjs` / `.cjs` / `.astro` without re-deriving it at every call
 /// site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SourceLang {
@@ -333,6 +333,7 @@ mod tests {
             ("jsx", lens_ts::Dialect::Jsx),
             ("mjs", lens_ts::Dialect::Mjs),
             ("cjs", lens_ts::Dialect::Cjs),
+            ("astro", lens_ts::Dialect::Astro),
         ] {
             assert_eq!(
                 SourceLang::from_extension(ext),

@@ -15,10 +15,9 @@ use oxc_ast::ast::{
     ImportExpression, Statement,
 };
 use oxc_ast_visit::{Visit, walk::walk_import_expression};
-use oxc_parser::Parser;
 
 use crate::module_path::module_segments;
-use crate::parser::{Dialect, TsParseError};
+use crate::parser::{Dialect, MODULE_EXTENSIONS, TsParseError};
 
 /// Failures raised while discovering a TS/JS module graph.
 #[derive(Debug, thiserror::Error)]
@@ -144,7 +143,7 @@ struct ImportLink {
 
 fn parse_links(source: &str, dialect: Dialect) -> Result<Vec<ImportLink>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.diagnostics
@@ -269,15 +268,13 @@ fn resolve_relative_module(base: &Path, specifier: &str) -> Option<PathBuf> {
             .then(|| normalize_path(&joined));
     }
 
-    const EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
-
-    for ext in EXTS {
+    for ext in MODULE_EXTENSIONS {
         let candidate = joined.with_extension(ext);
         if candidate.exists() {
             return Some(normalize_path(&candidate));
         }
     }
-    for ext in EXTS {
+    for ext in MODULE_EXTENSIONS {
         let candidate = joined.join(format!("index.{ext}"));
         if candidate.exists() {
             return Some(normalize_path(&candidate));
