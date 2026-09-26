@@ -2,8 +2,17 @@
 //!
 //! A profile bundles a target path, shared path filters, an ordered list
 //! of analyzers to run, and optional per-tool option overrides. The `run`
-//! subcommand discovers the nearest `agent-lens.toml`, resolves a named
-//! profile, and fans out to the selected analyzers.
+//! subcommand discovers every `agent-lens.toml` from the current directory
+//! up, resolves a named profile from the nearest one that defines it, and
+//! fans out to the selected analyzers.
+//!
+//! Nesting is what makes a monorepo work: a package's own
+//! `packages/web/agent-lens.toml` adds or overrides profiles while every
+//! profile the repository root declares stays runnable from inside the
+//! package. A profile is taken whole from the file that defines it — keys
+//! are not merged across files — and its `path` resolves against that
+//! file's directory, so a root profile means the same thing wherever it is
+//! run from.
 //!
 //! ```toml
 //! [profile.web]
@@ -430,11 +439,53 @@ impl ToolName {
     }
 }
 
-/// Walk up from `start` (inclusive) and return the first `agent-lens.toml`.
-pub fn discover(start: &Path) -> Option<PathBuf> {
-    start.ancestors().find_map(|dir| {
-        let candidate = dir.join(CONFIG_FILE_NAME);
-        candidate.is_file().then_some(candidate)
+/// Walk up from `start` (inclusive) and return every `agent-lens.toml`,
+/// nearest first. Empty when there is none.
+pub fn discover_all(start: &Path) -> Vec<PathBuf> {
+    start
+        .ancestors()
+        .map(|dir| dir.join(CONFIG_FILE_NAME))
+        .filter(|candidate| candidate.is_file())
+        .collect()
+}
+
+/// A profile together with the config file that defined it, whose
+/// directory its relative `path` entries resolve against.
+#[derive(Debug, Clone)]
+pub struct FoundProfile {
+    pub config_path: PathBuf,
+    pub profile: Profile,
+}
+
+impl FoundProfile {
+    /// The directory holding the defining config file.
+    pub fn config_dir(&self) -> &Path {
+        self.config_path.parent().unwrap_or_else(|| Path::new("."))
+    }
+}
+
+/// Look `name` up in `configs`, nearest first: the first file that
+/// defines it wins, so a nested config overrides an ancestor's profile of
+/// the same name.
+///
+/// Files are loaded only as far as the lookup has to go, so a broken
+/// ancestor config does not fail a profile a nearer file already defines.
+/// A name no file defines lists every name the chain does.
+pub fn find_profile(configs: &[PathBuf], name: &str) -> Result<FoundProfile, ConfigError> {
+    let mut available = std::collections::BTreeSet::new();
+    for config_path in configs {
+        let config = load(config_path)?;
+        if let Some(profile) = config.profiles.get(name) {
+            return Ok(FoundProfile {
+                config_path: config_path.clone(),
+                profile: profile.clone(),
+            });
+        }
+        available.extend(config.profiles.into_keys());
+    }
+    Err(ConfigError::UnknownProfile {
+        name: name.to_owned(),
+        available: available.into_iter().collect(),
     })
 }
 
@@ -917,24 +968,102 @@ since = "90.days.ago"
     }
 
     #[test]
-    fn discover_walks_up_to_find_config() {
+    fn discover_all_walks_up_nearest_first() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
             CONFIG_FILE_NAME,
             "[profile.x]\npath = \".\"\ntools = []\n",
         );
+        write_file(
+            &dir.path().join("a"),
+            CONFIG_FILE_NAME,
+            "[profile.y]\npath = \".\"\ntools = []\n",
+        );
         let nested = dir.path().join("a/b/c");
         std::fs::create_dir_all(&nested).unwrap();
 
-        let found = discover(&nested).expect("config found by walking up");
-        assert_eq!(found.file_name().unwrap(), CONFIG_FILE_NAME);
-        assert_eq!(found.parent().unwrap(), dir.path());
+        assert_eq!(
+            discover_all(&nested),
+            vec![
+                dir.path().join("a").join(CONFIG_FILE_NAME),
+                dir.path().join(CONFIG_FILE_NAME),
+            ],
+        );
     }
 
     #[test]
-    fn discover_returns_none_when_no_config_exists() {
+    fn discover_all_is_empty_when_no_config_exists() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(discover(dir.path()).is_none());
+        assert!(discover_all(dir.path()).is_empty());
+    }
+
+    /// The monorepo layout: a root config and a package config.
+    fn nested_configs() -> (tempfile::TempDir, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            "[profile.shared]\npath = \"crates\"\ntools = [\"complexity\"]\n\
+             [profile.web]\npath = \"root-web\"\ntools = [\"complexity\"]\n",
+        );
+        let pkg = dir.path().join("packages/web");
+        write_file(
+            &pkg,
+            CONFIG_FILE_NAME,
+            "[profile.web]\npath = \"src\"\ntools = [\"similarity\"]\n",
+        );
+        let chain = discover_all(&pkg);
+        (dir, chain)
+    }
+
+    #[rstest]
+    // The nearer file overrides a same-named ancestor profile whole.
+    #[case::override_("web", "packages/web", "src", ToolName::Similarity)]
+    // An ancestor-only profile stays runnable, resolved against its own dir.
+    #[case::inherited("shared", "", "crates", ToolName::Complexity)]
+    fn find_profile_prefers_the_nearest_definition(
+        #[case] name: &str,
+        #[case] config_dir: &str,
+        #[case] path: &str,
+        #[case] tool: ToolName,
+    ) {
+        let (dir, chain) = nested_configs();
+        let found = find_profile(&chain, name).unwrap();
+        let expected_dir = dir.path().join(config_dir);
+        assert_eq!(found.config_dir(), expected_dir);
+        assert_eq!(found.profile.tools, vec![tool]);
+        assert_eq!(
+            found.profile.resolved_paths(found.config_dir()),
+            vec![expected_dir.join(path)],
+        );
+    }
+
+    #[test]
+    fn find_profile_lists_every_name_in_the_chain_when_missing() {
+        let (_dir, chain) = nested_configs();
+        let err = find_profile(&chain, "nope").unwrap_err();
+        let ConfigError::UnknownProfile { available, .. } = err else {
+            panic!("expected UnknownProfile, got {err:?}");
+        };
+        assert_eq!(available, vec!["shared".to_owned(), "web".to_owned()]);
+    }
+
+    #[test]
+    fn find_profile_stops_before_a_broken_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), CONFIG_FILE_NAME, "not = [valid");
+        let pkg = dir.path().join("pkg");
+        write_file(
+            &pkg,
+            CONFIG_FILE_NAME,
+            "[profile.x]\npath = \".\"\ntools = []\n",
+        );
+        let chain = discover_all(&pkg);
+        assert!(find_profile(&chain, "x").is_ok());
+        assert!(matches!(
+            find_profile(&chain, "y"),
+            Err(ConfigError::Parse { .. })
+        ));
     }
 }

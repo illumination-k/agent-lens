@@ -29,6 +29,7 @@ mod statements;
 mod tree;
 mod type_defs;
 mod walk;
+mod workspace;
 mod wrapper;
 
 pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};

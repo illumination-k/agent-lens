@@ -157,8 +157,9 @@ pub(super) struct SkillsInstallArgs {
 pub(super) struct ProfileSelectorArgs {
     /// Name of the `[profile.<name>]` table to run.
     pub(super) profile: String,
-    /// Path to an explicit `agent-lens.toml`. Defaults to the nearest
-    /// one found by walking up from the current directory.
+    /// Path to an explicit `agent-lens.toml`. Defaults to every one
+    /// found by walking up from the current directory, taking the
+    /// profile from the nearest that defines it.
     #[arg(long, value_name = "PATH")]
     pub(super) config: Option<PathBuf>,
 }

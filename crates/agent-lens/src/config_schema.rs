@@ -747,10 +747,13 @@ pub fn render() -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# {CONFIG_FILE_NAME} schema");
     out.push_str(
-        "\nNamed analysis profiles for the `run` subcommand. The nearest \
-         file is discovered by walking up from the current directory (or \
-         pointed at with `--config`). Keys are kebab-case to mirror the CLI \
-         flags, and unknown keys are a parse error.\n",
+        "\nNamed analysis profiles for the `run` subcommand. Every file \
+         from the current directory up is discovered, and a profile is \
+         taken whole from the nearest file that defines it, so a nested \
+         config (a monorepo package's own) overrides or adds profiles \
+         while its ancestors' stay runnable; `--config` names one file \
+         instead. Keys are kebab-case to mirror the CLI flags, and unknown \
+         keys are a parse error.\n",
     );
 
     let _ = writeln!(out, "\n## `[profile.<name>]`");

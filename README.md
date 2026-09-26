@@ -220,11 +220,17 @@ min-lines = 8
 ```
 
 ```bash
-agent-lens run web                       # from the nearest agent-lens.toml
+agent-lens run web                       # nearest agent-lens.toml defining `web`
 agent-lens run web --config path/to/agent-lens.toml
 agent-lens run web --format json         # override the profile's format
 agent-lens run web --digest              # entity-joined rollup, not sections
 ```
+
+In a monorepo, configs nest: every `agent-lens.toml` from the current
+directory up is read, and a profile comes whole from the nearest file that
+defines it. A package's own config adds or overrides profiles while the
+root's stay runnable from inside the package, and each profile's `path`
+resolves against the directory of the file that defined it.
 
 Keys are kebab-case and match the CLI flags. Unknown keys — a typo, or an
 option set on the wrong tool — are rejected at parse time rather than silently
@@ -494,6 +500,13 @@ Language coverage per analyzer:
 `coupling`, `context-span`, and `communities` name modules the way the
 analyzed language does (`crate::analyze::coupling`, `github.com/x/proj/internal/store`,
 `components/Chat`, `util.text`); TS/JS and Python modules are one per file.
+
+TS/JS module graphs follow relative imports and, in a monorepo, imports of
+workspace member packages (`package.json#workspaces` or
+`pnpm-workspace.yaml`): `import { Button } from "@acme/ui"` becomes an edge
+into that package's source, resolved through its `exports` / `main` fields
+and falling back to `src/` when those point at unbuilt output. Other bare
+specifiers (`react`, `node:fs`) and `tsconfig` path aliases stay external.
 
 In TypeScript / JavaScript, callbacks registered with a recognised test
 harness (`describe`, `it`, `test`, hooks, `it.skip`-style chains) are units

@@ -15,6 +15,7 @@ oxc_ast_visit = "0.142"
 oxc_parser = "0.142"
 oxc_span = "0.142"
 oxc_syntax = "0.142"
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tree-sitter = "0.27"
