@@ -472,6 +472,11 @@ mod tests {
         "def caller():\n    emit = lambda x: x\n    def inner():\n        emit(1)\n",
         true
     )]
+    #[case::nonlocal_keeps_outer_binding(
+        "def outer():\n    emit = lambda x: x\n    def inner():\n        nonlocal emit\n        emit = compute()\n        emit(1)\n",
+        true
+    )]
+    #[case::module_lambda("emit = lambda x: x\ndef caller():\n    emit(1)\n", false)]
     #[case::plain_local("def caller():\n    emit = compute()\n    emit(1)\n", false)]
     #[case::value_param("def caller(emit: int):\n    emit(1)\n", false)]
     #[case::unbound_name("def caller():\n    emit(1)\n", false)]
@@ -549,6 +554,46 @@ mod tests {
     )]
     #[case::comprehension_target("def caller(fs):\n    [run() for run in fs]\n", "run", None)]
     #[case::unbound("def caller():\n    run()\n", "run", None)]
+    #[case::walrus_in_comprehension_binds_the_function(
+        "def run():\n    pass\ndef caller(fs):\n    [(run := f) for f in fs]\n    run()\n",
+        "run",
+        None
+    )]
+    #[case::lambda_default_runs_outside(
+        "def run():\n    pass\ndef caller():\n    go(lambda cb=run(): cb())\n",
+        "run",
+        Some("pkg::main::run")
+    )]
+    #[case::lambda_parameter_shadows(
+        "def run():\n    pass\ndef caller():\n    go(lambda run: run())\n",
+        "run",
+        None
+    )]
+    #[case::except_body_resolves(
+        "def run():\n    pass\ndef caller():\n    try:\n        pass\n    except E as err:\n        run()\n",
+        "run",
+        Some("pkg::main::run")
+    )]
+    #[case::except_name_shadows(
+        "def run():\n    pass\ndef caller():\n    try:\n        pass\n    except E as run:\n        run()\n",
+        "run",
+        None
+    )]
+    #[case::match_capture_shadows(
+        "def run():\n    pass\ndef caller(x):\n    match x:\n        case run:\n            run()\n",
+        "run",
+        None
+    )]
+    #[case::match_star_shadows(
+        "def run():\n    pass\ndef caller(x):\n    match x:\n        case [*run]:\n            run()\n",
+        "run",
+        None
+    )]
+    #[case::match_rest_shadows(
+        "def run():\n    pass\ndef caller(x):\n    match x:\n        case {**run}:\n            run()\n",
+        "run",
+        None
+    )]
     fn callee_bindings(#[case] src: &str, #[case] callee: &str, #[case] expected: Option<&str>) {
         let call = calls(src, "pkg::main")
             .into_iter()
@@ -559,6 +604,27 @@ mod tests {
             CalleeBinding::External => "<external>",
         });
         assert_eq!(binding, expected);
+    }
+
+    /// A comprehension's target binds in the comprehension's own scope,
+    /// so it neither leaks into the function nor hides a call inside the
+    /// comprehension from the module it resolves to.
+    #[rstest]
+    #[case::list("[run for run in fs]")]
+    #[case::set("{run for run in fs}")]
+    #[case::generator("list(run for run in fs)")]
+    #[case::dict("{run: 1 for run in fs}")]
+    fn comprehension_targets_stay_in_their_scope(#[case] comprehension: &str) {
+        let src = format!(
+            "def run():\n    pass\ndef caller(fs):\n    {comprehension}\n    [run() for f in fs]\n    run()\n"
+        );
+        let bindings: Vec<_> = calls(&src, "m")
+            .into_iter()
+            .filter(|call| call.callee_name() == Some("run"))
+            .map(|call| call.callee_binding().cloned())
+            .collect();
+        let module_run = Some(CalleeBinding::Declaration("m::run".to_owned()));
+        assert_eq!(bindings, [module_run.clone(), module_run]);
     }
 
     /// A receiver bound to a value — a parameter, a local, a module-level

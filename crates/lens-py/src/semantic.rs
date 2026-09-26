@@ -29,7 +29,7 @@ use ruff_python_ast::{
 };
 use ruff_python_semantic::{
     BindingFlags, BindingId, BindingKind, FromImport, GeneratorKind, Import, Module, ModuleKind,
-    ModuleSource, ScopeId, ScopeKind, SemanticModel, SubmoduleImport,
+    ModuleSource, ScopeId, ScopeKind, SemanticModel,
 };
 use ruff_python_stdlib::builtins::{python_builtins, python_magic_globals};
 use ruff_text_size::{Ranged, TextRange, TextSize};
@@ -254,19 +254,17 @@ impl<'a> Binder<'a, '_> {
     fn visit_import(&mut self, import: &'a StmtImport) {
         for alias in &import.names {
             let imported = alias.name.as_str();
-            let qualified_name = Box::new(QualifiedName::user_defined(imported));
+            // `referent` reads every import kind alike, so `import a.b`
+            // needs no `SubmoduleImport` of its own.
+            let kind = BindingKind::Import(Import {
+                qualified_name: Box::new(QualifiedName::user_defined(imported)),
+            });
             let Some(asname) = &alias.asname else {
                 // `import a.b` binds `a`, the top-level package.
                 let top = top_segment(imported);
-                let kind = if top.len() == imported.len() {
-                    BindingKind::Import(Import { qualified_name })
-                } else {
-                    BindingKind::SubmoduleImport(SubmoduleImport { qualified_name })
-                };
                 self.bind_import(top, alias.range, kind, top.to_owned());
                 continue;
             };
-            let kind = BindingKind::Import(Import { qualified_name });
             let target = dotted_to_module_path(imported);
             self.bind_import(asname.as_str(), alias.range, kind, target);
         }
