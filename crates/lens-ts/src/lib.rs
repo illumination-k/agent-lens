@@ -11,6 +11,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod astro;
 mod attrs;
 mod call_index;
 mod cohesion;

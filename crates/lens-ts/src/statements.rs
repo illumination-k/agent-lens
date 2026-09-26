@@ -16,7 +16,6 @@
 use lens_domain::{LineIndex, StatementSeq, StatementUnit};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::Parser;
 use oxc_span::GetSpan;
 
 use crate::Dialect;
@@ -32,7 +31,7 @@ pub fn extract_statement_seqs(
     dialect: Dialect,
 ) -> Result<Vec<StatementSeq>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.diagnostics

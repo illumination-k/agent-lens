@@ -17,9 +17,7 @@ use std::path::Path;
 
 use lens_domain::path_segments;
 
-/// Extensions that mark a file as a TS/JS module. The extension names
-/// the dialect, not the module, so it is not part of the module path.
-const MODULE_EXTENSIONS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+use crate::parser::MODULE_EXTENSIONS;
 
 /// Module-path segments for `rel`, a source file path relative to the
 /// analysis root.

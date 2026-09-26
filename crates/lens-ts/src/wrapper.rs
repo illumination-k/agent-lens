@@ -16,7 +16,6 @@
 use lens_domain::{LineIndex, WrapperFinding, args_pass_through_by};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_parser::Parser;
 
 use crate::parser::{Dialect, TsParseError};
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
@@ -36,7 +35,7 @@ const TRIVIAL_NULLARY_ADAPTERS: &[&str] = &[
 /// forwarding call.
 pub fn find_wrappers(source: &str, dialect: Dialect) -> Result<Vec<WrapperFinding>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.diagnostics

@@ -38,7 +38,6 @@ use lens_domain::{CohesionUnit, CohesionUnitKind, LineIndex, MethodCohesion};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
-use oxc_parser::Parser;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 
@@ -65,7 +64,7 @@ pub fn extract_cohesion_units(
     dialect: Dialect,
 ) -> Result<Vec<CohesionUnit>, CohesionError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(CohesionError::Parse(TsParseError::from_diagnostics(
             ret.diagnostics

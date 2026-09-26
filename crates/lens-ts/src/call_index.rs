@@ -16,10 +16,9 @@ use lens_domain::{
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
-use oxc_parser::Parser;
 use oxc_syntax::scope::ScopeFlags;
 
-use crate::parser::{Dialect, TsParseError, is_test_item};
+use crate::parser::{Dialect, MODULE_EXTENSIONS, TsParseError, is_test_item};
 use crate::tree::function_body_tree;
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
@@ -30,7 +29,7 @@ pub fn extract_function_shapes_with_module(
     module: &str,
 ) -> Result<Vec<FunctionShape>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.diagnostics
@@ -56,7 +55,7 @@ pub fn extract_call_shapes_with_module(
     module: &str,
 ) -> Result<Vec<CallShape>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = Parser::new(&alloc, source, dialect.source_type()).parse();
+    let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
         return Err(TsParseError::from_diagnostics(
             ret.diagnostics
@@ -552,12 +551,10 @@ fn resolve_import_module(module: &str, source: &str) -> Option<String> {
 }
 
 fn strip_ts_extension(segment: &str) -> &str {
-    for ext in [".tsx", ".ts", ".jsx", ".js", ".mts", ".cts", ".mjs", ".cjs"] {
-        if let Some(stripped) = segment.strip_suffix(ext) {
-            return stripped;
-        }
-    }
     segment
+        .rsplit_once('.')
+        .filter(|(_, ext)| MODULE_EXTENSIONS.contains(ext))
+        .map_or(segment, |(stem, _)| stem)
 }
 
 fn split_owner(name: &str) -> (Option<String>, String) {
