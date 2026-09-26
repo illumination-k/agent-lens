@@ -13,6 +13,8 @@ oxc_allocator = "0.142"
 oxc_ast = "0.142"
 oxc_ast_visit = "0.142"
 oxc_parser = "0.142"
+oxc_resolver = "11"
+oxc_semantic = "0.142"
 oxc_span = "0.142"
 oxc_syntax = "0.142"
 serde_json = { workspace = true }

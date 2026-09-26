@@ -501,12 +501,18 @@ Language coverage per analyzer:
 analyzed language does (`crate::analyze::coupling`, `github.com/x/proj/internal/store`,
 `components/Chat`, `util.text`); TS/JS and Python modules are one per file.
 
-TS/JS module graphs follow relative imports and, in a monorepo, imports of
-workspace member packages (`package.json#workspaces` or
-`pnpm-workspace.yaml`): `import { Button } from "@acme/ui"` becomes an edge
-into that package's source, resolved through its `exports` / `main` fields
-and falling back to `src/` when those point at unbuilt output. Other bare
-specifiers (`react`, `node:fs`) and `tsconfig` path aliases stay external.
+TS/JS imports resolve the way the TypeScript toolchain does
+([`oxc_resolver`](https://github.com/oxc-project/oxc-resolver)): relative
+paths, `tsconfig` `paths` aliases (through `extends`), `exports` maps, and
+TS ESM's `./util.js` for `util.ts`. In a monorepo, imports of workspace
+member packages (`package.json#workspaces` or `pnpm-workspace.yaml`) —
+`import { Button } from "@acme/ui"` — land on that package's source,
+falling back to `src/` when its manifest points at build output. Other
+bare specifiers (`react`, `node:fs`) stay external. Call graphs also bind
+each TS/JS callee's name with `oxc_semantic`: a call through an import or
+a module-scope declaration resolves with `resolution_method: "binding"`,
+and a call to a global or an external package's import is never matched
+to a same-named workspace function.
 
 Go packages are named by the nearest `go.mod` above them, so a scan can span
 several modules. A directory holding `go.work` is a Go root in its own

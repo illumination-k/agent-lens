@@ -1,24 +1,32 @@
 //! TypeScript / JavaScript function and call-shape extraction for the
 //! function graph analyzer.
 //!
-//! This stays syntax-only: imports are resolved to lexical module paths
-//! when they are relative, receiver calls are kept unresolved unless they
-//! look like namespace/static calls, and no type inference is attempted.
+//! No type inference is attempted, but names are bound: `oxc_semantic`
+//! settles what each callee's leading identifier refers to — a local, a
+//! declaration at module scope, an import, or nothing the file declares
+//! (a global) — and, given an [`ImportContext`], `oxc_resolver` settles
+//! which file an import names. Together they turn a call into
+//! [`CalleeBinding`] facts the graph resolves without name matching.
+//! Receiver calls on values stay unresolved unless they look like
+//! namespace/static calls.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use lens_domain::{
-    ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus,
-    LineIndex, OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind, ReceiverShape,
-    SignatureShape, SourceSpan, SyntaxFact, callee_names_local_binding, qualify_module,
-    starts_uppercase,
+    ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, ImportShape,
+    LexicalResolutionStatus, LineIndex, OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind,
+    ReceiverShape, SignatureShape, SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
+use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_syntax::scope::ScopeFlags;
+use oxc_syntax::symbol::SymbolId;
 
 use crate::parser::{Dialect, MODULE_EXTENSIONS, TsParseError, is_test_item};
+use crate::resolver::{ModuleResolver, is_relative_specifier};
 use crate::tree::function_body_tree;
 use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
 
@@ -48,11 +56,45 @@ pub fn extract_function_shapes_with_module(
     Ok(collector.out)
 }
 
+/// Where one file's import specifiers lead: the file itself, the
+/// project's resolver, and the module path the caller names a resolved
+/// source file by (`None` for a file outside the analysis).
+pub struct ImportContext<'a> {
+    pub file: &'a Path,
+    pub resolver: &'a ModuleResolver,
+    pub module_of: &'a dyn Fn(&Path) -> Option<String>,
+}
+
 /// Extract neutral call-shape facts for TypeScript / JavaScript.
+///
+/// Without an [`ImportContext`] only relative imports are followed, and
+/// lexically (`./util` next to `app::main` is `app::util`).
 pub fn extract_call_shapes_with_module(
     source: &str,
     dialect: Dialect,
     module: &str,
+) -> Result<Vec<CallShape>, TsParseError> {
+    extract_call_shapes(source, dialect, module, None)
+}
+
+/// [`extract_call_shapes_with_module`], resolving every import the way
+/// the TypeScript toolchain does — tsconfig `paths`, `exports` maps,
+/// workspace members — and treating an import that resolves to no
+/// analysed file as external.
+pub fn extract_call_shapes_with_imports(
+    source: &str,
+    dialect: Dialect,
+    module: &str,
+    imports: &ImportContext<'_>,
+) -> Result<Vec<CallShape>, TsParseError> {
+    extract_call_shapes(source, dialect, module, Some(imports))
+}
+
+fn extract_call_shapes(
+    source: &str,
+    dialect: Dialect,
+    module: &str,
+    context: Option<&ImportContext<'_>>,
 ) -> Result<Vec<CallShape>, TsParseError> {
     let alloc = Allocator::default();
     let ret = dialect.parse(&alloc, source);
@@ -65,22 +107,36 @@ pub fn extract_call_shapes_with_module(
     }
 
     let line_index = LineIndex::new(source);
-    let imports = collect_imports(&ret.program, module);
-    let namespace_aliases = imports
+    // Reference binding only: no AST node table, no syntax re-check.
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(false)
+        .build(&ret.program)
+        .semantic;
+    let bindings = collect_imports(&ret.program, module, context);
+    let imports = bindings.iter().filter_map(ImportBinding::shape).collect();
+    let namespace_aliases = bindings
         .iter()
-        .filter_map(|import| {
-            let alias = import.local_alias.known_value().and_then(Option::as_ref)?;
-            let exported = import
-                .exported_symbol
-                .known_value()
-                .and_then(Option::as_ref);
-            (exported.is_none()).then(|| alias.clone())
+        .filter(|binding| {
+            binding.name != ImportedName::Named && matches!(binding.module, Imported::Workspace(_))
         })
+        .map(|binding| binding.local.clone())
         .collect();
+    let mut dynamic = DynamicImportCollector {
+        module,
+        context,
+        out: Vec::new(),
+    };
+    dynamic.visit_program(&ret.program);
     let mut collector = CallShapeCollector {
         module: module.to_owned(),
         line_index: &line_index,
+        scoping: semantic.scoping(),
         imports,
+        bindings: bindings
+            .into_iter()
+            .chain(dynamic.out)
+            .filter_map(|binding| Some((binding.symbol?, binding)))
+            .collect(),
         namespace_aliases,
         out: Vec::new(),
     };
@@ -168,7 +224,11 @@ fn parameter_signature(params: &FormalParameters) -> SignatureShape {
 struct CallShapeCollector<'a> {
     module: String,
     line_index: &'a LineIndex,
+    scoping: &'a Scoping,
     imports: Vec<ImportShape>,
+    /// Import bindings by the symbol they declare: static imports, and
+    /// locals destructured from a dynamic `import()`.
+    bindings: HashMap<SymbolId, ImportBinding>,
     namespace_aliases: HashSet<String>,
     out: Vec<CallShape>,
 }
@@ -178,117 +238,29 @@ impl FunctionVisitor for CallShapeCollector<'_> {
         let (owner, _) = split_owner(&item.name);
         let caller = qualify_module(&self.module, &item.name);
         let mut visitor = FunctionBodyCallVisitor {
-            module: &self.module,
+            collector: self,
             caller_qualified_name: caller,
             caller_owner: owner,
-            line_index: self.line_index,
-            imports: &self.imports,
-            namespace_aliases: &self.namespace_aliases,
-            locally_bound: local_callable_bindings(&item),
             out: Vec::new(),
         };
         visitor.visit_function_body(item.body);
-        self.out.extend(visitor.out);
+        let calls = visitor.out;
+        self.out.extend(calls);
     }
 }
 
-/// Names bound to a callable inside `item`'s own scope: arrow functions,
-/// function expressions and nested `function` declarations held in a
-/// local, plus parameters whose type annotation or default value is a
-/// function.
-///
-/// The walker gives a nested function the synthetic name
-/// `<parent>::closure#N`, never the local it is assigned to, so a call to
-/// that local has no workspace target. Left to the resolver's name
-/// fallback, it would instead land on whichever unrelated module happens
-/// to export the same name.
-///
-/// Bindings are collected body-wide rather than from the point of
-/// declaration: a call that precedes its binding and means an outer name
-/// is rare, and losing an edge beats fabricating one.
-fn local_callable_bindings(item: &FunctionItem<'_>) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for param in &item.params.items {
-        if !binds_a_callable(param) {
-            continue;
-        }
-        if let Some(id) = param.pattern.get_binding_identifier() {
-            out.insert(id.name.to_string());
-        }
-    }
-    let mut collector = LocalBindingCollector { out };
-    collector.visit_function_body(item.body);
-    collector.out
-}
-
-/// A parameter is callable when its annotation is a function type
-/// (`emit: (e: Event) => void`) or its default value is a function
-/// (`emit = () => {}`) — the two shapes JS/TS syntax can decide alone.
-fn binds_a_callable(param: &FormalParameter) -> bool {
-    let annotated = param
-        .type_annotation
-        .as_ref()
-        .is_some_and(|annotation| matches!(annotation.type_annotation, TSType::TSFunctionType(_)));
-    let defaulted = param
-        .initializer
-        .as_deref()
-        .is_some_and(is_function_expression);
-    annotated || defaulted
-}
-
-fn is_function_expression(expr: &Expression) -> bool {
-    matches!(
-        expr,
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    )
-}
-
-struct LocalBindingCollector {
-    out: HashSet<String>,
-}
-
-impl<'a> Visit<'a> for LocalBindingCollector {
-    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
-        if it.init.as_ref().is_some_and(is_function_expression)
-            && let Some(id) = it.id.get_binding_identifier()
-        {
-            self.out.insert(id.name.to_string());
-        }
-        // The initialiser's body is a scope of its own — nothing it
-        // declares binds here.
-    }
-
-    fn visit_function(&mut self, it: &Function<'a>, _flags: ScopeFlags) {
-        // A `function inner() {}` statement binds `inner` in this scope;
-        // a named function *expression* binds its name only inside
-        // itself, so the declaration check is not just an id check.
-        if it.r#type == FunctionType::FunctionDeclaration
-            && let Some(id) = &it.id
-        {
-            self.out.insert(id.name.to_string());
-        }
-    }
-
-    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
-}
-
-struct FunctionBodyCallVisitor<'a> {
-    module: &'a str,
+struct FunctionBodyCallVisitor<'c, 'a> {
+    collector: &'c CallShapeCollector<'a>,
     caller_qualified_name: String,
     caller_owner: Option<String>,
-    line_index: &'a LineIndex,
-    imports: &'a [ImportShape],
-    namespace_aliases: &'a HashSet<String>,
-    /// Callable names bound in this function's own scope — see
-    /// [`local_callable_bindings`].
-    locally_bound: HashSet<String>,
     out: Vec<CallShape>,
 }
 
-impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_> {
+impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_, '_> {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         let arguments = it.arguments.iter().map(argument_shape).collect();
-        let shape = self.call_shape(&it.callee, arguments, self.line_index.line(it.span.start));
+        let line = self.collector.line_index.line(it.span.start);
+        let shape = self.call_shape(&it.callee, arguments, line);
         self.out.push(shape);
         walk::walk_call_expression(self, it);
     }
@@ -304,25 +276,44 @@ impl<'a> Visit<'a> for FunctionBodyCallVisitor<'_> {
     fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
 }
 
-impl FunctionBodyCallVisitor<'_> {
+/// What a callee's leading identifier refers to, per `oxc_semantic`.
+enum Referent<'b> {
+    /// Declared in a function, block, or parameter list — any scope
+    /// below the module's.
+    Local,
+    /// Declared at module scope by this file.
+    ModuleScope,
+    /// An import binding.
+    Import(&'b ImportBinding),
+    /// Declared nowhere in the file: a global.
+    Global,
+}
+
+impl FunctionBodyCallVisitor<'_, '_> {
     /// The visitor already owns every caller-side fact a call shape
     /// needs, so this reads them off `self` instead of taking them as a
     /// parameter list.
     fn call_shape(
         &self,
-        callee: &Expression,
+        callee_expr: &Expression,
         arguments: Vec<ArgumentShape>,
         line: usize,
     ) -> CallShape {
-        let callee = callee_facts(callee, self.namespace_aliases);
-        let callee_is_locally_bound = callee_names_local_binding(
-            callee.receiver,
-            callee.path_segments.as_deref(),
-            &self.locally_bound,
-        );
+        let collector = self.collector;
+        let callee = callee_facts(callee_expr, &collector.namespace_aliases);
+        let referent = root_identifier(callee_expr).and_then(|root| self.referent(root));
+        // A local binding shadows every definition outside the function,
+        // but only a bare call names the binding itself: `local.run()`
+        // names a method on whatever the local holds.
+        let bare = matches!(callee.path_segments.as_deref(), Some([_]));
+        let callee_is_locally_bound = bare && matches!(referent, Some(Referent::Local));
+        let callee_binding = match (&referent, callee.path_segments.as_deref()) {
+            (Some(referent), Some(segments)) => self.binding(referent, segments),
+            _ => SyntaxFact::Unknown,
+        };
         CallShape {
             caller_qualified_name: SyntaxFact::Known(Some(self.caller_qualified_name.clone())),
-            caller_module: SyntaxFact::Known(self.module.to_owned()),
+            caller_module: SyntaxFact::Known(collector.module.clone()),
             caller_owner: SyntaxFact::Known(self.caller_owner.clone()),
             callee_display_name: SyntaxFact::Known(callee.name),
             callee_path_segments: callee
@@ -331,10 +322,76 @@ impl FunctionBodyCallVisitor<'_> {
             receiver_expr_kind: SyntaxFact::Known(callee.receiver),
             arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
+            callee_binding,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
-            visible_imports: self.imports.to_vec(),
+            visible_imports: collector.imports.clone(),
             line,
         }
+    }
+
+    fn referent(&self, root: &IdentifierReference) -> Option<Referent<'_>> {
+        let scoping = self.collector.scoping;
+        let reference = scoping.get_reference(root.reference_id.get()?);
+        let Some(symbol) = reference.symbol_id() else {
+            return Some(Referent::Global);
+        };
+        if let Some(import) = self.collector.bindings.get(&symbol) {
+            return Some(Referent::Import(import));
+        }
+        if scoping.symbol_scope_id(symbol) != scoping.root_scope_id() {
+            return Some(Referent::Local);
+        }
+        // An import form not collected (`import x = require(...)`).
+        if scoping.symbol_flags(symbol).is_import() {
+            return None;
+        }
+        Some(Referent::ModuleScope)
+    }
+
+    /// The declaration `segments` (the callee path, its first segment
+    /// being the bound identifier) names, when the binding settles it.
+    fn binding(&self, referent: &Referent<'_>, segments: &[String]) -> SyntaxFact<CalleeBinding> {
+        let rest = segments[1..].join("::");
+        let declaration = |target: String| SyntaxFact::Known(CalleeBinding::Declaration(target));
+        match referent {
+            Referent::Local => SyntaxFact::Unknown,
+            Referent::Global => SyntaxFact::Known(CalleeBinding::External),
+            Referent::ModuleScope => {
+                declaration(qualify_module(&self.collector.module, &segments.join("::")))
+            }
+            Referent::Import(import) => match (&import.module, import.name) {
+                (Imported::External, _) => SyntaxFact::Known(CalleeBinding::External),
+                (Imported::Workspace(module), ImportedName::Named) => {
+                    let exported = import.exported.as_deref().unwrap_or_default();
+                    let target = qualify_module(module, exported);
+                    declaration(if rest.is_empty() {
+                        target
+                    } else {
+                        qualify_module(&target, &rest)
+                    })
+                }
+                // `ns.helper()` names `helper` in the module; `ns()` names
+                // the module object, which no function node is.
+                (Imported::Workspace(module), ImportedName::Namespace) if !rest.is_empty() => {
+                    declaration(qualify_module(module, &rest))
+                }
+                // A default export's node is named after its declaration,
+                // which the importer does not know.
+                (Imported::Workspace(_) | Imported::Unknown, _) => SyntaxFact::Unknown,
+            },
+        }
+    }
+}
+
+/// The identifier a callee path starts at: `helper` in `helper()`,
+/// `api` in `api.users.list()`. `None` for `this.x()`, `f()()`, and
+/// other callees not rooted at a name.
+fn root_identifier<'b>(callee: &'b Expression<'b>) -> Option<&'b IdentifierReference<'b>> {
+    match callee {
+        Expression::Identifier(id) => Some(id),
+        Expression::StaticMemberExpression(member) => root_identifier(&member.object),
+        Expression::ParenthesizedExpression(expr) => root_identifier(&expr.expression),
+        _ => None,
     }
 }
 
@@ -462,52 +519,168 @@ fn expression_path(expr: &Expression) -> Option<Vec<String>> {
     }
 }
 
-fn collect_imports(program: &Program, module: &str) -> Vec<ImportShape> {
+/// Where an import's specifier leads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Imported {
+    /// A module of the analysis, by its module path.
+    Workspace(String),
+    /// A package or file outside the analysis.
+    External,
+    /// Not settled: no [`ImportContext`] to resolve a bare specifier, or
+    /// a relative one whose target is missing.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportedName {
+    Named,
+    Default,
+    Namespace,
+}
+
+/// One local name an `import` declaration, or a destructured dynamic
+/// `import()`, binds.
+#[derive(Debug, Clone)]
+struct ImportBinding {
+    local: String,
+    symbol: Option<SymbolId>,
+    module: Imported,
+    name: ImportedName,
+    /// The exported name, for [`ImportedName::Named`].
+    exported: Option<String>,
+}
+
+impl ImportBinding {
+    /// The lexical import fact, for an import into the workspace.
+    fn shape(&self) -> Option<ImportShape> {
+        let Imported::Workspace(module) = &self.module else {
+            return None;
+        };
+        let target = self
+            .exported
+            .as_deref()
+            .map_or_else(|| module.clone(), |name| qualify_module(module, name));
+        Some(import_shape(
+            Some(self.local.clone()),
+            target,
+            self.exported.clone(),
+        ))
+    }
+}
+
+fn collect_imports(
+    program: &Program,
+    module: &str,
+    context: Option<&ImportContext<'_>>,
+) -> Vec<ImportBinding> {
     let mut out = Vec::new();
     for stmt in &program.body {
         let Statement::ImportDeclaration(import) = stmt else {
             continue;
         };
-        let Some(target_module) = resolve_import_module(module, import.source.value.as_str())
-        else {
-            continue;
-        };
         let Some(specifiers) = &import.specifiers else {
             continue;
         };
+        let imported = imported_module(module, import.source.value.as_str(), context);
         for specifier in specifiers {
-            match specifier {
-                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                    let imported = module_export_name(&specifier.imported);
-                    let local = specifier.local.name.to_string();
-                    let target = imported.as_deref().map_or_else(
-                        || target_module.clone(),
-                        |name| qualify_module(&target_module, name),
-                    );
-                    out.push(import_shape(
-                        Some(local),
-                        target,
-                        imported.map(Some).unwrap_or(None),
-                    ));
-                }
+            let (local, name, exported) = match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => (
+                    &specifier.local,
+                    ImportedName::Named,
+                    module_export_name(&specifier.imported),
+                ),
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                    out.push(import_shape(
-                        Some(specifier.local.name.to_string()),
-                        target_module.clone(),
-                        None,
-                    ));
+                    (&specifier.local, ImportedName::Default, None)
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                    out.push(import_shape(
-                        Some(specifier.local.name.to_string()),
-                        target_module.clone(),
-                        None,
-                    ));
+                    (&specifier.local, ImportedName::Namespace, None)
                 }
-            }
+            };
+            out.push(ImportBinding {
+                local: local.name.to_string(),
+                symbol: local.symbol_id.get(),
+                module: imported.clone(),
+                name,
+                exported,
+            });
         }
     }
     out
+}
+
+/// Locals bound from a dynamic import: `const { a, b: c } = await
+/// import("./m")` binds `a` and `c` as named imports of `./m`, and
+/// `const m = await import("./m")` binds `m` as its namespace. Only the
+/// declaring symbol is recorded, so such a local binds the import in its
+/// own scope and nowhere else.
+struct DynamicImportCollector<'m, 'c> {
+    module: &'m str,
+    context: Option<&'c ImportContext<'c>>,
+    out: Vec<ImportBinding>,
+}
+
+impl<'a> Visit<'a> for DynamicImportCollector<'_, '_> {
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if let Some(specifier) = it.init.as_ref().and_then(dynamic_import_specifier) {
+            let module = imported_module(self.module, specifier, self.context);
+            let mut bind = |local: &BindingIdentifier, name, exported| {
+                self.out.push(ImportBinding {
+                    local: local.name.to_string(),
+                    symbol: local.symbol_id.get(),
+                    module: module.clone(),
+                    name,
+                    exported,
+                });
+            };
+            match &it.id {
+                BindingPattern::BindingIdentifier(id) => bind(id, ImportedName::Namespace, None),
+                BindingPattern::ObjectPattern(pattern) => {
+                    for property in &pattern.properties {
+                        if let (Some(key), Some(local)) = (
+                            property.key.static_name(),
+                            property.value.get_binding_identifier(),
+                        ) && !property.computed
+                        {
+                            bind(local, ImportedName::Named, Some(key.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk::walk_variable_declarator(self, it);
+    }
+}
+
+/// The static specifier of `import("…")` or `await import("…")`.
+fn dynamic_import_specifier<'b>(init: &'b Expression<'b>) -> Option<&'b str> {
+    match init.without_parentheses() {
+        Expression::AwaitExpression(inner) => dynamic_import_specifier(&inner.argument),
+        Expression::ImportExpression(import) => {
+            crate::coupling::static_string_value(&import.source)
+        }
+        _ => None,
+    }
+}
+
+/// Settle where `specifier`, imported by `module`, leads. With a context
+/// the resolver decides, and a specifier it cannot map onto an analysed
+/// file is external; a relative one it cannot find falls back to the
+/// lexical guess, as without a context.
+fn imported_module(module: &str, specifier: &str, context: Option<&ImportContext<'_>>) -> Imported {
+    if let Some(context) = context {
+        if let Some(target) = context
+            .resolver
+            .resolve(context.file, specifier)
+            .and_then(|file| (context.module_of)(&file))
+        {
+            return Imported::Workspace(target);
+        }
+        if !is_relative_specifier(specifier) {
+            return Imported::External;
+        }
+    }
+    resolve_import_module(module, specifier).map_or(Imported::Unknown, Imported::Workspace)
 }
 
 /// Every import in this language names its module, alias, and symbol
@@ -575,9 +748,9 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    /// A callee bound to a closure, a nested `function`, or a
-    /// function-shaped parameter in the caller's own scope is shadowed:
-    /// the resolver must be told so it does not fall back to a same-named
+    /// A bare callee bound anywhere below module scope — a closure, a
+    /// nested `function`, a parameter, any local — is shadowed: the
+    /// resolver must be told so it does not fall back to a same-named
     /// function exported elsewhere. The walker names such a closure
     /// `pump::closure#N`, never `emit`, so nothing legitimate resolves.
     #[rstest]
@@ -594,9 +767,12 @@ mod tests {
         "function pump(flag: boolean) { if (flag) { const emit = () => {}; emit(1); } }",
         true
     )]
-    #[case::plain_local("function pump() { const emit = compute(); emit(1); }", false)]
-    #[case::value_param("function pump(emit: number) { emit(1); }", false)]
+    // Scope binding, not syntax, decides: whatever the local holds, it is
+    // not a workspace declaration named `emit`.
+    #[case::plain_local("function pump() { const emit = compute(); emit(1); }", true)]
+    #[case::untyped_param("function pump(emit) { emit(1); }", true)]
     #[case::unbound_name("function pump() { emit(1); }", false)]
+    #[case::module_scope("const emit = () => {}; function pump() { emit(1); }", false)]
     fn local_callable_bindings_shadow_bare_calls(#[case] source: &str, #[case] expected: bool) {
         let call = extract_call_shapes_with_module(source, Dialect::Ts, "src::m")
             .unwrap()
@@ -607,6 +783,194 @@ mod tests {
             })
             .expect("emit call site in pump");
         assert_eq!(call.callee_is_locally_bound(), expected);
+    }
+
+    fn binding_of(source: &str, callee: &str) -> SyntaxFact<CalleeBinding> {
+        extract_call_shapes_with_module(source, Dialect::Ts, "app::main")
+            .unwrap()
+            .into_iter()
+            .find(|call| call.callee_path().as_deref() == Some(callee))
+            .unwrap_or_else(|| panic!("no call to {callee}"))
+            .callee_binding
+    }
+
+    /// `oxc_semantic` settles the callee's leading name: a module-scope
+    /// declaration, a relative import (aliased, namespace, or through a
+    /// class), or a global. Without an [`ImportContext`] a bare import
+    /// and a default import stay unsettled.
+    #[rstest]
+    #[case::module_function(
+        "function helper() {} function f() { helper(); }",
+        "helper",
+        Some("app::main::helper")
+    )]
+    #[case::module_class_static(
+        "class Api { static create() {} } function f() { Api.create(); }",
+        "Api::create",
+        Some("app::main::Api::create")
+    )]
+    #[case::aliased_import(
+        "import { helper as h } from './util'; function f() { h(); }",
+        "h",
+        Some("app::util::helper")
+    )]
+    #[case::namespace_import(
+        "import * as util from './util'; function f() { util.helper(); }",
+        "util::helper",
+        Some("app::util::helper")
+    )]
+    #[case::imported_class(
+        "import { Api } from '../api'; function f() { Api.create(); }",
+        "Api::create",
+        Some("api::Api::create")
+    )]
+    #[case::dynamic_import_destructured(
+        "async function f() { const { helper: h } = await import('./util'); h(); }",
+        "h",
+        Some("app::util::helper")
+    )]
+    #[case::dynamic_import_namespace(
+        "async function f() { const util = await import('./util'); util.helper(); }",
+        "util::helper",
+        Some("app::util::helper")
+    )]
+    #[case::parenthesized_callee(
+        "function helper() {} function f() { (helper)(); }",
+        "helper",
+        Some("app::main::helper")
+    )]
+    // Calling the namespace object itself names no function.
+    #[case::namespace_called_directly(
+        "import * as util from './util'; function f() { util(); }",
+        "util",
+        None
+    )]
+    #[case::default_import("import h from './util'; function f() { h(); }", "h", None)]
+    #[case::bare_import_without_context(
+        "import { h } from 'lib'; function f() { h(); }",
+        "h",
+        None
+    )]
+    #[case::local("function f() { const h = () => {}; h(); }", "h", None)]
+    fn callee_bindings(#[case] source: &str, #[case] callee: &str, #[case] expected: Option<&str>) {
+        let expected = expected.map_or(SyntaxFact::Unknown, |target| {
+            SyntaxFact::Known(CalleeBinding::Declaration(target.to_owned()))
+        });
+        assert_eq!(binding_of(source, callee), expected);
+    }
+
+    /// Only a default or namespace import into the workspace is a
+    /// namespace alias, making `alias.member()` a path call; a named
+    /// import's `.member()` is a call on a value, and an unsettled
+    /// namespace is no known module.
+    #[rstest]
+    #[case::namespace("import * as api from './api'; function f() { api.get(); }", false)]
+    #[case::default("import api from './api'; function f() { api.get(); }", false)]
+    #[case::named_value("import { api } from './api'; function f() { api.get(); }", true)]
+    #[case::unsettled_namespace("import * as api from 'lib'; function f() { api.get(); }", true)]
+    fn namespace_aliases_are_workspace_default_or_namespace_imports(
+        #[case] source: &str,
+        #[case] receiver_call: bool,
+    ) {
+        let call = extract_call_shapes_with_module(source, Dialect::Ts, "app::main")
+            .unwrap()
+            .into_iter()
+            .find(|call| call.callee_name() == Some("get"))
+            .expect("get call");
+        assert_eq!(call.has_receiver_expression(), receiver_call);
+    }
+
+    #[rstest]
+    #[case::global_function("function f() { fetch('/'); }", "fetch")]
+    #[case::global_object("function f() { JSON.parse('1'); }", "JSON::parse")]
+    #[case::test_global("function f() { expect(1); }", "expect")]
+    fn globals_bind_external(#[case] source: &str, #[case] callee: &str) {
+        assert_eq!(
+            binding_of(source, callee),
+            SyntaxFact::Known(CalleeBinding::External)
+        );
+    }
+
+    /// With an [`ImportContext`], imports resolve through tsconfig paths
+    /// and workspace members, and an import that lands on no analysed
+    /// file is external.
+    #[test]
+    fn import_context_resolves_aliases_and_marks_packages_external() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (rel, content) in [
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}"#,
+            ),
+            ("src/main.ts", ""),
+            ("src/lib/db.ts", "export function query() {}"),
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+        let resolver = ModuleResolver::new(root);
+        let module_of = |file: &Path| {
+            file.strip_prefix(root)
+                .ok()
+                .map(|rel| crate::module_segments(rel).join("::"))
+        };
+        let file = root.join("src/main.ts");
+        let context = ImportContext {
+            file: &file,
+            resolver: &resolver,
+            module_of: &module_of,
+        };
+        let source = "import { query } from '@/lib/db';\n\
+                      import { useState } from 'react';\n\
+                      import { gone } from './missing';\n\
+                      import { lost } from '../missing';\n\
+                      function f() { query(); useState(); gone(); lost(); }\n";
+        let calls =
+            extract_call_shapes_with_imports(source, Dialect::Ts, "src::main", &context).unwrap();
+        let binding = |name: &str| {
+            calls
+                .iter()
+                .find(|call| call.callee_name() == Some(name))
+                .map(|call| call.callee_binding.clone())
+        };
+        assert_eq!(
+            binding("query"),
+            Some(SyntaxFact::Known(CalleeBinding::Declaration(
+                "src::lib::db::query".to_owned()
+            )))
+        );
+        assert_eq!(
+            binding("useState"),
+            Some(SyntaxFact::Known(CalleeBinding::External))
+        );
+        // A relative import the resolver cannot find is not external: it
+        // keeps the lexical guess, as without a context.
+        for (callee, target) in [("gone", "src::missing::gone"), ("lost", "missing::lost")] {
+            assert_eq!(
+                binding(callee),
+                Some(SyntaxFact::Known(CalleeBinding::Declaration(
+                    target.to_owned()
+                ))),
+                "{callee}",
+            );
+        }
+        let imports = &calls[0].visible_imports;
+        assert_eq!(
+            imports[0],
+            ImportShape::known(
+                "src::lib::db::query".to_owned(),
+                Some("query".to_owned()),
+                Some("query".to_owned()),
+            ),
+        );
+        assert!(
+            !imports
+                .iter()
+                .any(|import| import.local_alias == SyntaxFact::Known(Some("useState".to_owned()))),
+            "an external import is no lexical import fact",
+        );
     }
 
     /// A binding in one function does not shadow the same name in

@@ -1919,6 +1919,7 @@ mod tests {
             // argument facts for this site.
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
+            callee_binding: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 2,

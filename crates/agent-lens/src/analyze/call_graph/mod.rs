@@ -311,6 +311,17 @@ impl CallGraphBuilder {
         // produces — match the sequential walk's exactly.
         let index = AnalysisIndex::active();
         let crate_cache = Mutex::new(CrateNameCache::new());
+        // One resolver for the whole scan: it caches every manifest and
+        // tsconfig it reads, and TS/JS imports resolve through it.
+        let ts_resolver = sources
+            .iter()
+            .any(|file| {
+                matches!(
+                    SourceLang::from_path(&file.path),
+                    Some(SourceLang::TypeScript(_))
+                )
+            })
+            .then(|| lens_ts::ModuleResolver::new(roots.base()));
         let files = sources
             .par_iter()
             .map(|source_file| {
@@ -322,7 +333,13 @@ impl CallGraphBuilder {
                     // down every call-graph analyzer.
                     skip_parse_error_if_walked(
                         source_file,
-                        self.scan_file(roots.base(), source_file, path_is_test, &crate_cache),
+                        self.scan_file(
+                            roots.base(),
+                            source_file,
+                            path_is_test,
+                            &crate_cache,
+                            ts_resolver.as_ref(),
+                        ),
                     )
                 })
             })
@@ -368,6 +385,7 @@ impl CallGraphBuilder {
         file: &SourceFile,
         path_is_test: bool,
         crate_cache: &Mutex<CrateNameCache>,
+        ts_resolver: Option<&lens_ts::ModuleResolver>,
     ) -> Result<FileGraphInput, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
         let crate_info = match lang {
@@ -389,7 +407,19 @@ impl CallGraphBuilder {
             .iter()
             .map(|f| self.includes_function(f, path_is_test))
             .collect();
-        let calls = extract_call_shapes(lang, &source, &module, !self.exclude_tests)?;
+        let module_of = |path: &Path| module_path::ts_module_path_for_path(root, path);
+        let ts_imports = ts_resolver.map(|resolver| lens_ts::ImportContext {
+            file: &file.path,
+            resolver,
+            module_of: &module_of,
+        });
+        let calls = extract_call_shapes(
+            lang,
+            &source,
+            &module,
+            !self.exclude_tests,
+            ts_imports.as_ref(),
+        )?;
         // Complexity (node weights) and wrapper findings (delegation
         // facts) are the same facts `analyze complexity` and `analyze
         // wrapper` report, so both go through the shared index helpers.
@@ -533,21 +563,25 @@ fn extract_function_shapes_uncached(
     }
 }
 
+/// `ts_imports` resolves a TS/JS file's imports; the module path already
+/// names the file, so it needs no place in the index key.
 fn extract_call_shapes(
     lang: SourceLang,
     source: &str,
     module: &str,
     include_cfg_test_blocks: bool,
+    ts_imports: Option<&lens_ts::ImportContext<'_>>,
 ) -> Result<Arc<Vec<CallShape>>, AnalyzerError> {
+    let extract =
+        || extract_call_shapes_uncached(lang, source, module, include_cfg_test_blocks, ts_imports);
     match AnalysisIndex::active() {
         Some(index) => index.call_shapes(
             SourceKey::new(lang, source),
             module,
             include_cfg_test_blocks,
-            || extract_call_shapes_uncached(lang, source, module, include_cfg_test_blocks),
+            extract,
         ),
-        None => extract_call_shapes_uncached(lang, source, module, include_cfg_test_blocks)
-            .map(Arc::new),
+        None => extract().map(Arc::new),
     }
 }
 
@@ -556,6 +590,7 @@ fn extract_call_shapes_uncached(
     source: &str,
     module: &str,
     include_cfg_test_blocks: bool,
+    ts_imports: Option<&lens_ts::ImportContext<'_>>,
 ) -> Result<Vec<CallShape>, AnalyzerError> {
     match lang {
         SourceLang::Rust => lens_rust::extract_call_shapes_with_options_and_base_module(
@@ -566,9 +601,13 @@ fn extract_call_shapes_uncached(
             module,
         )
         .map_err(parse_err),
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_call_shapes_with_module(source, dialect, module).map_err(parse_err)
+        SourceLang::TypeScript(dialect) => match ts_imports {
+            Some(imports) => {
+                lens_ts::extract_call_shapes_with_imports(source, dialect, module, imports)
+            }
+            None => lens_ts::extract_call_shapes_with_module(source, dialect, module),
         }
+        .map_err(parse_err),
         SourceLang::Python => {
             lens_py::extract_call_shapes_with_module(source, module).map_err(parse_err)
         }

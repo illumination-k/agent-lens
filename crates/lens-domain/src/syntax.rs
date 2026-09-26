@@ -360,9 +360,27 @@ pub struct CallShape {
     /// `Unknown` when the adapter does not track local scopes; consumers
     /// then behave as if the callee were not locally bound.
     pub callee_is_locally_bound: SyntaxFact<bool>,
+    /// The declaration the callee's leading name refers to, when the
+    /// adapter bound the reference semantically (scopes and imports, not
+    /// name matching). `Unknown` when it did not, or when the callee is
+    /// not a plain name or path; consumers then fall back to name-based
+    /// resolution.
+    pub callee_binding: SyntaxFact<CalleeBinding>,
     pub lexical_resolution: LexicalResolutionStatus,
     pub visible_imports: Vec<ImportShape>,
     pub line: usize,
+}
+
+/// What a call's callee was bound to — see [`CallShape::callee_binding`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CalleeBinding {
+    /// A workspace declaration: the fully qualified name the call
+    /// targets (`app::util::helper`, or `app::api::Client::create` for a
+    /// path through an imported class).
+    Declaration(String),
+    /// Nothing the workspace declares: an ambient global (`fetch`,
+    /// `describe`) or an import from an external package (`react`).
+    External,
 }
 
 impl CallShape {
@@ -403,6 +421,10 @@ impl CallShape {
     /// scopes on the pre-existing resolution path.
     pub fn callee_is_locally_bound(&self) -> bool {
         matches!(self.callee_is_locally_bound, SyntaxFact::Known(true))
+    }
+
+    pub fn callee_binding(&self) -> Option<&CalleeBinding> {
+        self.callee_binding.known_value()
     }
 
     pub fn has_receiver_expression(&self) -> bool {
@@ -609,6 +631,7 @@ mod tests {
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::Expression),
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
+            callee_binding: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 12,
@@ -647,6 +670,16 @@ mod tests {
         assert!(call.callee_is_locally_bound());
         assert!(!not_bound.callee_is_locally_bound());
         assert!(!unknown.callee_is_locally_bound());
+    }
+
+    #[test]
+    fn callee_binding_reads_only_a_known_binding() {
+        let bound = CallShape {
+            callee_binding: SyntaxFact::Known(CalleeBinding::External),
+            ..call_shape()
+        };
+        assert_eq!(bound.callee_binding(), Some(&CalleeBinding::External));
+        assert_eq!(call_shape().callee_binding(), None);
     }
 
     #[test]
@@ -750,6 +783,7 @@ mod tests {
             receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::None),
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Unknown,
+            callee_binding: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 1,

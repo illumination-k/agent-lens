@@ -6,6 +6,8 @@ allow = [
   "ISC",
   "Unicode-3.0",
   "Unicode-DFS-2016",
+  # `foldhash`, hashbrown's default hasher (via oxc_resolver's simd-json).
+  "Zlib",
 ]
 confidence-threshold = 0.8
 
@@ -38,6 +40,12 @@ skip = [
   # `clap_derive` and `thiserror-impl` have moved to syn 3 while the rest of the
   # proc-macro ecosystem (serde_derive, tracing-attributes, oxc_ast_macros, and
   # `lens-rust`'s own parser) is still on syn 2.
+  # `oxc_resolver` pins `dashmap` 6 (hashbrown 0.14) and `simd-json`
+  # (halfbrown → hashbrown 0.16), while oxc and ruff are on 0.17.
+  { crate = "hashbrown@0.14", reason = "dashmap 6 (via oxc_resolver) lags hashbrown 0.17" },
+  { crate = "hashbrown@0.16", reason = "halfbrown (via oxc_resolver's simd-json) lags hashbrown 0.17" },
+  # `oxc_semantic` moved to itertools 0.15; the ruff crates are still on 0.14.
+  { crate = "itertools@0.14", reason = "ruff_python_trivia lags oxc_semantic's itertools 0.15" },
   { crate = "syn@2", reason = "proc-macro ecosystem and lens-rust are still on syn 2; clap_derive and thiserror-impl are on syn 3" },
 ]
 

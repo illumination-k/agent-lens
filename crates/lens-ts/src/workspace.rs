@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::parser::MODULE_EXTENSIONS;
+
 /// `exports` conditions in the order a source-level resolver should try
 /// them. `types` is deliberately absent: a `.d.ts` is not the module.
 const EXPORT_CONDITIONS: &[&str] = &[
@@ -29,8 +31,8 @@ const EXPORT_CONDITIONS: &[&str] = &[
 ];
 
 /// Build-output directories whose files usually mirror `src/`. A manifest
-/// that points `main` at `./dist/index.js` still names `src/index.ts`
-/// when the package has not been built.
+/// that points `main` at `./dist/index.js` names `src/index.ts`, built or
+/// not: the build output is not the source an analysis reads.
 const BUILD_DIRS: &[&str] = &["dist", "lib", "build", "out"];
 
 /// Directories never searched for member packages.
@@ -192,16 +194,13 @@ fn resolve_in_package(dir: &Path, target: &str) -> Option<PathBuf> {
     if target.starts_with('/') || target.split('/').any(|part| part == "..") {
         return None;
     }
-    let joined = dir.join(target);
-    if let Some(found) = existing_source(&joined) {
-        return Some(found);
-    }
-    // `./dist/index.js` before a build: try the mirrored `src/` file.
-    let (first, rest) = target.split_once('/')?;
-    if !BUILD_DIRS.contains(&first) {
-        return None;
-    }
-    existing_source(&dir.join("src").join(rest))
+    // `./dist/index.js` names build output that mirrors `src/`: the
+    // mirrored source is the module, built or not.
+    let mirrored = target
+        .split_once('/')
+        .filter(|(first, _)| BUILD_DIRS.contains(first))
+        .and_then(|(_, rest)| existing_source(&dir.join("src").join(rest)));
+    mirrored.or_else(|| existing_source(&dir.join(target)))
 }
 
 /// `path` itself when it is a source file, else the file or `index` the
@@ -210,11 +209,25 @@ fn existing_source(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
         return is_source_file(path).then(|| path.to_path_buf());
     }
-    crate::coupling::probe_module(path).filter(|found| is_source_file(found))
+    probe_module(path).filter(|found| is_source_file(found))
+}
+
+/// The file the TS resolver picks for an extensionless `path`: `path`
+/// with a module extension, else an `index` file inside it.
+fn probe_module(path: &Path) -> Option<PathBuf> {
+    MODULE_EXTENSIONS
+        .iter()
+        .map(|ext| path.with_extension(ext))
+        .chain(
+            MODULE_EXTENSIONS
+                .iter()
+                .map(|ext| path.join(format!("index.{ext}"))),
+        )
+        .find(|candidate| candidate.exists())
 }
 
 /// A code file the parser handles, and not a declaration file.
-fn is_source_file(path: &Path) -> bool {
+pub(crate) fn is_source_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     crate::parser::Dialect::from_path(path).is_some()
         && ![".d.ts", ".d.mts", ".d.cts"]
@@ -497,6 +510,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pkg = dir.path().join("pkg");
         write(&pkg.join("src/index.ts"), "");
+        write(&pkg.join("dist/index.js"), "");
         write(&pkg.join("src/types.d.ts"), "");
         write(&pkg.join("data.json"), "");
         write(&dir.path().join("outside.ts"), "");
@@ -506,7 +520,8 @@ mod tests {
             resolve_in_package(&pkg, "./src/index.ts"),
             Some(pkg.join("src/index.ts"))
         );
-        // Build output mirrors `src/`; another directory does not.
+        // Build output mirrors `src/`, even once built; another
+        // directory does not.
         assert_eq!(
             resolve_in_package(&pkg, "./dist/index.js"),
             Some(pkg.join("src/index.ts"))
