@@ -4,12 +4,12 @@
 //! flattened into a preorder sequence of node tokens, and similarity is
 //! the weighted Jaccard overlap of the two token k-gram multisets. This is
 //! cheaper than TSED and more tolerant of reordered code, at the cost of
-//! some precision — see [`super::SimilarityMethod`].
+//! some precision — see `SimilarityMethod::Token` in `agent-lens`.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use lens_domain::TreeNode;
+use crate::TreeNode;
 
 /// Width of the token k-gram window. Matches the preorder shingle width
 /// used by the LSH candidate filter, so the token score stays close to
@@ -19,7 +19,7 @@ const SHINGLE_WIDTH: usize = 3;
 /// Flattened token view of one function body, precomputed once per
 /// function so pairwise scoring never re-walks the tree.
 #[derive(Debug)]
-pub(super) struct TokenProfile {
+pub struct TokenProfile {
     token_count: usize,
     unigrams: HashMap<u64, usize>,
     shingles: HashMap<u64, usize>,
@@ -30,7 +30,7 @@ impl TokenProfile {
     /// unigram and k-gram multisets. `compare_values` mirrors the APTED
     /// option: when set, leaf values (identifiers, literals) fold into the
     /// token; otherwise only structural labels are compared.
-    pub(super) fn from_tree(tree: &TreeNode, compare_values: bool) -> Self {
+    pub fn from_tree(tree: &TreeNode, compare_values: bool) -> Self {
         let mut tokens = Vec::new();
         collect_tokens(tree, compare_values, &mut tokens);
         let unigrams = multiset(tokens.iter().copied());
@@ -48,7 +48,7 @@ impl TokenProfile {
 /// Uses k-gram multisets when both bodies have at least [`SHINGLE_WIDTH`]
 /// tokens; tiny bodies fall back to the unigram multiset so the score
 /// stays defined (their k-gram sets would be empty and incomparable).
-pub(super) fn token_similarity(a: &TokenProfile, b: &TokenProfile) -> f64 {
+pub fn token_similarity(a: &TokenProfile, b: &TokenProfile) -> f64 {
     if a.token_count >= SHINGLE_WIDTH && b.token_count >= SHINGLE_WIDTH {
         weighted_jaccard(&a.shingles, &b.shingles)
     } else {

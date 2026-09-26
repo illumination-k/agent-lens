@@ -76,6 +76,9 @@
 //!   with. Adapters describe their label vocabulary through
 //!   [`DependenceVocabulary`]; graph construction and the kernel live
 //!   here.
+//! * [`signature_similarity`] and [`token_similarity`] — the signature
+//!   component of a `similarity` pair score, and the token k-gram body
+//!   score `similarity --method token` uses in place of TSED.
 //! * [`wrapper`] — thin-wrapper finding shape. Adapters decide what
 //!   counts as a trivial adapter in their grammar; the result type is
 //!   shared so `agent-lens` can dispatch on language without per-adapter
@@ -101,8 +104,10 @@ pub mod naming;
 pub mod pdg;
 pub mod risk;
 pub mod search;
+pub mod signature_similarity;
 pub mod source_walk;
 pub mod syntax;
+pub mod token_similarity;
 pub mod tree;
 pub mod tsed;
 pub mod type_shape;
@@ -158,6 +163,9 @@ pub use search::{
     Bm25Options, FuzzyOptions, IndexOptions, SearchDocument, SearchField, SearchHit, SearchIndex,
     TermScore,
 };
+pub use signature_similarity::{
+    SignatureComponents, count_similarity, signature_components, token_overlap,
+};
 pub use source_walk::{IncludeAll, SourceFilter, collect_files_with_extension};
 pub use syntax::{
     ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, InterfaceMethodShape,
@@ -165,6 +173,7 @@ pub use syntax::{
     ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact, TraitDeclShape, TraitImplShape,
     VisibilityShape, callee_names_local_binding,
 };
+pub use token_similarity::{TokenProfile, token_similarity};
 pub use tree::TreeNode;
 pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};
 pub use type_shape::{
