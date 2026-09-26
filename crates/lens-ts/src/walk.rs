@@ -35,8 +35,9 @@
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use oxc_syntax::scope::ScopeFlags;
+use oxc_syntax::symbol::SymbolId;
 
-use lens_domain::LineIndex;
+use lens_domain::{LineIndex, qualify};
 
 use crate::harness::{CLOSURE_CALLEE, call_title, harness_callee, synthetic_segment};
 
@@ -65,6 +66,12 @@ pub(crate) struct FunctionItem<'a> {
     /// declarations, the item itself otherwise. `None` for nested
     /// closures, which never carry their own doc block.
     pub doc_attach_start: Option<u32>,
+    /// The symbol the function is declared as — a function declaration's
+    /// name, or the `const` / `let` its expression initialises — when the
+    /// AST was run through semantic analysis. Lets a call through that
+    /// name find this unit, whatever the walker named it
+    /// (`setup::closure#2` for a nested `function helper() {}`).
+    pub binding: Option<SymbolId>,
 }
 
 /// Receiver for function-shaped items found by [`walk_program`].
@@ -105,10 +112,10 @@ fn walk_stmt<V: FunctionVisitor>(
         Statement::FunctionDeclaration(f) => {
             visit_function(f, owner, f.span.start, line_index, visitor);
         }
-        Statement::ClassDeclaration(c) => walk_class(c, line_index, visitor),
+        Statement::ClassDeclaration(c) => walk_class(c, owner, line_index, visitor),
         Statement::VariableDeclaration(v) => {
             for d in &v.declarations {
-                visit_variable_declarator(d, v.span.start, line_index, visitor);
+                visit_variable_declarator(d, owner, v.span.start, line_index, visitor);
             }
         }
         Statement::ExportNamedDeclaration(e) => {
@@ -120,16 +127,14 @@ fn walk_stmt<V: FunctionVisitor>(
             ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
                 visit_function(f, owner, e.span.start, line_index, visitor);
             }
-            ExportDefaultDeclarationKind::ClassDeclaration(c) => walk_class(c, line_index, visitor),
+            ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                walk_class(c, owner, line_index, visitor);
+            }
             _ => {}
         },
-        Statement::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                walk_module_body(body, line_index, visitor, units);
-            }
-        }
+        Statement::TSModuleDeclaration(m) => walk_module(m, owner, line_index, visitor, units),
         Statement::ExpressionStatement(e) => {
-            scan_expression_functions(&e.expression, line_index, visitor, units);
+            scan_expression_functions(&e.expression, owner, line_index, visitor, units);
         }
         _ => {}
     }
@@ -147,47 +152,60 @@ fn walk_decl<V: FunctionVisitor>(
         Declaration::FunctionDeclaration(f) => {
             visit_function(f, owner, attach_start, line_index, visitor);
         }
-        Declaration::ClassDeclaration(c) => walk_class(c, line_index, visitor),
+        Declaration::ClassDeclaration(c) => walk_class(c, owner, line_index, visitor),
         Declaration::VariableDeclaration(v) => {
             for d in &v.declarations {
-                visit_variable_declarator(d, attach_start, line_index, visitor);
+                visit_variable_declarator(d, owner, attach_start, line_index, visitor);
             }
         }
-        Declaration::TSModuleDeclaration(m) => {
-            if let Some(body) = &m.body {
-                walk_module_body(body, line_index, visitor, units);
-            }
-        }
+        Declaration::TSModuleDeclaration(m) => walk_module(m, owner, line_index, visitor, units),
         _ => {}
     }
 }
 
-fn walk_module_body<V: FunctionVisitor>(
-    body: &TSModuleDeclarationBody,
+/// A `namespace` body: everything declared in it is named under the
+/// namespace (`Result::combine` for `namespace Result { function combine }`,
+/// `A::B::f` for `namespace A.B`), which is how every caller outside it
+/// spells the function. A string-named `declare module "pkg"` adds no
+/// segment: it declares a module's types, not a value to call through.
+fn walk_module<V: FunctionVisitor>(
+    module: &TSModuleDeclaration,
+    owner: Option<&str>,
     line_index: &LineIndex,
     visitor: &mut V,
     units: &mut ModuleUnitCounter,
 ) {
+    let scope = match &module.id {
+        TSModuleDeclarationName::Identifier(id) => Some(qualify(owner, id.name.as_str())),
+        TSModuleDeclarationName::StringLiteral(_) => owner.map(ToOwned::to_owned),
+    };
+    let Some(body) = &module.body else { return };
     match body {
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                walk_stmt(stmt, None, line_index, visitor, units);
+                walk_stmt(stmt, scope.as_deref(), line_index, visitor, units);
             }
         }
         TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-            if let Some(body) = &nested.body {
-                walk_module_body(body, line_index, visitor, units);
-            }
+            walk_module(nested, scope.as_deref(), line_index, visitor, units);
         }
     }
 }
 
-fn walk_class<V: FunctionVisitor>(class: &Class, line_index: &LineIndex, visitor: &mut V) {
-    let class_name = class
-        .id
-        .as_ref()
-        .map(|i| i.name.as_str())
-        .unwrap_or("anonymous");
+fn walk_class<V: FunctionVisitor>(
+    class: &Class,
+    owner: Option<&str>,
+    line_index: &LineIndex,
+    visitor: &mut V,
+) {
+    let class_name = qualify(
+        owner,
+        class
+            .id
+            .as_ref()
+            .map(|i| i.name.as_str())
+            .unwrap_or("anonymous"),
+    );
     for elem in &class.body.body {
         if let ClassElement::MethodDefinition(m) = elem
             && let Some(body) = &m.value.body
@@ -203,6 +221,7 @@ fn walk_class<V: FunctionVisitor>(class: &Class, line_index: &LineIndex, visitor
                 is_constructor: matches!(m.kind, MethodDefinitionKind::Constructor),
                 is_argument: false,
                 doc_attach_start: Some(m.span.start),
+                binding: None,
             });
             scan_nested_functions(&qualified, body, line_index, visitor);
         }
@@ -222,10 +241,7 @@ fn visit_function<V: FunctionVisitor>(
         .as_ref()
         .map(|i| i.name.as_str())
         .unwrap_or("anonymous");
-    let name = match owner {
-        Some(o) => format!("{o}::{raw_name}"),
-        None => raw_name.to_owned(),
-    };
+    let name = qualify(owner, raw_name);
     visitor.on_function(FunctionItem {
         name: name.clone(),
         start_line: line_index.line(func.span.start),
@@ -235,12 +251,14 @@ fn visit_function<V: FunctionVisitor>(
         is_constructor: false,
         is_argument: false,
         doc_attach_start: Some(attach_start),
+        binding: func.id.as_ref().and_then(|id| id.symbol_id.get()),
     });
     scan_nested_functions(&name, body, line_index, visitor);
 }
 
 fn visit_variable_declarator<V: FunctionVisitor>(
     decl: &VariableDeclarator,
+    owner: Option<&str>,
     attach_start: u32,
     line_index: &LineIndex,
     visitor: &mut V,
@@ -249,7 +267,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
     let Some(id) = decl.id.get_binding_identifier() else {
         return;
     };
-    let name = id.name.to_string();
+    let name = qualify(owner, id.name.as_str());
     match init {
         Expression::ArrowFunctionExpression(arrow) => {
             visitor.on_function(FunctionItem {
@@ -261,6 +279,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                 is_constructor: false,
                 is_argument: false,
                 doc_attach_start: Some(attach_start),
+                binding: id.symbol_id.get(),
             });
             scan_nested_functions(&name, &arrow.body, line_index, visitor);
         }
@@ -275,6 +294,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                     is_constructor: false,
                     is_argument: false,
                     doc_attach_start: Some(attach_start),
+                    binding: id.symbol_id.get(),
                 });
                 scan_nested_functions(&name, body, line_index, visitor);
             }
@@ -303,6 +323,7 @@ fn scan_nested_functions<V: FunctionVisitor>(
         parent,
         line_index,
         counter: 0,
+        binding: None,
     };
     scanner.visit_function_body(body);
 }
@@ -314,15 +335,17 @@ fn scan_nested_functions<V: FunctionVisitor>(
 /// are bare segments: `describe#1("groupFor")`, `closure#4`.
 fn scan_expression_functions<V: FunctionVisitor>(
     expr: &Expression,
+    owner: Option<&str>,
     line_index: &LineIndex,
     visitor: &mut V,
     units: &mut ModuleUnitCounter,
 ) {
     let mut scanner = NestedScanner {
         visitor,
-        parent: "",
+        parent: owner.unwrap_or(""),
         line_index,
         counter: units.0,
+        binding: None,
     };
     scanner.visit_expression(expr);
     units.0 = scanner.counter;
@@ -342,6 +365,9 @@ struct NestedScanner<'s, V> {
     parent: &'s str,
     line_index: &'s LineIndex,
     counter: usize,
+    /// The symbol the next emitted unit is declared as; see
+    /// [`FunctionItem::binding`].
+    binding: Option<SymbolId>,
 }
 
 impl<V: FunctionVisitor> NestedScanner<'_, V> {
@@ -369,6 +395,7 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
             is_constructor: false,
             is_argument,
             doc_attach_start: None,
+            binding: self.binding.take(),
         });
         scan_nested_functions(&name, body, self.line_index, self.visitor);
     }
@@ -377,6 +404,13 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
 impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: ScopeFlags) {
         if let Some(body) = &func.body {
+            // `const f = function g() {}` is called as `f`: the
+            // declarator's symbol, already pending, wins.
+            if self.binding.is_none()
+                && let Some(id) = &func.id
+            {
+                self.binding = id.symbol_id.get();
+            }
             self.emit(
                 CLOSURE_CALLEE,
                 None,
@@ -397,6 +431,18 @@ impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
             arrow.span.start,
             false,
         );
+    }
+
+    /// `const helper = () => …` names its closure: the unit is emitted by
+    /// the default walk of the initialiser, as any other, but carries the
+    /// declared symbol.
+    fn visit_variable_declarator(&mut self, decl: &VariableDeclarator<'a>) {
+        if let (BindingPattern::BindingIdentifier(id), Some(init)) = (&decl.id, &decl.init)
+            && callback_shape(init).is_some()
+        {
+            self.binding = id.symbol_id.get();
+        }
+        walk::walk_variable_declarator(self, decl);
     }
 
     /// A function written inline as an argument (`xs.map((x) => f(x))`,

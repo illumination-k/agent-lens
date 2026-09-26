@@ -62,10 +62,22 @@ export function either(s: Sq | Circle): number {
 `;
 
 const B = `import { run as r, Sq } from "./a";
+import { typed as t } from "./c";
 export function main() {
-  return r(new Sq(1));
+  return r(new Sq(1)) + t(1);
 }
 main();
+`;
+
+const C = `export const typed: <T>(x: T) => T = (x) => x;
+export function useTyped(): number {
+  return typed(1);
+}
+interface Api { set(n: number): void }
+export const indexed: Api["set"] = (n) => {};
+export function useIndexed(): void {
+  indexed(1);
+}
 `;
 
 let dir;
@@ -76,6 +88,7 @@ before(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-ts-"));
   fs.writeFileSync(path.join(dir, "a.ts"), A);
   fs.writeFileSync(path.join(dir, "b.ts"), B);
+  fs.writeFileSync(path.join(dir, "c.ts"), C);
   fs.writeFileSync(path.join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { experimentalDecorators: true, strict: true } }));
   ({ doc } = run(dir));
   edges = new Set(doc.edges.map((e) => `${e.caller_file}:${e.caller_def_line}@${e.call_line} -> ${e.callee_file}:${e.callee_def_line} ${e.dispatch}`));
@@ -92,8 +105,8 @@ test("direct function and method calls are static", () => {
 });
 
 test("import aliases and constructors", () => {
-  assert.ok(edges.has("b.ts:2@3 -> a.ts:31 static")); // r(...) is run
-  assert.ok(edges.has("b.ts:2@3 -> a.ts:11 static")); // new Sq(1) -> constructor
+  assert.ok(edges.has("b.ts:3@4 -> a.ts:31 static")); // r(...) is run
+  assert.ok(edges.has("b.ts:3@4 -> a.ts:11 static")); // new Sq(1) -> constructor
   assert.ok(edges.has("a.ts:31@33 -> a.ts:11 static"));
 });
 
@@ -122,6 +135,13 @@ test("the caller is the innermost function, anonymous ones included", () => {
 });
 
 test("module top-level calls are dropped and every file is analysed", () => {
-  assert.ok(![...edges].some((e) => e.startsWith("b.ts:") && e.includes("@5 ")));
-  assert.deepEqual(doc.analyzed_files, ["a.ts", "b.ts"]);
+  assert.ok(![...edges].some((e) => e.startsWith("b.ts:") && e.includes("@6 ")));
+  assert.deepEqual(doc.analyzed_files, ["a.ts", "b.ts", "c.ts"]);
+});
+
+test("a call through a type-annotated const reaches its initializer", () => {
+  assert.ok(edges.has("c.ts:2@3 -> c.ts:1 static")); // typed(1)
+  assert.ok(edges.has("b.ts:3@4 -> c.ts:1 static")); // t(1): the same const, imported under an alias
+  assert.ok(edges.has("c.ts:7@8 -> c.ts:6 static")); // indexed(1): Api["set"] resolves to Api
+  assert.ok(![...edges].some((e) => e.startsWith("c.ts:7@8") && e.includes("-> c.ts:5 ")));
 });

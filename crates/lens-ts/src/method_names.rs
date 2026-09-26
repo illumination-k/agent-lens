@@ -31,6 +31,9 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "clear",
     "codePointAt",
     "concat",
+    // Every object's `.constructor`: `draft.arr.constructor(1)` is
+    // `Array`, never a workspace class's `constructor` method.
+    "constructor",
     "copyWithin",
     "create",
     "debug",
