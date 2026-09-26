@@ -495,6 +495,13 @@ Language coverage per analyzer:
 analyzed language does (`crate::analyze::coupling`, `github.com/x/proj/internal/store`,
 `components/Chat`, `util.text`); TS/JS and Python modules are one per file.
 
+TS/JS module graphs follow relative imports and, in a monorepo, imports of
+workspace member packages (`package.json#workspaces` or
+`pnpm-workspace.yaml`): `import { Button } from "@acme/ui"` becomes an edge
+into that package's source, resolved through its `exports` / `main` fields
+and falling back to `src/` when those point at unbuilt output. Other bare
+specifiers (`react`, `node:fs`) and `tsconfig` path aliases stay external.
+
 In TypeScript / JavaScript, callbacks registered with a recognised test
 harness (`describe`, `it`, `test`, hooks, `it.skip`-style chains) are units
 named after the callee and its literal title — so a vitest / jest suite is not

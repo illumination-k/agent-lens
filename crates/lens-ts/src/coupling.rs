@@ -3,7 +3,10 @@
 //! Unlike `lens-rust` (which walks Rust `mod` trees), TS/JS coupling is
 //! modeled at file granularity: each discovered source file is one module,
 //! and relative `import` / `export ... from` edges become `EdgeKind::Use`
-//! edges between those file modules.
+//! edges between those file modules. Inside a JS/TS workspace (a
+//! monorepo), a bare specifier that names a member package — `@acme/ui`,
+//! `@acme/ui/button` — is followed into that package's source as well;
+//! see [`crate::workspace`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -18,6 +21,7 @@ use oxc_ast_visit::{Visit, walk::walk_import_expression};
 
 use crate::module_path::module_segments;
 use crate::parser::{Dialect, MODULE_EXTENSIONS, TsParseError};
+use crate::workspace::Workspace;
 
 /// Failures raised while discovering a TS/JS module graph.
 #[derive(Debug, thiserror::Error)]
@@ -47,9 +51,11 @@ pub struct TsModule {
 }
 
 /// Build the transitive file graph rooted at `entry` by following
-/// relative module specifiers (`./` and `../`).
+/// relative module specifiers (`./` and `../`) and, when `entry` sits in
+/// a JS/TS workspace, bare specifiers naming one of its member packages.
 pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
     let entry = normalize_path(entry);
+    let workspace = Workspace::discover(&entry).unwrap_or_default();
     let mut discovered = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut stack = vec![entry.clone()];
@@ -68,7 +74,7 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
         // newer than the bundled parser must not disable analysis of
         // every module around it. The entry file the caller named keeps
         // the hard error.
-        let links = match parse_links(&source, dialect) {
+        let mut links = match parse_links(&source, dialect) {
             Ok(links) => links,
             Err(source) if file != entry => {
                 tracing::warn!(path = %file.display(), error = %source, "skipping file: parse failed");
@@ -82,11 +88,12 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
             }
         };
         let base = file.parent().unwrap_or_else(|| Path::new("."));
-        for link in &links {
-            if let Some(next) = resolve_relative_module(base, &link.specifier)
-                && next.exists()
-            {
-                stack.push(normalize_path(&next));
+        for link in &mut links {
+            link.target = resolve_module(base, &link.specifier, &workspace)
+                .filter(|next| next.exists())
+                .map(|next| normalize_path(&next));
+            if let Some(next) = &link.target {
+                stack.push(next.clone());
             }
         }
         discovered.push((file.clone(), links));
@@ -114,9 +121,8 @@ pub fn extract_edges(modules: &[TsModule]) -> Vec<CouplingEdge> {
 
     let mut edges = Vec::new();
     for module in modules {
-        let base = module.file.parent().unwrap_or_else(|| Path::new("."));
         for link in &module.links {
-            let Some(target_file) = resolve_relative_module(base, &link.specifier) else {
+            let Some(target_file) = &link.target else {
                 continue;
             };
             let Some(target) = known_by_file.get(target_file.as_path()) else {
@@ -139,6 +145,19 @@ pub fn extract_edges(modules: &[TsModule]) -> Vec<CouplingEdge> {
 struct ImportLink {
     specifier: String,
     symbols: Vec<String>,
+    /// The file `specifier` resolved to, filled in while the tree is
+    /// built so edge extraction does not re-probe the filesystem.
+    target: Option<PathBuf>,
+}
+
+impl ImportLink {
+    fn new(specifier: String, symbols: Vec<String>) -> Self {
+        Self {
+            specifier,
+            symbols,
+            target: None,
+        }
+    }
 }
 
 fn parse_links(source: &str, dialect: Dialect) -> Result<Vec<ImportLink>, TsParseError> {
@@ -177,12 +196,10 @@ struct DynamicImportVisitor {
 impl<'a> Visit<'a> for DynamicImportVisitor {
     fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
         if let Some(specifier) = static_string_value(&it.source)
-            && is_relative_specifier(specifier)
+            && is_followable_specifier(specifier)
         {
-            self.links.push(ImportLink {
-                specifier: specifier.to_owned(),
-                symbols: vec!["*".to_owned()],
-            });
+            self.links
+                .push(ImportLink::new(specifier.to_owned(), vec!["*".to_owned()]));
         }
         walk_import_expression(self, it);
     }
@@ -200,7 +217,7 @@ fn static_string_value<'a>(expr: &'a oxc_ast::ast::Expression<'a>) -> Option<&'a
 
 fn maybe_push_import(out: &mut Vec<ImportLink>, decl: &ImportDeclaration<'_>) {
     let specifier = decl.source.value.to_string();
-    if !is_relative_specifier(&specifier) {
+    if !is_followable_specifier(&specifier) {
         return;
     }
     let mut symbols = Vec::new();
@@ -222,13 +239,13 @@ fn maybe_push_import(out: &mut Vec<ImportLink>, decl: &ImportDeclaration<'_>) {
     if symbols.is_empty() {
         symbols.push("*".to_owned());
     }
-    out.push(ImportLink { specifier, symbols });
+    out.push(ImportLink::new(specifier, symbols));
 }
 
 fn maybe_push_re_export_named(out: &mut Vec<ImportLink>, decl: &ExportNamedDeclaration<'_>) {
     let Some(src) = &decl.source else { return };
     let specifier = src.value.to_string();
-    if !is_relative_specifier(&specifier) {
+    if !is_followable_specifier(&specifier) {
         return;
     }
     let mut symbols = Vec::new();
@@ -238,22 +255,36 @@ fn maybe_push_re_export_named(out: &mut Vec<ImportLink>, decl: &ExportNamedDecla
     if symbols.is_empty() {
         symbols.push("*".to_owned());
     }
-    out.push(ImportLink { specifier, symbols });
+    out.push(ImportLink::new(specifier, symbols));
 }
 
 fn maybe_push_re_export_all(out: &mut Vec<ImportLink>, decl: &ExportAllDeclaration<'_>) {
     let specifier = decl.source.value.to_string();
-    if !is_relative_specifier(&specifier) {
+    if !is_followable_specifier(&specifier) {
         return;
     }
-    out.push(ImportLink {
-        specifier,
-        symbols: vec!["*".to_owned()],
-    });
+    out.push(ImportLink::new(specifier, vec!["*".to_owned()]));
 }
 
 fn is_relative_specifier(specifier: &str) -> bool {
     specifier.starts_with("./") || specifier.starts_with("../")
+}
+
+/// Relative specifiers, plus bare ones (`@acme/ui`, `lodash`) that may
+/// name a workspace member. Absolute paths and URL-style specifiers
+/// (`node:fs`, `https://…`) never resolve to a local module.
+fn is_followable_specifier(specifier: &str) -> bool {
+    is_relative_specifier(specifier)
+        || !(specifier.is_empty() || specifier.starts_with('/') || specifier.contains(':'))
+}
+
+/// Resolve `specifier`, imported from a file in `base`, to a local file.
+fn resolve_module(base: &Path, specifier: &str, workspace: &Workspace) -> Option<PathBuf> {
+    if is_relative_specifier(specifier) {
+        resolve_relative_module(base, specifier)
+    } else {
+        workspace.resolve(normalize_module_specifier(specifier))
+    }
 }
 
 fn resolve_relative_module(base: &Path, specifier: &str) -> Option<PathBuf> {
@@ -268,19 +299,21 @@ fn resolve_relative_module(base: &Path, specifier: &str) -> Option<PathBuf> {
             .then(|| normalize_path(&joined));
     }
 
-    for ext in MODULE_EXTENSIONS {
-        let candidate = joined.with_extension(ext);
-        if candidate.exists() {
-            return Some(normalize_path(&candidate));
-        }
-    }
-    for ext in MODULE_EXTENSIONS {
-        let candidate = joined.join(format!("index.{ext}"));
-        if candidate.exists() {
-            return Some(normalize_path(&candidate));
-        }
-    }
-    None
+    probe_module(&joined).map(|found| normalize_path(&found))
+}
+
+/// The file the TS resolver picks for an extensionless `path`: `path`
+/// with a module extension, else an `index` file inside it.
+pub(crate) fn probe_module(path: &Path) -> Option<PathBuf> {
+    MODULE_EXTENSIONS
+        .iter()
+        .map(|ext| path.with_extension(ext))
+        .chain(
+            MODULE_EXTENSIONS
+                .iter()
+                .map(|ext| path.join(format!("index.{ext}"))),
+        )
+        .find(|candidate| candidate.exists())
 }
 
 fn normalize_module_specifier(specifier: &str) -> &str {
@@ -475,6 +508,70 @@ mod tests {
             edges.is_empty(),
             "non-relative imports/re-exports must not create local coupling edges"
         );
+    }
+
+    /// The monorepo case: `apps/web` imports `@acme/ui` by package name,
+    /// and the edge lands on the member package's source even though
+    /// its manifest points at an unbuilt `dist/`.
+    #[test]
+    fn follows_workspace_package_imports_across_packages() {
+        let project = mk_temp_project();
+        let root = project.path();
+        let write = |rel: &str, content: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, content).expect("write");
+        };
+        write(
+            "package.json",
+            r#"{"workspaces": ["apps/*", "packages/*"]}"#,
+        );
+        write("apps/web/package.json", r#"{"name": "web"}"#);
+        write(
+            "apps/web/src/main.ts",
+            "import { Button } from '@acme/ui'; import { cn } from '@acme/ui/cn'; import React from 'react';",
+        );
+        write(
+            "packages/ui/package.json",
+            r#"{"name": "@acme/ui", "main": "./dist/index.js"}"#,
+        );
+        write(
+            "packages/ui/src/index.ts",
+            "export { cn } from './cn'; export const Button = 1;",
+        );
+        write("packages/ui/src/cn.ts", "export const cn = 1;");
+
+        let modules = build_module_tree(&root.join("apps/web/src/main.ts")).expect("tree");
+        let edges = extract_edges(&modules);
+
+        assert_eq!(
+            modules.iter().map(|m| m.path.as_str()).collect::<Vec<_>>(),
+            vec![
+                "crate::apps::web::src::main",
+                "crate::packages::ui::src",
+                "crate::packages::ui::src::cn",
+            ],
+        );
+        let pairs: Vec<(&str, &str, &str)> = edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str(), e.symbol.as_str()))
+            .collect();
+        assert!(pairs.contains(&(
+            "crate::apps::web::src::main",
+            "crate::packages::ui::src",
+            "Button"
+        )));
+        assert!(pairs.contains(&(
+            "crate::apps::web::src::main",
+            "crate::packages::ui::src::cn",
+            "cn"
+        )));
+        assert!(pairs.contains(&(
+            "crate::packages::ui::src",
+            "crate::packages::ui::src::cn",
+            "cn"
+        )));
+        assert_eq!(edges.len(), 3, "`react` is not a member and stays external");
     }
 
     #[test]
