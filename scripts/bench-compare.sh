@@ -25,8 +25,8 @@ trap cleanup EXIT
 
 rm -rf "$CRITERION_HOME"
 git worktree add --detach "$worktree" "$ref" >/dev/null
-(cd "$worktree" && cargo bench --workspace --all-features -- --save-baseline base)
-cargo bench --workspace --all-features -- --baseline-lenient base
+(cd "$worktree" && cargo bench --workspace --all-features --bench '*' -- --save-baseline base)
+cargo bench --workspace --all-features --bench '*' -- --baseline-lenient base
 
 # One markdown row per compared benchmark; the verdict is the last cell.
 report_row() {

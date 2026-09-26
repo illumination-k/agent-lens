@@ -58,7 +58,7 @@ fi
 if [ -n "${usage_baseline:-}" ]; then
   set -- "$@" --baseline "$usage_baseline"
 fi
-cargo bench --workspace --all-features -- "$@"
+cargo bench --workspace --all-features --bench '*' -- "$@"
 '''
 
 # Regression gate over the Criterion benchmarks: `ref` and the working tree run
