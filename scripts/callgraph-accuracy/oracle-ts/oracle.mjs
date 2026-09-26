@@ -8,7 +8,10 @@
 //
 // Edge conventions (see README.md next to this file):
 //   - a call is a CallExpression (including `super(...)`) or a NewExpression;
-//     its callee is the declaration of the signature the checker resolves.
+//     its callee is the declaration of the signature the checker resolves,
+//     except that a call through a type-annotated `const` bound to a function
+//     expression (`const f: Api["set"] = (x) => ...`, import aliases followed)
+//     goes to that function, not to the annotation's signature.
 //     An overload signature is mapped to the implementation; a callee with no
 //     body (`declare function`, an implicit constructor) is dropped, as are
 //     callees outside root, in node_modules or in a .d.ts. A call resolved to
@@ -105,6 +108,22 @@ function implementation(decl, checker) {
   if (decl.body) return decl;
   const sym = decl.name ? checker.getSymbolAtLocation(decl.name) : decl.symbol;
   return (sym?.declarations ?? []).find((d) => isFunctionLike(d) && d.kind === decl.kind && d.body);
+}
+
+/**
+ * `f(x)` where `f` is a const bound to a function expression runs that
+ * function, whatever the const's type annotation says: with
+ * `const f: Api['set'] = (x) => ...` the checker resolves the signature of
+ * the annotation (`Api['set']`), not of the initializer.
+ */
+function constFunctionCallee(call, checker) {
+  if (!ts.isCallExpression(call) || !ts.isIdentifier(call.expression)) return undefined;
+  let sym = checker.getSymbolAtLocation(call.expression);
+  if (sym && sym.flags & ts.SymbolFlags.Alias) sym = checker.getAliasedSymbol(sym);
+  const binding = sym?.valueDeclaration;
+  if (!binding || !ts.isVariableDeclaration(binding) || !binding.type || !isConstBinding(binding)) return undefined;
+  const init = binding.initializer;
+  return init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) && init.body ? init : undefined;
 }
 
 /** The interface or abstract class member a bodiless signature declares, if any. */
@@ -246,7 +265,7 @@ export function run(rootArg) {
     if (ts.isCallExpression(call) && call.expression.kind === ts.SyntaxKind.ImportKeyword) return;
     const decl = checker.getResolvedSignature(call)?.declaration;
     if (decl && !underRoot(fs.realpathSync(decl.getSourceFile().fileName))) return bump("callee_outside_root");
-    const callee = implementation(decl, checker);
+    const callee = constFunctionCallee(call, checker) ?? implementation(decl, checker);
     const members = unionMethods(call);
     let targets;
     if (members.length > 1) targets = members.map((fn) => [fn, "dynamic"]);

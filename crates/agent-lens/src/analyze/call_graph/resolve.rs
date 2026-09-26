@@ -308,11 +308,20 @@ impl Resolver {
         let Some(owner) = site.caller_owner() else {
             return ResolvedCall::unresolved();
         };
-        let candidate = qualify_module(module, &format!("{owner}::{callee_name}"));
-        if let Some(ids) = self.qualified.get(&candidate) {
-            return resolve_ids(ids, ResolutionMethod::SelfMethod);
+        // A closure inside a method (`Ky::retry::closure#1`) sees the
+        // method's `this`, so the owner is tried from the innermost
+        // segment outwards until one declares the callee.
+        let mut owner = owner;
+        loop {
+            let candidate = qualify_module(module, &format!("{owner}::{callee_name}"));
+            if let Some(ids) = self.qualified.get(&candidate) {
+                return resolve_ids(ids, ResolutionMethod::SelfMethod);
+            }
+            match owner.rsplit_once("::") {
+                Some((outer, _)) => owner = outer,
+                None => return ResolvedCall::unresolved(),
+            }
         }
-        ResolvedCall::unresolved()
     }
 
     /// Receiver method calls (`obj.foo()`) cannot be type-inferred
@@ -366,8 +375,17 @@ impl Resolver {
             return ResolvedCall::unresolved();
         };
         // `wg.Add(1)` on a local value is a method call; a package-level
-        // `tag.Add` shares the name but no receiver reaches it.
-        let ids = self.with_owner_shape(ids, true, language, false);
+        // `tag.Add` shares the name but no receiver reaches it. A
+        // receiver the adapter knows holds a value (`retry.delay()` on a
+        // parameter) says the same in any language.
+        let ids = if matches!(
+            site.receiver_expr_kind,
+            SyntaxFact::Known(ReceiverExprKind::LocalValue)
+        ) {
+            self.with_owner(ids, true)
+        } else {
+            self.with_owner_shape(ids, true, language, false)
+        };
         if ids.is_empty() {
             return ResolvedCall::unresolved();
         }
@@ -387,6 +405,11 @@ impl Resolver {
         if !language.call_shape_decides_owner(qualified_path) {
             return ids.to_vec();
         }
+        self.with_owner(ids, method)
+    }
+
+    /// `ids` kept to methods (`method == true`) or to free functions.
+    fn with_owner(&self, ids: &[String], method: bool) -> Vec<String> {
         ids.iter()
             .filter(|id| self.methods.contains(id.as_str()) == method)
             .cloned()
@@ -866,6 +889,68 @@ mod tests {
 
         assert_eq!(call.resolution, Resolution::Resolved);
         assert_eq!(call.method, Some(ResolutionMethod::SelfMethod));
+    }
+
+    /// In a closure inside a method the callee is looked up on the
+    /// enclosing owners, innermost first: an arrow keeps the method's
+    /// `this`.
+    #[rstest]
+    #[case::method_owner("S", Some("crate::m::S::helper"))]
+    #[case::closure_owner("S::run::closure#1", Some("crate::m::S::helper"))]
+    #[case::inner_owner_wins("S::Inner", Some("crate::m::S::Inner::helper"))]
+    #[case::no_owner_declares_it("T::run", None)]
+    fn self_method_calls_search_enclosing_owners(
+        #[case] owner: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let nodes = vec![
+            node("crate::m::S::helper"),
+            node("crate::m::S::Inner::helper"),
+        ];
+        let resolver = Resolver::new(&nodes);
+        let self_site = CallShape {
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::SelfValue),
+            caller_owner: SyntaxFact::Known(Some(owner.to_owned())),
+            ..site("helper")
+        };
+
+        let call = resolver.resolve(&self_site, GraphLanguage::TypeScript);
+
+        let expected_id = expected.map(|qualified| format!("src/lib.rs:{qualified}:1"));
+        assert_eq!(call.to, expected_id);
+    }
+
+    /// A receiver the adapter knows holds a value reaches methods only,
+    /// in any language: `retry.delay()` is never the free `delay`. A
+    /// plain `Expression` receiver keeps both in TypeScript, where an
+    /// object literal or a module object may hold the free function.
+    #[rstest]
+    #[case::value_receiver(ReceiverExprKind::LocalValue, &["crate::m::W::delay"])]
+    #[case::expression_receiver(
+        ReceiverExprKind::Expression,
+        &["crate::m::W::delay", "crate::m::delay"]
+    )]
+    fn value_receivers_reach_methods_only(
+        #[case] receiver: ReceiverExprKind,
+        #[case] expected: &[&str],
+    ) {
+        let nodes = vec![node("crate::m::W::delay"), node("crate::m::delay")];
+        let resolver = Resolver::new(&nodes);
+        let call_site = CallShape {
+            receiver_expr_kind: SyntaxFact::Known(receiver),
+            ..site("delay")
+        };
+
+        let call = resolver.resolve(&call_site, GraphLanguage::TypeScript);
+
+        let mut reached: Vec<String> = call.to.into_iter().chain(call.candidates).collect();
+        reached.sort();
+        let mut expected: Vec<String> = expected
+            .iter()
+            .map(|qualified| format!("src/lib.rs:{qualified}:1"))
+            .collect();
+        expected.sort();
+        assert_eq!(reached, expected);
     }
 
     /// Crate narrowing must not become a back door: several candidates

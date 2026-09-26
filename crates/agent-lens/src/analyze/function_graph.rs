@@ -960,6 +960,74 @@ export function useState() {}
         }
     }
 
+    /// Shapes the TypeScript checker oracle found agent-lens getting
+    /// wrong on OSS projects (docs/callgraph-accuracy.md): a namespace
+    /// function, a `new` expression, a private method called from an
+    /// arrow in its class, a receiver holding a value, and a module-scope
+    /// value shadowing a workspace function of the same name.
+    #[test]
+    fn typescript_namespaces_constructors_and_value_receivers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "result.ts",
+            "export namespace Result { export function combine() {} }
+export class Box {
+  constructor() {}
+  #peek() {}
+  open() { const run = () => this.#peek(); run(); }
+}
+export function delay() {}
+export function isFrozen() {}
+",
+        );
+        write_file(
+            dir.path(),
+            "main.ts",
+            "import { Result, Box } from './result';
+const { isFrozen } = Object;
+function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
+",
+        );
+
+        let report = analyze_json(dir.path());
+        let target = |callee: &str| {
+            let edge = edge_by_callee(&report, callee);
+            (
+                edge["resolution_method"].as_str().map(ToOwned::to_owned),
+                target_qualified_name(&report, edge),
+            )
+        };
+        assert_eq!(
+            target("combine"),
+            (
+                Some("binding".to_owned()),
+                Some("result::Result::combine".to_owned())
+            )
+        );
+        assert_eq!(
+            target("constructor"),
+            (
+                Some("binding".to_owned()),
+                Some("result::Box::constructor".to_owned())
+            )
+        );
+        assert_eq!(
+            target("#peek"),
+            (
+                Some("self_method".to_owned()),
+                Some("result::Box::#peek".to_owned())
+            )
+        );
+        for callee in ["delay", "isFrozen"] {
+            assert_eq!(
+                edge_by_callee(&report, callee)["resolution"],
+                "unresolved",
+                "{callee}"
+            );
+        }
+    }
+
     #[test]
     fn python_roots_emit_nodes_edges_and_language() {
         let dir = tempfile::tempdir().unwrap();

@@ -712,7 +712,7 @@ class Foo {
     #[case::function_expression_let_binding("let f = function () { return 1; };\n", "f")]
     #[case::function_inside_namespace(
         "namespace inner {\n    export function hidden(): number { return 0; }\n}\n",
-        "hidden"
+        "inner::hidden"
     )]
     #[case::exported_function_declaration(
         "export function exported(): number { return 1; }\n",
@@ -743,7 +743,7 @@ export namespace outer {
 "#;
         let funcs = parse_functions(src);
         assert_eq!(funcs.len(), 1);
-        assert_eq!(funcs[0].name, "exported_inner");
+        assert_eq!(funcs[0].name, "outer::exported_inner");
     }
 
     #[test]

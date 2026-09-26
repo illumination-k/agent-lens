@@ -402,6 +402,58 @@ its false positives), and lo's self-edges on generic functions
 (`Contains → Contains`), which come from the oracle collapsing instantiation
 wrappers.
 
+### TypeScript
+
+Measured 2026-09-26 after seven TypeScript fixes, found by running the oracle
+over neverthrow and zustand plus four more projects: immerjs/immer `b00474e`
+(v11.1.18), pmndrs/jotai `3e0b9ff` (v2.20.3), ianstormtaylor/superstruct
+`d31f007` (v2.0.2) and sindresorhus/ky `a6faace` (v2.1.0):
+
+- functions and classes inside a `namespace` are named under it
+  (`Result::combine`), which is how every caller outside spells them;
+- `new C()` is a call to `C::constructor`, bound like a static path call;
+- `this.#m()` / `x.#m()` name the private method `#m`, and `this.m()` in an
+  arrow inside a method finds `m` on the enclosing class;
+- a bare call through a local bound to a closure or a nested function
+  (`const parse = (s) => ...; parse(x)`, `function helper() {}` inside a
+  function, a sibling in a `namespace`) binds that closure's node;
+- a module-scope value the file computes (`const { isFrozen } = Object`,
+  `const useStore = create(...)`) shadows same-named functions elsewhere, as a
+  local does; a CommonJS `require(...)` still binds a module;
+- a receiver bound to a value (a parameter, a local, a computed module-scope
+  value, but not an object literal, which may hold functions by reference)
+  reaches methods only: `retry.delay()` is never the free function `delay`;
+- `constructor` joins the ubiquitous method names (`arr.constructor(1)`).
+
+The oracle also changed: a call through a type-annotated `const` bound to a
+function (`const f: Api["set"] = (x) => ...`) goes to that function instead of
+the annotation's signature, which had made every such call an agent-lens-only
+pair. Both columns below use the updated oracle; the discovery targets are not
+in `targets.toml`, and every agent-lens-only pair counts as a false positive.
+
+| Repository                     | Commit    | Precision before    | Precision after     | Static recall before | Static recall after |
+| ------------------------------ | --------- | ------------------- | ------------------- | -------------------- | ------------------- |
+| supermacro/neverthrow v8.2.0   | `1b7a959` | 1.000 (563 / 563)   | 1.000 (699 / 699)   | 0.650 (562 / 864)    | 0.808 (698 / 864)   |
+| pmndrs/zustand v5.0.15         | `2115efb` | 0.981 (202 / 206)   | 0.978 (220 / 225)   | 0.894 (202 / 226)    | 0.973 (220 / 226)   |
+| immerjs/immer v11.1.18         | `b00474e` | 0.920 (506 / 550)   | 0.980 (647 / 660)   | 0.621 (292 / 470)    | 0.919 (432 / 470)   |
+| pmndrs/jotai v2.20.3           | `3e0b9ff` | 0.997 (1300 / 1304) | 0.993 (1363 / 1372) | 0.929 (1300 / 1399)  | 0.974 (1363 / 1399) |
+| ianstormtaylor/superstruct 2.0 | `d31f007` | 1.000 (356 / 356)   | 1.000 (376 / 376)   | 0.734 (356 / 485)    | 0.775 (376 / 485)   |
+| sindresorhus/ky v2.1.0         | `a6faace` | 0.987 (620 / 628)   | 1.000 (714 / 714)   | 0.862 (620 / 719)    | 0.993 (714 / 719)   |
+| all six (micro-avg.)           |           | 0.983 (3547 / 3607) | 0.993 (4019 / 4046) | 0.800 (3332 / 4163)  | 0.914 (3803 / 4163) |
+
+Dynamic recall is unchanged (215 → 216 of 703). What is left:
+
+- agent-lens-only pairs that are real calls: the oracle's caller or callee
+  line holds two nodes (a curried `const f = (a) => (b) => ...`, a closure
+  written on the line of the closure it is passed to), so the scorer cannot
+  map its edge (zustand, jotai); immer's benchmarks import `../dist/immer.mjs`,
+  which is not analysed, and the name fallback binds `setAutoFreeze()` to the
+  `Immer` method that `dist` re-exports;
+- static misses: calls through a barrel re-export (`import { mask } from
+  '../src'` in superstruct's tests, `export { f as g }` aliases in jotai),
+  which leave an ambiguous candidate set or nothing, and method chains on
+  returned values (`ok(1).andThen(...)` in neverthrow), which need a type.
+
 ### Rust and TypeScript
 
 Measured 2026-09-26 with `mise run callgraph-accuracy semver log neverthrow
@@ -450,10 +502,11 @@ What the misses are, from reading the disagreements:
 - TypeScript static misses: calls to functions of a `namespace`
   (`Result.combine(...)`, 66 of neverthrow's 153), `new C()` (35; no call
   site is recorded for a `new` expression), and calls to local closures
-  (`const parse = (s) => ...; parse(x)`, all 20 of zustand's).
+  (`const parse = (s) => ...; parse(x)`, all 20 of zustand's). All three are
+  fixed; see TypeScript above.
 - TypeScript false positives: `last_segment` binding `useStore()` in the
   zustand examples, where `useStore` is the local result of `create(...)`, to
-  `src/react.ts`'s `useStore`.
+  `src/react.ts`'s `useStore`. Fixed; see TypeScript above.
 
 ### Rust
 
