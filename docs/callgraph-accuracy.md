@@ -483,9 +483,7 @@ plus `as_ptr` / `as_mut_ptr` in Rust's ubiquitous method names.
 
 The five discovery targets are pinned in
 `scripts/callgraph-accuracy/targets-rust-discovery.toml`
-(`run.py --targets-file scripts/callgraph-accuracy/targets-rust-discovery.toml`);
-the full reports and every disagreement of this measurement are saved in
-[`docs/callgraph-accuracy-results/rust-2026-09-26/`](callgraph-accuracy-results/rust-2026-09-26/summary.md).
+(`run.py --targets-file scripts/callgraph-accuracy/targets-rust-discovery.toml`).
 
 Per repository (the five discovery targets are not in `targets.toml`; no
 disagreement is adjudicated, so precision counts every agent-lens-only pair
