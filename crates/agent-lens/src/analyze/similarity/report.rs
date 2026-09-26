@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use lens_domain::SimilarCluster;
 use serde::Serialize;
 
-use super::{OwnedUnit, SimilarityComponents, SimilarityTarget};
+use super::{OwnedUnit, SimilarityComponents, SimilarityTarget, sorted_pair_key};
 use crate::analyze::AnalyzeRoots;
 
 /// Longest representative snippet rendered for a block cluster. Long
@@ -261,10 +261,6 @@ fn cluster_pair_views<'a>(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     pairs
-}
-
-fn sorted_pair_key(i: usize, j: usize) -> (usize, usize) {
-    if i <= j { (i, j) } else { (j, i) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

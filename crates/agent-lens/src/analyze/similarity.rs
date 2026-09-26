@@ -10,11 +10,11 @@
 //! ethos.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{TSEDOptions, calculate_tsed_with_subtree_sizes, cluster_similar_pairs};
+use lens_domain::{TSEDOptions, TokenProfile, cluster_similar_pairs, token_similarity};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -28,7 +28,7 @@ mod extract;
 mod paired;
 mod pdg;
 mod report;
-mod token;
+mod score;
 
 use candidates::{
     CandidatePairs, TreeProfile, candidate_pairs, eligible_function_count, similarity_uses_lsh,
@@ -43,7 +43,12 @@ use report::{
     ClusterView, PairedReport, PairedReportInputs, Report, ScoredMatch, build_drift_groups,
     format_markdown, format_paired_markdown,
 };
-use token::TokenProfile;
+use score::{
+    ScoreStats, ScoreWeights, ScoredPair, SimilarityComponents, score_candidate_pairs,
+    score_profile_pairs, sorted_pair_key,
+};
+#[cfg(test)]
+use score::{is_exact_match_without_distance, score_candidate_pair, score_profile_pair};
 
 /// Default similarity threshold. Picked to match the cutoff used by the
 /// PostToolUse `similarity` hook so the on-demand analyzer reports the
@@ -246,37 +251,6 @@ impl SimilarityTarget {
                 signature: 0.0,
             },
         }
-    }
-}
-
-/// Relative weight of the body and signature components in a pair's
-/// combined score. Always sums to 1.
-#[derive(Debug, Clone, Copy)]
-struct ScoreWeights {
-    body: f64,
-    signature: f64,
-}
-
-impl ScoreWeights {
-    /// Body-only weights, for pairs whose signature match carries no
-    /// information: two implementations of the same trait share a
-    /// signature by construction, so blending it in would inflate every
-    /// `impl Display` against every other `impl Display`.
-    const BODY_ONLY: Self = Self {
-        body: 1.0,
-        signature: 0.0,
-    };
-
-    fn blend(self, body_similarity: f64, signature_similarity: f64) -> f64 {
-        (self.body * body_similarity) + (self.signature * signature_similarity)
-    }
-
-    /// Lowest body score that could still reach `threshold` once the
-    /// signature component is added at its most generous. Used to relax
-    /// the cheap candidate filters without dropping a pair the full
-    /// score would have kept.
-    fn body_candidate_threshold(self, threshold: f64) -> f64 {
-        ((threshold - self.signature) / self.body).clamp(0.0, 1.0)
     }
 }
 
@@ -972,7 +946,7 @@ impl SimilarityAnalyzer {
             SimilarityMethod::Token => {
                 let token_profiles = build_token_profiles(corpus, compare_values);
                 score_profile_pairs(corpus, pairs, threshold, weights, |i, j| {
-                    Some(token::token_similarity(
+                    Some(token_similarity(
                         token_profiles.get(i)?,
                         token_profiles.get(j)?,
                     ))
@@ -1045,7 +1019,7 @@ impl SimilarityAnalyzer {
                 value_similarity: value_profiles
                     .get(&pair.i)
                     .zip(value_profiles.get(&pair.j))
-                    .map_or(0.0, |(a, b)| token::token_similarity(a, b)),
+                    .map_or(0.0, |(a, b)| token_similarity(a, b)),
             })
             .collect();
         let units = corpus
@@ -1335,343 +1309,6 @@ fn enforce_candidate_pair_limit(
         min_lines,
         strategy,
     })
-}
-
-fn is_exact_match_without_distance(
-    profile_a: &TreeProfile,
-    profile_b: &TreeProfile,
-    a: &lens_domain::TreeNode,
-    b: &lens_domain::TreeNode,
-    compare_values: bool,
-) -> bool {
-    if profile_a.size != profile_b.size {
-        return false;
-    }
-    if profile_a.exact_hash(compare_values) != profile_b.exact_hash(compare_values) {
-        return false;
-    }
-    trees_match_without_distance(a, b, compare_values)
-}
-
-fn score_candidate_pairs(
-    corpus: &[OwnedUnit],
-    profiles: &[TreeProfile],
-    pairs: &[(usize, usize)],
-    threshold: f64,
-    opts: &TSEDOptions,
-    weights: ScoreWeights,
-) -> ScoreStats {
-    pairs
-        .par_iter()
-        .fold(ScoreStats::default, |mut stats, &(i, j)| {
-            if let Some(score) = score_candidate_pair(corpus, profiles, i, j, opts, weights) {
-                stats.record(score, threshold);
-            }
-            stats
-        })
-        .reduce(ScoreStats::default, ScoreStats::merge)
-        .sorted()
-}
-
-fn score_candidate_pair(
-    corpus: &[OwnedUnit],
-    profiles: &[TreeProfile],
-    i: usize,
-    j: usize,
-    opts: &TSEDOptions,
-    weights: ScoreWeights,
-) -> Option<PairScore> {
-    let a = corpus.get(i)?;
-    let b = corpus.get(j)?;
-    let profile_a = profiles.get(i)?;
-    let profile_b = profiles.get(j)?;
-    let compare_values = opts.apted.compare_values;
-    let body_a = a.body_tree();
-    let body_b = b.body_tree();
-    let exact_match =
-        is_exact_match_without_distance(profile_a, profile_b, body_a, body_b, compare_values);
-    let body_similarity = if exact_match {
-        1.0
-    } else {
-        let sizes_a = profile_a.subtree_sizes(body_a);
-        let sizes_b = profile_b.subtree_sizes(body_b);
-        calculate_tsed_with_subtree_sizes(
-            body_a,
-            body_b,
-            profile_a.size,
-            profile_b.size,
-            sizes_a,
-            sizes_b,
-            opts,
-        )
-    };
-    let signature = signature_components(a.signature(), b.signature());
-    let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
-    let same_trait = same_trait_pair(a, b);
-    let weights = if same_trait {
-        ScoreWeights::BODY_ONLY
-    } else {
-        weights
-    };
-    Some(PairScore {
-        i,
-        j,
-        components: SimilarityComponents {
-            similarity: weights.blend(body_similarity, signature_similarity),
-            body_similarity,
-            signature_similarity: signature.signature_similarity,
-            type_overlap: signature.type_overlap,
-            identifier_overlap: signature.identifier_overlap,
-            doc_overlap: None,
-            same_trait,
-        },
-        exact_match,
-    })
-}
-
-/// Whether both units implement the same method of the same trait
-/// (`impl Display for A`'s `fmt` against `impl Display for B`'s `fmt`).
-/// The trait dictates that pair's shared signature, so it is scored on
-/// the body alone and the report carries the annotation. Different
-/// methods of one trait are not exempt: the trait only fixes each
-/// method's own signature, so between two visitor methods a signature
-/// mismatch is real evidence and keeps its weight.
-fn same_trait_pair(a: &OwnedUnit, b: &OwnedUnit) -> bool {
-    let (Some(left), Some(right)) = (a.implements(), b.implements()) else {
-        return false;
-    };
-    left == right && bare_method_name(a.name()) == bare_method_name(b.name())
-}
-
-/// Last `::` segment of a display name (`Owner::method` → `method`).
-fn bare_method_name(name: &str) -> &str {
-    name.rsplit_once("::").map_or(name, |(_, last)| last)
-}
-
-/// Score `pairs` for a method whose body score comes from precomputed
-/// per-unit profiles: `body_similarity(i, j)` is the method's own
-/// comparison, and everything around it — the signature component, the
-/// same-trait exemption, the blend — is shared with TSED scoring.
-fn score_profile_pairs(
-    corpus: &[OwnedUnit],
-    pairs: &[(usize, usize)],
-    threshold: f64,
-    weights: ScoreWeights,
-    body_similarity: impl Fn(usize, usize) -> Option<f64> + Sync,
-) -> ScoreStats {
-    pairs
-        .par_iter()
-        .fold(ScoreStats::default, |mut stats, &(i, j)| {
-            if let Some(score) = body_similarity(i, j)
-                .and_then(|body| score_profile_pair(corpus, i, j, body, weights))
-            {
-                stats.record(score, threshold);
-            }
-            stats
-        })
-        .reduce(ScoreStats::default, ScoreStats::merge)
-        .sorted()
-}
-
-fn score_profile_pair(
-    corpus: &[OwnedUnit],
-    i: usize,
-    j: usize,
-    body_similarity: f64,
-    weights: ScoreWeights,
-) -> Option<PairScore> {
-    let a = corpus.get(i)?;
-    let b = corpus.get(j)?;
-    let signature = signature_components(a.signature(), b.signature());
-    let signature_similarity = signature.signature_similarity.unwrap_or(1.0);
-    let same_trait = same_trait_pair(a, b);
-    let weights = if same_trait {
-        ScoreWeights::BODY_ONLY
-    } else {
-        weights
-    };
-    Some(PairScore {
-        i,
-        j,
-        components: SimilarityComponents {
-            similarity: weights.blend(body_similarity, signature_similarity),
-            body_similarity,
-            signature_similarity: signature.signature_similarity,
-            type_overlap: signature.type_overlap,
-            identifier_overlap: signature.identifier_overlap,
-            doc_overlap: None,
-            same_trait,
-        },
-        exact_match: body_similarity >= 1.0,
-    })
-}
-
-#[derive(Debug)]
-struct PairScore {
-    i: usize,
-    j: usize,
-    components: SimilarityComponents,
-    exact_match: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct SimilarityComponents {
-    pub(super) similarity: f64,
-    pub(super) body_similarity: f64,
-    pub(super) signature_similarity: Option<f64>,
-    pub(super) type_overlap: Option<f64>,
-    pub(super) identifier_overlap: Option<f64>,
-    /// Word-level overlap of the two functions' doc comments. A
-    /// diagnostic component only — it does not feed `similarity` — and
-    /// filled by [`annotate_doc_overlap`] after threshold filtering so
-    /// the scoring hot path never tokenizes doc prose. `None` unless
-    /// both sides carry doc text.
-    pub(super) doc_overlap: Option<f64>,
-    /// Both sides implement the same method of the same trait, so the
-    /// signature component was excluded from `similarity` (the trait
-    /// dictates the match).
-    pub(super) same_trait: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SignatureComponents {
-    signature_similarity: Option<f64>,
-    type_overlap: Option<f64>,
-    identifier_overlap: Option<f64>,
-}
-
-fn signature_components(
-    a: Option<&lens_domain::SignatureShape>,
-    b: Option<&lens_domain::SignatureShape>,
-) -> SignatureComponents {
-    let (Some(a), Some(b)) = (a, b) else {
-        return SignatureComponents {
-            signature_similarity: None,
-            type_overlap: None,
-            identifier_overlap: None,
-        };
-    };
-
-    let identifier_overlap = token_overlap(
-        a.name_tokens().chain(a.parameter_names()),
-        b.name_tokens().chain(b.parameter_names()),
-    );
-    let type_overlap = token_overlap(
-        a.parameter_type_paths()
-            .chain(a.return_type_paths.iter().map(String::as_str)),
-        b.parameter_type_paths()
-            .chain(b.return_type_paths.iter().map(String::as_str)),
-    );
-    let parameter_name_overlap = token_overlap(a.parameter_names(), b.parameter_names());
-    let generic_overlap = token_overlap(a.generics(), b.generics());
-    let parameter_count = count_similarity(a.parameter_count(), b.parameter_count());
-    let receiver = if a.receiver_shape() == b.receiver_shape() {
-        1.0
-    } else {
-        0.0
-    };
-    let signature_similarity = (0.25 * identifier_overlap)
-        + (0.10 * parameter_count)
-        + (0.05 * parameter_name_overlap)
-        + (0.45 * type_overlap)
-        + (0.10 * generic_overlap)
-        + (0.05 * receiver);
-
-    SignatureComponents {
-        signature_similarity: Some(signature_similarity),
-        type_overlap: Some(type_overlap),
-        identifier_overlap: Some(identifier_overlap),
-    }
-}
-
-fn token_overlap<'a>(a: impl Iterator<Item = &'a str>, b: impl Iterator<Item = &'a str>) -> f64 {
-    let a: HashSet<&str> = a.collect();
-    let b: HashSet<&str> = b.collect();
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    let intersection = a.intersection(&b).count();
-    let union = a.union(&b).count();
-    if union == 0 {
-        1.0
-    } else {
-        intersection as f64 / union as f64
-    }
-}
-
-fn count_similarity(a: usize, b: usize) -> f64 {
-    let max = a.max(b);
-    if max == 0 {
-        return 1.0;
-    }
-    1.0 - (a.abs_diff(b) as f64 / max as f64)
-}
-
-fn sorted_pair_key(i: usize, j: usize) -> (usize, usize) {
-    if i <= j { (i, j) } else { (j, i) }
-}
-
-#[derive(Debug, Default)]
-struct ScoreStats {
-    pairs: Vec<ScoredPair>,
-    exact_match_count: usize,
-    below_threshold_count: usize,
-    diff_filtered_count: usize,
-}
-
-impl ScoreStats {
-    fn record(&mut self, score: PairScore, threshold: f64) {
-        if score.exact_match {
-            self.exact_match_count += 1;
-        }
-        if score.components.similarity < threshold {
-            self.below_threshold_count += 1;
-            return;
-        }
-        self.pairs.push(ScoredPair {
-            i: score.i,
-            j: score.j,
-            components: score.components,
-        });
-    }
-
-    fn merge(mut a: Self, mut b: Self) -> Self {
-        a.below_threshold_count += b.below_threshold_count;
-        a.diff_filtered_count += b.diff_filtered_count;
-        a.exact_match_count += b.exact_match_count;
-        a.pairs.append(&mut b.pairs);
-        a
-    }
-
-    fn sorted(mut self) -> Self {
-        self.pairs.sort_by_key(|pair| (pair.i, pair.j));
-        self
-    }
-
-    fn scored_pair_count(&self) -> usize {
-        self.pairs.len() + self.below_threshold_count
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ScoredPair {
-    i: usize,
-    j: usize,
-    components: SimilarityComponents,
-}
-
-fn trees_match_without_distance(
-    a: &lens_domain::TreeNode,
-    b: &lens_domain::TreeNode,
-    compare_values: bool,
-) -> bool {
-    a.label == b.label
-        && (!compare_values || a.value == b.value)
-        && a.children.len() == b.children.len()
-        && a.children
-            .iter()
-            .zip(&b.children)
-            .all(|(a, b)| trees_match_without_distance(a, b, compare_values))
 }
 
 fn collect_changed_ranges(
@@ -2105,90 +1742,6 @@ fn delta(xs: &[i32]) -> i32 {
     }
 
     #[test]
-    fn score_stats_record_and_merge_preserve_counts() {
-        fn components(similarity: f64) -> SimilarityComponents {
-            SimilarityComponents {
-                similarity,
-                body_similarity: similarity,
-                signature_similarity: None,
-                type_overlap: None,
-                identifier_overlap: None,
-                doc_overlap: None,
-                same_trait: false,
-            }
-        }
-
-        let mut stats = ScoreStats::default();
-        stats.record(
-            PairScore {
-                i: 0,
-                j: 1,
-                components: components(1.0),
-                exact_match: true,
-            },
-            0.85,
-        );
-        stats.record(
-            PairScore {
-                i: 0,
-                j: 2,
-                components: components(0.25),
-                exact_match: false,
-            },
-            0.85,
-        );
-
-        let merged = ScoreStats::merge(
-            stats,
-            ScoreStats {
-                pairs: vec![ScoredPair {
-                    i: 2,
-                    j: 3,
-                    components: components(0.9),
-                }],
-                exact_match_count: 2,
-                below_threshold_count: 3,
-                diff_filtered_count: 4,
-            },
-        );
-
-        let pairs: Vec<_> = merged
-            .pairs
-            .iter()
-            .map(|pair| (pair.i, pair.j, pair.components.similarity))
-            .collect();
-        assert_eq!(pairs, vec![(0, 1, 1.0), (2, 3, 0.9)]);
-        assert_eq!(merged.exact_match_count, 3);
-        assert_eq!(merged.below_threshold_count, 4);
-        assert_eq!(merged.diff_filtered_count, 4);
-    }
-
-    #[test]
-    fn score_stats_keeps_scores_equal_to_threshold() {
-        let mut stats = ScoreStats::default();
-        stats.record(
-            PairScore {
-                i: 2,
-                j: 4,
-                components: SimilarityComponents {
-                    similarity: 0.85,
-                    body_similarity: 1.0,
-                    signature_similarity: Some(0.25),
-                    type_overlap: Some(0.0),
-                    identifier_overlap: Some(0.5),
-                    doc_overlap: None,
-                    same_trait: false,
-                },
-                exact_match: false,
-            },
-            0.85,
-        );
-
-        assert_eq!(stats.pairs.len(), 1);
-        assert_eq!(stats.below_threshold_count, 0);
-    }
-
-    #[test]
     fn body_candidate_threshold_reverses_combined_score_formula_and_clamps() {
         let blended = SimilarityTarget::Functions.weights();
         assert!((blended.body_candidate_threshold(0.85) - 0.8125).abs() < 1e-9);
@@ -2229,135 +1782,6 @@ fn delta(xs: &[i32]) -> i32 {
             FunctionSelection::from_args(true, true),
             FunctionSelection::OnlyTests
         );
-    }
-
-    #[test]
-    fn token_overlap_count_similarity_and_pair_keys_cover_edge_cases() {
-        assert_eq!(token_overlap([].into_iter(), ["user"].into_iter()), 0.0);
-        assert_eq!(
-            token_overlap(["user", "id"].into_iter(), ["id", "order"].into_iter()),
-            1.0 / 3.0,
-        );
-        assert_eq!(count_similarity(0, 0), 1.0);
-        assert_eq!(count_similarity(2, 4), 0.5);
-        assert_eq!(sorted_pair_key(5, 3), (3, 5));
-    }
-
-    fn rust_sig(
-        name_tokens: &[&str],
-        parameter_names: &[&str],
-        parameter_type_paths: &[&str],
-        return_type_paths: &[&str],
-    ) -> lens_domain::SignatureShape {
-        lens_domain::FunctionSignature {
-            name_tokens: name_tokens.iter().map(|s| (*s).to_owned()).collect(),
-            parameter_count: parameter_names.len(),
-            parameter_names: parameter_names.iter().map(|s| (*s).to_owned()).collect(),
-            parameter_type_paths: parameter_type_paths
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
-            return_type_paths: return_type_paths.iter().map(|s| (*s).to_owned()).collect(),
-            generics: Vec::new(),
-            receiver: lens_domain::ReceiverShape::None,
-        }
-        .into()
-    }
-
-    fn rust_sig_with_receiver(
-        name_tokens: &[&str],
-        parameter_names: &[&str],
-        parameter_type_paths: &[&str],
-        return_type_paths: &[&str],
-        generics: &[&str],
-        receiver: lens_domain::ReceiverShape,
-    ) -> lens_domain::SignatureShape {
-        let mut sig = lens_domain::FunctionSignature {
-            name_tokens: name_tokens.iter().map(|s| (*s).to_owned()).collect(),
-            parameter_count: parameter_names.len(),
-            parameter_names: parameter_names.iter().map(|s| (*s).to_owned()).collect(),
-            parameter_type_paths: parameter_type_paths
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
-            return_type_paths: return_type_paths.iter().map(|s| (*s).to_owned()).collect(),
-            generics: Vec::new(),
-            receiver: lens_domain::ReceiverShape::None,
-        };
-        sig.generics = generics.iter().map(|s| (*s).to_owned()).collect();
-        sig.receiver = receiver;
-        sig.into()
-    }
-
-    #[test]
-    fn signature_score_rewards_same_domain_types_over_same_body_different_types() {
-        let same_domain_renamed = signature_components(
-            Some(&rust_sig(&["validate"], &["id"], &["UserId"], &["bool"])),
-            Some(&rust_sig(
-                &["validate"],
-                &["candidate"],
-                &["UserId"],
-                &["bool"],
-            )),
-        )
-        .signature_similarity
-        .unwrap();
-        let different_domain_type = signature_components(
-            Some(&rust_sig(&["validate"], &["id"], &["UserId"], &["bool"])),
-            Some(&rust_sig(&["validate"], &["id"], &["OrderId"], &["bool"])),
-        )
-        .signature_similarity
-        .unwrap();
-
-        assert!(
-            same_domain_renamed > different_domain_type,
-            "renamed={same_domain_renamed}, different_type={different_domain_type}",
-        );
-    }
-
-    #[test]
-    fn signature_components_calculates_observable_subscores() {
-        let left = rust_sig_with_receiver(
-            &["get", "user"],
-            &["id"],
-            &["UserId"],
-            &["User"],
-            &["T: Clone"],
-            lens_domain::ReceiverShape::Ref,
-        );
-        let right = rust_sig_with_receiver(
-            &["get", "order"],
-            &["other"],
-            &["OrderId"],
-            &["Order"],
-            &["E: Clone"],
-            lens_domain::ReceiverShape::RefMut,
-        );
-
-        let score = signature_components(Some(&left), Some(&right));
-
-        assert_eq!(score.identifier_overlap, Some(0.2));
-        assert_eq!(score.type_overlap, Some(0.0));
-        assert!((score.signature_similarity.unwrap() - 0.15).abs() < 1e-9);
-
-        let same_receiver = rust_sig_with_receiver(
-            &["get", "order"],
-            &["other"],
-            &["OrderId"],
-            &["Order"],
-            &["E: Clone"],
-            lens_domain::ReceiverShape::Ref,
-        );
-        let with_receiver_match = signature_components(Some(&left), Some(&same_receiver));
-        assert!(
-            with_receiver_match.signature_similarity.unwrap() > score.signature_similarity.unwrap()
-        );
-
-        let different_parameter_count = signature_components(
-            Some(&rust_sig(&[], &["id"], &[], &[])),
-            Some(&rust_sig(&[], &["id", "fallback"], &[], &[])),
-        );
-        assert!((different_parameter_count.signature_similarity.unwrap() - 0.8).abs() < 1e-9);
     }
 
     #[test]
@@ -3929,7 +3353,7 @@ fn beta(items: &[i32], scale: i32) -> i32 {
             &corpus,
             0,
             1,
-            token::token_similarity(&token_profiles[0], &token_profiles[1]),
+            token_similarity(&token_profiles[0], &token_profiles[1]),
             SimilarityTarget::Functions.weights(),
         )
         .unwrap();
@@ -3991,7 +3415,7 @@ fn beta(items: &[i32], scale: i32) -> i32 {
             &corpus,
             0,
             1,
-            token::token_similarity(&token_profiles[0], &token_profiles[1]),
+            token_similarity(&token_profiles[0], &token_profiles[1]),
             SimilarityTarget::Functions.weights(),
         )
         .unwrap();
