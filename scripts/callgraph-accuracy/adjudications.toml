@@ -1,0 +1,186 @@
+# Human verdicts on edges where agent-lens and an oracle disagree
+# (docs/callgraph-accuracy.md, "Adjudication"). Reused on every run.
+#
+# One [[adjudication]] per (target, caller, callee), keyed by agent-lens
+# qualified names so a verdict survives line shifts. Copy the `toml` snippet
+# of an entry in target/callgraph-accuracy/results/<target>/disagreements.json
+# and fill in:
+#   verdict = "oracle_wrong"      the oracle is corrected: an agent-lens-only
+#                                 edge counts as a TP, an oracle-only edge is
+#                                 dropped
+#           | "agent_lens_wrong"  confirmed resolver bug; numbers unchanged
+#           | "definition_gap"    the edge definition does not decide it; the
+#                                 edge leaves both sides
+#   note    = why, with the call site, so the next reader need not re-derive it
+# A verdict that matches no current disagreement is reported as stale.
+
+# pflag: `(expr).String()` on a parenthesised receiver is read as a bare call
+# to the package-level `String` function.
+[[adjudication]]
+target = "pflag"
+caller = "pflag::durationValue::String"
+callee = "pflag::String"
+verdict = "agent_lens_wrong"
+note = "duration.go:25 `(*time.Duration)(d).String()` is time.Duration.String (stdlib), not pflag.String"
+
+[[adjudication]]
+target = "pflag"
+caller = "pflag::ipValue::String"
+callee = "pflag::String"
+verdict = "agent_lens_wrong"
+note = "ip.go:17 `net.IP(*i).String()` is net.IP.String (stdlib)"
+
+[[adjudication]]
+target = "pflag"
+caller = "pflag::ipMaskValue::String"
+callee = "pflag::String"
+verdict = "agent_lens_wrong"
+note = "ipmask.go:17 `net.IPMask(*i).String()` is net.IPMask.String (stdlib)"
+
+[[adjudication]]
+target = "pflag"
+caller = "pflag::testParse"
+callee = "pflag::String"
+verdict = "agent_lens_wrong"
+note = "flag_test.go:342 `(*maskFlag).String()` is net.IPMask.String (stdlib)"
+
+# pflag: last-segment fallback binds a method call on a stdlib value to the
+# only pflag method with that name.
+[[adjudication]]
+target = "pflag"
+caller = "pflag::wrapFlagValue"
+callee = "module::FlagSet::Name"
+verdict = "agent_lens_wrong"
+note = "golangflag.go:54 `t.Name()` is reflect.Type.Name (stdlib)"
+
+[[adjudication]]
+target = "pflag"
+caller = "pflag::FlagSet::GetText"
+callee = "module::FlagSet::Name"
+verdict = "agent_lens_wrong"
+note = "text.go:57 `reflect.TypeOf(...).Name()` is reflect.Type.Name (stdlib)"
+
+[[adjudication]]
+target = "pflag"
+caller = "pflag::textValue::Type"
+callee = "module::FlagSet::Name"
+verdict = "agent_lens_wrong"
+note = "text.go:48 `reflect.ValueOf(v.p).Type().Name()` is reflect.Type.Name (stdlib)"
+
+# go-cmp: a method called on a call expression's result is read as a bare
+# call to the package-level function of that name.
+[[adjudication]]
+target = "go-cmp"
+caller = "cmp::state::callTRFunc"
+callee = "cmp::Equal"
+verdict = "agent_lens_wrong"
+note = "compare.go:336 `s.statelessCompare(step).Equal()` is diff.Result.Equal, a method, not cmp.Equal"
+
+[[adjudication]]
+target = "go-cmp"
+caller = "cmp::textList::AppendEllipsis"
+callee = "cmp::Equal"
+verdict = "agent_lens_wrong"
+note = "report_text.go:155 `(*s)[len(*s)-1].Value.Equal(textEllipsis)` is the textNode.Equal interface method"
+
+# go-cmp: last-segment fallback binds a stdlib method to the only in-repo
+# method with that name.
+[[adjudication]]
+target = "go-cmp"
+caller = "cmp::cmpopts::areNonZeroTimes"
+callee = "cmp::diffStats::IsZero"
+verdict = "agent_lens_wrong"
+note = "cmpopts/equate.go:108 `x.IsZero()` on a time.Time is time.Time.IsZero (stdlib)"
+
+[[adjudication]]
+target = "go-cmp"
+caller = "cmp::cmpopts::IgnoreMapEntries"
+callee = "cmp::internal::value::Pointer::IsNil"
+verdict = "agent_lens_wrong"
+note = "cmpopts/ignore.go:185 `vf.IsNil()` on a reflect.Value is reflect.Value.IsNil (stdlib)"
+
+[[adjudication]]
+target = "go-cmp"
+caller = "cmp::retrieveUnexportedField"
+callee = "cmp::internal::value::Pointer::IsNil"
+verdict = "agent_lens_wrong"
+note = "export.go:25 `ve.IsNil()` on a reflect.Value is reflect.Value.IsNil (stdlib)"
+
+# toolz: a call through a local, a parameter or a loop variable is bound to
+# a same-named function or method elsewhere (the name is shadowed).
+[[adjudication]]
+target = "toolz"
+caller = "toolz::tests::test_functoolz::test_curry_simple"
+callee = "toolz::tests::test_functoolz::double"
+verdict = "agent_lens_wrong"
+note = "tests/test_functoolz.py:196 `double(10)` calls the local `double = cmul(2)` (a curry object), which shadows the module-level def"
+
+[[adjudication]]
+target = "toolz"
+caller = "toolz::functoolz::do"
+callee = "toolz::functoolz::curry::func"
+verdict = "agent_lens_wrong"
+note = "functoolz.py:703 `func(x)` calls the parameter `func`, not the curry.func property"
+
+[[adjudication]]
+target = "toolz"
+caller = "toolz::functoolz::Compose::__call__"
+callee = "toolz::tests::test_serialization::f"
+verdict = "agent_lens_wrong"
+note = "functoolz.py:489 `f(ret)` calls the loop variable of `for f in self.funcs`"
+
+[[adjudication]]
+target = "toolz"
+caller = "toolz::sandbox::tests::test_core::test_unzip"
+callee = "toolz::itertoolz::count"
+verdict = "agent_lens_wrong"
+note = "sandbox/tests/test_core.py:95 `count(1)` is itertools.count (`from itertools import count, repeat`), not toolz.count"
+
+# more-itertools: `count` imported from itertools, bound by the last-segment
+# fallback to the only in-repo method named `count`.
+[[adjudication]]
+target = "more-itertools"
+caller = "tests::test_more::InterleaveTests::test_mixed_types"
+callee = "more_itertools::more::numeric_range::count"
+verdict = "agent_lens_wrong"
+note = "tests/test_more.py:1108 `count()` is itertools.count (imported at the top of the file), not numeric_range.count"
+
+[[adjudication]]
+target = "more-itertools"
+caller = "tests::test_more::LongestCommonPrefixTests::test_contains_infinite_iterables"
+callee = "more_itertools::more::numeric_range::count"
+verdict = "agent_lens_wrong"
+note = "tests/test_more.py:5846 `count()` is itertools.count (imported at the top of the file), not numeric_range.count"
+
+# Oracle limits (docs/callgraph-accuracy.md, "Where the oracles fall short").
+# A call to a generator function is seen only where the generator is first
+# advanced; when that line does not name it, the oracle drops the edge.
+[[adjudication]]
+target = "more-itertools"
+caller = "more_itertools::more::adjacent"
+callee = "more_itertools::more::windowed"
+verdict = "oracle_wrong"
+note = "more.py:2184 `map(any, windowed(selected, ...))` calls the generator function windowed; it is first advanced later, inside map"
+
+[[adjudication]]
+target = "more-itertools"
+caller = "more_itertools::more::locate"
+callee = "more_itertools::more::windowed"
+verdict = "oracle_wrong"
+note = "more.py:2537 `it = windowed(iterable, ...)` calls the generator function windowed; it is first advanced on another line"
+
+# A decorated function is the callee (edge definition). `memoize` is wrapped
+# by `@curry`, so the oracle records test -> curry.__call__ -> memoize.
+[[adjudication]]
+target = "toolz"
+caller = "toolz::tests::test_functoolz::test_memoize"
+callee = "toolz::functoolz::memoize"
+verdict = "oracle_wrong"
+note = "tests/test_functoolz.py:74 `memoize(f)` calls the @curry-decorated memoize; the oracle sees only curry.__call__"
+
+[[adjudication]]
+target = "toolz"
+caller = "toolz::tests::test_functoolz::test_memoize_kwargs"
+callee = "toolz::functoolz::memoize"
+verdict = "oracle_wrong"
+note = "tests/test_functoolz.py:88 `memoize(f)` calls the @curry-decorated memoize; the oracle sees only curry.__call__"

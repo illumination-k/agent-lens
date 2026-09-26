@@ -12,6 +12,8 @@
 //! traversal is attempted here.
 
 pub(crate) mod algo;
+#[cfg(test)]
+mod metamorphic_tests;
 pub(crate) mod model;
 pub(crate) mod module_path;
 pub(crate) mod resolve;

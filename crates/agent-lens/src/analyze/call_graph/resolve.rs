@@ -207,7 +207,12 @@ impl Resolver {
         if let Some(callee_path) = site.callee_path()
             && callee_path.contains("::")
         {
-            let narrowed = self.narrow_by_path_suffix(ids, &callee_path);
+            let mut narrowed = self.narrow_by_path_suffix(ids, &callee_path);
+            if narrowed.is_empty()
+                && let Some(expanded) = import_expanded_path(site, &callee_path)
+            {
+                narrowed = self.narrow_by_import_path(ids, &expanded);
+            }
             return if narrowed.is_empty() {
                 ResolvedCall::unresolved()
             } else {
@@ -236,6 +241,9 @@ impl Resolver {
     /// last-segment match, then narrow ambiguous matches to the
     /// caller's crate.
     ///
+    /// * Receiver bound by an import, with a node at the imported path
+    ///   (`text.shout()` after `from app import text`) →
+    ///   [`Resolution::Resolved`] via [`ResolutionMethod::Lexical`].
     /// * Ubiquitous method name → [`Resolution::Unresolved`], whatever
     ///   the candidates. The name is the only evidence a receiver call
     ///   offers, and for `.clone()` / `.get()` / `.map()` it says
@@ -260,6 +268,18 @@ impl Resolver {
         callee_name: &str,
         language: GraphLanguage,
     ) -> ResolvedCall {
+        // `text.shout()` after `from app import text`: the receiver is an
+        // imported name, so the import says what it is. Only an exact
+        // node under the imported path counts — an imported *object*
+        // (`from app.cfg import settings; settings.load()`) names no
+        // such node and falls through to the name heuristics below.
+        if let Some(expanded) = site
+            .callee_path()
+            .and_then(|path| import_expanded_path(site, &path))
+            && let Some(ids) = self.qualified.get(&expanded)
+        {
+            return resolve_ids(ids, ResolutionMethod::Lexical);
+        }
         if language.ubiquitous_method_names().contains(callee_name) {
             return ResolvedCall::unresolved();
         }
@@ -294,6 +314,30 @@ impl Resolver {
             .is_some_and(|qualified| qualified_in_crate(qualified, crate_name))
     }
 
+    /// Candidates whose qualified name ends the import-expanded path, on
+    /// segment boundaries, with at least the module segment the call
+    /// named. An import path is rooted where the graph's module paths are
+    /// not — a Go import carries the module path from `go.mod`
+    /// (`example.com::shapes::geo`), the node only its package directory
+    /// (`geo::Area`) — so the node is a suffix of the import rather than
+    /// the other way round, which is what [`Self::narrow_by_path_suffix`]
+    /// checks. Only consulted when that forward match found nothing: an
+    /// aliased import (`shapes.Area()`) is the case it exists for.
+    fn narrow_by_import_path(&self, ids: &[String], expanded: &str) -> Vec<String> {
+        ids.iter()
+            .filter(|id| {
+                self.id_to_qualified
+                    .get(id.as_str())
+                    .is_some_and(|qualified| {
+                        qualified.contains("::")
+                            && (expanded == qualified
+                                || expanded.ends_with(&format!("::{qualified}")))
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
     fn narrow_by_path_suffix(&self, ids: &[String], callee_path: &str) -> Vec<String> {
         let suffix = format!("::{callee_path}");
         ids.iter()
@@ -307,6 +351,19 @@ impl Resolver {
             .cloned()
             .collect()
     }
+}
+
+/// `callee_path` with its first segment replaced by the import that
+/// binds it (`shapes::Area` → `example.com::shapes::geo::Area` after
+/// `import shapes "example.com/shapes/geo"`). `None` for a single
+/// segment or a head no import binds.
+fn import_expanded_path(site: &CallShape, callee_path: &str) -> Option<String> {
+    let segments: Vec<&str> = callee_path.split("::").collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let target = alias_target(site, segments[0])?;
+    prefix_with_tail(module_segments(target), &segments)
 }
 
 fn resolve_ids(ids: &[String], method: ResolutionMethod) -> ResolvedCall {
@@ -743,6 +800,73 @@ mod tests {
         let call = resolver.resolve(&receiver, GraphLanguage::Go);
 
         assert_eq!(call.resolution, Resolution::Resolved);
+    }
+
+    /// `a.parse()` after `from crate import a`: the receiver is an
+    /// imported module, so the import resolves the call where the name
+    /// alone would be ambiguous. Regression for #579, where renaming the
+    /// import (`from crate import a as b`) flipped this edge between
+    /// resolved and ambiguous.
+    #[test]
+    fn receiver_calls_through_an_imported_module_resolve_lexically() {
+        let nodes = vec![node("crate::a::parse"), node("crate::other::parse")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&receiver_site("a::parse"), GraphLanguage::Python);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+        assert_eq!(call.to.as_deref(), Some("src/lib.rs:crate::a::parse:1"));
+        assert_eq!(call.method, Some(ResolutionMethod::Lexical));
+    }
+
+    /// An imported *object* names no node under the import path, so the
+    /// receiver call keeps the ordinary name heuristics.
+    #[test]
+    fn receiver_calls_on_an_imported_object_keep_the_name_heuristics() {
+        let nodes = vec![node("crate::m::W::run"), node("other::W::run")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&receiver_site("parse::run"), GraphLanguage::Python);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+        assert_eq!(call.to.as_deref(), Some("src/lib.rs:crate::m::W::run:1"));
+        assert_eq!(call.method, Some(ResolutionMethod::CrateNarrowed));
+    }
+
+    /// `shapes.Area()` after `import shapes "example.com/shapes/geo"`:
+    /// the alias hides the package name the forward path-suffix match
+    /// needs, so the import path decides — the node's `geo::Area` ends it.
+    /// Regression for #579, where aliasing a Go import left every call
+    /// through it unresolved.
+    #[rstest]
+    #[case::aliased("shapes", "shapes::Area", Some("src/lib.rs:geo::Area:1"))]
+    #[case::default_alias("geo", "geo::Area", Some("src/lib.rs:geo::Area:1"))]
+    #[case::unbound_head("shapes", "other::Area", None)]
+    fn import_paths_narrow_a_package_call_to_the_imported_package(
+        #[case] alias: &str,
+        #[case] path: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let nodes = vec![node("geo::Area"), node("decoy::Area")];
+        let resolver = Resolver::new(&nodes);
+        let call_site = CallShape {
+            caller_module: SyntaxFact::Known("app".to_owned()),
+            caller_qualified_name: SyntaxFact::Known(Some("app::Run".to_owned())),
+            visible_imports: vec![ImportShape {
+                local_alias: SyntaxFact::Known(Some(alias.to_owned())),
+                imported_module: SyntaxFact::Known("example.com::shapes::geo".to_owned()),
+                exported_symbol: SyntaxFact::Known(None),
+            }],
+            ..site(path)
+        };
+
+        let call = resolver.resolve(&call_site, GraphLanguage::Go);
+
+        assert_eq!(call.to.as_deref(), expected, "{path}");
+        match expected {
+            Some(_) => assert_eq!(call.method, Some(ResolutionMethod::PathSuffix)),
+            None => assert_eq!(call.resolution, Resolution::Unresolved),
+        }
     }
 
     #[test]

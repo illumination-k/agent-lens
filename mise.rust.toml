@@ -133,9 +133,47 @@ echo "Running cargo-mutants against diff base: $base"
 cargo mutants --workspace --no-shuffle --iterate --jobs "$jobs" --in-diff target/mutants-diff.patch
 '''
 
+[tasks."test:callgraph-accuracy"]
+description = "Unit-test the call-graph accuracy scorer and Python oracle (scripts/callgraph-accuracy)"
+# The oracle tests run pytest under the profiler; uv supplies it (they skip
+# without pytest). uv is declared here because ci_rust.yml sets MISE_ENV=rust.
+tools = { uv = "0.11.5" }
+# `ruff check` (default rules) is the harness's only Python lint gate; the Go
+# oracle's gofmt / vet / tests run by hand (see its README), since this task
+# runs with MISE_ENV=rust, which has no Go toolchain.
+run = [
+  "uvx ruff@0.14.0 check scripts/callgraph-accuracy",
+  "uv run --no-project --python 3.12 --with pytest==8.4.2 python -m unittest discover -s scripts/callgraph-accuracy",
+]
+
 [tasks."ci:rust"]
 description = "Run Rust lint and test tasks"
-depends = ["lint:rust", "test:rust", "test:rust:doc"]
+depends = ["lint:rust", "test:rust", "test:rust:doc", "test:callgraph-accuracy"]
+
+# Call-graph accuracy benchmark (issue #579, docs/callgraph-accuracy.md):
+# precision/recall of `function-graph` per ResolutionMethod against a Go
+# go/callgraph/vta oracle and a Python sys.setprofile oracle on the pinned
+# projects in scripts/callgraph-accuracy/targets.toml.
+#
+# Deliberately not a `ci:*` / `test:*` / `bench:*` task, like `bench`: it
+# clones third-party repositories, downloads Go modules and PyPI packages,
+# and runs their test suites under a profiler (minutes, network required),
+# and its output is a report to read, not a pass/fail gate. The scorer's own
+# unit tests are `test:callgraph-accuracy`, which `ci:rust` runs; the
+# metamorphic resolver tests are ordinary cargo tests.
+[tasks.callgraph-accuracy]
+description = "Measure call-graph precision/recall against Go (VTA) and Python (setprofile) oracles"
+usage = '''
+arg "[target]..." help="Targets from scripts/callgraph-accuracy/targets.toml (default: all)" var=#true
+'''
+# go for the VTA oracle, uv for the Python targets' venvs (uv is also a base tool,
+# but this task must work with MISE_ENV=rust alone).
+tools = { go = "1.26.8", uv = "0.11.5" }
+run = '''
+set -eu
+cargo build --release --locked -p agent-lens
+python3 scripts/callgraph-accuracy/run.py ${usage_target:-}
+'''
 
 # Dogfooding: run the freshly built binary over this repository's own
 # sources, driving the profiles in `agent-lens.toml`.

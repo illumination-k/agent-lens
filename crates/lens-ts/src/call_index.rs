@@ -547,6 +547,12 @@ fn resolve_import_module(module: &str, source: &str) -> Option<String> {
             segment => segments.push(strip_ts_extension(segment).to_owned()),
         }
     }
+    // `./geo/index` is the module `./geo` names: a directory's
+    // `index.ts` takes the directory's module path (see
+    // `module_path::module_segments`), so the import must too.
+    if segments.last().is_some_and(|last| last == "index") {
+        segments.pop();
+    }
     (!segments.is_empty()).then(|| segments.join("::"))
 }
 
@@ -793,6 +799,26 @@ mod tests {
                 .known_value()
                 .map(String::as_str),
             Some("src::helper::helper"),
+        );
+    }
+
+    /// A directory's `index.ts` has the directory's module path, so an
+    /// import spelling the file out must land on that same module.
+    /// Regression for #579: `'./geo/index'` resolved to `src::geo::index`,
+    /// which no node carries.
+    #[rstest]
+    #[case::directory("./geo", "src::geo")]
+    #[case::index_file("./geo/index", "src::geo")]
+    #[case::index_file_with_extension("./geo/index.ts", "src::geo")]
+    #[case::sibling_index("./index", "src")]
+    #[case::index_named_directory("./index/geo", "src::index::geo")]
+    fn index_file_imports_resolve_to_the_directory_module(
+        #[case] specifier: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(
+            resolve_import_module("src::main", specifier).as_deref(),
+            Some(expected)
         );
     }
 

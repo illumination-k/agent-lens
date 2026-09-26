@@ -1,0 +1,63 @@
+# Pinned OSS projects the call-graph accuracy benchmark runs on.
+# See docs/callgraph-accuracy.md. `commit` is the full SHA the tag resolved to
+# (`git ls-remote <repo> refs/tags/<tag>`); the tag is kept for humans only.
+#
+# Keys:
+#   name      directory under target/callgraph-accuracy/, and the key
+#             adjudications.toml entries are filed under
+#   language  go | python
+#   oracle    go-vta | python-setprofile
+#   repo      git URL
+#   tag       release tag `commit` was resolved from (informational)
+#   commit    full commit SHA that is checked out
+#   subdir    optional: analyse only this directory of the checkout
+#   install   python only: extra pip requirements next to the editable install
+#   pytest    python only: arguments passed to pytest under the oracle
+
+[[target]]
+name = "pflag"
+language = "go"
+oracle = "go-vta"
+repo = "https://github.com/spf13/pflag"
+tag = "v1.0.10"
+commit = "0491e5702ad2bb108bc519a5221bcc0f52aa9564"
+
+[[target]]
+name = "go-cmp"
+language = "go"
+oracle = "go-vta"
+repo = "https://github.com/google/go-cmp"
+tag = "v0.7.0"
+commit = "9b12f366a942ebc7254abc7f32ca05068b455fb7"
+
+[[target]]
+name = "more-itertools"
+language = "python"
+oracle = "python-setprofile"
+repo = "https://github.com/more-itertools/more-itertools"
+tag = "v11.1.0"
+commit = "64be96ceb2a6e836f76f069f4a96d2394d59fd0c"
+install = ["pytest"]
+# test_concurrent_consumers runs 100 threads over 10**5 items: ~50 s plain,
+# ~7 min under the profiler, for a handful of edges the other concurrent_tee
+# tests also produce.
+pytest = [
+  "-q",
+  "-p",
+  "no:cacheprovider",
+  "tests",
+  "--deselect",
+  "tests/test_more.py::TestConcurrentTee::test_concurrent_consumers",
+]
+
+[[target]]
+name = "toolz"
+language = "python"
+oracle = "python-setprofile"
+repo = "https://github.com/pytoolz/toolz"
+tag = "1.1.0"
+commit = "568c2b8393973cd172a466546c9d95779c452438"
+install = ["pytest"]
+# test_has_version reads the version from git tags, which a shallow checkout
+# at a pinned commit does not have.
+pytest = ["-q", "-p", "no:cacheprovider", "toolz", "--deselect", "toolz/tests/test_package.py::test_has_version"]
