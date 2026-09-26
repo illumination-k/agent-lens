@@ -377,16 +377,30 @@ spf13/cast `40e8e07` (v1.9.2):
 
 plus `IsNil` / `IsZero` in Go's ubiquitous method names.
 
-| Targets       | Precision           | Static recall       |
-| ------------- | ------------------- | ------------------- |
-| pflag, go-cmp | 0.989 (1474 / 1491) | 0.838 (1470 / 1754) |
+Per repository, after the fixes (the five discovery targets are not in
+`targets.toml`; their precision counts every agent-lens-only pair as a false
+positive, since none is adjudicated):
 
-Per target: precision pflag 0.985, go-cmp 1.000; static recall pflag 0.841,
-go-cmp 0.830. On the five discovery targets precision went 0.968 → 0.973
-and static recall 0.678 → 0.792. What is left there: `reflect.Value.Type`
-bound to an in-repo `Type` method by `crate_narrowed` (toml), `Get` on an
-`http.Header` (mux), and edges to `zz_generated.go`, which the oracle
-excludes as generated (cast).
+| Repository                  | Commit    | Precision           | Static recall       | Static pairs only in a candidate set | Dynamic recall |
+| --------------------------- | --------- | ------------------- | ------------------- | ------------------------------------ | -------------- |
+| spf13/pflag v1.0.10         | `0491e57` | 0.985 (1098 / 1115) | 0.841 (1094 / 1301) | 30                                   | 4 / 837        |
+| google/go-cmp v0.7.0        | `9b12f36` | 1.000 (376 / 376)   | 0.830 (376 / 453)   | 63                                   | 0 / 222        |
+| google/uuid v1.6.0          | `0f11ee6` | 1.000 (159 / 159)   | 0.828 (159 / 192)   | 8                                    | 0 / 5          |
+| BurntSushi/toml v1.5.0      | `d97def5` | 0.972 (692 / 712)   | 0.889 (690 / 776)   | 65                                   | 2 / 87         |
+| samber/lo v1.51.0           | `203faca` | 0.993 (144 / 145)   | 0.706 (144 / 204)   | 7                                    | 0 / 3          |
+| gorilla/mux v1.8.1          | `b4617d0` | 0.981 (358 / 365)   | 0.669 (358 / 535)   | 177                                  | 0 / 66         |
+| spf13/cast v1.9.2           | `40e8e07` | 0.887 (94 / 106)    | 0.803 (94 / 117)    | 0                                    | 0 / 37         |
+| pflag + go-cmp (micro-avg.) |           | 0.989 (1474 / 1491) | 0.838 (1470 / 1754) | 93                                   | 4 / 1059       |
+
+Against the baseline above, pflag + go-cmp went from precision 0.973 and
+static recall 0.536. On the five discovery targets, the fixes raised
+precision from 0.968 to 0.973 and static recall from 0.678 to 0.792. What is
+left there: `reflect.Value.Type` bound to an in-repo `Type` method by
+`crate_narrowed` (toml), `Get` on an `http.Header` (mux), edges to
+`zz_generated.go`, which the oracle excludes as generated (cast, all 12 of
+its false positives), and lo's self-edges on generic functions
+(`Contains → Contains`), which come from the oracle collapsing instantiation
+wrappers.
 
 ### Rust and TypeScript
 
