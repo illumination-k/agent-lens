@@ -88,8 +88,12 @@ pair you know is the same computation, or to confirm that a high TSED pair is
 the same _logic_ and not just the same shape: half the score is the wiring,
 half is the statements themselves, so a body with the same statement kinds and
 dependences but different statements bottoms out at `0.5`. Scores are not
-comparable across methods, and `--method token` is the cheap third option
-(token k-gram overlap) for very large corpora.
+comparable across methods. `--method token` is the cheap option (token
+k-gram overlap) for very large corpora; add `--idf` to weight k-grams by how
+rare they are in the corpus, so pairs that share only logging or error
+plumbing drop. `--method lcs` scores the longest common token subsequence:
+order-aware, and it keeps a copy that had a block of statements inserted in
+the middle, which the k-gram overlap scores low.
 
 Two blind spots to read around. Anything an adapter lowers to an opaque leaf
 (a Rust macro invocation, a closure body in TypeScript) hides the names it

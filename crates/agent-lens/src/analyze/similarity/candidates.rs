@@ -3,7 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 use lens_domain::{
-    CandidateStrategy, TSEDOptions, collect_subtree_sizes, lsh_candidate_pairs_for_trees,
+    CandidateStrategy, TSEDOptions, TraversalProfile, collect_subtree_sizes,
+    lsh_candidate_pairs_for_trees,
 };
 use rayon::prelude::*;
 
@@ -13,6 +14,10 @@ use super::{OwnedUnit, SimilarityMethod};
 pub(super) struct TreeProfile {
     pub size: usize,
     subtree_sizes: OnceLock<lens_domain::SubtreeSizes>,
+    /// Traversal strings for the edit-distance lower bound, built on the
+    /// first pair that needs them. `compare_values` is fixed per run, so
+    /// the first caller's setting is the only one ever asked for.
+    traversal: OnceLock<TraversalProfile>,
     filters: Option<TreeFilterProfile>,
     exact_hash_ignoring_values: u64,
     exact_hash_with_values: u64,
@@ -42,6 +47,7 @@ impl TreeProfile {
         Self {
             size,
             subtree_sizes: initialized_once_lock(subtree_sizes),
+            traversal: OnceLock::new(),
             filters: Some(filters),
             exact_hash_ignoring_values: exact_hashes.ignoring_values,
             exact_hash_with_values: exact_hashes.with_values,
@@ -53,6 +59,7 @@ impl TreeProfile {
         Self {
             size: tree.subtree_size(),
             subtree_sizes: OnceLock::new(),
+            traversal: OnceLock::new(),
             filters: None,
             exact_hash_ignoring_values: exact_hashes.ignoring_values,
             exact_hash_with_values: exact_hashes.with_values,
@@ -65,6 +72,15 @@ impl TreeProfile {
     ) -> &'a lens_domain::SubtreeSizes {
         self.subtree_sizes
             .get_or_init(|| collect_subtree_sizes(tree))
+    }
+
+    pub(super) fn traversal<'a>(
+        &'a self,
+        tree: &lens_domain::TreeNode,
+        compare_values: bool,
+    ) -> &'a TraversalProfile {
+        self.traversal
+            .get_or_init(|| TraversalProfile::from_tree(tree, compare_values))
     }
 
     /// Whether this profile carries the cheap-filter data (`from_tree`)

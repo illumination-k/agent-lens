@@ -114,6 +114,7 @@ pub mod source_walk;
 pub mod syntax;
 pub mod token_similarity;
 pub mod tree;
+pub mod tree_bound;
 pub mod tsed;
 pub mod type_shape;
 pub mod wrapper;
@@ -178,9 +179,16 @@ pub use syntax::{
     ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact, TraitDeclShape,
     TraitImplShape, VisibilityShape, callee_names_local_binding,
 };
-pub use token_similarity::{TokenProfile, token_similarity};
+pub use token_similarity::{
+    TokenIdf, TokenProfile, lcs_similarity, lcs_similarity_upper_bound, token_similarity,
+    weighted_token_similarity,
+};
 pub use tree::TreeNode;
-pub use tsed::{TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes};
+pub use tree_bound::{DistanceBound, TraversalProfile, edit_distance_lower_bound};
+pub use tsed::{
+    TSEDOptions, calculate_tsed, calculate_tsed_with_subtree_sizes, tsed_distance_cutoff,
+    tsed_from_distance,
+};
 pub use type_shape::{
     TypeDefKind, TypeMemberShape, TypeShape, TypeVariantShape, normalize_type_text,
 };

@@ -27,6 +27,9 @@ exclude_globs = [
 # equivalent: writing `>=` instead of `>` produces the same final
 # `max_nesting` value, just with one extra idempotent write.
 exclude_re = [
+  # similarity: the rounding slack under the threshold before an
+  # edit-distance bound skips APTED; only moves scores within 1e-9.
+  "clearly_below_threshold",
   # complexity: per-stmt / per-expr Halstead label dispatchers
   "ComplexityVisitor::record_stmt_halstead",
   "ComplexityVisitor::record_expr_halstead",

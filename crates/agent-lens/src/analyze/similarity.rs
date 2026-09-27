@@ -14,7 +14,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lens_domain::{TSEDOptions, TokenProfile, cluster_similar_pairs, token_similarity};
+use lens_domain::{
+    TSEDOptions, TokenIdf, TokenProfile, cluster_similar_pairs, lcs_similarity,
+    lcs_similarity_upper_bound, token_similarity, weighted_token_similarity,
+};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -163,6 +166,12 @@ pub enum SimilarityMethod {
     /// Cheaper than TSED and more tolerant of reordered code, at the
     /// cost of some precision.
     Token,
+    /// Longest common subsequence of the body's preorder token sequence,
+    /// over the longer sequence's length. Order-aware where `token` is
+    /// not, and tolerant of a large inserted or deleted gap, so it
+    /// catches the Type-3 clone that had a block of statements added in
+    /// the middle (NIL, ESEC/FSE 2021).
+    Lcs,
     /// Weisfeiler-Lehman kernel over the body's program dependence
     /// graph: statements as nodes, control and data dependences as
     /// edges. Invariant to reordering independent statements and to
@@ -177,6 +186,7 @@ impl SimilarityMethod {
         match self {
             Self::Tsed => "tsed",
             Self::Token => "token",
+            Self::Lcs => "lcs",
             Self::Pdg => "pdg",
         }
     }
@@ -337,7 +347,9 @@ pub struct SimilarityOptions {
     /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
     /// distance over the body AST. `token` compares preorder token
     /// k-gram multisets — faster and more tolerant of reordered code,
-    /// but less precise. `pdg` compares program dependence graphs
+    /// but less precise. `lcs` scores the longest common subsequence
+    /// of the preorder token sequences — order-aware, and tolerant of a
+    /// large inserted gap that splits a copied body. `pdg` compares program dependence graphs
     /// (statements wired by control and data dependence) with a
     /// Weisfeiler-Lehman kernel — invariant to statement reordering
     /// and local renaming, so it finds semantic clones the tree shape
@@ -345,6 +357,13 @@ pub struct SimilarityOptions {
     /// comparable.
     #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
     pub method: SimilarityMethod,
+    /// Weight each token k-gram by its inverse document frequency over
+    /// the analyzed corpus, so boilerplate every body repeats (logging,
+    /// error plumbing, builder chains) counts for less than the logic a
+    /// body does not share with the rest of the corpus. Only affects
+    /// `--method token`.
+    #[arg(long)]
+    pub idf: bool,
     /// Roll the per-pair doc-comment overlap up into the markdown
     /// report, as a range plus how many of the cluster's pairs carried
     /// doc text on both sides. Diagnostic only — it never feeds the
@@ -371,6 +390,7 @@ impl Default for SimilarityOptions {
             min_lines: None,
             target: SimilarityTarget::Functions,
             method: SimilarityMethod::Tsed,
+            idf: false,
             doc_overlap: false,
         }
     }
@@ -406,6 +426,7 @@ pub struct SimilarityAnalyzer {
     min_lines: Option<usize>,
     top: Option<usize>,
     method: SimilarityMethod,
+    idf: bool,
     target: SimilarityTarget,
     sweep: Option<Vec<f64>>,
     doc_overlap: bool,
@@ -436,6 +457,7 @@ impl SimilarityAnalyzer {
             min_lines: None,
             top: None,
             method: SimilarityMethod::default(),
+            idf: false,
             target: SimilarityTarget::default(),
             sweep: None,
             doc_overlap: false,
@@ -466,6 +488,7 @@ impl SimilarityAnalyzer {
             .with_min_lines_opt(opts.min_lines)
             .with_target(opts.target)
             .with_method(opts.method)
+            .with_idf(opts.idf)
             .with_doc_overlap(opts.doc_overlap)
             .with_paired_by(opts.paired_by)
             .with_drift_floor(opts.drift_floor)
@@ -502,6 +525,12 @@ impl SimilarityAnalyzer {
         /// [`SimilarityMethod::Tsed`]; [`SimilarityMethod::Token`] swaps
         /// in the cheaper token k-gram score.
         fn with_method, method: SimilarityMethod
+    }
+
+    with_setter! {
+        /// Weight token k-grams by corpus inverse document frequency
+        /// under [`SimilarityMethod::Token`].
+        fn with_idf, idf: bool
     }
 
     with_setter! {
@@ -945,10 +974,23 @@ impl SimilarityAnalyzer {
             }
             SimilarityMethod::Token => {
                 let token_profiles = build_token_profiles(corpus, compare_values);
+                let idf = self.idf.then(|| TokenIdf::from_profiles(&token_profiles));
                 score_profile_pairs(corpus, pairs, threshold, weights, |i, j| {
-                    Some(token_similarity(
+                    let (a, b) = (token_profiles.get(i)?, token_profiles.get(j)?);
+                    Some(match &idf {
+                        Some(idf) => weighted_token_similarity(a, b, idf),
+                        None => token_similarity(a, b),
+                    })
+                })
+            }
+            SimilarityMethod::Lcs => {
+                let token_profiles = build_token_profiles(corpus, compare_values);
+                let min_body = weights.body_candidate_threshold(threshold);
+                score_profile_pairs(corpus, pairs, threshold, weights, |i, j| {
+                    Some(bounded_lcs_similarity(
                         token_profiles.get(i)?,
                         token_profiles.get(j)?,
+                        min_body,
                     ))
                 })
             }
@@ -1158,6 +1200,19 @@ fn build_token_profiles(corpus: &[OwnedUnit], compare_values: bool) -> Vec<Token
         .collect()
 }
 
+/// [`lcs_similarity`], skipping the quadratic LCS when the unigram bound
+/// already rules out `min_body`. A skipped pair returns that bound, which
+/// is below `min_body` and so below the threshold the pair is recorded
+/// against: it is counted, never reported.
+fn bounded_lcs_similarity(a: &TokenProfile, b: &TokenProfile, min_body: f64) -> f64 {
+    let upper = lcs_similarity_upper_bound(a, b);
+    if upper < min_body {
+        upper
+    } else {
+        lcs_similarity(a, b)
+    }
+}
+
 fn build_pdg_profiles(corpus: &[OwnedUnit], compare_values: bool) -> Vec<PdgProfile> {
     corpus
         .par_iter()
@@ -1283,6 +1338,7 @@ fn log_score_stats(
         shingle_filtered_count = candidates.shingle_filtered_count,
         overlap_filtered_count = candidates.overlap_filtered_count,
         below_threshold_count = score_stats.below_threshold_count,
+        bound_pruned_count = score_stats.bound_pruned_count,
         diff_filtered_count = score_stats.diff_filtered_count,
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         "similarity scoring finished"
@@ -1469,6 +1525,92 @@ fn delta(xs: &[i32]) -> i32 {
                 );
             }
         }
+    }
+
+    fn unit_with_body(name: &str, tree: lens_domain::TreeNode) -> OwnedUnit {
+        OwnedUnit {
+            file: PathBuf::from("lib.rs"),
+            rel_path: "lib.rs".to_owned(),
+            is_test: false,
+            kind: None,
+            implements: None,
+            lang: crate::analyze::SourceLang::Rust,
+            shape: lens_domain::FunctionShape::from(lens_domain::FunctionDef {
+                name: name.to_owned(),
+                start_line: 1,
+                end_line: 5,
+                is_test: false,
+                signature: None,
+                doc: None,
+                implements: None,
+                tree,
+            }),
+        }
+    }
+
+    proptest! {
+        /// The traversal lower bound may skip APTED only for a pair the
+        /// exact score also puts below the threshold: every pair that
+        /// reaches it keeps its exact score, so reports are unchanged.
+        #[test]
+        fn edit_distance_bound_never_changes_a_pair_that_reaches_threshold(
+            a in arb_valued_tree(),
+            b in arb_valued_tree(),
+            threshold in 0.0_f64..1.0,
+            compare_values in any::<bool>(),
+            size_penalty in any::<bool>(),
+        ) {
+            let mut opts = TSEDOptions { size_penalty, ..TSEDOptions::default() };
+            opts.apted.compare_values = compare_values;
+            let corpus = vec![unit_with_body("a", a), unit_with_body("b", b)];
+            let weights = SimilarityTarget::Functions.weights();
+            let profiles = build_tree_profiles(&corpus, 1, true, false);
+            let exact = score_candidate_pair(&corpus, &profiles, 0, 1, &opts, weights, 0.0);
+            let bounded =
+                score_candidate_pair(&corpus, &profiles, 0, 1, &opts, weights, threshold);
+            let (Some(exact), Some(bounded)) = (exact, bounded) else {
+                return Err(TestCaseError::fail("pair must score"));
+            };
+            prop_assert!(!exact.bound_pruned);
+            if bounded.bound_pruned {
+                prop_assert!(exact.components.similarity < threshold);
+                prop_assert!(bounded.components.similarity < threshold);
+                prop_assert!(bounded.components.similarity >= exact.components.similarity - 1e-9);
+            } else {
+                prop_assert_eq!(
+                    bounded.components.similarity,
+                    exact.components.similarity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn edit_distance_bound_skips_a_far_apart_pair() {
+        let a = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![lens_domain::TreeNode::leaf("Let"); 12],
+        );
+        let b = lens_domain::TreeNode::with_children(
+            "Block",
+            "",
+            vec![lens_domain::TreeNode::leaf("Call"); 12],
+        );
+        let corpus = vec![unit_with_body("a", a), unit_with_body("b", b)];
+        let profiles = build_tree_profiles(&corpus, 1, true, false);
+        let score = score_candidate_pair(
+            &corpus,
+            &profiles,
+            0,
+            1,
+            &TSEDOptions::default(),
+            SimilarityTarget::Functions.weights(),
+            0.85,
+        )
+        .unwrap();
+        assert!(score.bound_pruned);
+        assert!(score.components.similarity < 0.85);
     }
 
     fn arb_valued_tree() -> impl Strategy<Value = lens_domain::TreeNode> {
@@ -1869,6 +2011,7 @@ fn delta(xs: &[i32]) -> i32 {
             1,
             &TSEDOptions::default(),
             SimilarityTarget::Functions.weights(),
+            0.0,
         )
         .unwrap();
 
@@ -3099,6 +3242,64 @@ fn beta(x: i32) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&pdg).unwrap();
         assert_eq!(parsed["method"], "pdg");
+
+        let lcs = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_method(SimilarityMethod::Lcs)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&lcs).unwrap();
+        assert_eq!(parsed["method"], "lcs");
+    }
+
+    /// The LCS method and IDF-weighted token scoring surface the same
+    /// near-duplicate pair the plain methods do.
+    #[rstest]
+    #[case::lcs(SimilarityMethod::Lcs, false)]
+    #[case::token_idf(SimilarityMethod::Token, true)]
+    fn order_aware_and_idf_methods_report_paired_functions(
+        #[case] method: SimilarityMethod,
+        #[case] idf: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);
+        let out = SimilarityAnalyzer::new()
+            .with_threshold(0.5)
+            .with_method(method)
+            .with_idf(idf)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        assert_json_pair_report(&out);
+    }
+
+    /// `A B C D` against `D C X Y`: the unigram bound counts Block, C and
+    /// D (3 of 5) but only Block and one of them line up in order (2 of
+    /// 5), so the two readings differ and the test sees which one ran.
+    #[rstest]
+    #[case::bound_rules_out(0.9, 0.6)]
+    #[case::bound_equal_to_min_scores_exactly(0.6, 0.4)]
+    #[case::bound_above_min_scores_exactly(0.1, 0.4)]
+    fn bounded_lcs_skips_only_pairs_the_unigram_bound_rules_out(
+        #[case] min_body: f64,
+        #[case] expected: f64,
+    ) {
+        let body = |labels: &[&str]| {
+            TokenProfile::from_tree(
+                &lens_domain::TreeNode::with_children(
+                    "Block",
+                    "",
+                    labels
+                        .iter()
+                        .map(|l| lens_domain::TreeNode::leaf(*l))
+                        .collect(),
+                ),
+                false,
+            )
+        };
+        let a = body(&["A", "B", "C", "D"]);
+        let b = body(&["D", "C", "X", "Y"]);
+        let got = bounded_lcs_similarity(&a, &b, min_body);
+        assert!((got - expected).abs() < 1e-12, "got {got}");
     }
 
     /// The token method must surface the same near-duplicate pair the
@@ -3153,6 +3354,7 @@ def beta(ys):
     #[rstest]
     #[case::token(SimilarityMethod::Token, "token method")]
     #[case::pdg(SimilarityMethod::Pdg, "pdg method")]
+    #[case::lcs(SimilarityMethod::Lcs, "lcs method")]
     fn markdown_header_names_the_method(#[case] method: SimilarityMethod, #[case] label: &str) {
         let dir = tempfile::tempdir().unwrap();
         let file = write_file(dir.path(), "lib.rs", PAIRED_FUNCTIONS);

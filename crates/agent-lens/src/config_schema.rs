@@ -143,9 +143,15 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             },
             Field {
                 key: "method",
-                ty: "\"tsed\", \"token\" or \"pdg\"",
+                ty: "\"tsed\", \"token\", \"lcs\" or \"pdg\"",
                 presence: "optional",
-                desc: "Body-scoring algorithm: tsed (tree-edit distance, default), token (k-gram overlap) or pdg (dependence-graph kernel; invariant to statement order and local names).",
+                desc: "Body-scoring algorithm: tsed (tree-edit distance, default), token (k-gram overlap), lcs (longest common token subsequence; order-aware, tolerant of a large inserted gap) or pdg (dependence-graph kernel; invariant to statement order and local names).",
+            },
+            Field {
+                key: "idf",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Weight token k-grams by inverse document frequency over the corpus, so boilerplate every body repeats counts for less. Only affects method = \"token\".",
             },
             Field {
                 key: "target",
@@ -497,7 +503,7 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             },
             Field {
                 key: "method",
-                ty: "\"tsed\", \"token\" or \"pdg\"",
+                ty: "\"tsed\", \"token\", \"lcs\" or \"pdg\"",
                 presence: "default: tsed",
                 desc: "Body-scoring algorithm, as `similarity`'s. `pdg` reads dependence structure, so a copied test whose arrange step moved still scores as a copy.",
             },
