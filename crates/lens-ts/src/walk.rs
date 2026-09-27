@@ -157,16 +157,11 @@ fn walk_stmt<V: FunctionVisitor>(
     visitor: &mut V,
     units: &mut ModuleUnitCounter,
 ) {
+    if let Some(decl) = stmt.as_declaration() {
+        walk_decl(decl, owner, decl.span().start, line_index, visitor, units);
+        return;
+    }
     match stmt {
-        Statement::FunctionDeclaration(f) => {
-            visit_function(f, owner, f.span.start, line_index, visitor);
-        }
-        Statement::ClassDeclaration(c) => walk_class(c, owner, line_index, visitor),
-        Statement::VariableDeclaration(v) => {
-            for d in &v.declarations {
-                visit_variable_declarator(d, owner, v.span.start, line_index, visitor);
-            }
-        }
         Statement::ExportDeclaration(e) => {
             walk_decl(
                 &e.declaration,
@@ -186,16 +181,6 @@ fn walk_stmt<V: FunctionVisitor>(
             }
             _ => {}
         },
-        Statement::TSNamespaceDeclaration(m) => {
-            walk_namespace(m, owner, line_index, visitor, units);
-        }
-        Statement::TSExternalModuleDeclaration(m) => {
-            walk_module_block(m.body.as_deref(), owner, line_index, visitor, units);
-        }
-        Statement::TSGlobalDeclaration(m) => {
-            let scope = qualify(owner, "global");
-            walk_module_block(Some(&m.body), Some(&scope), line_index, visitor, units);
-        }
         Statement::ExpressionStatement(e) => {
             scan_expression_functions(&e.expression, owner, line_index, visitor, units);
         }
@@ -221,15 +206,10 @@ fn walk_decl<V: FunctionVisitor>(
                 visit_variable_declarator(d, owner, attach_start, line_index, visitor);
             }
         }
+        // `declare module "pkg"` and `declare global` are ambient: they
+        // cannot hold a function body, so there is nothing to walk.
         Declaration::TSNamespaceDeclaration(m) => {
             walk_namespace(m, owner, line_index, visitor, units);
-        }
-        Declaration::TSExternalModuleDeclaration(m) => {
-            walk_module_block(m.body.as_deref(), owner, line_index, visitor, units);
-        }
-        Declaration::TSGlobalDeclaration(m) => {
-            let scope = qualify(owner, "global");
-            walk_module_block(Some(&m.body), Some(&scope), line_index, visitor, units);
         }
         _ => {}
     }
@@ -238,8 +218,7 @@ fn walk_decl<V: FunctionVisitor>(
 /// A `namespace` body: everything declared in it is named under the
 /// namespace (`Result::combine` for `namespace Result { function combine }`,
 /// `A::B::f` for `namespace A.B`), which is how every caller outside it
-/// spells the function. A string-named `declare module "pkg"` adds no
-/// segment: it declares a module's types, not a value to call through.
+/// spells the function.
 fn walk_namespace<V: FunctionVisitor>(
     namespace: &TSNamespaceDeclaration,
     owner: Option<&str>,
@@ -250,24 +229,13 @@ fn walk_namespace<V: FunctionVisitor>(
     let scope = qualify(owner, namespace.id.name.as_str());
     match &namespace.body {
         TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            walk_module_block(Some(block), Some(&scope), line_index, visitor, units);
+            for stmt in &block.body {
+                walk_stmt(stmt, Some(&scope), line_index, visitor, units);
+            }
         }
         TSNamespaceDeclarationBody::TSNamespaceDeclaration(nested) => {
             walk_namespace(nested, Some(&scope), line_index, visitor, units);
         }
-    }
-}
-
-fn walk_module_block<V: FunctionVisitor>(
-    block: Option<&TSModuleBlock>,
-    owner: Option<&str>,
-    line_index: &LineIndex,
-    visitor: &mut V,
-    units: &mut ModuleUnitCounter,
-) {
-    let Some(block) = block else { return };
-    for stmt in &block.body {
-        walk_stmt(stmt, owner, line_index, visitor, units);
     }
 }
 

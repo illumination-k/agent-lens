@@ -70,16 +70,13 @@ impl ExtractContext<'_> {
 }
 
 fn walk_stmt(stmt: &Statement, ctx: &ExtractContext, out: &mut Vec<TypeShape>) {
+    if let Some(decl) = stmt.as_declaration() {
+        walk_decl(decl, decl.span().start, ctx, out);
+        return;
+    }
     match stmt {
-        Statement::TSInterfaceDeclaration(decl) => {
-            out.push(interface_shape(decl, decl.span.start, ctx));
-        }
-        Statement::TSTypeAliasDeclaration(decl) => {
-            out.push(alias_shape(decl, decl.span.start, ctx));
-        }
-        Statement::TSEnumDeclaration(decl) => out.push(enum_shape(decl, decl.span.start, ctx)),
         Statement::ExportDeclaration(export) => {
-            walk_exported_decl(&export.declaration, export.span.start, ctx, out);
+            walk_decl(&export.declaration, export.span.start, ctx, out);
         }
         Statement::ExportDefaultDeclaration(export) => {
             if let ExportDefaultDeclarationKind::TSInterfaceDeclaration(decl) = &export.declaration
@@ -87,21 +84,11 @@ fn walk_stmt(stmt: &Statement, ctx: &ExtractContext, out: &mut Vec<TypeShape>) {
                 out.push(interface_shape(decl, export.span.start, ctx));
             }
         }
-        Statement::TSNamespaceDeclaration(namespace) => walk_namespace(namespace, ctx, out),
-        Statement::TSExternalModuleDeclaration(module) => {
-            walk_module_block(module.body.as_deref(), ctx, out);
-        }
-        Statement::TSGlobalDeclaration(global) => walk_module_block(Some(&global.body), ctx, out),
         _ => {}
     }
 }
 
-fn walk_exported_decl(
-    decl: &Declaration,
-    attach: u32,
-    ctx: &ExtractContext,
-    out: &mut Vec<TypeShape>,
-) {
+fn walk_decl(decl: &Declaration, attach: u32, ctx: &ExtractContext, out: &mut Vec<TypeShape>) {
     match decl {
         Declaration::TSInterfaceDeclaration(decl) => out.push(interface_shape(decl, attach, ctx)),
         Declaration::TSTypeAliasDeclaration(decl) => out.push(alias_shape(decl, attach, ctx)),
@@ -540,6 +527,14 @@ export enum Level {
     #[case::exported_namespace(
         "export namespace api {\n    export interface Request { url: string }\n}\n",
         "Request"
+    )]
+    #[case::external_module(
+        "declare module \"pkg\" {\n    interface Options { debug: boolean }\n}\n",
+        "Options"
+    )]
+    #[case::global_augmentation(
+        "declare global {\n    interface Window { debug: boolean }\n}\n",
+        "Window"
     )]
     fn bare_and_exported_declaration_forms_are_extracted(
         #[case] source: &str,

@@ -97,12 +97,11 @@ fn collect_scope(
 }
 
 fn collect_stmt(stmt: &Statement, line_index: &LineIndex, out: &mut Vec<CohesionUnit>) {
+    if let Some(decl) = stmt.as_declaration() {
+        collect_decl(decl, line_index, out);
+        return;
+    }
     match stmt {
-        Statement::ClassDeclaration(c) => {
-            if let Some(unit) = unit_from_class(c, line_index) {
-                out.push(unit);
-            }
-        }
         Statement::ExportDeclaration(e) => collect_decl(&e.declaration, line_index, out),
         Statement::ExportDefaultDeclaration(e) => {
             if let ExportDefaultDeclarationKind::ClassDeclaration(c) = &e.declaration
@@ -111,11 +110,6 @@ fn collect_stmt(stmt: &Statement, line_index: &LineIndex, out: &mut Vec<Cohesion
                 out.push(unit);
             }
         }
-        Statement::TSNamespaceDeclaration(n) => collect_namespace(n, line_index, out),
-        Statement::TSExternalModuleDeclaration(m) => {
-            collect_external_module(m, line_index, out);
-        }
-        Statement::TSGlobalDeclaration(g) => collect_scope(&g.body.body, "global", line_index, out),
         _ => {}
     }
 }
@@ -127,13 +121,9 @@ fn collect_decl(decl: &Declaration, line_index: &LineIndex, out: &mut Vec<Cohesi
                 out.push(unit);
             }
         }
+        // `declare module "pkg"` and `declare global` are ambient: they
+        // cannot hold an implementation, so they contribute no unit.
         Declaration::TSNamespaceDeclaration(n) => collect_namespace(n, line_index, out),
-        Declaration::TSExternalModuleDeclaration(m) => {
-            collect_external_module(m, line_index, out);
-        }
-        Declaration::TSGlobalDeclaration(g) => {
-            collect_scope(&g.body.body, "global", line_index, out);
-        }
         _ => {}
     }
 }
@@ -154,17 +144,6 @@ fn collect_namespace(
         TSNamespaceDeclarationBody::TSNamespaceDeclaration(nested) => {
             collect_namespace(nested, line_index, out);
         }
-    }
-}
-
-/// `declare module "pkg" { ... }` is a scope named after its specifier.
-fn collect_external_module(
-    decl: &TSExternalModuleDeclaration,
-    line_index: &LineIndex,
-    out: &mut Vec<CohesionUnit>,
-) {
-    if let Some(block) = &decl.body {
-        collect_scope(&block.body, decl.id.value.as_str(), line_index, out);
     }
 }
 
@@ -1161,6 +1140,34 @@ namespace inner {
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "inner");
         assert_eq!(module_units[0].components.len(), 1);
+    }
+
+    #[test]
+    fn exported_namespace_gets_its_own_module_unit() {
+        let src = r#"
+export namespace inner {
+    let counter = 0;
+    function bump(): void { counter += 1; }
+    function get(): number { return counter; }
+}
+"#;
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
+        let names: Vec<&str> = units.iter().map(|u| u.type_name.as_str()).collect();
+        assert_eq!(names, ["inner"]);
+        assert_eq!(units[0].components.len(), 1);
+    }
+
+    #[test]
+    fn module_exported_let_and_function_expression_share_a_field() {
+        let src = r#"
+export let counter = 0;
+
+const bump = function (): void { counter += 1; };
+const get = function (): number { return counter; };
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.methods.len(), 2);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]

@@ -685,6 +685,17 @@ class Service {
     }
 
     #[test]
+    fn end_line_tracks_the_end_of_a_concise_arrow_body() {
+        let src = "const sum = (xs: number[]): number =>\n    xs.reduce(\n        (a, b) => a + b,\n        0,\n    );\n";
+        let funcs = parse_functions(src);
+        let lines: Vec<_> = funcs
+            .iter()
+            .map(|f| (f.name.as_str(), f.start_line, f.end_line))
+            .collect();
+        assert_eq!(lines, [("sum", 1, 5), ("sum::closure#1", 3, 3)]);
+    }
+
+    #[test]
     fn language_identifier_is_typescript() {
         let parser = TypeScriptParser::new();
         assert_eq!(parser.language(), "typescript");
