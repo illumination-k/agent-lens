@@ -25,7 +25,7 @@ from pathlib import Path
 # Order of the rows in every per-method table; any other method the graph
 # reports is appended after these.
 METHODS = ["lexical", "self_method", "last_segment", "path_suffix", "crate_narrowed"]
-DISPATCHES = ["static", "dynamic", "callback"]
+DISPATCHES = ["static", "dynamic"]
 VERDICTS = ["oracle_wrong", "agent_lens_wrong", "definition_gap"]
 # A pair the oracle reports under several dispatch kinds counts once, under
 # the most specific one.
@@ -221,21 +221,13 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
     oracle_pairs, oracle_lines, unmapped = _oracle_pairs(oracle, index)
     resolved, candidate_sets, pair_sites = _agent_lens_edges(graph)
 
-    executed: set[str] | None = None
-    if oracle.get("kind") == "dynamic":
-        executed = set()
-        for f in oracle.get("executed_functions", []):
-            node_id, _ = index.definition(f["file"], f["def_line"])
-            if node_id is not None:
-                executed.add(node_id)
-
     # A type-checker oracle lists the files it type-checked; a caller in any
     # other file (excluded by a build constraint) is out of its scope.
     analyzed: set[str] | None = set(oracle["analyzed_files"]) if "analyzed_files" in oracle else None
     # Functions the oracle saw but could not resolve (cfg-inactive Rust code).
     unanalyzed = {index.definition(f["file"], f["def_line"])[0] for f in oracle.get("unanalyzed_functions", [])}
     unanalyzed.discard(None)
-    caller_out_of_scope = _out_of_scope(index.nodes, executed, analyzed, unanalyzed)
+    caller_out_of_scope = _out_of_scope(index.nodes, analyzed, unanalyzed)
     # Call sites the oracle could not resolve at all (Python: a receiver of
     # unknown type); an agent-lens pair all of whose sites are among them is
     # outside the oracle's view, as a caller in an unanalysed file is.
@@ -323,7 +315,7 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
     }
 
 
-def _out_of_scope(nodes: dict, executed: set[str] | None, analyzed: set[str] | None, unanalyzed: set[str] = frozenset()):
+def _out_of_scope(nodes: dict, analyzed: set[str] | None, unanalyzed: set[str] = frozenset()):
     """Return a function giving why a caller node is outside the oracle's view, or None."""
 
     def reason(node_id: str) -> str | None:
@@ -331,8 +323,6 @@ def _out_of_scope(nodes: dict, executed: set[str] | None, analyzed: set[str] | N
             return "caller_not_analyzed"
         if node_id in unanalyzed:
             return "caller_not_analyzed"
-        if executed is not None and node_id not in executed:
-            return "caller_not_executed"
         return None
 
     return reason
@@ -439,25 +429,13 @@ def render(result: dict, title: str) -> str:
     lines = [f"## {title}", "", f"oracle: {result.get('oracle')} ({kind}), language: {result.get('language')}, oracle edges: {result.get('oracle_edges')}", ""]
 
     p = result["precision"]
-    if kind == "dynamic":
-        lines += [
-            "### Resolved edges vs observed calls (unobserved rate is an indicator, not a precision verdict)",
-            "",
-        ]
-        rows = []
-        for m in _method_rows(p):
-            c = p[m]
-            scope = c.get("tp", 0) + c.get("fp", 0)
-            rows.append([m, c.get("resolved", 0), c.get("caller_not_executed", 0), scope, c.get("tp", 0), c.get("fp", 0), _ratio(c.get("fp", 0), scope)])
-        lines += _md_table(["method", "resolved", "caller never ran (excluded)", "caller ran", "observed", "unobserved", "unobserved rate"], rows)
-    else:
-        lines += ["### Precision of resolved edges", ""]
-        rows = []
-        for m in _method_rows(p):
-            c = p[m]
-            tp, fp = c.get("tp", 0), c.get("fp", 0)
-            rows.append([m, c.get("resolved", 0), c.get("caller_not_analyzed", 0), c.get("call_site_unresolved", 0), tp, fp, _ratio(tp, tp + fp)])
-        lines += _md_table(["method", "resolved", "caller not type-checked (excluded)", "call site unresolved by oracle (excluded)", "TP", "FP", "precision"], rows)
+    lines += ["### Precision of resolved edges", ""]
+    rows = []
+    for m in _method_rows(p):
+        c = p[m]
+        tp, fp = c.get("tp", 0), c.get("fp", 0)
+        rows.append([m, c.get("resolved", 0), c.get("caller_not_analyzed", 0), c.get("call_site_unresolved", 0), tp, fp, _ratio(tp, tp + fp)])
+    lines += _md_table(["method", "resolved", "caller not type-checked (excluded)", "call site unresolved by oracle (excluded)", "TP", "FP", "precision"], rows)
 
     r = result["recall"]
     methods = [m for m in METHODS if any(f"by_{m}" in r.get(d, {}) for d in DISPATCHES)]

@@ -82,11 +82,6 @@ def python_venv(t: dict, checkout_dir: Path) -> Path:
     return venv / "bin" / "python"
 
 
-def python_oracle(t: dict, checkout_dir: Path, root: Path, out: Path) -> None:
-    python = python_venv(t, checkout_dir)
-    run([python, HERE / "oracle_py.py", "--root", root, "--out", out, "--", *t.get("pytest", [])], cwd=root)
-
-
 def pyright_oracle(t: dict, checkout_dir: Path, root: Path, out: Path) -> None:
     python = python_venv(t, checkout_dir)
     langserver = os.environ.get("PYRIGHT_LANGSERVER") or f"{require('uvx')} --from {PYRIGHT} pyright-langserver"
@@ -115,8 +110,6 @@ def run_target(t: dict, binary: Path, adjudications: Path) -> dict:
 
     if t["oracle"] == "go-vta":
         go_oracle(t, root, oracle_json)
-    elif t["oracle"] == "python-setprofile":
-        python_oracle(t, checkout_dir, root, oracle_json)
     elif t["oracle"] == "python-pyright":
         pyright_oracle(t, checkout_dir, root, oracle_json)
     elif t["oracle"] == "rust-analyzer":

@@ -145,9 +145,8 @@ run = 'scripts/mutants-minimize.sh "$usage_package" "${usage_jobs:-2}"'
 
 [tasks."test:callgraph-accuracy"]
 description = "Unit-test the call-graph accuracy scorer and the Python and Rust oracles (scripts/callgraph-accuracy)"
-# The setprofile oracle tests run pytest under the profiler and the pyright
-# oracle tests run pyright's language server; uv supplies both (they skip
-# without them). uv is declared here because ci_rust.yml sets MISE_ENV=rust.
+# The pyright oracle tests run pyright's language server; uv supplies it
+# (they skip without it). uv is declared here because ci_rust.yml sets MISE_ENV=rust.
 tools = { uv = "0.11.5" }
 # `ruff check` (default rules) is the harness's only Python lint gate; the Go
 # oracle's gofmt / vet / tests and the TypeScript oracle's `npm test` run by
@@ -156,7 +155,7 @@ tools = { uv = "0.11.5" }
 # rust-analyzer component is installed.
 run = [
   "uvx ruff@0.14.0 check scripts/callgraph-accuracy",
-  "uv run --no-project --python 3.12 --with pytest==8.4.2 --with pyright==1.1.408 python -m unittest discover -s scripts/callgraph-accuracy",
+  "uv run --no-project --python 3.12 --with pyright==1.1.408 python -m unittest discover -s scripts/callgraph-accuracy",
 ]
 
 [tasks."ci:rust"]

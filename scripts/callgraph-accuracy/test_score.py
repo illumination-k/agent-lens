@@ -46,11 +46,8 @@ def graph(edges: list[dict]) -> dict:
     return {"nodes": NODES, "edges": edges}
 
 
-def oracle(edges: list[dict], kind: str = "type-checker", executed: list[dict] | None = None) -> dict:
-    o = {"oracle": "go-vta" if kind != "dynamic" else "python-setprofile", "language": "go", "kind": kind, "root": "/nonexistent", "edges": edges}
-    if executed is not None:
-        o["executed_functions"] = [{"file": n["file"], "def_line": n["start_line"]} for n in executed]
-    return o
+def oracle(edges: list[dict]) -> dict:
+    return {"oracle": "go-vta", "language": "go", "kind": "type-checker", "root": "/nonexistent", "edges": edges}
 
 
 class PrecisionRecallTest(unittest.TestCase):
@@ -68,7 +65,7 @@ class PrecisionRecallTest(unittest.TestCase):
             edge(INIT, 15, GO),
             edge(MAIN, 9, GO, "dynamic"),  # only in the candidate set
             edge(OTHER, 4, HELPER),  # missed
-            edge(OTHER, 4, HELPER, "callback"),  # same pair: counted once, as static
+            edge(OTHER, 4, HELPER, "dynamic"),  # same pair: counted once, as static
         ])
         self.result = score.score(self.graph, self.oracle)
 
@@ -142,33 +139,6 @@ class MappingTest(unittest.TestCase):
         self.assertEqual(index.innermost("x.rs", 3), (None, "ambiguous_node"))
 
 
-class DynamicOracleTest(unittest.TestCase):
-    def test_unobserved_rate_only_over_executed_callers(self):
-        g = graph([
-            resolved(MAIN, HELPER, "lexical"),  # observed
-            resolved(MAIN, OTHER, "lexical"),  # caller ran, never observed
-            resolved(INIT, GO, "self_method"),  # caller never ran: excluded
-        ])
-        o = oracle([edge(MAIN, 6, HELPER)], kind="dynamic", executed=[MAIN, HELPER])
-        r = score.score(g, o)
-        self.assertEqual(r["precision"]["overall"], {"resolved": 3, "tp": 1, "fp": 1, "caller_not_executed": 1})
-        self.assertEqual([d["callee"]["qualified_name"] for d in r["disagreements"]], ["m::other"])
-        md = score.render(r, "t")
-        self.assertIn("unobserved rate", md)
-        self.assertNotIn("Precision of resolved", md)
-
-
-    def test_candidate_sets_only_over_executed_callers(self):
-        g = graph([
-            {"from": MAIN["id"], "to": None, "resolution": "ambiguous", "candidates": [INIT["id"], GO["id"]], "resolution_method": "last_segment"},
-            {"from": OTHER["id"], "to": None, "resolution": "ambiguous", "candidates": [HELPER["id"], GO["id"]], "resolution_method": "last_segment"},
-        ])
-        o = oracle([edge(OTHER, 4, HELPER)], kind="dynamic", executed=[OTHER, HELPER])
-        r = score.score(g, o)
-        self.assertEqual(r["candidates"]["overall"], {"sets": 1, "size": 2, "hit_sets": 1, "hit_candidates": 1, "excluded": 1})
-        self.assertIn("| overall | 1 | 1 | 2.00 | 1.000 | 0.500 |", score.render(r, "t"))
-
-
 class AnalyzedFilesTest(unittest.TestCase):
     def test_callers_in_files_the_oracle_did_not_type_check_are_excluded(self):
         debug = node("debug", 1, 3, "debug.go")
@@ -186,6 +156,16 @@ class AnalyzedFilesTest(unittest.TestCase):
         r = score.score(g, o)
         self.assertEqual(r["precision"]["lexical"], {"resolved": 2, "tp": 1, "caller_not_analyzed": 1})
         self.assertEqual(r["disagreements"], [])
+
+    def test_candidate_sets_of_out_of_scope_callers_are_excluded(self):
+        g = graph([
+            {"from": MAIN["id"], "to": None, "resolution": "ambiguous", "candidates": [INIT["id"], GO["id"]], "resolution_method": "last_segment"},
+            {"from": OTHER["id"], "to": None, "resolution": "ambiguous", "candidates": [HELPER["id"], GO["id"]], "resolution_method": "last_segment"},
+        ])
+        o = oracle([edge(OTHER, 4, HELPER)]) | {"unanalyzed_functions": [{"file": "m.py", "def_line": 5}]}
+        r = score.score(g, o)
+        self.assertEqual(r["candidates"]["overall"], {"sets": 1, "size": 2, "hit_sets": 1, "hit_candidates": 1, "excluded": 1})
+        self.assertIn("| overall | 1 | 1 | 2.00 | 1.000 | 0.500 |", score.render(r, "t"))
 
 
 class UnresolvedCallSiteTest(unittest.TestCase):
@@ -302,13 +282,13 @@ class AdjudicationTest(unittest.TestCase):
         self.assertEqual(r["adjudicated"], {})
 
     def test_adjudication_on_out_of_scope_caller_is_stale(self):
-        # MAIN never ran under the dynamic oracle, so main -> other is never
+        # The oracle could not resolve MAIN, so main -> other is never
         # listed as a disagreement and a record on it must not apply.
         g = graph([resolved(MAIN, OTHER, "last_segment", 8)])
-        o = oracle([edge(INIT, 15, GO)], kind="dynamic", executed=[INIT, GO])
+        o = oracle([edge(INIT, 15, GO)]) | {"unanalyzed_functions": [{"file": "m.py", "def_line": 5}]}
         r = score.score(g, o, [{"caller": "m::main", "callee": "m::other", "verdict": "oracle_wrong"}])
         self.assertEqual(r["recall"]["static"], {"oracle": 1, "missed": 1, "missed_no_site": 1})
-        self.assertEqual(r["precision"]["overall"], {"resolved": 1, "caller_not_executed": 1})
+        self.assertEqual(r["precision"]["overall"], {"resolved": 1, "caller_not_analyzed": 1})
         self.assertEqual(r["adjudicated"], {})
         self.assertEqual(r["stale_adjudications"], 1)
 
