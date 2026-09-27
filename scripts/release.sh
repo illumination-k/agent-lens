@@ -95,19 +95,23 @@ echo "==> PR #$pr: $(gh pr view "$pr" --json url --jq .url)"
 # --- 3. wait for checks, then merge -----------------------------------------
 state="$(gh pr view "$pr" --json state --jq .state)"
 if [ "$state" = OPEN ]; then
-	# Checks register a few seconds after the push; --watch exits at once on
-	# an empty list.
-	for _ in $(seq 1 30); do
-		if [ -n "$(gh pr checks "$pr" --json name --jq '.[].name' 2>/dev/null)" ]; then
-			break
-		fi
-		sleep 5
-	done
+	# Polled rather than `gh pr checks --watch`: that exits non-zero on a
+	# dropped connection just as on a failed check. A failed query here is
+	# retried; only a check in the fail/cancel bucket stops the release. An
+	# empty list means the checks have not registered since the push yet.
 	echo "==> waiting for checks on #$pr"
-	if ! gh pr checks "$pr" --watch --fail-fast --interval 30; then
-		echo "checks failed on #$pr; fix them and rerun this script" >&2
-		exit 1
-	fi
+	while :; do
+		buckets="$(gh pr checks "$pr" --json bucket --jq '[.[].bucket] | unique | join(" ")' 2>/dev/null)" || buckets=unknown
+		case " $buckets " in
+		*" fail "* | *" cancel "*)
+			gh pr checks "$pr" >&2 || true
+			echo "checks failed on #$pr; fix them and rerun this script" >&2
+			exit 1
+			;;
+		*" pending "* | "  " | " unknown ") sleep 30 ;;
+		*) break ;;
+		esac
+	done
 	echo "==> merging #$pr"
 	gh pr merge "$pr" --squash --delete-branch
 	state=MERGED
