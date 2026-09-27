@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-lens-domain = { path = "../lens-domain", version = "0.7.0" }
+lens-domain = { path = "../lens-domain", version = "0.8.0" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tree-sitter = "0.27"
