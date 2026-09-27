@@ -70,7 +70,7 @@ this table in sync when the resolver changes):
 | calls in a closure / lambda body      | attributed to the enclosing fn                                                                                                                                                                | attributed to the enclosing function                           | attributed to the enclosing function     | attributed to the closure's own `::closure#N` node |
 | calls in a nested named fn / def      | attributed to the enclosing fn                                                                                                                                                                | n/a                                                            | attributed to the enclosing function     | attributed to the nested function's own node       |
 | calling the closure / nested fn       | `unresolved`                                                                                                                                                                                  | `unresolved` (named variable) or `anonymous` (`func(){...}()`) | `unresolved`                             | `unresolved`                                       |
-| `A()` on a class                      | n/a                                                                                                                                                                                           | n/a                                                            | `unresolved` (no `__init__` edge)        | `new A()`: no call site at all                     |
+| `A()` on a class                      | n/a                                                                                                                                                                                           | n/a                                                            | `A.__init__` when `A` declares one       | `new A()`: no call site at all                     |
 | calls inside a macro invocation       | attributed to the enclosing fn when the arguments parse as an expression list (`assert_eq!`, `format!`, `write!`, `vec![a, b]`); none for `vec![x; n]`, `matches!` or a macro's own expansion | n/a                                                            | n/a                                      | n/a                                                |
 | method on an interface / trait object | `resolved` via `last_segment` if one impl has that name, else a candidate set                                                                                                                 | same                                                           | same                                     | same                                               |
 | decorated def                         | n/a                                                                                                                                                                                           | n/a                                                            | node spans from the first decorator line | node spans from the first decorator line           |
@@ -605,6 +605,74 @@ What the disagreements are:
 - 9 oracle edges have no agent-lens callee node: functions defined inside an
   `if` / `try` at module level (`dl_split`, `_fsumprod` and `batched` in
   more-itertools, `_check_sigspec` in toolz), which agent-lens does not index.
+
+Measured again on 2026-09-27 (pyright 1.1.408) after the Python fixes below,
+found by running the oracle over six more projects: pallets/click `934813e`
+(8.1.8), psf/requests `0e322af` (v2.32.3), python-attrs/attrs `6771a04`
+(24.2.0), mahmoud/boltons `5aed99e` (24.1.0), hukkin/tomli `73c3d10` (2.2.1)
+and pallets/itsdangerous `096c8d4` (2.2.0). The six are not in
+`targets.toml`; as for Go, their precision counts every agent-lens-only pair
+as a false positive. Before is agent-lens `bec70e9`:
+
+- a bare call to any parameter or local (`httpbin("get")` on a pytest
+  fixture, `func(*args)`, `f = compose(...); f(x)`) calls what the local
+  holds and is never matched by name, not only one bound to a `lambda`,
+  a nested `def` or a `Callable` annotation; a local assigned once from a
+  path that starts at an import or a module-level definition
+  (`extract = mi.extract`) is an alias for that path;
+- an import whose top-level package is no module segment of the workspace
+  (`from itertools import count`, `from math import floor`,
+  `import pytest`) binds no workspace function, however unique the name;
+- `A()` reaches `A.__init__` when `A` declares one, through the same rungs
+  as a function of that path;
+- `super().m()` reads as `Base.m()` through the class's first base (a
+  class without one reaches `object`), never as a receiver call the name
+  fallback could bind to the caller's own override;
+- a receiver whose class an annotation (`s: Session`, `Optional[...]`,
+  `... | None`) or a once-assigned constructor call (`s = Session()`,
+  `e = threading.Event()`) names binds the method through that class;
+  a builtin or out-of-workspace class leaves it external;
+- `pkg.name()` through a package import (`import more_itertools as mi;
+  mi.extract()`, `click.Group.get_command`) narrows to the candidates
+  under that package, which re-exports its submodules' names from
+  `__init__.py`;
+- `import a.b` binds `a`, so the alias names `a`, not `a.b`: `click.edit()`
+  after `import click._termui_impl` no longer expands to
+  `click::_termui_impl::edit`.
+
+| Repository                 | Commit    | Precision before    | Static recall before | Precision after     | Static recall after |
+| -------------------------- | --------- | ------------------- | -------------------- | ------------------- | ------------------- |
+| more-itertools v11.1.0     | `64be96c` | 0.787 (140 / 178)   | 0.154 (140 / 911)    | 0.999 (885 / 886)   | 0.971 (885 / 911)   |
+| toolz 1.1.0                | `568c2b8` | 0.831 (250 / 301)   | 0.868 (244 / 281)    | 0.972 (278 / 286)   | 0.968 (272 / 281)   |
+| pallets/click 8.1.8        | `934813e` | 0.973 (438 / 450)   | 0.310 (438 / 1413)   | 0.994 (1053 / 1059) | 0.745 (1053 / 1413) |
+| psf/requests v2.32.3       | `0e322af` | 0.652 (330 / 506)   | 0.423 (330 / 781)    | 0.969 (556 / 574)   | 0.712 (556 / 781)   |
+| python-attrs/attrs 24.2.0  | `6771a04` | 1.000 (440 / 440)   | 0.685 (440 / 642)    | 0.965 (547 / 567)   | 0.852 (547 / 642)   |
+| mahmoud/boltons 24.1.0     | `5aed99e` | 0.956 (603 / 631)   | 0.592 (603 / 1019)   | 0.985 (773 / 785)   | 0.759 (773 / 1019)  |
+| hukkin/tomli 2.2.1         | `73c3d10` | 1.000 (88 / 88)     | 0.815 (88 / 108)     | 1.000 (106 / 106)   | 0.981 (106 / 108)   |
+| pallets/itsdangerous 2.2.0 | `096c8d4` | 1.000 (64 / 64)     | 0.562 (63 / 112)     | 1.000 (81 / 81)     | 0.714 (80 / 112)    |
+| all eight (micro-avg.)     |           | 0.885 (2353 / 2658) | 0.445 (2346 / 5267)  | 0.985 (4279 / 4344) | 0.811 (4272 / 5267) |
+
+What is left among the 65 agent-lens-only pairs:
+
+- `attr.field()` / `attr.define()` in attrs (20): pyright names the
+  declaration in `src/attr/__init__.pyi`, a stub that is no node, so the
+  oracle drops the edge agent-lens gets right (`__init__.py` re-exports
+  `_next_gen.field`).
+- A receiver whose type flows from something other than an annotation or a
+  constructor (`s = requests.Session()` through the package barrel, whose
+  class path names no node, then crate-narrowed to a test subclass's
+  `send`; `x, y = socket.socketpair()`), bound by name to a workspace method.
+- Calls through a `toolz.curried` binding (`get = curry(itertoolz.get)`),
+  which pyright does not follow, and `super()` inside a class nested in a
+  function body, which agent-lens does not index as a class.
+- `_get_windows_console_stream` in click: the call binds to a `def` inside
+  a module-level `if`, which has no node, and falls back to the other
+  module's function of that name.
+
+The static misses left are mostly methods reached through inheritance
+(`self._method()` defined on a base class, `Sub().m()` where only the base
+declares `m`) and constructors whose `__init__` a base class declares, both
+of which need the class hierarchy.
 
 ## Metamorphic checks
 

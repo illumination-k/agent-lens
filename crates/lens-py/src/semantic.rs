@@ -23,9 +23,9 @@ use lens_domain::qualify_module;
 use ruff_python_ast::name::QualifiedName;
 use ruff_python_ast::visitor::{Visitor, walk_except_handler, walk_expr, walk_pattern, walk_stmt};
 use ruff_python_ast::{
-    Comprehension, ExceptHandler, Expr, ExprAttribute, ExprContext, ExprName, Identifier,
-    Parameters, Pattern, Stmt, StmtAnnAssign, StmtAssign, StmtClassDef, StmtFunctionDef,
-    StmtImport, StmtImportFrom,
+    Comprehension, ExceptHandler, Expr, ExprContext, ExprName, Identifier, Operator, Parameters,
+    Pattern, Stmt, StmtAnnAssign, StmtAssign, StmtClassDef, StmtFunctionDef, StmtImport,
+    StmtImportFrom,
 };
 use ruff_python_semantic::{
     BindingFlags, BindingId, BindingKind, FromImport, GeneratorKind, Import, Module, ModuleKind,
@@ -54,13 +54,10 @@ pub(crate) enum Referent<'b> {
     ModuleDefinition,
     /// Any other module-scope binding: an assignment, a loop variable.
     ModuleValue,
-    /// A name bound to a callable in a function-level scope — a nested
-    /// `def` or `class`, a `lambda` held in a local, a parameter or local
-    /// annotated `Callable`.
-    LocalCallable,
-    /// Any other name bound in a function-level scope, parameters
-    /// included.
-    LocalValue,
+    /// Any name bound in a function-level scope: a parameter, a local, a
+    /// nested `def` or `class`. Calling one calls whatever it holds, which
+    /// no workspace definition of that name can be.
+    Local,
 }
 
 /// The resolved loads of one module, queried after binding completes.
@@ -68,11 +65,12 @@ pub(crate) struct ModuleBindings<'a> {
     semantic: SemanticModel<'a>,
     /// Name-load start offset → the scope the load sits in.
     loads: HashMap<TextSize, ScopeId>,
-    callable: HashSet<BindingId>,
     import_targets: HashMap<BindingId, String>,
+    declared_classes: HashMap<BindingId, &'a Expr>,
+    aliases: HashMap<BindingId, &'a Expr>,
 }
 
-impl ModuleBindings<'_> {
+impl<'a> ModuleBindings<'a> {
     /// What `name` — a loaded name in the bound module — refers to;
     /// `None` when it resolves to nothing the file binds and is no
     /// builtin (a star import's member, a typo).
@@ -93,9 +91,41 @@ impl ModuleBindings<'_> {
                 Referent::ModuleDefinition
             }
             _ if binding.scope == ScopeId::global() => Referent::ModuleValue,
-            _ if self.callable.contains(&id) => Referent::LocalCallable,
-            _ => Referent::LocalValue,
+            _ => Referent::Local,
         })
+    }
+
+    /// The class the value in `name` — a loaded name in the bound module
+    /// — is declared or constructed as: `Session` for a parameter
+    /// `s: Session`, a local `s: Optional[Session]`, or `s = Session()`.
+    /// Only a name bound once in its scope has one; a rebinding could
+    /// hold anything. The returned expression is a plain path whose own
+    /// head [`Self::referent`] can look up.
+    pub(crate) fn declared_class(&self, name: &ExprName) -> Option<&'a Expr> {
+        self.declared_classes
+            .get(&self.sole_binding(name)?)
+            .copied()
+    }
+
+    /// The plain path `name` — a loaded name in the bound module — was
+    /// assigned from, when that is its only binding in its scope:
+    /// `mi.extract` for `extract = mi.extract`.
+    pub(crate) fn alias_of(&self, name: &ExprName) -> Option<&'a Expr> {
+        self.aliases.get(&self.sole_binding(name)?).copied()
+    }
+
+    /// The binding `name` loads, when it is the only binding of that name
+    /// in its scope.
+    fn sole_binding(&self, name: &ExprName) -> Option<BindingId> {
+        let scope = *self.loads.get(&name.range.start())?;
+        let id = self
+            .semantic
+            .lookup_symbol_in_scope(name.id.as_str(), scope, false)?;
+        let binding = self.semantic.binding(id);
+        self.semantic.scopes[binding.scope]
+            .shadowed_binding(id)
+            .is_none()
+            .then_some(id)
     }
 }
 
@@ -117,8 +147,9 @@ pub(crate) fn bind_module<'a>(body: &'a [Stmt], module: &str) -> ModuleBindings<
         module,
         declared_outer: HashMap::new(),
         loads: HashMap::new(),
-        callable: HashSet::new(),
         import_targets: HashMap::new(),
+        declared_classes: HashMap::new(),
+        aliases: HashMap::new(),
     };
     binder.bind_builtins();
     for stmt in body {
@@ -127,8 +158,9 @@ pub(crate) fn bind_module<'a>(body: &'a [Stmt], module: &str) -> ModuleBindings<
     ModuleBindings {
         semantic: binder.semantic,
         loads: binder.loads,
-        callable: binder.callable,
         import_targets: binder.import_targets,
+        declared_classes: binder.declared_classes,
+        aliases: binder.aliases,
     }
 }
 
@@ -139,8 +171,9 @@ struct Binder<'a, 'm> {
     /// in an outer scope, so it must not create a local.
     declared_outer: HashMap<ScopeId, HashSet<&'a str>>,
     loads: HashMap<TextSize, ScopeId>,
-    callable: HashSet<BindingId>,
     import_targets: HashMap<BindingId, String>,
+    declared_classes: HashMap<BindingId, &'a Expr>,
+    aliases: HashMap<BindingId, &'a Expr>,
 }
 
 impl<'a> Binder<'a, '_> {
@@ -184,12 +217,6 @@ impl<'a> Binder<'a, '_> {
         Some(id)
     }
 
-    fn bind_callable(&mut self, name: &'a str, range: TextRange, kind: BindingKind<'a>) {
-        if let Some(id) = self.bind(name, range, kind) {
-            self.callable.insert(id);
-        }
-    }
-
     fn bind_import(
         &mut self,
         name: &'a str,
@@ -199,6 +226,12 @@ impl<'a> Binder<'a, '_> {
     ) {
         if let Some(id) = self.bind(name, range, kind) {
             self.import_targets.insert(id, target);
+        }
+    }
+
+    fn declare_class(&mut self, id: Option<BindingId>, class: Option<&'a Expr>) {
+        if let (Some(id), Some(class)) = (id, class) {
+            self.declared_classes.insert(id, class);
         }
     }
 
@@ -212,11 +245,8 @@ impl<'a> Binder<'a, '_> {
     fn bind_parameters(&mut self, parameters: &'a Parameters) {
         for param in parameters.iter() {
             let name = param.name();
-            if param.annotation().is_some_and(annotation_is_callable) {
-                self.bind_callable(name.as_str(), name.range, BindingKind::Argument);
-            } else {
-                self.bind(name.as_str(), name.range, BindingKind::Argument);
-            }
+            let id = self.bind(name.as_str(), name.range, BindingKind::Argument);
+            self.declare_class(id, param.annotation().and_then(annotated_class));
         }
     }
 
@@ -242,7 +272,7 @@ impl<'a> Binder<'a, '_> {
             self.visit_expr(returns);
         }
         let kind = BindingKind::FunctionDefinition(self.semantic.scope_id);
-        self.bind_callable(func.name.as_str(), func.name.range, kind);
+        self.bind(func.name.as_str(), func.name.range, kind);
         self.semantic.push_scope(ScopeKind::Function(func));
         self.bind_parameters(&func.parameters);
         for stmt in &func.body {
@@ -309,19 +339,25 @@ impl<'a> Binder<'a, '_> {
         }
         self.semantic.pop_scope();
         let kind = BindingKind::ClassDefinition(self.semantic.scope_id);
-        self.bind_callable(class.name.as_str(), class.name.range, kind);
+        self.bind(class.name.as_str(), class.name.range, kind);
     }
 
+    /// The value runs before the targets bind, so `f = f(x)` loads the
+    /// outer `f`.
     fn visit_assign(&mut self, assign: &'a StmtAssign) {
         self.visit_expr(&assign.value);
-        let is_lambda = assign.value.is_lambda_expr();
-        for target in &assign.targets {
-            match target {
-                Expr::Name(name) if is_lambda => {
-                    self.bind_callable(name.id.as_str(), name.range, BindingKind::Assignment);
-                }
-                _ => self.visit_expr(target),
+        if let [Expr::Name(name)] = assign.targets.as_slice() {
+            let id = self.bind(name.id.as_str(), name.range, BindingKind::Assignment);
+            self.declare_class(id, constructed_class(&assign.value));
+            if let Some(id) = id
+                && matches!(&*assign.value, Expr::Name(_) | Expr::Attribute(_))
+            {
+                self.aliases.insert(id, &assign.value);
             }
+            return;
+        }
+        for target in &assign.targets {
+            self.visit_expr(target);
         }
     }
 
@@ -336,11 +372,8 @@ impl<'a> Binder<'a, '_> {
             self.visit_expr(&assign.target);
             return;
         };
-        let is_lambda = assign.value.as_ref().is_some_and(|v| v.is_lambda_expr());
         let id = self.bind(name.id.as_str(), name.range, BindingKind::Assignment);
-        if is_lambda || annotation_is_callable(&assign.annotation) {
-            self.callable.extend(id);
-        }
+        self.declare_class(id, annotated_class(&assign.annotation));
     }
 
     /// Bind a comprehension's scope: the first iterable runs in the
@@ -470,14 +503,53 @@ impl<'a> Visitor<'a> for Binder<'a, '_> {
     }
 }
 
-/// `Callable`, `typing.Callable[[int], None]`, `collections.abc.Callable`.
-fn annotation_is_callable(annotation: &Expr) -> bool {
+/// The class an annotation names, as a plain path: `Session`,
+/// `mod.Session`, and the same inside `Optional[...]`, `... | None`,
+/// `Final[...]`, `ClassVar[...]` or `Annotated[..., meta]`. A generic
+/// (`List[int]`) names its origin, whose methods are what a call on the
+/// value reaches. `None` where no single class is named: a union, a
+/// `type[...]` (whose methods are the class's own, called on the class),
+/// a string annotation.
+fn annotated_class(annotation: &Expr) -> Option<&Expr> {
     match annotation {
-        Expr::Name(ExprName { id, .. }) => id.as_str() == "Callable",
-        Expr::Attribute(ExprAttribute { attr, .. }) => attr.as_str() == "Callable",
-        Expr::Subscript(subscript) => annotation_is_callable(&subscript.value),
-        // `"Callable[[int], None]"` as a string annotation.
-        Expr::StringLiteral(literal) => literal.value.to_str().starts_with("Callable"),
-        _ => false,
+        Expr::Name(_) | Expr::Attribute(_) => Some(annotation),
+        Expr::Subscript(subscript) => match last_name(&subscript.value)? {
+            "Optional" | "Final" | "ClassVar" => annotated_class(&subscript.slice),
+            "Annotated" => match subscript.slice.as_ref() {
+                Expr::Tuple(tuple) => annotated_class(tuple.elts.first()?),
+                _ => None,
+            },
+            "Union" | "type" | "Type" => None,
+            _ => annotated_class(&subscript.value),
+        },
+        Expr::BinOp(binop) if binop.op == Operator::BitOr => {
+            match (binop.left.as_ref(), binop.right.as_ref()) {
+                (class, Expr::NoneLiteral(_)) | (Expr::NoneLiteral(_), class) => {
+                    annotated_class(class)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The class `value` constructs, when it is a call whose callee's last
+/// segment is capitalized, Python's class naming convention: `Session()`,
+/// `threading.Event()`.
+fn constructed_class(value: &Expr) -> Option<&Expr> {
+    let Expr::Call(call) = value else {
+        return None;
+    };
+    last_name(&call.func)?
+        .starts_with(char::is_uppercase)
+        .then_some(&*call.func)
+}
+
+fn last_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(attr) => Some(attr.attr.as_str()),
+        _ => None,
     }
 }

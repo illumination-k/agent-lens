@@ -29,6 +29,8 @@ pub(crate) struct FnSite<'a> {
     pub func: &'a StmtFunctionDef,
     /// Name of the enclosing class, or `None` for a module-level `def`.
     pub owner: Option<&'a str>,
+    /// The enclosing class itself, whose bases `super()` reaches.
+    pub class: Option<&'a StmtClassDef>,
     /// True when the function is test-shaped, or when any enclosing class
     /// is. Consumers that report test functions separately (parser,
     /// call index) or drop them outright (wrapper) share this one rule.
@@ -44,8 +46,12 @@ where
     walk_stmts(body, None, false, visit);
 }
 
-fn walk_stmts<'a, F>(body: &'a [Stmt], owner: Option<&'a str>, owner_is_test: bool, visit: &mut F)
-where
+fn walk_stmts<'a, F>(
+    body: &'a [Stmt],
+    class: Option<&'a StmtClassDef>,
+    owner_is_test: bool,
+    visit: &mut F,
+) where
     F: FnMut(FnSite<'a>),
 {
     for stmt in body {
@@ -56,7 +62,8 @@ where
                 }
                 visit(FnSite {
                     func,
-                    owner,
+                    owner: class.map(|class| class.name.as_str()),
+                    class,
                     is_test: owner_is_test || is_test_function(func),
                 });
             }
@@ -75,7 +82,7 @@ where
     }
     walk_stmts(
         &class.body,
-        Some(class.name.as_str()),
+        Some(class),
         owner_is_test || is_test_class(class),
         visit,
     );

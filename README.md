@@ -514,8 +514,14 @@ to a same-named workspace function.
 Python callees are bound the same way through the module's scopes with
 [`ruff_python_semantic`](https://github.com/astral-sh/ruff/tree/main/crates/ruff_python_semantic):
 a call through an import or to a module-level `def` / `class` resolves
-with `binding`, a call to a builtin is never matched to a workspace
-function, and a receiver held in a parameter or local is read as a value.
+with `binding`, a call to a builtin or through an import of a package
+outside the workspace (the standard library, a dependency) is never
+matched to a workspace function, a bare call to a parameter or local is
+never matched by name, and a receiver held in a parameter or local is
+read as a value, bound through its class where an annotation
+(`s: Session`) or a constructor call (`s = Session()`) names one.
+`A()` reaches `A.__init__`, and `super().m()` binds through the class's
+first base.
 
 Go packages are named by the nearest `go.mod` above them, so a scan can span
 several modules. A directory holding `go.work` is a Go root in its own
