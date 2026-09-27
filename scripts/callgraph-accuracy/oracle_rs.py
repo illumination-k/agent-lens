@@ -61,14 +61,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import queue
-import subprocess
 import sys
-import threading
 import time
 from collections import Counter
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+
+from lsp import LspClient, locations, position, uri_to_path
 
 SKIP_DIRS = {"target", ".git", "node_modules", "vendor"}
 # LSP SymbolKind values.
@@ -81,102 +79,27 @@ def log(msg: str) -> None:
     print(f"oracle_rs: {msg}", file=sys.stderr, flush=True)
 
 
-# ---------------------------------------------------------------- LSP client
+# ---------------------------------------------------------------- rust-analyzer status
 
 
-class LspClient:
-    """Minimal JSON-RPC over stdio: requests block, notifications are queued."""
-
-    def __init__(self, cmd: list[str], cwd: Path):
-        self.proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        self.next_id = 0
-        self.responses: dict[int, queue.Queue] = {}
-        self.notifications: queue.Queue = queue.Queue()
-        self.lock = threading.Lock()
-        threading.Thread(target=self._reader, daemon=True).start()
-
-    def _reader(self) -> None:
-        out = self.proc.stdout
-        while True:
-            headers = {}
-            while True:
-                line = out.readline()
-                if not line:
-                    self.notifications.put(None)
-                    return
-                line = line.decode("ascii").strip()
-                if not line:
-                    break
-                key, _, value = line.partition(":")
-                headers[key.strip().lower()] = value.strip()
-            msg = json.loads(out.read(int(headers["content-length"])))
-            if "id" in msg and "method" in msg:
-                # A server -> client request (workDoneProgress/create, configuration, ...).
-                self._send({"jsonrpc": "2.0", "id": msg["id"], "result": self._answer(msg)})
-            elif "id" in msg:
-                self.responses.setdefault(msg["id"], queue.Queue()).put(msg)
-            else:
-                self.notifications.put(msg)
-
-    @staticmethod
-    def _answer(msg: dict):
-        if msg["method"] == "workspace/configuration":
-            return [None for _ in msg["params"]["items"]]
-        return None
-
-    def _send(self, msg: dict) -> None:
-        body = json.dumps(msg).encode()
-        with self.lock:
-            self.proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
-            self.proc.stdin.flush()
-
-    def request(self, method: str, params) -> dict:
-        with self.lock:
-            self.next_id += 1
-            rid = self.next_id
-        box = self.responses.setdefault(rid, queue.Queue())
-        self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
-        msg = box.get()
-        del self.responses[rid]
-        if "error" in msg:
-            raise RuntimeError(f"{method}: {msg['error']}")
-        return msg.get("result")
-
-    def notify(self, method: str, params) -> None:
-        self._send({"jsonrpc": "2.0", "method": method, "params": params})
-
-    def wait_quiescent(self, timeout: float) -> None:
-        """Block until rust-analyzer reports it finished loading and indexing."""
-        deadline = time.monotonic() + timeout
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                raise TimeoutError("rust-analyzer did not become quiescent")
-            msg = self.notifications.get(timeout=left)
-            if msg is None:
-                raise RuntimeError("rust-analyzer exited")
-            if msg.get("method") == "experimental/serverStatus":
-                status = msg["params"]
-                if status.get("quiescent"):
-                    if status.get("health") == "error":
-                        raise RuntimeError(f"rust-analyzer: {status.get('message', '')}")
-                    if status.get("health") != "ok":
-                        log(f"server status {status.get('health')}: {status.get('message', '')}")
-                    return
-
-    def close(self) -> None:
-        try:
-            self.request("shutdown", None)
-            self.notify("exit", None)
-            self.proc.wait(timeout=30)
-        except Exception:  # noqa: BLE001 - best effort teardown
-            self.proc.kill()
-            self.proc.wait()
-        for pipe in (self.proc.stdin, self.proc.stdout):
-            try:
-                pipe.close()
-            except OSError:
-                pass
+def wait_quiescent(client: LspClient, timeout: float) -> None:
+    """Block until rust-analyzer reports it finished loading and indexing."""
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("rust-analyzer did not become quiescent")
+        msg = client.notifications.get(timeout=left)
+        if msg is None:
+            raise RuntimeError("rust-analyzer exited")
+        if msg.get("method") == "experimental/serverStatus":
+            status = msg["params"]
+            if status.get("quiescent"):
+                if status.get("health") == "error":
+                    raise RuntimeError(f"rust-analyzer: {status.get('message', '')}")
+                if status.get("health") != "ok":
+                    log(f"server status {status.get('health')}: {status.get('message', '')}")
+                return
 
 
 # ---------------------------------------------------------------- oracle
@@ -188,10 +111,6 @@ def rust_files(root: Path) -> list[Path]:
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
         out += [Path(dirpath) / f for f in sorted(filenames) if f.endswith(".rs")]
     return out
-
-
-def uri_to_path(uri: str) -> Path:
-    return Path(unquote(urlparse(uri).path))
 
 
 def function_symbols(symbols: list[dict], in_trait: bool = False):
@@ -355,20 +274,6 @@ def line_col(src: str, offset: int) -> tuple[int, int]:
     return line, len(src[start:offset].encode("utf-16-le")) // 2
 
 
-def _locations(result) -> list[tuple[str, int]]:
-    """(uri, 0-based selection line) of a definition / implementation response."""
-    if isinstance(result, dict):
-        result = [result]
-    return [
-        (t.get("targetUri") or t["uri"], (t.get("targetSelectionRange") or t["range"])["start"]["line"])
-        for t in result or []
-    ]
-
-
-def _position(f: Path, line: int, char: int) -> dict:
-    return {"textDocument": {"uri": f.as_uri()}, "position": {"line": line, "character": char}}
-
-
 class RustOracle:
     """One rust-analyzer session over one cargo project; `run` returns the oracle document."""
 
@@ -432,7 +337,7 @@ class RustOracle:
 
     def outgoing_calls(self, f: Path, line: int, char: int) -> bool:
         """Record a fn's call-hierarchy edges; False when rust-analyzer cannot resolve the fn."""
-        items = self.client.request("textDocument/prepareCallHierarchy", _position(f, line, char))
+        items = self.client.request("textDocument/prepareCallHierarchy", position(f, line, char))
         if not items:
             self.stats["unresolved_function"] += 1
             return False
@@ -465,7 +370,7 @@ class RustOracle:
     def resolve_site(self, f: Path, caller_line: int, site: tuple[int, int]) -> bool:
         """Record the edge `textDocument/definition` gives at a call site; False when none."""
         found = False
-        for uri, line0 in _locations(self.client.request("textDocument/definition", _position(f, *site))):
+        for uri, line0 in locations(self.client.request("textDocument/definition", position(f, *site))):
             to = self.function_at(uri, line0)
             if to is None:
                 self.stats["callee_outside_root_or_not_fn"] += 1
@@ -486,8 +391,8 @@ class RustOracle:
 
     def implementations(self, trait_fn: tuple[str, int]) -> list[tuple[str, int]]:
         if trait_fn not in self.impls:
-            found = self.client.request("textDocument/implementation", _position(*self.positions[trait_fn]))
-            out = [self.function_at(uri, line0) for uri, line0 in _locations(found)]
+            found = self.client.request("textDocument/implementation", position(*self.positions[trait_fn]))
+            out = [self.function_at(uri, line0) for uri, line0 in locations(found)]
             self.impls[trait_fn] = [to for to in out if to is not None and to != trait_fn]
         return self.impls[trait_fn]
 
@@ -522,7 +427,7 @@ def initialize(client: LspClient, root: Path, features: list[str] | None) -> Non
     )
     client.notify("initialized", {})
     log("waiting for rust-analyzer to load the workspace")
-    client.wait_quiescent(INDEXING_TIMEOUT_S)
+    wait_quiescent(client, INDEXING_TIMEOUT_S)
 
 
 def run(root: Path, ra: str, features: list[str] | None = None) -> tuple[dict, Counter]:
