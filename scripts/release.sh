@@ -27,8 +27,10 @@ tag="v$version"
 branch="chore/release-$version"
 title="chore(release): bump version to $version"
 
-git fetch --quiet --tags origin main
-if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+# Not `fetch --tags`: the rolling release force-moves `latest` and `rolling`,
+# and fetching them onto stale local copies is rejected as a clobber.
+git fetch --quiet origin main
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
 	echo "$tag already exists" >&2
 	exit 1
 fi
@@ -48,7 +50,7 @@ else
 		exit 1
 	fi
 
-	prev_tag="$(git describe --tags --abbrev=0 origin/main)"
+	prev_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' origin/main)"
 	if [ -n "$notes_file" ]; then
 		notes="$(cat "$notes_file")"
 	else
