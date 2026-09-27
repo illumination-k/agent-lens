@@ -23,7 +23,7 @@
 //! [`crate::parser`] (which collects [`lens_domain::FunctionDef`]) and
 //! [`crate::complexity`] (which collects [`lens_domain::FunctionComplexity`]).
 //! Both files matched the same `Statement` / `Declaration` /
-//! `TSModuleDeclarationBody` / `Class` shapes, only differing in what
+//! `TSNamespaceDeclarationBody` / `Class` shapes, only differing in what
 //! they pushed at the leaves. The walker normalises every leaf into
 //! [`FunctionItem`] so consumers only implement the conversion to their
 //! own target type.
@@ -34,6 +34,7 @@
 
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
+use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 use oxc_syntax::symbol::SymbolId;
 
@@ -49,7 +50,7 @@ pub(crate) struct FunctionItem<'a> {
     pub name: String,
     pub start_line: usize,
     pub end_line: usize,
-    pub body: &'a FunctionBody<'a>,
+    pub body: FnBody<'a>,
     pub params: &'a FormalParameters<'a>,
     /// True for class constructors; analyzers like `wrapper` use this to
     /// skip mandatory boilerplate (`super(...)`) that structurally looks
@@ -72,6 +73,54 @@ pub(crate) struct FunctionItem<'a> {
     /// name find this unit, whatever the walker named it
     /// (`setup::closure#2` for a nested `function helper() {}`).
     pub binding: Option<SymbolId>,
+}
+
+/// A function's body. oxc parses an arrow with a concise body
+/// (`(x) => f(x)`) into a bare expression rather than a statement list;
+/// analyzers read it as the one-`ExpressionStatement` block it is
+/// equivalent to.
+#[derive(Clone, Copy)]
+pub(crate) enum FnBody<'a> {
+    Block(&'a FunctionBody<'a>),
+    Expr(&'a Expression<'a>),
+}
+
+impl<'a> FnBody<'a> {
+    pub fn of_arrow(body: &'a ArrowFunctionBody<'a>) -> Self {
+        match body {
+            ArrowFunctionBody::FunctionBody(block) => Self::Block(block),
+            _ => Self::Expr(body.to_expression()),
+        }
+    }
+
+    /// Byte offset one past the body's last character.
+    pub fn end(self) -> u32 {
+        match self {
+            Self::Block(block) => block.span.end,
+            Self::Expr(expr) => expr.span().end,
+        }
+    }
+
+    /// The body's statements; empty for a concise arrow body.
+    pub fn statements(self) -> &'a [Statement<'a>] {
+        match self {
+            Self::Block(block) => &block.statements,
+            Self::Expr(_) => &[],
+        }
+    }
+
+    pub fn visit<V: Visit<'a>>(self, visitor: &mut V) {
+        match self {
+            Self::Block(block) => visitor.visit_function_body(block),
+            Self::Expr(expr) => visitor.visit_expression(expr),
+        }
+    }
+}
+
+impl<'a> From<&'a FunctionBody<'a>> for FnBody<'a> {
+    fn from(block: &'a FunctionBody<'a>) -> Self {
+        Self::Block(block)
+    }
 }
 
 /// Receiver for function-shaped items found by [`walk_program`].
@@ -118,10 +167,15 @@ fn walk_stmt<V: FunctionVisitor>(
                 visit_variable_declarator(d, owner, v.span.start, line_index, visitor);
             }
         }
-        Statement::ExportNamedDeclaration(e) => {
-            if let Some(decl) = &e.declaration {
-                walk_decl(decl, owner, e.span.start, line_index, visitor, units);
-            }
+        Statement::ExportDeclaration(e) => {
+            walk_decl(
+                &e.declaration,
+                owner,
+                e.span.start,
+                line_index,
+                visitor,
+                units,
+            );
         }
         Statement::ExportDefaultDeclaration(e) => match &e.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
@@ -132,7 +186,16 @@ fn walk_stmt<V: FunctionVisitor>(
             }
             _ => {}
         },
-        Statement::TSModuleDeclaration(m) => walk_module(m, owner, line_index, visitor, units),
+        Statement::TSNamespaceDeclaration(m) => {
+            walk_namespace(m, owner, line_index, visitor, units);
+        }
+        Statement::TSExternalModuleDeclaration(m) => {
+            walk_module_block(m.body.as_deref(), owner, line_index, visitor, units);
+        }
+        Statement::TSGlobalDeclaration(m) => {
+            let scope = qualify(owner, "global");
+            walk_module_block(Some(&m.body), Some(&scope), line_index, visitor, units);
+        }
         Statement::ExpressionStatement(e) => {
             scan_expression_functions(&e.expression, owner, line_index, visitor, units);
         }
@@ -158,7 +221,16 @@ fn walk_decl<V: FunctionVisitor>(
                 visit_variable_declarator(d, owner, attach_start, line_index, visitor);
             }
         }
-        Declaration::TSModuleDeclaration(m) => walk_module(m, owner, line_index, visitor, units),
+        Declaration::TSNamespaceDeclaration(m) => {
+            walk_namespace(m, owner, line_index, visitor, units);
+        }
+        Declaration::TSExternalModuleDeclaration(m) => {
+            walk_module_block(m.body.as_deref(), owner, line_index, visitor, units);
+        }
+        Declaration::TSGlobalDeclaration(m) => {
+            let scope = qualify(owner, "global");
+            walk_module_block(Some(&m.body), Some(&scope), line_index, visitor, units);
+        }
         _ => {}
     }
 }
@@ -168,27 +240,34 @@ fn walk_decl<V: FunctionVisitor>(
 /// `A::B::f` for `namespace A.B`), which is how every caller outside it
 /// spells the function. A string-named `declare module "pkg"` adds no
 /// segment: it declares a module's types, not a value to call through.
-fn walk_module<V: FunctionVisitor>(
-    module: &TSModuleDeclaration,
+fn walk_namespace<V: FunctionVisitor>(
+    namespace: &TSNamespaceDeclaration,
     owner: Option<&str>,
     line_index: &LineIndex,
     visitor: &mut V,
     units: &mut ModuleUnitCounter,
 ) {
-    let scope = match &module.id {
-        TSModuleDeclarationName::Identifier(id) => Some(qualify(owner, id.name.as_str())),
-        TSModuleDeclarationName::StringLiteral(_) => owner.map(ToOwned::to_owned),
-    };
-    let Some(body) = &module.body else { return };
-    match body {
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                walk_stmt(stmt, scope.as_deref(), line_index, visitor, units);
-            }
+    let scope = qualify(owner, namespace.id.name.as_str());
+    match &namespace.body {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            walk_module_block(Some(block), Some(&scope), line_index, visitor, units);
         }
-        TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-            walk_module(nested, scope.as_deref(), line_index, visitor, units);
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(nested) => {
+            walk_namespace(nested, Some(&scope), line_index, visitor, units);
         }
+    }
+}
+
+fn walk_module_block<V: FunctionVisitor>(
+    block: Option<&TSModuleBlock>,
+    owner: Option<&str>,
+    line_index: &LineIndex,
+    visitor: &mut V,
+    units: &mut ModuleUnitCounter,
+) {
+    let Some(block) = block else { return };
+    for stmt in &block.body {
+        walk_stmt(stmt, owner, line_index, visitor, units);
     }
 }
 
@@ -216,14 +295,14 @@ fn walk_class<V: FunctionVisitor>(
                 name: qualified.clone(),
                 start_line: line_index.line(m.span.start),
                 end_line: line_index.line(m.span.end),
-                body,
+                body: FnBody::Block(body),
                 params: &m.value.params,
                 is_constructor: matches!(m.kind, MethodDefinitionKind::Constructor),
                 is_argument: false,
                 doc_attach_start: Some(m.span.start),
                 binding: None,
             });
-            scan_nested_functions(&qualified, body, line_index, visitor);
+            scan_nested_functions(&qualified, FnBody::Block(body), line_index, visitor);
         }
     }
 }
@@ -246,14 +325,14 @@ fn visit_function<V: FunctionVisitor>(
         name: name.clone(),
         start_line: line_index.line(func.span.start),
         end_line: line_index.line(body.span.end),
-        body,
+        body: FnBody::Block(body),
         params: &func.params,
         is_constructor: false,
         is_argument: false,
         doc_attach_start: Some(attach_start),
         binding: func.id.as_ref().and_then(|id| id.symbol_id.get()),
     });
-    scan_nested_functions(&name, body, line_index, visitor);
+    scan_nested_functions(&name, FnBody::Block(body), line_index, visitor);
 }
 
 fn visit_variable_declarator<V: FunctionVisitor>(
@@ -270,18 +349,19 @@ fn visit_variable_declarator<V: FunctionVisitor>(
     let name = qualify(owner, id.name.as_str());
     match init {
         Expression::ArrowFunctionExpression(arrow) => {
+            let body = FnBody::of_arrow(&arrow.body);
             visitor.on_function(FunctionItem {
                 name: name.clone(),
                 start_line: line_index.line(decl.span.start),
-                end_line: line_index.line(arrow.body.span.end),
-                body: &arrow.body,
+                end_line: line_index.line(body.end()),
+                body,
                 params: &arrow.params,
                 is_constructor: false,
                 is_argument: false,
                 doc_attach_start: Some(attach_start),
                 binding: id.symbol_id.get(),
             });
-            scan_nested_functions(&name, &arrow.body, line_index, visitor);
+            scan_nested_functions(&name, body, line_index, visitor);
         }
         Expression::FunctionExpression(f) => {
             if let Some(body) = &f.body {
@@ -289,14 +369,14 @@ fn visit_variable_declarator<V: FunctionVisitor>(
                     name: name.clone(),
                     start_line: line_index.line(decl.span.start),
                     end_line: line_index.line(body.span.end),
-                    body,
+                    body: FnBody::Block(body),
                     params: &f.params,
                     is_constructor: false,
                     is_argument: false,
                     doc_attach_start: Some(attach_start),
                     binding: id.symbol_id.get(),
                 });
-                scan_nested_functions(&name, body, line_index, visitor);
+                scan_nested_functions(&name, FnBody::Block(body), line_index, visitor);
             }
         }
         _ => {}
@@ -314,7 +394,7 @@ fn visit_variable_declarator<V: FunctionVisitor>(
 /// `setup::closure#1::closure#1`.
 fn scan_nested_functions<V: FunctionVisitor>(
     parent: &str,
-    body: &FunctionBody,
+    body: FnBody<'_>,
     line_index: &LineIndex,
     visitor: &mut V,
 ) {
@@ -325,7 +405,7 @@ fn scan_nested_functions<V: FunctionVisitor>(
         counter: 0,
         binding: None,
     };
-    scanner.visit_function_body(body);
+    body.visit(&mut scanner);
 }
 
 /// Emit every function carried by a module-scope expression, using the
@@ -376,7 +456,7 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
         callee: &str,
         title: Option<&str>,
         params: &FormalParameters,
-        body: &FunctionBody,
+        body: FnBody<'_>,
         start: u32,
         is_argument: bool,
     ) {
@@ -389,7 +469,7 @@ impl<V: FunctionVisitor> NestedScanner<'_, V> {
         self.visitor.on_function(FunctionItem {
             name: name.clone(),
             start_line: self.line_index.line(start),
-            end_line: self.line_index.line(body.span.end),
+            end_line: self.line_index.line(body.end()),
             body,
             params,
             is_constructor: false,
@@ -415,7 +495,7 @@ impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
                 CLOSURE_CALLEE,
                 None,
                 &func.params,
-                body,
+                FnBody::Block(body),
                 func.span.start,
                 false,
             );
@@ -427,7 +507,7 @@ impl<'a, V: FunctionVisitor> Visit<'a> for NestedScanner<'_, V> {
             CLOSURE_CALLEE,
             None,
             &arrow.params,
-            &arrow.body,
+            FnBody::of_arrow(&arrow.body),
             arrow.span.start,
             false,
         );
@@ -491,15 +571,17 @@ impl<'a, V: FunctionVisitor> NestedScanner<'_, V> {
 /// reference (`it("adds", checkAdds)`) which is a call, not a body.
 fn callback_shape<'b, 'a>(
     expr: &'b Expression<'a>,
-) -> Option<(&'b FormalParameters<'a>, &'b FunctionBody<'a>, u32)> {
+) -> Option<(&'b FormalParameters<'a>, FnBody<'b>, u32)> {
     match expr.without_parentheses() {
-        Expression::ArrowFunctionExpression(arrow) => {
-            Some((&arrow.params, &arrow.body, arrow.span.start))
-        }
+        Expression::ArrowFunctionExpression(arrow) => Some((
+            &arrow.params,
+            FnBody::of_arrow(&arrow.body),
+            arrow.span.start,
+        )),
         Expression::FunctionExpression(func) => func
             .body
             .as_ref()
-            .map(|body| (&*func.params, &**body, func.span.start)),
+            .map(|body| (&*func.params, FnBody::Block(body), func.span.start)),
         _ => None,
     }
 }

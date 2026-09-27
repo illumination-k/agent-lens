@@ -21,8 +21,15 @@
 use lens_domain::TreeNode;
 use oxc_ast::ast::*;
 
-pub fn function_body_tree(body: &FunctionBody) -> TreeNode {
-    node_with("FunctionBody", body.statements.iter().map(stmt_tree))
+use crate::walk::FnBody;
+
+/// A concise arrow body (`(x) => f(x)`) is shaped as the one-statement
+/// block it is equivalent to, so it scores against `{ f(x); }`.
+pub(crate) fn function_body_tree(body: FnBody<'_>) -> TreeNode {
+    match body {
+        FnBody::Block(block) => node_with("FunctionBody", block.statements.iter().map(stmt_tree)),
+        FnBody::Expr(expr) => node_with("FunctionBody", [node_with("ExprStmt", [expr_tree(expr)])]),
+    }
 }
 
 /// Build a label-only node and attach the given children. Centralising the

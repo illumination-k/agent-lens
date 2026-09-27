@@ -731,8 +731,8 @@ class Foo {
     #[test]
     fn extracts_functions_inside_exported_namespace() {
         // `export namespace foo { ... }` wraps the inner namespace in
-        // an `ExportNamedDeclaration` whose `declaration` is the
-        // `Declaration::TSModuleDeclaration` arm of `walk_decl`. The
+        // an `ExportDeclaration` whose `declaration` is the
+        // `Declaration::TSNamespaceDeclaration` arm of `walk_decl`. The
         // top-level `namespace foo` form goes through `walk_stmt` —
         // only `export namespace` reaches the analogous arm in
         // `walk_decl`, so it needs its own coverage.

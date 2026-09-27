@@ -37,7 +37,7 @@ use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
 
 use crate::parser::{Dialect, TsParseError};
-use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
+use crate::walk::{FnBody, FunctionItem, FunctionVisitor, walk_program};
 
 /// Failures produced while extracting complexity units.
 #[derive(Debug, thiserror::Error)]
@@ -86,10 +86,10 @@ fn analyze(
     name: String,
     start_line: usize,
     end_line: usize,
-    body: &FunctionBody,
+    body: FnBody<'_>,
 ) -> FunctionComplexity {
     let mut visitor = ComplexityVisitor::new();
-    visitor.visit_function_body(body);
+    body.visit(&mut visitor);
     FunctionComplexity {
         name,
         start_line,
