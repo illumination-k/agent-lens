@@ -82,36 +82,3 @@ caller = "tests::test_more::LongestCommonPrefixTests::test_contains_infinite_ite
 callee = "more_itertools::more::numeric_range::count"
 verdict = "agent_lens_wrong"
 note = "tests/test_more.py:5846 `count()` is itertools.count (imported at the top of the file), not numeric_range.count"
-
-# Oracle limits (docs/callgraph-accuracy.md, "Where the oracles fall short").
-# A call to a generator function is seen only where the generator is first
-# advanced; when that line does not name it, the oracle drops the edge.
-[[adjudication]]
-target = "more-itertools"
-caller = "more_itertools::more::adjacent"
-callee = "more_itertools::more::windowed"
-verdict = "oracle_wrong"
-note = "more.py:2184 `map(any, windowed(selected, ...))` calls the generator function windowed; it is first advanced later, inside map"
-
-[[adjudication]]
-target = "more-itertools"
-caller = "more_itertools::more::locate"
-callee = "more_itertools::more::windowed"
-verdict = "oracle_wrong"
-note = "more.py:2537 `it = windowed(iterable, ...)` calls the generator function windowed; it is first advanced on another line"
-
-# A decorated function is the callee (edge definition). `memoize` is wrapped
-# by `@curry`, so the oracle records test -> curry.__call__ -> memoize.
-[[adjudication]]
-target = "toolz"
-caller = "toolz::tests::test_functoolz::test_memoize"
-callee = "toolz::functoolz::memoize"
-verdict = "oracle_wrong"
-note = "tests/test_functoolz.py:74 `memoize(f)` calls the @curry-decorated memoize; the oracle sees only curry.__call__"
-
-[[adjudication]]
-target = "toolz"
-caller = "toolz::tests::test_functoolz::test_memoize_kwargs"
-callee = "toolz::functoolz::memoize"
-verdict = "oracle_wrong"
-note = "tests/test_functoolz.py:88 `memoize(f)` calls the @curry-decorated memoize; the oracle sees only curry.__call__"

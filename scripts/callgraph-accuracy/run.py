@@ -8,7 +8,7 @@ oracle with score.py. Everything is written under target/callgraph-accuracy/
 
 The agent-lens binary is not built here: `mise run callgraph-accuracy` builds
 it first. Override its path with AGENT_LENS_BIN. Needs git, and go (Go
-targets), uv (Python targets), rust-analyzer (Rust targets) or node and npm
+targets), uv (Python targets; also runs pyright), rust-analyzer (Rust targets) or node and npm
 (TypeScript targets) on PATH. See docs/callgraph-accuracy.md.
 """
 
@@ -27,6 +27,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 OUT = REPO / "target" / "callgraph-accuracy"
+# pyright for the python-pyright oracle, run through uvx unless PYRIGHT_LANGSERVER names a command.
+PYRIGHT = "pyright==1.1.408"
 
 sys.path.insert(0, str(HERE))
 import score  # noqa: E402
@@ -66,7 +68,8 @@ def go_oracle(t: dict, root: Path, out: Path) -> None:
     run([require("go"), "run", ".", "-root", root, "-out", out], cwd=HERE / "oracle-go")
 
 
-def python_oracle(t: dict, checkout_dir: Path, root: Path, out: Path) -> None:
+def python_venv(t: dict, checkout_dir: Path) -> Path:
+    """The target's venv (editable install plus `install`), rebuilt when the commit changes."""
     uv = require("uv")
     venv = OUT / "venvs" / t["name"]
     stamp = venv / ".callgraph-accuracy-commit"
@@ -76,8 +79,18 @@ def python_oracle(t: dict, checkout_dir: Path, root: Path, out: Path) -> None:
         env = os.environ | {"VIRTUAL_ENV": str(venv)}
         run([uv, "pip", "install", "-q", "-e", checkout_dir, *t.get("install", ["pytest"])], env=env)
         stamp.write_text(t["commit"])
-    python = venv / "bin" / "python"
+    return venv / "bin" / "python"
+
+
+def python_oracle(t: dict, checkout_dir: Path, root: Path, out: Path) -> None:
+    python = python_venv(t, checkout_dir)
     run([python, HERE / "oracle_py.py", "--root", root, "--out", out, "--", *t.get("pytest", [])], cwd=root)
+
+
+def pyright_oracle(t: dict, checkout_dir: Path, root: Path, out: Path) -> None:
+    python = python_venv(t, checkout_dir)
+    langserver = os.environ.get("PYRIGHT_LANGSERVER") or f"{require('uvx')} --from {PYRIGHT} pyright-langserver"
+    run([sys.executable, HERE / "oracle_pyright.py", "--root", root, "--out", out, "--python", python, "--pyright-langserver", langserver])
 
 
 def rust_oracle(t: dict, root: Path, out: Path) -> None:
@@ -104,6 +117,8 @@ def run_target(t: dict, binary: Path, adjudications: Path) -> dict:
         go_oracle(t, root, oracle_json)
     elif t["oracle"] == "python-setprofile":
         python_oracle(t, checkout_dir, root, oracle_json)
+    elif t["oracle"] == "python-pyright":
+        pyright_oracle(t, checkout_dir, root, oracle_json)
     elif t["oracle"] == "rust-analyzer":
         rust_oracle(t, root, oracle_json)
     elif t["oracle"] == "typescript-checker":

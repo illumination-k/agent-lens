@@ -15,16 +15,18 @@ mise run callgraph-accuracy pflag      # one or more targets
 The task builds the release binary and runs
 `scripts/callgraph-accuracy/run.py`. It needs network access (git, Go module
 proxy, PyPI, crates.io, npm); mise supplies `go`, `uv` and `node` through the
-task's `tools`, and the task adds the `rust-analyzer` rustup component. Output
+task's `tools`, the task adds the `rust-analyzer` rustup component, and `uvx`
+fetches the pinned pyright (`PYRIGHT_LANGSERVER` names another
+`pyright-langserver` command). Output
 goes to `target/callgraph-accuracy/` and is never committed:
 
-| Path                                         | Content                                                    |
-| -------------------------------------------- | ---------------------------------------------------------- |
-| `summary.md`, `summary.json`                 | combined table per language and oracle                     |
-| `results/<target>/report.md`, `score.json`   | per-target tables and raw counts                           |
-| `results/<target>/disagreements.json`        | every unadjudicated disagreement, each with a TOML snippet |
-| `results/<target>/graph.json`, `oracle.json` | the two inputs of the scorer                               |
-| `repos/<target>`, `venvs/<target>`           | checkout at the pinned commit, Python venv                 |
+| Path                                         | Content                                                                       |
+| -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `summary.md`, `summary.json`                 | combined table per language and oracle                                        |
+| `results/<target>/report.md`, `score.json`   | per-target tables and raw counts                                              |
+| `results/<target>/disagreements.json`        | every unadjudicated disagreement, each with a TOML snippet                    |
+| `results/<target>/graph.json`, `oracle.json` | the two inputs of the scorer                                                  |
+| `repos/<target>`, `venvs/<target>`           | checkout at the pinned commit, Python venv (what pyright resolves imports in) |
 
 Rust checkouts sit under this repository's `target/`, which the root
 `Cargo.toml` excludes from its workspace so that cargo treats each as its own.
@@ -57,7 +59,7 @@ are normalised to this before comparison.
 | a closure / lambda / nested function as the callee                                        | no node, so unmapped (`callee_nested_or_anonymous`)                                                                                                                       |
 | test code                                                                                 | included (test functions are ordinary nodes with `is_test`)                                                                                                               |
 | recursion                                                                                 | kept (self edges count)                                                                                                                                                   |
-| decorators                                                                                | the decorated function is the callee; a decorator's wrapper is not an edge of its own (the Python oracle does not implement this: see below)                              |
+| decorators                                                                                | the decorated function is the callee; a decorator's wrapper is not an edge of its own (the `python-setprofile` oracle does not implement this: see below)                 |
 | implicit calls (Python `__iter__` / `__next__` in a `for`, operators, `with`, properties) | edges, since the function runs, but there is no call expression; missed pairs of this kind show up under `of which no call site`                                          |
 
 What agent-lens does today with nested code, measured on small samples (keep
@@ -84,14 +86,19 @@ Where the oracles fall short of the definition:
   constraint excludes (`//go:build cmp_debug`, another GOOS) are never
   type-checked; the oracle lists the files it did check (`analyzed_files`)
   and the scorer leaves agent-lens edges from other files out of precision.
-- Python: a decorator's wrapper is recorded as a function of its own. The
-  wrapper is a nested def, so `caller → wrapper` is unmapped
-  (`callee_nested_or_anonymous`) and `wrapper → decorated` maps to
-  `decorator → decorated` (dispatch `dynamic`), while agent-lens resolves
-  `caller → decorated`, which the definition makes the edge: record an
-  agent-lens-only `caller → decorated` as `oracle_wrong`. A decorator that is
-  a class (toolz `@curry`) shows up as `caller → curry.__call__` instead. A C
-  wrapper (`functools.lru_cache`) is transparent.
+- Python (`python-pyright`): a call whose receiver pyright cannot type (an
+  unannotated parameter, a value from an untyped dependency) has no
+  declaration; the oracle lists such call sites (`unresolved_call_sites`) and
+  the scorer leaves an agent-lens edge out of precision when every call site
+  of it is one of them. A call through a value (a parameter, a local, a
+  loop variable, an attribute) has no edge, like a Rust closure call; a
+  binding to a call's result (`get = curry(itertoolz.get)` in
+  `toolz.curried`) is not followed, so an agent-lens edge through it to the
+  wrapped function is a disagreement to adjudicate. Implicit calls other than
+  property reads (operators, `for`, `with`, `len(x)`) and functions passed as
+  values (`sorted(key=f)`) have no edge. A method call on a concrete class is
+  `static` to the method pyright names even when a subclass overrides it, as
+  in TypeScript.
 - Rust: rust-analyzer resolves with one feature set (all features unless the
   target names some), so a fn behind an inactive `cfg` is unresolved: the
   oracle lists it in `unanalyzed_functions` and the scorer leaves agent-lens
@@ -110,19 +117,26 @@ Where the oracles fall short of the definition:
   decorators, iterators) have no edge, and neither do calls whose callee type
   comes from an uninstalled dependency (the checkout has no `node_modules`,
   so such a value is `any`).
-- Python: a generator's call is seen only when it is first advanced; the
-  edge is kept when that line names the generator (`for x in gen():`) and
-  dropped otherwise (counted in the oracle's `stats`); an agent-lens edge
-  to such a generator is `oracle_wrong`.
+- Python (`python-setprofile`, which no pinned target uses): a decorator's
+  wrapper is recorded as a function of its own. The wrapper is a nested def,
+  so `caller → wrapper` is unmapped (`callee_nested_or_anonymous`) and
+  `wrapper → decorated` maps to `decorator → decorated` (dispatch
+  `dynamic`), while the definition makes `caller → decorated` the edge; a
+  decorator that is a class (toolz `@curry`) shows up as
+  `caller → curry.__call__` instead. A generator's call is seen only when it
+  is first advanced; the edge is kept when that line names the generator
+  (`for x in gen():`) and dropped otherwise. Record agent-lens-only edges of
+  either kind as `oracle_wrong`.
 
 ## Oracles
 
-| Language   | Oracle               | Kind         | Tool                                                                                                                          |
-| ---------- | -------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| Go         | `go-vta`             | type-checker | `golang.org/x/tools/go/callgraph/vta` over the packages and their tests (`scripts/callgraph-accuracy/oracle-go`)              |
-| Python     | `python-setprofile`  | dynamic      | `sys.setprofile` while the project's pytest suite runs (`scripts/callgraph-accuracy/oracle_py.py`)                            |
-| Rust       | `rust-analyzer`      | type-checker | rust-analyzer's LSP call hierarchy, plus `textDocument/definition` inside macros and at trait calls (`oracle_rs.py`)          |
-| TypeScript | `typescript-checker` | type-checker | the TypeScript compiler API (`checker.getResolvedSignature`) over every TS / JS file (`scripts/callgraph-accuracy/oracle-ts`) |
+| Language   | Oracle               | Kind         | Tool                                                                                                                                        |
+| ---------- | -------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Go         | `go-vta`             | type-checker | `golang.org/x/tools/go/callgraph/vta` over the packages and their tests (`scripts/callgraph-accuracy/oracle-go`)                            |
+| Python     | `python-pyright`     | type-checker | pyright's language server: `textDocument/definition` at every call site `ast` finds (`scripts/callgraph-accuracy/oracle_pyright.py`)        |
+| Python     | `python-setprofile`  | dynamic      | `sys.setprofile` while the project's pytest suite runs (`scripts/callgraph-accuracy/oracle_py.py`); a cross-check, no pinned target uses it |
+| Rust       | `rust-analyzer`      | type-checker | rust-analyzer's LSP call hierarchy, plus `textDocument/definition` inside macros and at trait calls (`oracle_rs.py`)                        |
+| TypeScript | `typescript-checker` | type-checker | the TypeScript compiler API (`checker.getResolvedSignature`) over every TS / JS file (`scripts/callgraph-accuracy/oracle-ts`)               |
 
 Static-dispatch edges of a type-checker oracle are near exact, so precision
 and recall are both verdicts. A dynamic oracle only sees what the tests run:
@@ -134,7 +148,7 @@ replaced by an indicator (below).
 
 ```json
 {
-  "oracle": "go-vta | python-setprofile | rust-analyzer | typescript-checker",
+  "oracle": "go-vta | python-pyright | python-setprofile | rust-analyzer | typescript-checker",
   "language": "go | python | rust | typescript",
   "kind": "type-checker | dynamic",
   "root": "<absolute path of the analysed tree>",
@@ -149,7 +163,8 @@ replaced by an indicator (below).
   }],
   "executed_functions": [{ "file": "<relative>", "def_line": 12 }],
   "analyzed_files": ["<relative>"],
-  "unanalyzed_functions": [{ "file": "<relative>", "def_line": 12 }]
+  "unanalyzed_functions": [{ "file": "<relative>", "def_line": 12 }],
+  "unresolved_call_sites": [{ "file": "<relative>", "line": 15, "name": "run" }]
 }
 ```
 
@@ -171,10 +186,26 @@ replaced by an indicator (below).
   analysed file the oracle could not resolve (Rust: cfg-inactive). An
   agent-lens edge whose caller maps to one is left out of precision, as for
   `analyzed_files`.
+- `unresolved_call_sites` (optional, type-checker oracles): call sites the
+  oracle found no declaration for, with the called name (Python: a receiver
+  pyright cannot type). An agent-lens pair all of whose call sites (caller's
+  file, call line, callee name) are listed is left out of precision.
 - `caller_is_innermost_function` (optional, default false): when true,
   `caller_def_line` is the innermost function around the call, anonymous ones
   included, and the scorer maps the caller from it (see below).
-- The Python oracle reads dispatch off the call line, since it sees no types:
+- The `python-pyright` oracle: `static` when pyright names one function under
+  root, or a class under root (the edge goes to the `__init__` and the
+  `__new__` its MRO reaches first under root); `dynamic` when it names several
+  (a union receiver, conditional definitions), for an abstract method
+  (`@abstractmethod`, a `Protocol` member, a body that is only `...` or
+  `raise NotImplementedError`), which also gets a `dynamic` edge to every
+  override in a subclass under root, and for a read of a `@property` /
+  `cached_property` getter under root. The callee of a decorated function is
+  its `def`; a simple alias (`g = f`) is followed; of `@overload` stubs and
+  their implementation, only the implementation is kept. `call_line` is the
+  line of the callee's name; the caller is the innermost `def` lexically
+  around the call.
+- The `python-setprofile` oracle reads dispatch off the call line, since it sees no types:
   `static` when a call expression on that line names the callee (`f(...)`,
   `x.f(...)`), or, for a constructor dunder (`__init__`, `__new__`), the
   class, a subclass inheriting it, or the dunder itself (`A()`, `B()`,
@@ -242,7 +273,9 @@ counted (`resolved edge excluded`).
 
 - **Precision** (type-checker oracle), per `m`: TP = |R_m ∩ O|,
   FP = |R_m \ O|, precision = TP / (TP + FP), over the pairs whose caller is
-  in a file the oracle type-checked (the others are counted as excluded). The `overall` row is over the union
+  in a file the oracle type-checked and resolved, and that have a call site
+  the oracle resolved (`unresolved_call_sites`); the others are counted as
+  excluded. The `overall` row is over the union
   R of all methods; a pair reached by two methods counts in both method rows
   and once overall.
 - **Unobserved rate** (dynamic oracle), in place of precision: over the
@@ -304,7 +337,8 @@ that commit.
 
 ## Baseline
 
-The number to beat (#578, #586). Measured 2026-09-26 with
+The number to beat (#578, #586); for Python, see "Python" below, which
+replaces the setprofile rows here. Measured 2026-09-26 with
 `mise run callgraph-accuracy` on agent-lens `bb273cb` (plus the resolver fixes
 that landed with this benchmark), with the adjudications committed at the
 time. Targets: pflag `0491e57` (v1.0.10), go-cmp `9b12f36` (v0.7.0),
@@ -566,6 +600,43 @@ targets: `e.path()` on a `std::fs::DirEntry` bound to glob's
 `pub use` items (`fastrand::bool()`, httparse's `_benchable`), and calls on
 ubiquitous names (`is_empty`, `as_str`, `parse`, `next`), which the
 resolver refuses by design.
+
+### Python
+
+Measured 2026-09-27 with `mise run callgraph-accuracy more-itertools toolz`
+on agent-lens `5c83ef2`, against the `python-pyright` oracle (pyright
+1.1.408) that replaced `python-setprofile` for the pinned targets: a
+type-checker oracle gives a precision verdict where the dynamic one gave only
+an unobserved rate, sees code the tests never run, and follows decorators,
+generators and `__init__` re-exports the way the edge definition does. The
+four `oracle_wrong` verdicts the dynamic oracle needed (decorator wrappers,
+generators first advanced elsewhere) went stale and were deleted; the six
+`agent_lens_wrong` ones still apply. Every other agent-lens-only pair counts
+as a false positive.
+
+| Target         | Precision         | Static recall      | Static pairs only in a candidate set | Dynamic recall | Excluded (call site unresolved) |
+| -------------- | ----------------- | ------------------ | ------------------------------------ | -------------- | ------------------------------- |
+| more-itertools | 0.768 (129 / 168) | 0.142 (129 / 911)  | 14                                   | 0 / 10         | 6                               |
+| toolz          | 0.833 (250 / 300) | 0.868 (244 / 281)  | 4                                    | 6 / 15         | 2                               |
+| both           | 0.810 (379 / 468) | 0.313 (373 / 1192) | 18                                   | 6 / 25         | 8                               |
+
+Per method (both targets): `lexical` 0.983 (287 / 292), `self_method` 1.000
+(45 / 45), `last_segment` 0.352 (45 / 128), `path_suffix` 1.000 (2 / 2),
+`crate_narrowed` 0 / 1.
+
+What the disagreements are:
+
+- `last_segment` false positives are shadowed names, as the dynamic oracle
+  suggested, now confirmed: `count()` from `itertools` bound to
+  `numeric_range.count` (32 pairs in more-itertools), a parameter or local
+  `func(...)` bound to the `curry.func` property (12 pairs in toolz), a class attribute
+  `D = dict` bound to a test method `D`. The five `lexical` ones are a local
+  (`f = compose(...)`) shadowing a module-level `def f`.
+- Static misses are almost all `mi.foo(...)` in more-itertools' tests
+  (`import more_itertools as mi` over `from .more import *`, the barrel gap).
+- 9 oracle edges have no agent-lens callee node: functions defined inside an
+  `if` / `try` at module level (`dl_split`, `_fsumprod` and `batched` in
+  more-itertools, `_check_sigspec` in toolz), which agent-lens does not index.
 
 ## Metamorphic checks
 

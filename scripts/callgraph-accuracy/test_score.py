@@ -20,7 +20,7 @@ def node(name: str, start: int, end: int, file: str = "m.py") -> dict:
 
 
 def resolved(a: dict, b: dict, method: str, line: int = 0) -> dict:
-    return {"from": a["id"], "to": b["id"], "resolution": "resolved", "resolution_method": method, "call_lines": [line]}
+    return {"from": a["id"], "to": b["id"], "callee_name": b["name"], "resolution": "resolved", "resolution_method": method, "call_lines": [line]}
 
 
 def edge(caller: dict, call_line: int, callee: dict | int, dispatch: str = "static", file: str = "m.py") -> dict:
@@ -101,7 +101,7 @@ class PrecisionRecallTest(unittest.TestCase):
         md = score.render(self.result, "t")
         for heading in ("Precision of resolved", "Recall over oracle edges", "Candidate sets", "Unknown / adjudicated"):
             self.assertIn(heading, md)
-        self.assertIn("| overall | 3 | 0 | 2 | 1 | 0.667 |", md)
+        self.assertIn("| overall | 3 | 0 | 0 | 2 | 1 | 0.667 |", md)
 
 
 class MissedCallSiteTest(unittest.TestCase):
@@ -177,8 +177,7 @@ class AnalyzedFilesTest(unittest.TestCase):
         r = score.score(g, o)
         self.assertEqual(r["precision"]["lexical"], {"resolved": 2, "tp": 1, "caller_not_analyzed": 1})
         self.assertEqual(r["disagreements"], [])
-        self.assertIn("| lexical | 2 | 1 | 1 | 0 | 1.000 |", score.render(r, "t"))
-
+        self.assertIn("| lexical | 2 | 1 | 0 | 1 | 0 | 1.000 |", score.render(r, "t"))
 
     def test_callers_the_oracle_could_not_resolve_are_excluded(self):
         # Rust: a cfg-inactive fn in a file the oracle did analyse.
@@ -187,6 +186,38 @@ class AnalyzedFilesTest(unittest.TestCase):
         r = score.score(g, o)
         self.assertEqual(r["precision"]["lexical"], {"resolved": 2, "tp": 1, "caller_not_analyzed": 1})
         self.assertEqual(r["disagreements"], [])
+
+
+class UnresolvedCallSiteTest(unittest.TestCase):
+    """Python: call sites pyright found no declaration for leave agent-lens edges out of precision."""
+
+    def score(self, edges: list[dict], sites: list[tuple[int, str]]) -> dict:
+        o = oracle([edge(MAIN, 6, HELPER)]) | {"unresolved_call_sites": [{"file": "m.py", "line": ln, "name": n} for ln, n in sites]}
+        return score.score(graph(edges), o)
+
+    def test_edge_whose_every_site_is_unresolved_is_excluded(self):
+        r = self.score([resolved(MAIN, HELPER, "lexical", 6), resolved(MAIN, GO, "last_segment", 8)], [(8, "go")])
+        self.assertEqual(r["precision"]["last_segment"], {"resolved": 1, "call_site_unresolved": 1})
+        self.assertEqual(r["precision"]["overall"], {"resolved": 2, "tp": 1, "call_site_unresolved": 1})
+        self.assertEqual(r["disagreements"], [])
+        self.assertIn("| last_segment | 1 | 0 | 1 | 0 | 0 | - |", score.render(r, "t"))
+
+    def test_other_name_or_line_does_not_exclude(self):
+        # `helper(x.go())` on line 8: `go` is unresolved, the `helper` call is not.
+        r = self.score([resolved(MAIN, OTHER, "lexical", 8)], [(8, "go"), (9, "other")])
+        self.assertEqual(r["precision"]["lexical"], {"resolved": 1, "fp": 1})
+
+    def test_edge_with_one_resolved_site_is_scored(self):
+        e = resolved(MAIN, GO, "last_segment", 8)
+        e["call_lines"] = [8, 10]
+        r = self.score([e], [(8, "go")])
+        self.assertEqual(r["precision"]["last_segment"], {"resolved": 1, "fp": 1})
+
+    def test_adjudication_on_excluded_edge_is_stale(self):
+        o = oracle([]) | {"unresolved_call_sites": [{"file": "m.py", "line": 8, "name": "go"}]}
+        adj = [{"target": "t", "caller": "m::main", "callee": "m::A::go", "verdict": "agent_lens_wrong"}]
+        r = score.score(graph([resolved(MAIN, GO, "last_segment", 8)]), o, adj)
+        self.assertEqual(r["stale_adjudications"], 1)
 
 
 class ModuleLevelEdgeTest(unittest.TestCase):

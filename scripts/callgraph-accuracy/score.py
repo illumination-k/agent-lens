@@ -136,16 +136,18 @@ def _oracle_pairs(oracle: dict, index: NodeIndex) -> tuple[dict[Pair, str], dict
     return pairs, lines, unmapped
 
 
-def _agent_lens_edges(graph: dict) -> tuple[dict[Pair, set[str]], list[tuple[str, list[str], str]]]:
+def _agent_lens_edges(graph: dict) -> tuple[dict[Pair, set[str]], list[tuple[str, list[str], str]], dict[Pair, set]]:
     resolved: dict[Pair, set[str]] = defaultdict(set)
     candidate_sets: list[tuple[str, list[str], str]] = []
+    sites: dict[Pair, set[tuple[int, str]]] = defaultdict(set)  # (call line, callee name) per resolved pair
     for e in graph["edges"]:
         method = e.get("resolution_method") or "unknown"
         if e["resolution"] == "resolved":
             resolved[(e["from"], e["to"])].add(method)
+            sites[(e["from"], e["to"])].update((line, e.get("callee_name")) for line in e.get("call_lines") or [])
         elif e["resolution"] == "ambiguous":
             candidate_sets.append((e["from"], list(e.get("candidates") or []), method))
-    return resolved, candidate_sets
+    return resolved, candidate_sets, sites
 
 
 def _qualified_index(graph: dict) -> dict[str, set[str]]:
@@ -176,7 +178,7 @@ def _apply_adjudications(adjudications, graph, resolved, oracle_pairs, out_of_sc
 
     def disagreement(pair: Pair) -> bool:
         if pair in resolved:
-            return pair not in oracle_pairs and not out_of_scope(pair[0])
+            return pair not in oracle_pairs and not out_of_scope(pair)
         return pair in oracle_pairs
 
     for adj in adjudications:
@@ -217,7 +219,7 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
     graph = graph | {"edges": [e for e in graph["edges"] if e["from"] is not None]}
     index = NodeIndex(graph, source_root)
     oracle_pairs, oracle_lines, unmapped = _oracle_pairs(oracle, index)
-    resolved, candidate_sets = _agent_lens_edges(graph)
+    resolved, candidate_sets, pair_sites = _agent_lens_edges(graph)
 
     executed: set[str] | None = None
     if oracle.get("kind") == "dynamic":
@@ -233,14 +235,28 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
     # Functions the oracle saw but could not resolve (cfg-inactive Rust code).
     unanalyzed = {index.definition(f["file"], f["def_line"])[0] for f in oracle.get("unanalyzed_functions", [])}
     unanalyzed.discard(None)
-    out_of_scope = _out_of_scope(index.nodes, executed, analyzed, unanalyzed)
+    caller_out_of_scope = _out_of_scope(index.nodes, executed, analyzed, unanalyzed)
+    # Call sites the oracle could not resolve at all (Python: a receiver of
+    # unknown type); an agent-lens pair all of whose sites are among them is
+    # outside the oracle's view, as a caller in an unanalysed file is.
+    unresolved = {(s["file"], s["line"], s["name"]) for s in oracle.get("unresolved_call_sites", [])}
+
+    def out_of_scope(pair: Pair) -> str | None:
+        reason = caller_out_of_scope(pair[0])
+        if reason is None and unresolved:
+            file = index.nodes[pair[0]]["file"]
+            sites = pair_sites.get(pair)
+            if sites and all((file, line, name) in unresolved for line, name in sites):
+                reason = "call_site_unresolved"
+        return reason
+
     applied, stale, adjudicated = _apply_adjudications(adjudications or [], graph, resolved, oracle_pairs, out_of_scope)
 
     # Precision side: every agent-lens resolved pair, per method.
     precision: dict[str, Counter] = defaultdict(Counter)
     for pair, methods in resolved.items():
         rows = sorted(methods) + ["overall"]
-        reason = out_of_scope(pair[0])
+        reason = out_of_scope(pair)
         for m in rows:
             precision[m]["resolved"] += 1
             if reason:
@@ -277,7 +293,7 @@ def score(graph: dict, oracle: dict, adjudications: list[dict] | None = None, so
     # oracle cannot see is counted as excluded, as in precision.
     candidates: dict[str, Counter] = defaultdict(Counter)
     for src, cands, method in candidate_sets:
-        if out_of_scope(src):
+        if caller_out_of_scope(src):
             for m in (method, "overall"):
                 candidates[m]["excluded"] += 1
             continue
@@ -338,7 +354,7 @@ def _disagreements(graph, index, resolved, oracle_pairs, in_candidates, out_of_s
     for pair, methods in sorted(resolved.items()):
         if pair in oracle_pairs or pair in adjudicated:
             continue
-        if out_of_scope(pair[0]):
+        if out_of_scope(pair):
             continue
         out.append({
             "side": "agent_lens_only",
@@ -440,8 +456,8 @@ def render(result: dict, title: str) -> str:
         for m in _method_rows(p):
             c = p[m]
             tp, fp = c.get("tp", 0), c.get("fp", 0)
-            rows.append([m, c.get("resolved", 0), c.get("caller_not_analyzed", 0), tp, fp, _ratio(tp, tp + fp)])
-        lines += _md_table(["method", "resolved", "caller not type-checked (excluded)", "TP", "FP", "precision"], rows)
+            rows.append([m, c.get("resolved", 0), c.get("caller_not_analyzed", 0), c.get("call_site_unresolved", 0), tp, fp, _ratio(tp, tp + fp)])
+        lines += _md_table(["method", "resolved", "caller not type-checked (excluded)", "call site unresolved by oracle (excluded)", "TP", "FP", "precision"], rows)
 
     r = result["recall"]
     methods = [m for m in METHODS if any(f"by_{m}" in r.get(d, {}) for d in DISPATCHES)]
