@@ -13,7 +13,7 @@ Goal: surface only the noise that the current `git diff` introduced, not the who
 - After the user finishes a multi-file edit and asks "did I break anything?"
 - As a sanity pass after the agent itself made a large edit.
 
-The PostToolUse hook already runs `similarity` + `wrapper` (the `forwarding` analyzer's one-hop section) on every Edit/Write, so don't re-run those for a single just-edited file — those reports are already in context. Reach for this skill when the change is broader than one file or when the user explicitly wants a sweep.
+When `agent-lens hook setup` is installed, the PostToolUse hook already runs `similarity`, `wrapper` (the `forwarding` analyzer's one-hop section), and `footprint` on every Edit/Write, so don't re-run those for a single just-edited file — those reports are already in context. Reach for this skill when the change is broader than one file or when the user explicitly wants a sweep.
 
 ## Workflow
 
@@ -100,6 +100,6 @@ agent-lens analyze similarity <path> --diff-only --exclude-tests --format md
 
 ## Don't reach for it when
 
-- The user is mid-edit and hasn't paused — the PostToolUse hook is already running similarity + wrapper after every save. Adding more analyzers here would be redundant noise.
+- The user is mid-edit and hasn't paused — the PostToolUse hook is already running similarity, wrapper, and footprint after every save. Adding more analyzers here would be redundant noise.
 - The change is documentation-only or config-only — none of these analyzers will have anything useful to say.
 - The diff is empty — `--diff-only` reports will all be empty by definition.

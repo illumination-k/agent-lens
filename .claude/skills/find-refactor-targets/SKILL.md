@@ -16,7 +16,7 @@ The driver is **Hotspot** — `commits × cognitive_max`. A file with a high cog
 Start at the workspace level, scoped to the recent past:
 
 ```bash
-agent-lens analyze hotspot crates --since=180.days.ago --top 15 --format md
+agent-lens analyze hotspot . --since=180.days.ago --top 15 --format md
 ```
 
 Tune `--since`:
@@ -25,16 +25,16 @@ Tune `--since`:
 - `1.year.ago` for stable repos
 - omit for full history (defaults to all commits)
 
-The path must lie inside a git working tree. For a single crate:
+The path must lie inside a git working tree. For a single crate or package:
 
 ```bash
-agent-lens analyze hotspot crates/agent-lens --since=180.days.ago --format md
+agent-lens analyze hotspot <crate-or-package-dir> --since=180.days.ago --format md
 ```
 
 If the question is "how carefully should I edit this?" rather than "where should I refactor?", run `risk` instead — it swaps the complexity axis for call-graph centrality, so a hot file nothing depends on stops outranking a hot file half the codebase calls:
 
 ```bash
-agent-lens analyze risk crates --since=180.days.ago --top 15 --format md
+agent-lens analyze risk . --since=180.days.ago --top 15 --format md
 ```
 
 Note the inverted direction: `risk` ranks by a rank product, so **lower is riskier**.
