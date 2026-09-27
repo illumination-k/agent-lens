@@ -1217,6 +1217,17 @@ mod tests {
         analyze_json_with(path, ParametersAnalyzer::new())
     }
 
+    #[rstest]
+    #[case::sorted_and_deduplicated(&[7, 3, 7, 1], &[1, 3, 7])]
+    #[case::empty(&[], &[])]
+    fn call_lines_are_sorted_unique(#[case] recorded: &[usize], #[case] expected: &[usize]) {
+        let mut aggregate = SlotAggregate::default();
+        for &line in recorded {
+            aggregate.record(line, SlotValue::Constant("1".into()));
+        }
+        assert_eq!(aggregate.call_lines(), expected);
+    }
+
     fn analyze_json_with(path: &Path, analyzer: ParametersAnalyzer) -> Value {
         let json = analyzer.analyze(path, OutputFormat::Json).unwrap();
         serde_json::from_str(&json).unwrap()
