@@ -35,6 +35,7 @@ mise run bench-compare [ref]  # Benchmarks on ref vs working tree; fails on a re
 mise run mutants  # Mutation tests; slow and not part of normal ci
 mise run mutants:minimize <package>  # Redundant tests of a package via mutrim; slow, needs mutrim on PATH
 mise run selftest # Run agent-lens over its own sources; not part of ci
+mise run release <X.Y.Z>  # Version-bump PR -> wait for checks -> squash merge -> push the v tag; rerun to resume
 ```
 
 ## Dogfooding

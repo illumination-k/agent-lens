@@ -73,6 +73,16 @@ flag "--threshold <percent>" help="Slowdown in percent (lower 95% CI bound of th
 '''
 run = 'scripts/bench-compare.sh "${usage_ref:-main}" "${usage_threshold:-20}"'
 
+# Bump PR -> checks -> squash merge -> `v<version>` tag, which `release-tag.yml`
+# builds. Rerunning resumes from whichever step stopped (see `scripts/release.sh`).
+[tasks.release]
+description = "Bump the workspace version in a PR, merge it when checks pass, and push the tag"
+usage = '''
+arg "<version>" help="Version to release, X.Y.Z"
+arg "[notes]" help="File with the commit and PR body; defaults to commit subjects since the last tag"
+'''
+run = 'scripts/release.sh "$usage_version" ${usage_notes:+"$usage_notes"}'
+
 # Lives here rather than in `.mise.toml` so it resolves only where its dependency
 # does, and is not a `mutants:*` glob: that would also pull in the diff-scoped
 # run, which is the task you want on its own during normal development.

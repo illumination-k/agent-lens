@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-hooks"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "rstest",
  "serde",
@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "agent-lens"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "agent-hooks",
  "clap",
@@ -800,7 +800,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lens-domain"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ignore",
  "proptest",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "lens-golang"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lens-domain",
  "proptest",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "lens-py"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lens-domain",
  "proptest",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "lens-rust"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lens-domain",
  "proc-macro2",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "lens-ts"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lens-domain",
  "oxc_allocator",

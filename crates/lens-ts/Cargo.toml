@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-lens-domain = { path = "../lens-domain", version = "0.7.0" }
+lens-domain = { path = "../lens-domain", version = "0.8.0" }
 oxc_allocator = "0.150"
 oxc_ast = "0.150"
 oxc_ast_visit = "0.150"
