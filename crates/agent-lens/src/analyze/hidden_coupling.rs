@@ -55,7 +55,7 @@ use tracing::warn;
 use super::call_graph::model::{ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder};
 use super::churn::{ChurnScope, ReportablePaths};
-use super::co_change::CoChangeOptions;
+use super::co_change::{CoChangeOptions, PairView};
 use super::error_from::impl_from_churn_error;
 use super::format::render_module_confidence;
 use super::runner::render_report;
@@ -368,7 +368,7 @@ fn classify(pair: &CoChangePair, graph: &StaticFileGraph, filter: &CompiledPathF
 }
 
 #[derive(Debug, Serialize)]
-struct Report {
+struct Report<'a> {
     schema_version: u32,
     target: String,
     repo_root: String,
@@ -386,16 +386,16 @@ struct Report {
     /// The highest-value bucket: co-changed, with no declared dependency
     /// either way. `no_path` rows first, then the ones that only relate
     /// through intermediates.
-    hidden_coupling: Vec<HiddenRow>,
+    hidden_coupling: Vec<HiddenRow<'a>>,
     /// Declared dependencies whose endpoints both moved in the window
     /// but not together. Weaker by construction — see [`NOTE`].
     suspect_dependencies: Vec<SuspectRow>,
     /// Co-changing pairs with a test-like path on either side. Coupled
     /// by construction, kept separate so they cannot be read as hidden.
-    test_pairs: Vec<TestPairRow>,
+    test_pairs: Vec<TestPairRow<'a>>,
     /// Co-changing pairs where no language backend reads one side. No
     /// static view rather than no dependency.
-    no_static_view: Vec<OutsideRow>,
+    no_static_view: Vec<OutsideRow<'a>>,
     /// Per-module call-site resolution counts: a module whose calls
     /// mostly go unresolved has edges missing from the static side, so
     /// its pairs are over-reported as hidden.
@@ -457,45 +457,10 @@ struct StaticViewSummary {
     module_graph: ModuleGraphCoverage,
 }
 
-/// The co-change half of a row, identical in every bucket so the four
-/// tables read the same way.
 #[derive(Debug, Serialize)]
-struct PairView {
-    a: String,
-    b: String,
-    cochanges: u32,
-    commits_a: u32,
-    commits_b: u32,
-    confidence_a_to_b: f64,
-    confidence_b_to_a: f64,
-    lift: f64,
-    score: f64,
-    last_cochange: String,
-    last_cochange_commits_ago: usize,
-}
-
-impl From<&CoChangePair> for PairView {
-    fn from(p: &CoChangePair) -> Self {
-        Self {
-            a: p.a.clone(),
-            b: p.b.clone(),
-            cochanges: p.cochanges,
-            commits_a: p.commits_a,
-            commits_b: p.commits_b,
-            confidence_a_to_b: p.confidence_a_to_b,
-            confidence_b_to_a: p.confidence_b_to_a,
-            lift: p.lift,
-            score: p.score,
-            last_cochange: p.last_cochange.clone(),
-            last_cochange_commits_ago: p.last_cochange_commits_ago,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct HiddenRow {
+struct HiddenRow<'a> {
     #[serde(flatten)]
-    pair: PairView,
+    pair: PairView<'a>,
     #[serde(rename = "static")]
     verdict: StaticVerdict,
 }
@@ -517,17 +482,17 @@ struct SuspectRow {
 }
 
 #[derive(Debug, Serialize)]
-struct TestPairRow {
+struct TestPairRow<'a> {
     #[serde(flatten)]
-    pair: PairView,
+    pair: PairView<'a>,
     /// Which side(s) the test/production split classes as tests.
     tests: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct OutsideRow {
+struct OutsideRow<'a> {
     #[serde(flatten)]
-    pair: PairView,
+    pair: PairView<'a>,
     /// Which side(s) no language backend reads.
     outside: Vec<String>,
 }
@@ -545,8 +510,8 @@ struct ReportInputs<'a> {
     filter: &'a CompiledPathFilter,
 }
 
-impl Report {
-    fn build(analyzer: &HiddenCouplingAnalyzer, input: ReportInputs<'_>) -> Self {
+impl<'a> Report<'a> {
+    fn build(analyzer: &HiddenCouplingAnalyzer, input: ReportInputs<'a>) -> Self {
         let ReportInputs {
             roots,
             scope,
@@ -586,8 +551,8 @@ impl Report {
                 .cmp(&relation_rank(y.verdict.relation))
                 .then_with(|| y.pair.score.total_cmp(&x.pair.score))
                 .then_with(|| y.pair.cochanges.cmp(&x.pair.cochanges))
-                .then_with(|| x.pair.a.cmp(&y.pair.a))
-                .then_with(|| x.pair.b.cmp(&y.pair.b))
+                .then_with(|| x.pair.a.cmp(y.pair.a))
+                .then_with(|| x.pair.b.cmp(y.pair.b))
         });
 
         Self {
@@ -770,7 +735,7 @@ fn render_summary(out: &mut String, report: &Report) {
 const PAIR_COLUMNS: &str = "a | b | co | a→b | b→a | lift | last";
 const PAIR_RULE: &str = "--- | --- | ---: | ---: | ---: | ---: | ---";
 
-fn render_pair_cells(pair: &PairView) -> String {
+fn render_pair_cells(pair: &PairView<'_>) -> String {
     format!(
         "{} | {} | {} | {:.2} | {:.2} | {:.2} | {} ({} ago)",
         pair.a,

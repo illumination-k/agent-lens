@@ -51,6 +51,7 @@ pub mod similarity;
 pub mod single_impl;
 pub mod single_use;
 mod source_files;
+mod span_references;
 mod static_file_graph;
 pub mod test_only;
 pub mod test_redundancy;

@@ -52,6 +52,7 @@ use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
+use super::span_references::{AllowedSpan, SpanReferenceIndex};
 use super::unreachable::identifiers;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use lens_domain::ArgumentShape;
@@ -223,6 +224,19 @@ enum ConstantKind {
     /// No production call site passes the position at all, so the
     /// declared default is the only value (Python / TypeScript).
     DefaultOnly,
+}
+
+impl ConstantKind {
+    /// Whether a test call site's `slot` disagrees with the production
+    /// claim (`value` is the constant for [`ConstantKind::Constant`]).
+    fn contradicted_by(self, slot: &SlotValue, value: Option<&String>) -> bool {
+        match self {
+            ConstantKind::Constant => {
+                !matches!(slot, SlotValue::Constant(text) if Some(text) == value)
+            }
+            ConstantKind::DefaultOnly => !matches!(slot, SlotValue::Omitted),
+        }
+    }
 }
 
 /// The parameter a finding is about, spelled positionally so the row is
@@ -432,59 +446,75 @@ enum SlotValue {
     Omitted,
 }
 
-/// Line one call site's arguments up against the parameter slots.
-/// `Err(())` marks the site unanalyzable: a spread, an unmatched or
-/// duplicate keyword, more arguments than slots, or an omission in a
-/// language without argument defaults.
-fn assign_site(
-    site: &CallSiteFacts,
+/// What a callee's declaration says about how its call sites fill the
+/// parameter slots.
+#[derive(Debug, Clone, Copy)]
+struct SiteShape {
+    /// The callee takes a receiver that is not a parameter slot.
     has_receiver: bool,
-    slot_names: &[Option<String>],
+    /// The language lets a call site omit an argument in favour of its
+    /// declared default (Python / TypeScript).
     allows_omission: bool,
-) -> Result<Vec<SlotValue>, ()> {
-    let mut args = site.arguments.as_slice();
-    if has_receiver && !site.has_receiver_expression {
-        // `Owner::method(receiver, …)` — the first argument fills the
-        // receiver, not slot 0.
-        let Some(rest) = args.split_first().map(|(_, rest)| rest) else {
-            return Err(());
-        };
-        args = rest;
-    }
-    let mut slots: Vec<Option<SlotValue>> = vec![None; slot_names.len()];
-    let mut positional = 0usize;
-    let mut seen_keyword = false;
-    for arg in args {
-        match arg {
-            ArgumentShape::Spread => return Err(()),
-            ArgumentShape::Keyword { name, value } => {
-                seen_keyword = true;
-                let Some(index) = slot_names
-                    .iter()
-                    .position(|slot| slot.as_deref() == Some(name.as_str()))
-                else {
-                    return Err(());
-                };
-                if slots[index].replace(value_of(value)).is_some() {
-                    return Err(());
+}
+
+impl SiteShape {
+    /// Line one call site's arguments up against the parameter slots.
+    /// `Err(())` marks the site unanalyzable: a spread, an unmatched or
+    /// duplicate keyword, more arguments than slots, or an omission in a
+    /// language without argument defaults.
+    fn assign(
+        self,
+        site: &CallSiteFacts,
+        slot_names: &[Option<String>],
+    ) -> Result<Vec<SlotValue>, ()> {
+        let SiteShape {
+            has_receiver,
+            allows_omission,
+        } = self;
+        let mut args = site.arguments.as_slice();
+        if has_receiver && !site.has_receiver_expression {
+            // `Owner::method(receiver, …)` — the first argument fills the
+            // receiver, not slot 0.
+            let Some(rest) = args.split_first().map(|(_, rest)| rest) else {
+                return Err(());
+            };
+            args = rest;
+        }
+        let mut slots: Vec<Option<SlotValue>> = vec![None; slot_names.len()];
+        let mut positional = 0usize;
+        let mut seen_keyword = false;
+        for arg in args {
+            match arg {
+                ArgumentShape::Spread => return Err(()),
+                ArgumentShape::Keyword { name, value } => {
+                    seen_keyword = true;
+                    let Some(index) = slot_names
+                        .iter()
+                        .position(|slot| slot.as_deref() == Some(name.as_str()))
+                    else {
+                        return Err(());
+                    };
+                    if slots[index].replace(value_of(value)).is_some() {
+                        return Err(());
+                    }
                 }
-            }
-            shape => {
-                if seen_keyword || positional >= slots.len() {
-                    return Err(());
+                shape => {
+                    if seen_keyword || positional >= slots.len() {
+                        return Err(());
+                    }
+                    slots[positional] = Some(value_of(shape));
+                    positional += 1;
                 }
-                slots[positional] = Some(value_of(shape));
-                positional += 1;
             }
         }
+        if !allows_omission && slots.iter().any(Option::is_none) {
+            return Err(());
+        }
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or(SlotValue::Omitted))
+            .collect())
     }
-    if !allows_omission && slots.iter().any(Option::is_none) {
-        return Err(());
-    }
-    Ok(slots
-        .into_iter()
-        .map(|slot| slot.unwrap_or(SlotValue::Omitted))
-        .collect())
 }
 
 fn value_of(shape: &ArgumentShape) -> SlotValue {
@@ -568,6 +598,96 @@ struct SlotAggregate {
     lines: Vec<usize>,
 }
 
+impl SlotAggregate {
+    fn record(&mut self, line: usize, value: SlotValue) {
+        self.lines.push(line);
+        match value {
+            SlotValue::Constant(text) => {
+                self.values.insert(text);
+            }
+            SlotValue::NonConstant => self.non_constant += 1,
+            SlotValue::Omitted => self.omitted += 1,
+        }
+    }
+
+    /// Every analyzable site records exactly one of provided/omitted per
+    /// slot, so zero omissions means every site provided a value.
+    fn fully_provided(&self) -> bool {
+        self.omitted == 0
+    }
+
+    fn record_calibration(&self, calibration: &mut Calibration) {
+        if !self.fully_provided() {
+            return;
+        }
+        calibration.measured_parameter_count += 1;
+        if self.non_constant > 0 {
+            calibration.varying_count += 1;
+        } else if self.values.len() == 1 {
+            calibration.one_value_count += 1;
+        } else {
+            calibration.several_values_count += 1;
+        }
+    }
+
+    /// The finding this slot supports, if any, with the constant value
+    /// for [`ConstantKind::Constant`].
+    fn classify(
+        &self,
+        analyzable: usize,
+        allows_omission: bool,
+    ) -> Option<(ConstantKind, Option<String>)> {
+        if self.fully_provided() && self.non_constant == 0 && self.values.len() == 1 {
+            Some((ConstantKind::Constant, self.values.first().cloned()))
+        } else if self.omitted == analyzable && self.omitted > 0 && allows_omission {
+            Some((ConstantKind::DefaultOnly, None))
+        } else {
+            None
+        }
+    }
+
+    fn call_lines(&self) -> Vec<usize> {
+        let mut lines = self.lines.clone();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+}
+
+/// The production call sites of one callee, lined up per slot.
+struct ProductionTally {
+    aggregates: Vec<SlotAggregate>,
+    analyzable: usize,
+    /// Counted sites without argument facts plus sites
+    /// [`SiteShape::assign`] rejected.
+    unanalyzed: usize,
+}
+
+impl ProductionTally {
+    fn of(inbound: &InboundSites, shape: SiteShape, slot_names: &[Option<String>]) -> Self {
+        let mut tally = Self {
+            aggregates: (0..slot_names.len())
+                .map(|_| SlotAggregate::default())
+                .collect(),
+            analyzable: 0,
+            unanalyzed: inbound
+                .production_call_count
+                .saturating_sub(inbound.production.len()),
+        };
+        for site in &inbound.production {
+            let Ok(slots) = shape.assign(site, slot_names) else {
+                tally.unanalyzed += 1;
+                continue;
+            };
+            tally.analyzable += 1;
+            for (aggregate, value) in tally.aggregates.iter_mut().zip(slots) {
+                aggregate.record(site.line, value);
+            }
+        }
+        tally
+    }
+}
+
 /// A dead-check target: one named parameter and the span its mentions
 /// are counted in.
 struct DeadTarget {
@@ -585,7 +705,7 @@ struct RawTarget {
     name: String,
     /// `(file, start_line, end_line)` spans of the definition and its
     /// known callers.
-    allowed: Vec<(String, usize, usize)>,
+    allowed: Vec<AllowedSpan>,
 }
 
 /// Everything the source scan cannot compute: candidate rows waiting on
@@ -619,7 +739,6 @@ impl Collected {
             dead_candidates: Vec::new(),
             dead_targets: Vec::new(),
         };
-        let mut raw_slot_by_node: HashMap<usize, usize> = HashMap::new();
 
         for (idx, node) in graph.nodes.iter().enumerate() {
             if node.is_test && !only_tests {
@@ -641,14 +760,7 @@ impl Collected {
                 slot_names.iter().filter(|name| name.is_none()).count();
 
             out.collect_dead_candidates(node, slot_names);
-            out.collect_constant_candidates(
-                graph,
-                idx,
-                slot_names,
-                &inbound[idx],
-                min_call_sites,
-                &mut raw_slot_by_node,
-            );
+            out.collect_constant_candidates(graph, idx, slot_names, &inbound[idx], min_call_sites);
         }
         out
     }
@@ -694,128 +806,47 @@ impl Collected {
         slot_names: &[Option<String>],
         inbound: &InboundSites,
         min_call_sites: usize,
-        raw_slot_by_node: &mut HashMap<usize, usize>,
     ) {
         let node = &graph.nodes[node_idx];
-        let has_receiver = node.has_receiver.unwrap_or(false);
-        let allows_omission = matches!(
-            node.graph_language(),
-            Some(GraphLanguage::Python | GraphLanguage::TypeScript)
-        );
+        let shape = SiteShape {
+            has_receiver: node.has_receiver.unwrap_or(false),
+            allows_omission: matches!(
+                node.graph_language(),
+                Some(GraphLanguage::Python | GraphLanguage::TypeScript)
+            ),
+        };
 
-        let mut aggregates: Vec<SlotAggregate> = (0..slot_names.len())
-            .map(|_| SlotAggregate::default())
-            .collect();
-        let mut analyzable = 0usize;
-        let mut unanalyzed = inbound
-            .production_call_count
-            .saturating_sub(inbound.production.len());
-        for site in &inbound.production {
-            match assign_site(site, has_receiver, slot_names, allows_omission) {
-                Ok(slots) => {
-                    analyzable += 1;
-                    for (aggregate, value) in aggregates.iter_mut().zip(slots) {
-                        aggregate.lines.push(site.line);
-                        match value {
-                            SlotValue::Constant(text) => {
-                                aggregate.values.insert(text);
-                            }
-                            SlotValue::NonConstant => aggregate.non_constant += 1,
-                            SlotValue::Omitted => aggregate.omitted += 1,
-                        }
-                    }
-                }
-                Err(()) => unanalyzed += 1,
-            }
+        let tally = ProductionTally::of(inbound, shape, slot_names);
+        self.audit.unanalyzed_call_site_count += tally.unanalyzed;
+        if tally.analyzable < min_call_sites {
+            return;
         }
-        self.audit.unanalyzed_call_site_count += unanalyzed;
 
         // Test sites are analyzed the same way but never join the
         // claim; they only witness against it.
-        let mut test_slots: Vec<Vec<SlotValue>> = Vec::new();
-        for site in &inbound.test {
-            if let Ok(slots) = assign_site(site, has_receiver, slot_names, allows_omission) {
-                test_slots.push(slots);
-            }
-        }
+        let test_slots: Vec<Vec<SlotValue>> = inbound
+            .test
+            .iter()
+            .filter_map(|site| shape.assign(site, slot_names).ok())
+            .collect();
 
-        for (position, aggregate) in aggregates.iter().enumerate() {
-            if analyzable < min_call_sites {
-                continue;
-            }
-            // Every analyzable site records exactly one of
-            // provided/omitted per slot, so zero omissions means every
-            // site provided a value.
-            let fully_provided = aggregate.omitted == 0;
-            if fully_provided {
-                self.calibration.measured_parameter_count += 1;
-                if aggregate.non_constant > 0 {
-                    self.calibration.varying_count += 1;
-                } else if aggregate.values.len() == 1 {
-                    self.calibration.one_value_count += 1;
-                } else {
-                    self.calibration.several_values_count += 1;
-                }
-            }
-
-            let (kind, value) = if fully_provided
-                && aggregate.non_constant == 0
-                && aggregate.values.len() == 1
-            {
-                (
-                    ConstantKind::Constant,
-                    aggregate.values.iter().next().cloned(),
-                )
-            } else if aggregate.omitted == analyzable && aggregate.omitted > 0 && allows_omission {
-                (ConstantKind::DefaultOnly, None)
-            } else {
+        let mut raw_slot = None;
+        for (position, aggregate) in tally.aggregates.iter().enumerate() {
+            aggregate.record_calibration(&mut self.calibration);
+            let Some((kind, value)) = aggregate.classify(tally.analyzable, shape.allows_omission)
+            else {
                 continue;
             };
 
             let tests_vary = test_slots.iter().any(|slots| {
-                slots.get(position).is_some_and(|slot| match kind {
-                    ConstantKind::Constant => {
-                        !matches!(slot, SlotValue::Constant(text) if Some(text) == value.as_ref())
-                    }
-                    ConstantKind::DefaultOnly => !matches!(slot, SlotValue::Omitted),
-                })
+                slots
+                    .get(position)
+                    .is_some_and(|slot| kind.contradicted_by(slot, value.as_ref()))
             });
+            let caveats = constant_caveats(node, inbound, tally.unanalyzed, tests_vary);
 
-            let mut caveats = visibility_caveats(node);
-            if unanalyzed > 0 {
-                caveats.push(Caveat::UnanalyzedCallSites);
-            }
-            if inbound.ambiguous_inbound_count > 0 {
-                caveats.push(Caveat::AmbiguousInbound);
-            }
-            if inbound.fallback_resolved {
-                caveats.push(Caveat::FallbackResolvedCall);
-            }
-            if tests_vary {
-                caveats.push(Caveat::TestsVaryValue);
-            }
-            caveats.sort_unstable();
-
-            let mut call_lines = aggregate.lines.clone();
-            call_lines.sort_unstable();
-            call_lines.dedup();
-
-            let raw_slot = *raw_slot_by_node.entry(node_idx).or_insert_with(|| {
-                let span_of = |n: &CallGraphNode| (n.file.clone(), n.start_line, n.end_line);
-                let mut allowed = vec![span_of(node)];
-                allowed.extend(
-                    inbound
-                        .production_callers
-                        .iter()
-                        .chain(&inbound.test_callers)
-                        .map(|&caller| span_of(&graph.nodes[caller])),
-                );
-                self.raw_targets.push(RawTarget {
-                    name: node.name.clone(),
-                    allowed,
-                });
-                self.raw_targets.len() - 1
-            });
+            let raw_slot =
+                *raw_slot.get_or_insert_with(|| self.push_raw_target(graph, node, inbound));
             self.constant_raw_slots.push(raw_slot);
             self.constant_entries.push(ConstantArgumentEntry {
                 id: node.id.clone(),
@@ -830,16 +861,65 @@ impl Collected {
                 },
                 kind,
                 value,
-                call_site_count: analyzable,
+                call_site_count: tally.analyzable,
                 caller_count: inbound.production_callers.len(),
-                call_lines,
-                unanalyzed_call_site_count: unanalyzed,
+                call_lines: aggregate.call_lines(),
+                unanalyzed_call_site_count: tally.unanalyzed,
                 test_site_count: test_slots.len(),
                 raw_reference_count: 0,
                 caveats,
             });
         }
     }
+
+    /// Register `node` as a raw-reference target whose mentions inside
+    /// its own span or any known caller's span are already accounted
+    /// for, and return its index into [`Collected::raw_targets`].
+    fn push_raw_target(
+        &mut self,
+        graph: &CallGraph,
+        node: &CallGraphNode,
+        inbound: &InboundSites,
+    ) -> usize {
+        let span_of = |n: &CallGraphNode| (n.file.clone(), n.start_line, n.end_line);
+        let mut allowed = vec![span_of(node)];
+        allowed.extend(
+            inbound
+                .production_callers
+                .iter()
+                .chain(&inbound.test_callers)
+                .map(|&caller| span_of(&graph.nodes[caller])),
+        );
+        self.raw_targets.push(RawTarget {
+            name: node.name.clone(),
+            allowed,
+        });
+        self.raw_targets.len() - 1
+    }
+}
+
+fn constant_caveats(
+    node: &CallGraphNode,
+    inbound: &InboundSites,
+    unanalyzed: usize,
+    tests_vary: bool,
+) -> Vec<Caveat> {
+    let mut caveats = visibility_caveats(node);
+    caveats.extend(
+        [
+            (unanalyzed > 0, Caveat::UnanalyzedCallSites),
+            (
+                inbound.ambiguous_inbound_count > 0,
+                Caveat::AmbiguousInbound,
+            ),
+            (inbound.fallback_resolved, Caveat::FallbackResolvedCall),
+            (tests_vary, Caveat::TestsVaryValue),
+        ]
+        .into_iter()
+        .filter_map(|(applies, caveat)| applies.then_some(caveat)),
+    );
+    caveats.sort_unstable();
+    caveats
 }
 
 fn visibility_caveats(node: &CallGraphNode) -> Vec<Caveat> {
@@ -887,48 +967,28 @@ impl SourceScan {
                 .or_default()
                 .push(target);
         }
-        let mut raw_slots_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
-        let mut raw_allowed_by_file: HashMap<&str, Vec<(usize, usize, usize)>> = HashMap::new();
-        for (slot, target) in raw_targets.iter().enumerate() {
-            raw_slots_by_name
-                .entry(target.name.as_str())
-                .or_default()
-                .push(slot);
-            for (file, start, end) in &target.allowed {
-                raw_allowed_by_file
-                    .entry(file.as_str())
-                    .or_default()
-                    .push((*start, *end, slot));
-            }
-        }
+        let raw_index = SpanReferenceIndex::new(
+            raw_targets
+                .iter()
+                .enumerate()
+                .map(|(slot, t)| (slot, t.name.as_str(), t.allowed.as_slice())),
+        );
 
         builder.visit_source_texts(roots, |file, source| {
-            let dead = dead_by_file.get(file).map(Vec::as_slice);
-            let raw_allowed = raw_allowed_by_file.get(file).map(Vec::as_slice);
+            let dead = dead_by_file.get(file).map_or(&[][..], Vec::as_slice);
+            let raw_spans = raw_index.file(file);
             for (offset, line) in source.lines().enumerate() {
                 let line_no = offset + 1;
                 for token in identifiers(line) {
-                    if let Some(targets) = dead {
-                        for target in targets {
-                            if target.name == token
-                                && target.start_line <= line_no
-                                && line_no <= target.end_line
-                            {
-                                dead_counts[target.slot] += 1;
-                            }
+                    for target in dead {
+                        if target.name == token
+                            && (target.start_line..=target.end_line).contains(&line_no)
+                        {
+                            dead_counts[target.slot] += 1;
                         }
                     }
-                    if let Some(slots) = raw_slots_by_name.get(token) {
-                        for &slot in slots {
-                            let accounted = raw_allowed.is_some_and(|spans| {
-                                spans.iter().any(|&(start, end, s)| {
-                                    s == slot && start <= line_no && line_no <= end
-                                })
-                            });
-                            if !accounted {
-                                raw_counts[slot] += 1;
-                            }
-                        }
+                    for slot in raw_spans.unaccounted(token, line_no) {
+                        raw_counts[slot] += 1;
                     }
                 }
             }

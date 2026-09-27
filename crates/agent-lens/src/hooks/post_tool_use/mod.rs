@@ -18,8 +18,15 @@ impl HookEnvelope for ClaudeCodePostToolUse {
     type Input = PostToolUseInput;
     type Output = PostToolUseOutput;
 
+    /// After the edit the file must exist, so a missing file is a hard
+    /// error.
     fn prepare_sources(input: &Self::Input) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-        prepare_edited_sources(input)
+        crate::hooks::prepare_single_edited_source(
+            &input.tool_name,
+            &input.tool_input,
+            &input.context.cwd,
+            MissingFilePolicy::Error,
+        )
     }
 
     fn cwd(input: &Self::Input) -> &std::path::Path {
@@ -41,21 +48,6 @@ pub type FootprintHook = crate::hooks::core::FootprintHook<ClaudeCodePostToolUse
 pub type SimilarityError = crate::hooks::core::HookError;
 /// Re-exported for compatibility with earlier per-handler error aliases.
 pub type WrapperError = crate::hooks::core::HookError;
-
-/// Prepare the edited file for a PostToolUse hook to analyse.
-///
-/// Delegates to [`crate::hooks::prepare_single_edited_source`]; after
-/// the edit the file must exist, so a missing file is a hard error.
-pub(crate) fn prepare_edited_sources(
-    input: &PostToolUseInput,
-) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    crate::hooks::prepare_single_edited_source(
-        &input.tool_name,
-        &input.tool_input,
-        &input.context.cwd,
-        MissingFilePolicy::Error,
-    )
-}
 
 #[cfg(test)]
 mod tests {

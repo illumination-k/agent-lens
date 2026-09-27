@@ -12,6 +12,11 @@ use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEdit
 
 pub(crate) const HOOK_EVENT_NAME: &str = "PostToolUse";
 
+/// `apply_patch` markers whose files exist once the patch lands.
+/// `*** Delete File:` entries are skipped because the file is gone by the
+/// time the hook runs; a listed file that is missing is an error.
+const PATCHED_PATH_MARKERS: &[&str] = &["*** Update File: ", "*** Add File: "];
+
 /// Codex's PostToolUse adapter for the engine-agnostic hook runner.
 pub struct CodexPostToolUse;
 
@@ -20,7 +25,13 @@ impl HookEnvelope for CodexPostToolUse {
     type Output = PostToolUseOutput;
 
     fn prepare_sources(input: &Self::Input) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-        prepare_edited_sources(input)
+        super::prepare_patched_sources(
+            &input.tool_name,
+            &input.tool_input,
+            &input.context.cwd,
+            PATCHED_PATH_MARKERS,
+            MissingFilePolicy::Error,
+        )
     }
 
     fn cwd(input: &Self::Input) -> &std::path::Path {
@@ -49,44 +60,6 @@ pub type SimilarityError = crate::hooks::core::HookError;
 /// Re-exported for compatibility with earlier per-handler error aliases.
 pub type WrapperError = crate::hooks::core::HookError;
 
-/// Prepare every patched source file the analysers can handle.
-///
-/// Returns `Ok(vec![])` for "no opinion" cases — non-`apply_patch` tools,
-/// missing patch text, or a patch that only touches files in unsupported
-/// languages. `*** Delete File:` entries are skipped because the file is
-/// gone by the time the hook runs.
-pub(crate) fn prepare_edited_sources(
-    input: &PostToolUseInput,
-) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    super::prepare_patched_sources(
-        &input.tool_name,
-        &input.tool_input,
-        &input.context.cwd,
-        parse_patched_paths,
-        MissingFilePolicy::Error,
-    )
-}
-
-/// Pull `*** Update File: ...` and `*** Add File: ...` paths out of an
-/// `apply_patch` envelope.
-fn parse_patched_paths(command: &str) -> Vec<String> {
-    const MARKERS: &[&str] = &["*** Update File: ", "*** Add File: "];
-    let mut out = Vec::new();
-    for line in command.lines() {
-        let trimmed = line.trim_start();
-        for marker in MARKERS {
-            if let Some(rest) = trimmed.strip_prefix(marker) {
-                let path = rest.trim();
-                if !path.is_empty() {
-                    out.push(path.to_owned());
-                }
-                break;
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,36 +77,6 @@ mod tests {
             tool_input: json!({"command": command}),
             tool_response: json!({}),
         }
-    }
-
-    // -- patch parsing -----------------------------------------------
-
-    #[test]
-    fn parses_update_and_add_markers() {
-        let patch = "\
-*** Begin Patch
-*** Update File: src/lib.rs
-@@
--old
-+new
-*** Add File: src/new.rs
-+content
-*** Delete File: src/gone.rs
-*** End Patch
-";
-        let paths = parse_patched_paths(patch);
-        assert_eq!(paths, vec!["src/lib.rs", "src/new.rs"]);
-    }
-
-    #[test]
-    fn ignores_lines_that_only_resemble_markers() {
-        let patch = "\
-*** Update File:
-*** Update File: src/real.rs
-+context line that mentions *** Update File: fake.rs
-";
-        let paths = parse_patched_paths(patch);
-        assert_eq!(paths, vec!["src/real.rs"]);
     }
 
     // -- similarity --------------------------------------------------
