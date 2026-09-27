@@ -1,0 +1,46 @@
+@@ rename scores=xs best_index=bi best_score=bs index=i score=s
+@@ orig
+def subject(scores):
+    best_index = -1
+    best_score = None
+    for index, score in enumerate(scores):
+        if best_score is None or score > best_score:
+            best_score = score
+            best_index = index
+    return best_index
+@@ t3-insert
+def subject(scores):
+    if not scores:
+        return -1
+    best_index = -1
+    best_score = None
+    for index, score in enumerate(scores):
+        if score is None:
+            continue
+        if best_score is None or score > best_score:
+            best_score = score
+            best_index = index
+    return best_index
+@@ t3-modify
+def subject(scores):
+    best_index = 0
+    best_score = scores[0]
+    for index in range(1, len(scores)):
+        if scores[index] > best_score:
+            best_score = scores[index]
+            best_index = index
+    return best_index
+@@ t4
+def subject(scores):
+    if not scores:
+        return -1
+    return max(range(len(scores)), key=lambda i: scores[i])
+@@ hard
+def subject(items):
+    last_seen = -1
+    previous = None
+    for position, item in enumerate(items):
+        if previous is not None and item == previous:
+            last_seen = position
+        previous = item
+    return last_seen

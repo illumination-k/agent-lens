@@ -1,0 +1,64 @@
+@@ rename items=xs size=n chunks=out current=buf item=x
+@@ orig
+def subject(items, size):
+    if size <= 0:
+        raise ValueError("size must be positive")
+    chunks = []
+    current = []
+    for item in items:
+        current.append(item)
+        if len(current) == size:
+            chunks.append(current)
+            current = []
+    if current:
+        chunks.append(current)
+    return chunks
+@@ t3-insert
+def subject(items, size, fill=None):
+    if size <= 0:
+        raise ValueError("size must be positive")
+    chunks = []
+    current = []
+    for item in items:
+        current.append(item)
+        if len(current) == size:
+            chunks.append(current)
+            current = []
+    if current:
+        while len(current) < size:
+            current.append(fill)
+        chunks.append(current)
+    return chunks
+@@ t3-modify
+def subject(items, size):
+    chunks = []
+    current = []
+    for item in items:
+        if len(current) >= size:
+            chunks.append(current)
+            current = []
+        current.append(item)
+    if current:
+        chunks.append(current)
+    return chunks
+@@ t4
+def subject(items, size):
+    if size <= 0:
+        raise ValueError("size must be positive")
+    return [items[i:i + size] for i in range(0, len(items), size)]
+@@ hard
+def subject(items):
+    runs = []
+    current = None
+    count = 0
+    for item in items:
+        if item == current:
+            count += 1
+        else:
+            if count:
+                runs.append((current, count))
+            current = item
+            count = 1
+    if count:
+        runs.append((current, count))
+    return runs

@@ -1,0 +1,65 @@
+@@ rename items=xs target=needle low=lo high=hi mid=m
+@@ orig
+def subject(items, target):
+    low = 0
+    high = len(items) - 1
+    while low <= high:
+        mid = (low + high) // 2
+        if items[mid] == target:
+            return mid
+        if items[mid] < target:
+            low = mid + 1
+        else:
+            high = mid - 1
+    return -1
+@@ t3-insert
+def subject(items, target):
+    low = 0
+    high = len(items) - 1
+    steps = 0
+    while low <= high:
+        steps += 1
+        mid = (low + high) // 2
+        if items[mid] == target:
+            log.debug("found after %d steps", steps)
+            return mid
+        if items[mid] < target:
+            low = mid + 1
+        else:
+            high = mid - 1
+    return -1
+@@ t3-modify
+def subject(items, target):
+    low = 0
+    high = len(items)
+    while low < high:
+        mid = low + (high - low) // 2
+        if items[mid] < target:
+            low = mid + 1
+        else:
+            high = mid
+    if low < len(items) and items[low] == target:
+        return low
+    return -1
+@@ t4
+def subject(items, target, low=0, high=None):
+    if high is None:
+        high = len(items) - 1
+    if low > high:
+        return -1
+    mid = (low + high) // 2
+    if items[mid] == target:
+        return mid
+    if items[mid] < target:
+        return subject(items, target, mid + 1, high)
+    return subject(items, target, low, mid - 1)
+@@ hard
+def subject(n, tolerance):
+    guess = n / 2
+    steps = 0
+    while abs(guess * guess - n) > tolerance:
+        guess = (guess + n / guess) / 2
+        steps += 1
+        if steps > 100:
+            return None
+    return guess

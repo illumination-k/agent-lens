@@ -1,0 +1,79 @@
+@@ rename text=src result=out raw=entry line=row key=k value=v
+@@ orig
+fn subject(text: &str) -> Result<HashMap<String, String>, String> {
+    let mut result = HashMap::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("missing '=' in {line:?}"));
+        };
+        result.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    Ok(result)
+}
+@@ t3-insert
+fn subject(text: &str) -> Result<HashMap<String, String>, String> {
+    let mut result = HashMap::new();
+    for (number, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("line {}: missing '=' in {line:?}", number + 1));
+        };
+        let key = key.trim().to_string();
+        if result.contains_key(&key) {
+            return Err(format!("line {}: duplicate key {key:?}", number + 1));
+        }
+        result.insert(key, value.trim().to_string());
+    }
+    Ok(result)
+}
+@@ t3-modify
+fn subject(text: &str) -> Result<HashMap<String, String>, String> {
+    let mut result = HashMap::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            return Err("missing '='".to_string());
+        }
+        result.insert(parts[0].trim().to_string(), parts[1].trim().to_string());
+    }
+    Ok(result)
+}
+@@ t4
+fn subject(text: &str) -> Result<HashMap<String, String>, String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            l.split_once('=')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                .ok_or_else(|| "missing '='".to_string())
+        })
+        .collect()
+}
+@@ hard
+fn subject(text: &str) -> Result<Vec<Vec<String>>, String> {
+    let mut rows = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if line.is_empty() || line.ends_with('\\') {
+            continue;
+        }
+        let fields: Vec<String> = line.split(',').map(str::to_string).collect();
+        if fields.len() < 3 {
+            return Err(format!("short row {line:?}"));
+        }
+        rows.push(fields);
+    }
+    Ok(rows)
+}

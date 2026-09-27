@@ -1,0 +1,76 @@
+@@ rename items=xs target=needle low=lo high=hi mid=m
+@@ orig
+func subject(items []int, target int) int {
+	low := 0
+	high := len(items) - 1
+	for low <= high {
+		mid := (low + high) / 2
+		if items[mid] == target {
+			return mid
+		}
+		if items[mid] < target {
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	return -1
+}
+@@ t3-insert
+func subject(items []int, target int) int {
+	low := 0
+	high := len(items) - 1
+	steps := 0
+	for low <= high {
+		steps++
+		mid := (low + high) / 2
+		if items[mid] == target {
+			log.Printf("found after %d steps", steps)
+			return mid
+		}
+		if items[mid] < target {
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	return -1
+}
+@@ t3-modify
+func subject(items []int, target int) int {
+	low := 0
+	high := len(items)
+	for low < high {
+		mid := low + (high-low)/2
+		if items[mid] < target {
+			low = mid + 1
+		} else {
+			high = mid
+		}
+	}
+	if low < len(items) && items[low] == target {
+		return low
+	}
+	return -1
+}
+@@ t4
+func subject(items []int, target int) int {
+	i := sort.SearchInts(items, target)
+	if i < len(items) && items[i] == target {
+		return i
+	}
+	return -1
+}
+@@ hard
+func subject(n float64, tolerance float64) (float64, bool) {
+	guess := n / 2
+	steps := 0
+	for math.Abs(guess*guess-n) > tolerance {
+		guess = (guess + n/guess) / 2
+		steps++
+		if steps > 100 {
+			return 0, false
+		}
+	}
+	return guess, true
+}

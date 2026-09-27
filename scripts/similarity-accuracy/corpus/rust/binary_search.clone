@@ -1,0 +1,76 @@
+@@ rename items=xs target=needle low=lo high=hi mid=m
+@@ orig
+fn subject(items: &[i64], target: i64) -> Option<usize> {
+    let mut low = 0;
+    let mut high = items.len();
+    while low < high {
+        let mid = (low + high) / 2;
+        if items[mid] == target {
+            return Some(mid);
+        }
+        if items[mid] < target {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    None
+}
+@@ t3-insert
+fn subject(items: &[i64], target: i64) -> Option<usize> {
+    let mut low = 0;
+    let mut high = items.len();
+    let mut steps = 0;
+    while low < high {
+        steps += 1;
+        let mid = (low + high) / 2;
+        if items[mid] == target {
+            tracing::debug!(steps, "found");
+            return Some(mid);
+        }
+        if items[mid] < target {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    None
+}
+@@ t3-modify
+fn subject(items: &[i64], target: i64) -> Option<usize> {
+    let mut low = 0;
+    let mut high = items.len();
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match items[mid].cmp(&target) {
+            Ordering::Less => low = mid + 1,
+            _ => high = mid,
+        }
+    }
+    (low < items.len() && items[low] == target).then_some(low)
+}
+@@ t4
+fn subject(items: &[i64], target: i64) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+    let mid = items.len() / 2;
+    match items[mid].cmp(&target) {
+        Ordering::Equal => Some(mid),
+        Ordering::Less => subject(&items[mid + 1..], target).map(|i| i + mid + 1),
+        Ordering::Greater => subject(&items[..mid], target),
+    }
+}
+@@ hard
+fn subject(n: f64, tolerance: f64) -> Option<f64> {
+    let mut guess = n / 2.0;
+    let mut steps = 0;
+    while (guess * guess - n).abs() > tolerance {
+        guess = (guess + n / guess) / 2.0;
+        steps += 1;
+        if steps > 100 {
+            return None;
+        }
+    }
+    Some(guess)
+}

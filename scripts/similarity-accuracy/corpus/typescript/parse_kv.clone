@@ -1,0 +1,77 @@
+@@ rename text=src result=out raw=entry line=row key=k value=v eq=sep
+@@ orig
+function subject(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    const eq = line.indexOf("=");
+    if (eq < 0) {
+      throw new Error(`missing '=' in ${line}`);
+    }
+    result[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  return result;
+}
+@@ t3-insert
+function subject(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  text.split("\n").forEach((raw, number) => {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) {
+      return;
+    }
+    const eq = line.indexOf("=");
+    if (eq < 0) {
+      throw new Error(`line ${number + 1}: missing '=' in ${line}`);
+    }
+    const key = line.slice(0, eq).trim();
+    if (key in result) {
+      throw new Error(`line ${number + 1}: duplicate key ${key}`);
+    }
+    result[key] = line.slice(eq + 1).trim();
+  });
+  return result;
+}
+@@ t3-modify
+function subject(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    const parts = line.split("=");
+    if (parts.length < 2) {
+      throw new Error("missing '='");
+    }
+    result[parts[0].trim()] = parts.slice(1).join("=").trim();
+  }
+  return result;
+}
+@@ t4
+function subject(text: string): Record<string, string> {
+  const lines = text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  if (lines.some((l) => !l.includes("="))) {
+    throw new Error("missing '='");
+  }
+  return Object.fromEntries(lines.map((l) => [l.split("=")[0].trim(), l.slice(l.indexOf("=") + 1).trim()]));
+}
+@@ hard
+function subject(text: string): string[][] {
+  const rows: string[][] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trimEnd();
+    if (!line || line.endsWith("\\")) {
+      continue;
+    }
+    const fields = line.split(",");
+    if (fields.length < 3) {
+      throw new Error(`short row ${line}`);
+    }
+    rows.push(fields);
+  }
+  return rows;
+}

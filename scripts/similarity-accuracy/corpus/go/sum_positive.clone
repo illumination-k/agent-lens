@@ -1,0 +1,48 @@
+@@ rename values=xs total=acc value=x
+@@ orig
+func subject(values []int) int {
+	total := 0
+	for _, value := range values {
+		if value > 0 {
+			total += value
+		}
+	}
+	return total
+}
+@@ t3-insert
+func subject(values []int) int {
+	total := 0
+	count := 0
+	for _, value := range values {
+		if value > 0 {
+			total += value
+			count++
+		}
+	}
+	log.Printf("positives: %d", count)
+	return total
+}
+@@ t3-modify
+func subject(values []*int) int {
+	total := 0
+	for _, value := range values {
+		if value != nil && *value > 0 {
+			total = total + *value
+		}
+	}
+	return total
+}
+@@ t4
+func subject(values []int) int {
+	return lo.Sum(lo.Filter(values, func(v int, _ int) bool { return v > 0 }))
+}
+@@ hard
+func subject(words []string) int {
+	longest := 0
+	for _, word := range words {
+		if len(word) > longest {
+			longest = len(word)
+		}
+	}
+	return longest
+}

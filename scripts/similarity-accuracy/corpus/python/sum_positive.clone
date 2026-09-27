@@ -1,0 +1,35 @@
+@@ rename values=xs total=acc value=x
+@@ orig
+def subject(values):
+    total = 0
+    for value in values:
+        if value > 0:
+            total += value
+    return total
+@@ t3-insert
+def subject(values):
+    total = 0
+    count = 0
+    for value in values:
+        if value > 0:
+            total += value
+            count += 1
+    print("positives:", count)
+    return total
+@@ t3-modify
+def subject(values):
+    total = 0
+    for value in values:
+        if value is not None and value > 0:
+            total = total + value
+    return total
+@@ t4
+def subject(values):
+    return sum(v for v in values if v > 0)
+@@ hard
+def subject(words):
+    longest = 0
+    for word in words:
+        if len(word) > longest:
+            longest = len(word)
+    return longest

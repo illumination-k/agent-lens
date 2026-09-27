@@ -1,0 +1,47 @@
+@@ rename text=src counts=freq line=row word=token
+@@ orig
+def subject(text):
+    counts = {}
+    for line in text.splitlines():
+        for word in line.split():
+            word = word.lower().strip(".,;:!?")
+            if not word:
+                continue
+            counts[word] = counts.get(word, 0) + 1
+    return counts
+@@ t3-insert
+def subject(text):
+    counts = {}
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        for word in line.split():
+            word = word.lower().strip(".,;:!?")
+            if not word or word in STOPWORDS:
+                continue
+            counts[word] = counts.get(word, 0) + 1
+    return counts
+@@ t3-modify
+def subject(text):
+    counts = {}
+    for line in text.splitlines():
+        for word in line.split():
+            if word in counts:
+                counts[word] += 1
+            else:
+                counts[word] = 1
+    return counts
+@@ t4
+def subject(text):
+    words = (w.lower().strip(".,;:!?") for w in text.split())
+    return dict(Counter(w for w in words if w))
+@@ hard
+def subject(text):
+    groups = {}
+    for line in text.splitlines():
+        for part in line.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            groups.setdefault(part[0], []).append(part)
+    return groups

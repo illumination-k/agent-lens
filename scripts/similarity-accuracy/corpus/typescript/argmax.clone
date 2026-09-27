@@ -1,0 +1,62 @@
+@@ rename scores=xs bestIndex=bi bestScore=bs index=i score=s
+@@ orig
+function subject(scores: number[]): number {
+  let bestIndex = -1;
+  let bestScore: number | undefined;
+  scores.forEach((score, index) => {
+    if (bestScore === undefined || score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+@@ t3-insert
+function subject(scores: Array<number | null>): number {
+  if (scores.length === 0) {
+    return -1;
+  }
+  let bestIndex = -1;
+  let bestScore: number | undefined;
+  scores.forEach((score, index) => {
+    if (score === null) {
+      return;
+    }
+    if (bestScore === undefined || score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+@@ t3-modify
+function subject(scores: number[]): number {
+  let bestIndex = 0;
+  let bestScore = scores[0];
+  for (let index = 1; index < scores.length; index++) {
+    if (scores[index] > bestScore) {
+      bestScore = scores[index];
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+@@ t4
+function subject(scores: number[]): number {
+  if (scores.length === 0) {
+    return -1;
+  }
+  return scores.indexOf(Math.max(...scores));
+}
+@@ hard
+function subject<T>(items: T[]): number {
+  let lastSeen = -1;
+  let previous: T | undefined;
+  items.forEach((item, position) => {
+    if (previous !== undefined && item === previous) {
+      lastSeen = position;
+    }
+    previous = item;
+  });
+  return lastSeen;
+}

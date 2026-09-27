@@ -1,0 +1,86 @@
+@@ rename items=xs size=n chunks=out current=buf item=x
+@@ orig
+func subject(items []int, size int) ([][]int, error) {
+	if size <= 0 {
+		return nil, errors.New("size must be positive")
+	}
+	chunks := [][]int{}
+	current := []int{}
+	for _, item := range items {
+		current = append(current, item)
+		if len(current) == size {
+			chunks = append(chunks, current)
+			current = []int{}
+		}
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks, nil
+}
+@@ t3-insert
+func subject(items []int, size int, fill int) ([][]int, error) {
+	if size <= 0 {
+		return nil, errors.New("size must be positive")
+	}
+	chunks := [][]int{}
+	current := []int{}
+	for _, item := range items {
+		current = append(current, item)
+		if len(current) == size {
+			chunks = append(chunks, current)
+			current = []int{}
+		}
+	}
+	if len(current) > 0 {
+		for len(current) < size {
+			current = append(current, fill)
+		}
+		chunks = append(chunks, current)
+	}
+	return chunks, nil
+}
+@@ t3-modify
+func subject(items []int, size int) [][]int {
+	chunks := [][]int{}
+	current := []int{}
+	for _, item := range items {
+		if len(current) >= size {
+			chunks = append(chunks, current)
+			current = []int{}
+		}
+		current = append(current, item)
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+@@ t4
+func subject(items []int, size int) ([][]int, error) {
+	if size <= 0 {
+		return nil, errors.New("size must be positive")
+	}
+	return slices.Collect(slices.Chunk(items, size)), nil
+}
+@@ hard
+func subject(items []string) []Run {
+	runs := []Run{}
+	current := ""
+	count := 0
+	for _, item := range items {
+		if count > 0 && item == current {
+			count++
+		} else {
+			if count > 0 {
+				runs = append(runs, Run{current, count})
+			}
+			current = item
+			count = 1
+		}
+	}
+	if count > 0 {
+		runs = append(runs, Run{current, count})
+	}
+	return runs
+}

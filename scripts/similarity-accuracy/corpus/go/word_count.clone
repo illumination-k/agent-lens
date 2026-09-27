@@ -1,0 +1,67 @@
+@@ rename text=src counts=freq line=row word=token
+@@ orig
+func subject(text string) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(text, "\n") {
+		for _, raw := range strings.Fields(line) {
+			word := strings.ToLower(strings.Trim(raw, ".,;:!?"))
+			if word == "" {
+				continue
+			}
+			counts[word]++
+		}
+	}
+	return counts
+}
+@@ t3-insert
+func subject(text string) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		for _, raw := range strings.Fields(line) {
+			word := strings.ToLower(strings.Trim(raw, ".,;:!?"))
+			if word == "" || stopwords[word] {
+				continue
+			}
+			counts[word]++
+		}
+	}
+	return counts
+}
+@@ t3-modify
+func subject(text string) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(text, "\n") {
+		for _, word := range strings.Split(line, " ") {
+			if _, ok := counts[word]; ok {
+				counts[word] += 1
+			} else {
+				counts[word] = 1
+			}
+		}
+	}
+	return counts
+}
+@@ t4
+func subject(text string) map[string]int {
+	words := lo.Map(strings.Fields(text), func(w string, _ int) string {
+		return strings.ToLower(strings.Trim(w, ".,;:!?"))
+	})
+	return lo.CountValues(lo.Compact(words))
+}
+@@ hard
+func subject(text string) map[byte][]string {
+	groups := map[byte][]string{}
+	for _, line := range strings.Split(text, "\n") {
+		for _, raw := range strings.Split(line, ",") {
+			part := strings.TrimSpace(raw)
+			if part == "" {
+				continue
+			}
+			groups[part[0]] = append(groups[part[0]], part)
+		}
+	}
+	return groups
+}

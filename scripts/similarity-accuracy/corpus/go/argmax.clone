@@ -1,0 +1,62 @@
+@@ rename scores=xs bestIndex=bi bestScore=bs index=i score=s
+@@ orig
+func subject(scores []float64) int {
+	bestIndex := -1
+	bestScore := math.Inf(-1)
+	for index, score := range scores {
+		if bestIndex < 0 || score > bestScore {
+			bestScore = score
+			bestIndex = index
+		}
+	}
+	return bestIndex
+}
+@@ t3-insert
+func subject(scores []*float64) int {
+	if len(scores) == 0 {
+		return -1
+	}
+	bestIndex := -1
+	bestScore := math.Inf(-1)
+	for index, score := range scores {
+		if score == nil {
+			continue
+		}
+		if bestIndex < 0 || *score > bestScore {
+			bestScore = *score
+			bestIndex = index
+		}
+	}
+	return bestIndex
+}
+@@ t3-modify
+func subject(scores []float64) int {
+	bestIndex := 0
+	bestScore := scores[0]
+	for index := 1; index < len(scores); index++ {
+		if scores[index] > bestScore {
+			bestScore = scores[index]
+			bestIndex = index
+		}
+	}
+	return bestIndex
+}
+@@ t4
+func subject(scores []float64) int {
+	if len(scores) == 0 {
+		return -1
+	}
+	return slices.Index(scores, slices.Max(scores))
+}
+@@ hard
+func subject(items []string) int {
+	lastSeen := -1
+	previous := ""
+	for position, item := range items {
+		if position > 0 && item == previous {
+			lastSeen = position
+		}
+		previous = item
+	}
+	return lastSeen
+}
