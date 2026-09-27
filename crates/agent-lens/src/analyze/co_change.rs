@@ -339,19 +339,21 @@ struct ThresholdsView {
     max_commit_files: usize,
 }
 
+/// The co-change half of a row, shared with `hidden_coupling` so every
+/// table over a [`CoChangePair`] reads the same way.
 #[derive(Debug, Serialize)]
-struct PairView<'a> {
-    a: &'a str,
-    b: &'a str,
-    cochanges: u32,
-    commits_a: u32,
-    commits_b: u32,
-    confidence_a_to_b: f64,
-    confidence_b_to_a: f64,
-    lift: f64,
-    score: f64,
-    last_cochange: &'a str,
-    last_cochange_commits_ago: usize,
+pub(super) struct PairView<'a> {
+    pub(super) a: &'a str,
+    pub(super) b: &'a str,
+    pub(super) cochanges: u32,
+    pub(super) commits_a: u32,
+    pub(super) commits_b: u32,
+    pub(super) confidence_a_to_b: f64,
+    pub(super) confidence_b_to_a: f64,
+    pub(super) lift: f64,
+    pub(super) score: f64,
+    pub(super) last_cochange: &'a str,
+    pub(super) last_cochange_commits_ago: usize,
 }
 
 impl<'a> From<&'a CoChangePair> for PairView<'a> {

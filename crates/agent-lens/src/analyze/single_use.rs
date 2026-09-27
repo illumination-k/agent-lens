@@ -62,6 +62,7 @@ use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
 use super::runner::render_report;
+use super::span_references::{AllowedSpan, SpanReferenceIndex};
 use super::unreachable::identifiers;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use std::collections::HashMap;
@@ -508,7 +509,7 @@ struct ScanTarget {
     name: String,
     /// `(file, start_line, end_line)` spans whose mentions are
     /// accounted for.
-    allowed: Vec<(String, usize, usize)>,
+    allowed: Vec<AllowedSpan>,
 }
 
 impl SingleCallers {
@@ -579,38 +580,19 @@ impl RawReferences {
         if targets.is_empty() {
             return Ok(Self { counts });
         }
-        let mut slots_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
-        let mut allowed_by_file: HashMap<&str, Vec<(usize, usize, usize)>> = HashMap::new();
-        for (slot, target) in targets.iter().enumerate() {
-            slots_by_name
-                .entry(target.name.as_str())
-                .or_default()
-                .push(slot);
-            for (file, start, end) in &target.allowed {
-                allowed_by_file
-                    .entry(file.as_str())
-                    .or_default()
-                    .push((*start, *end, slot));
-            }
-        }
+        let index = SpanReferenceIndex::new(
+            targets
+                .iter()
+                .enumerate()
+                .map(|(slot, t)| (slot, t.name.as_str(), t.allowed.as_slice())),
+        );
 
         builder.visit_source_texts(roots, |file, source| {
-            let allowed = allowed_by_file.get(file).map(Vec::as_slice);
+            let spans = index.file(file);
             for (offset, line) in source.lines().enumerate() {
-                let line_no = offset + 1;
                 for token in identifiers(line) {
-                    let Some(slots) = slots_by_name.get(token) else {
-                        continue;
-                    };
-                    for &slot in slots {
-                        let accounted = allowed.is_some_and(|spans| {
-                            spans.iter().any(|&(start, end, s)| {
-                                s == slot && start <= line_no && line_no <= end
-                            })
-                        });
-                        if !accounted {
-                            counts[slot] += 1;
-                        }
+                    for slot in spans.unaccounted(token, offset + 1) {
+                        counts[slot] += 1;
                     }
                 }
             }

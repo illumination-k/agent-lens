@@ -56,6 +56,7 @@ use super::call_graph::model::{GraphLanguage, NodeVisibility};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::options::analyzer_options;
 use super::runner::render_report;
+use super::span_references::{AllowedSpan, SpanReferenceIndex};
 use super::unreachable::identifiers;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat, SourceLang};
 
@@ -260,7 +261,7 @@ struct DeclRecord {
     test_implementors: BTreeSet<String>,
     /// Spans the usage scan must not count: the declaration itself and
     /// every matched implementor block, as `(file, start, end)`.
-    allowed: Vec<(String, usize, usize)>,
+    allowed: Vec<AllowedSpan>,
 }
 
 /// Everything the two source passes produce.
@@ -476,57 +477,43 @@ impl UsageScan {
         inventory: &Inventory,
     ) -> Result<Self, AnalyzerError> {
         let mut counts: HashMap<usize, (usize, usize, usize)> = HashMap::new();
-        let mut slots_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
-        let mut allowed_by_file: HashMap<&str, Vec<(usize, usize, usize)>> = HashMap::new();
-        for (slot, decl) in inventory.decls.iter().enumerate() {
-            if decl.shape.is_test {
-                continue;
-            }
-            slots_by_name
-                .entry(decl.shape.display_name.as_str())
-                .or_default()
-                .push(slot);
-            for (file, start, end) in &decl.allowed {
-                allowed_by_file
-                    .entry(file.as_str())
-                    .or_default()
-                    .push((*start, *end, slot));
-            }
-        }
-        if slots_by_name.is_empty() {
+        let index = SpanReferenceIndex::new(
+            inventory
+                .decls
+                .iter()
+                .enumerate()
+                .filter(|(_, decl)| !decl.shape.is_test)
+                .map(|(slot, decl)| {
+                    (
+                        slot,
+                        decl.shape.display_name.as_str(),
+                        decl.allowed.as_slice(),
+                    )
+                }),
+        );
+        if index.is_empty() {
             return Ok(Self { counts });
         }
 
         builder.visit_source_texts(roots, |file, source| {
-            let allowed = allowed_by_file.get(file).map(Vec::as_slice);
+            let spans = index.file(file);
             for (offset, line) in source.lines().enumerate() {
-                let line_no = offset + 1;
                 let tokens: Vec<&str> = identifiers(line).collect();
                 for (position, &token) in tokens.iter().enumerate() {
-                    let Some(slots) = slots_by_name.get(token) else {
-                        continue;
-                    };
                     let is_dyn = position > 0 && tokens[position - 1] == "dyn";
                     // `impl … Name … for …` in raw text is how a macro
                     // body implements a trait; the block extraction
                     // never sees it. The trailing slice may start at
                     // the matched token itself: a declaration cannot be
                     // named `for`, so including it changes nothing.
-                    let is_impl_pattern =
-                        tokens[..position].contains(&"impl") && tokens[position..].contains(&"for");
-                    for &slot in slots {
-                        let accounted = allowed.is_some_and(|spans| {
-                            spans.iter().any(|&(start, end, s)| {
-                                s == slot && start <= line_no && line_no <= end
-                            })
-                        });
-                        if accounted {
-                            continue;
-                        }
+                    let is_impl_pattern = || {
+                        tokens[..position].contains(&"impl") && tokens[position..].contains(&"for")
+                    };
+                    for slot in spans.unaccounted(token, offset + 1) {
                         let entry = counts.entry(slot).or_default();
                         if is_dyn {
                             entry.1 += 1;
-                        } else if is_impl_pattern {
+                        } else if is_impl_pattern() {
                             entry.2 += 1;
                         } else {
                             entry.0 += 1;

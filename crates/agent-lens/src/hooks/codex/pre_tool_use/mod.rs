@@ -20,6 +20,12 @@ use agent_hooks::codex::{CommonOutput as _, PreToolUseInput, PreToolUseOutput};
 
 use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
 
+/// `apply_patch` markers whose files exist *before* the patch lands.
+/// `*** Add File:` entries have no current on-disk content and
+/// `*** Delete File:` entries are going away, so neither is worth
+/// pre-edit context; a listed file that is missing is skipped.
+const PATCHED_PATH_MARKERS: &[&str] = &["*** Update File: "];
+
 /// Codex's PreToolUse adapter for the engine-agnostic hook runner.
 pub struct CodexPreToolUse;
 
@@ -28,7 +34,13 @@ impl HookEnvelope for CodexPreToolUse {
     type Output = PreToolUseOutput;
 
     fn prepare_sources(input: &Self::Input) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-        prepare_edited_sources(input)
+        super::prepare_patched_sources(
+            &input.tool_name,
+            &input.tool_input,
+            &input.context.cwd,
+            PATCHED_PATH_MARKERS,
+            MissingFilePolicy::Skip,
+        )
     }
 
     fn cwd(input: &Self::Input) -> &std::path::Path {
@@ -49,44 +61,6 @@ pub type ComplexityError = crate::hooks::core::HookError;
 /// Re-exported for symmetry with the PostToolUse handlers.
 pub type CohesionError = crate::hooks::core::HookError;
 
-/// Prepare every patched source file the analysers can reason about
-/// *before* Codex applies the patch.
-///
-/// Returns `Ok(vec![])` for "no opinion" cases — non-`apply_patch`
-/// tools, missing patch text, or a patch that only touches files in
-/// unsupported languages or only adds brand-new files.
-pub(crate) fn prepare_edited_sources(
-    input: &PreToolUseInput,
-) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    super::prepare_patched_sources(
-        &input.tool_name,
-        &input.tool_input,
-        &input.context.cwd,
-        parse_pre_edit_paths,
-        MissingFilePolicy::Skip,
-    )
-}
-
-/// Pull `*** Update File: ...` paths out of an `apply_patch` envelope.
-///
-/// `*** Add File:` and `*** Delete File:` entries are skipped: the
-/// former has no current on-disk content, the latter is going away and
-/// not worth pre-edit context for.
-fn parse_pre_edit_paths(command: &str) -> Vec<String> {
-    const MARKER: &str = "*** Update File: ";
-    let mut out = Vec::new();
-    for line in command.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix(MARKER) {
-            let path = rest.trim();
-            if !path.is_empty() {
-                out.push(path.to_owned());
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,36 +77,6 @@ mod tests {
             tool_use_id: "call-1".into(),
             tool_input: json!({"command": command}),
         }
-    }
-
-    // -- patch parsing ----------------------------------------------
-
-    #[test]
-    fn parses_only_update_markers() {
-        let patch = "\
-*** Begin Patch
-*** Update File: src/lib.rs
-@@
--old
-+new
-*** Add File: src/new.rs
-+content
-*** Delete File: src/gone.rs
-*** End Patch
-";
-        let paths = parse_pre_edit_paths(patch);
-        assert_eq!(paths, vec!["src/lib.rs"]);
-    }
-
-    #[test]
-    fn ignores_lines_that_only_resemble_markers() {
-        let patch = "\
-*** Update File:
-*** Update File: src/real.rs
-+context line that mentions *** Update File: fake.rs
-";
-        let paths = parse_pre_edit_paths(patch);
-        assert_eq!(paths, vec!["src/real.rs"]);
     }
 
     // -- complexity --------------------------------------------------
