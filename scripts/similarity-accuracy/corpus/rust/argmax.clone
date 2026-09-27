@@ -1,0 +1,63 @@
+@@ rename scores=xs best_index=bi best_score=bs index=i score=s
+@@ orig
+fn subject(scores: &[f64]) -> Option<usize> {
+    let mut best_index = None;
+    let mut best_score = f64::NEG_INFINITY;
+    for (index, &score) in scores.iter().enumerate() {
+        if best_index.is_none() || score > best_score {
+            best_score = score;
+            best_index = Some(index);
+        }
+    }
+    best_index
+}
+@@ t3-insert
+fn subject(scores: &[Option<f64>]) -> Option<usize> {
+    if scores.is_empty() {
+        return None;
+    }
+    let mut best_index = None;
+    let mut best_score = f64::NEG_INFINITY;
+    for (index, score) in scores.iter().enumerate() {
+        let Some(score) = *score else {
+            continue;
+        };
+        if best_index.is_none() || score > best_score {
+            best_score = score;
+            best_index = Some(index);
+        }
+    }
+    best_index
+}
+@@ t3-modify
+fn subject(scores: &[f64]) -> usize {
+    let mut best_index = 0;
+    let mut best_score = scores[0];
+    for index in 1..scores.len() {
+        if scores[index] > best_score {
+            best_score = scores[index];
+            best_index = index;
+        }
+    }
+    best_index
+}
+@@ t4
+fn subject(scores: &[f64]) -> Option<usize> {
+    scores
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| i)
+}
+@@ hard
+fn subject<T: PartialEq>(items: &[T]) -> Option<usize> {
+    let mut last_seen = None;
+    let mut previous: Option<&T> = None;
+    for (position, item) in items.iter().enumerate() {
+        if previous.is_some() && previous == Some(item) {
+            last_seen = Some(position);
+        }
+        previous = Some(item);
+    }
+    last_seen
+}

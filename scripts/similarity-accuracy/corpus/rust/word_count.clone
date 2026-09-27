@@ -1,0 +1,70 @@
+@@ rename text=src counts=freq line=row word=token
+@@ orig
+fn subject(text: &str) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for line in text.lines() {
+        for raw in line.split_whitespace() {
+            let word = raw.trim_matches(|c: char| ".,;:!?".contains(c)).to_lowercase();
+            if word.is_empty() {
+                continue;
+            }
+            *counts.entry(word).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+@@ t3-insert
+fn subject(text: &str) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        for raw in line.split_whitespace() {
+            let word = raw.trim_matches(|c: char| ".,;:!?".contains(c)).to_lowercase();
+            if word.is_empty() || STOPWORDS.contains(&word.as_str()) {
+                continue;
+            }
+            *counts.entry(word).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+@@ t3-modify
+fn subject(text: &str) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for line in text.lines() {
+        for word in line.split(' ') {
+            if let Some(count) = counts.get_mut(word) {
+                *count += 1;
+            } else {
+                counts.insert(word.to_string(), 1);
+            }
+        }
+    }
+    counts
+}
+@@ t4
+fn subject(text: &str) -> HashMap<String, usize> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| ".,;:!?".contains(c)).to_lowercase())
+        .filter(|w| !w.is_empty())
+        .fold(HashMap::new(), |mut m, w| {
+            *m.entry(w).or_default() += 1;
+            m
+        })
+}
+@@ hard
+fn subject(text: &str) -> HashMap<char, Vec<String>> {
+    let mut groups = HashMap::new();
+    for line in text.lines() {
+        for raw in line.split(',') {
+            let part = raw.trim();
+            let Some(first) = part.chars().next() else {
+                continue;
+            };
+            groups.entry(first).or_insert_with(Vec::new).push(part.to_string());
+        }
+    }
+    groups
+}

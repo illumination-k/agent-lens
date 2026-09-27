@@ -1,0 +1,48 @@
+@@ rename values=xs total=acc value=x
+@@ orig
+function subject(values: number[]): number {
+  let total = 0;
+  for (const value of values) {
+    if (value > 0) {
+      total += value;
+    }
+  }
+  return total;
+}
+@@ t3-insert
+function subject(values: number[]): number {
+  let total = 0;
+  let count = 0;
+  for (const value of values) {
+    if (value > 0) {
+      total += value;
+      count += 1;
+    }
+  }
+  console.log("positives:", count);
+  return total;
+}
+@@ t3-modify
+function subject(values: Array<number | null>): number {
+  let total = 0;
+  for (const value of values) {
+    if (value !== null && value > 0) {
+      total = total + value;
+    }
+  }
+  return total;
+}
+@@ t4
+function subject(values: number[]): number {
+  return values.filter((v) => v > 0).reduce((a, b) => a + b, 0);
+}
+@@ hard
+function subject(words: string[]): number {
+  let longest = 0;
+  for (const word of words) {
+    if (word.length > longest) {
+      longest = word.length;
+    }
+  }
+  return longest;
+}

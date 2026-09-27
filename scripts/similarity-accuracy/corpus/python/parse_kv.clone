@@ -1,0 +1,59 @@
+@@ rename text=src result=out raw=entry line=row key=k value=v sep=eq
+@@ orig
+def subject(text):
+    result = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            raise ValueError(f"missing '=' in {line!r}")
+        result[key.strip()] = value.strip()
+    return result
+@@ t3-insert
+def subject(text):
+    result = {}
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            raise ValueError(f"line {number}: missing '=' in {line!r}")
+        key = key.strip()
+        if key in result:
+            raise ValueError(f"line {number}: duplicate key {key!r}")
+        result[key] = value.strip()
+    return result
+@@ t3-modify
+def subject(text):
+    result = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("=", 1)
+        if len(parts) != 2:
+            raise ValueError("missing '='")
+        result[parts[0].strip()] = parts[1].strip()
+    return result
+@@ t4
+def subject(text):
+    lines = [l.strip() for l in text.splitlines()]
+    pairs = [l.split("=", 1) for l in lines if l and not l.startswith("#")]
+    if any(len(p) != 2 for p in pairs):
+        raise ValueError("missing '='")
+    return {k.strip(): v.strip() for k, v in pairs}
+@@ hard
+def subject(text):
+    rows = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line or line.endswith("\\"):
+            continue
+        fields = line.split(",")
+        if len(fields) < 3:
+            raise ValueError(f"short row {line!r}")
+        rows.append(fields)
+    return rows

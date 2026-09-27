@@ -1,0 +1,48 @@
+@@ rename values=xs total=acc value=x
+@@ orig
+fn subject(values: &[i64]) -> i64 {
+    let mut total = 0;
+    for &value in values {
+        if value > 0 {
+            total += value;
+        }
+    }
+    total
+}
+@@ t3-insert
+fn subject(values: &[i64]) -> i64 {
+    let mut total = 0;
+    let mut count = 0;
+    for &value in values {
+        if value > 0 {
+            total += value;
+            count += 1;
+        }
+    }
+    eprintln!("positives: {count}");
+    total
+}
+@@ t3-modify
+fn subject(values: &[Option<i64>]) -> i64 {
+    let mut total = 0;
+    for value in values {
+        if let Some(value) = value.filter(|v| *v > 0) {
+            total = total + value;
+        }
+    }
+    total
+}
+@@ t4
+fn subject(values: &[i64]) -> i64 {
+    values.iter().filter(|v| **v > 0).sum()
+}
+@@ hard
+fn subject(words: &[&str]) -> usize {
+    let mut longest = 0;
+    for word in words {
+        if word.len() > longest {
+            longest = word.len();
+        }
+    }
+    longest
+}

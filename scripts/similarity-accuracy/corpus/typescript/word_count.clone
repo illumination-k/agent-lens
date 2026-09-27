@@ -1,0 +1,68 @@
+@@ rename text=src counts=freq line=row word=token
+@@ orig
+function subject(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const line of text.split("\n")) {
+    for (const raw of line.split(/\s+/)) {
+      const word = raw.toLowerCase().replace(/[.,;:!?]/g, "");
+      if (!word) {
+        continue;
+      }
+      counts.set(word, (counts.get(word) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+@@ t3-insert
+function subject(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const line of text.split("\n")) {
+    if (line.startsWith("#")) {
+      continue;
+    }
+    for (const raw of line.split(/\s+/)) {
+      const word = raw.toLowerCase().replace(/[.,;:!?]/g, "");
+      if (!word || STOPWORDS.has(word)) {
+        continue;
+      }
+      counts.set(word, (counts.get(word) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+@@ t3-modify
+function subject(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const line of text.split("\n")) {
+    for (const word of line.split(" ")) {
+      if (counts.has(word)) {
+        counts.set(word, counts.get(word)! + 1);
+      } else {
+        counts.set(word, 1);
+      }
+    }
+  }
+  return counts;
+}
+@@ t4
+function subject(text: string): Map<string, number> {
+  return text
+    .split(/\s+/)
+    .map((w) => w.toLowerCase().replace(/[.,;:!?]/g, ""))
+    .filter((w) => w.length > 0)
+    .reduce((m, w) => m.set(w, (m.get(w) ?? 0) + 1), new Map<string, number>());
+}
+@@ hard
+function subject(text: string): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const line of text.split("\n")) {
+    for (const raw of line.split(",")) {
+      const part = raw.trim();
+      if (!part) {
+        continue;
+      }
+      groups.set(part[0], [...(groups.get(part[0]) ?? []), part]);
+    }
+  }
+  return groups;
+}

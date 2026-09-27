@@ -1,0 +1,86 @@
+@@ rename items=xs size=n chunks=out current=buf item=x
+@@ orig
+function subject<T>(items: T[], size: number): T[][] {
+  if (size <= 0) {
+    throw new Error("size must be positive");
+  }
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  for (const item of items) {
+    current.push(item);
+    if (current.length === size) {
+      chunks.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+  return chunks;
+}
+@@ t3-insert
+function subject<T>(items: T[], size: number, fill: T): T[][] {
+  if (size <= 0) {
+    throw new Error("size must be positive");
+  }
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  for (const item of items) {
+    current.push(item);
+    if (current.length === size) {
+      chunks.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) {
+    while (current.length < size) {
+      current.push(fill);
+    }
+    chunks.push(current);
+  }
+  return chunks;
+}
+@@ t3-modify
+function subject<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  for (const item of items) {
+    if (current.length >= size) {
+      chunks.push(current);
+      current = [];
+    }
+    current.push(item);
+  }
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+  return chunks;
+}
+@@ t4
+function subject<T>(items: T[], size: number): T[][] {
+  if (size <= 0) {
+    throw new Error("size must be positive");
+  }
+  return Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size));
+}
+@@ hard
+function subject<T>(items: T[]): Array<[T, number]> {
+  const runs: Array<[T, number]> = [];
+  let current: T | undefined;
+  let count = 0;
+  for (const item of items) {
+    if (item === current) {
+      count += 1;
+    } else {
+      if (count > 0) {
+        runs.push([current as T, count]);
+      }
+      current = item;
+      count = 1;
+    }
+  }
+  if (count > 0) {
+    runs.push([current as T, count]);
+  }
+  return runs;
+}

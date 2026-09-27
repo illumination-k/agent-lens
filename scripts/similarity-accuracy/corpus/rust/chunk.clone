@@ -1,0 +1,84 @@
+@@ rename items=xs size=n chunks=out current=buf item=x
+@@ orig
+fn subject<T: Clone>(items: &[T], size: usize) -> Result<Vec<Vec<T>>, String> {
+    if size == 0 {
+        return Err("size must be positive".to_string());
+    }
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for item in items {
+        current.push(item.clone());
+        if current.len() == size {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    Ok(chunks)
+}
+@@ t3-insert
+fn subject<T: Clone>(items: &[T], size: usize, fill: T) -> Result<Vec<Vec<T>>, String> {
+    if size == 0 {
+        return Err("size must be positive".to_string());
+    }
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for item in items {
+        current.push(item.clone());
+        if current.len() == size {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        while current.len() < size {
+            current.push(fill.clone());
+        }
+        chunks.push(current);
+    }
+    Ok(chunks)
+}
+@@ t3-modify
+fn subject<T: Clone>(items: &[T], size: usize) -> Vec<Vec<T>> {
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for item in items {
+        if current.len() >= size {
+            chunks.push(current);
+            current = Vec::new();
+        }
+        current.push(item.clone());
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+@@ t4
+fn subject<T: Clone>(items: &[T], size: usize) -> Result<Vec<Vec<T>>, String> {
+    if size == 0 {
+        return Err("size must be positive".to_string());
+    }
+    Ok(items.chunks(size).map(<[T]>::to_vec).collect())
+}
+@@ hard
+fn subject<T: Clone + PartialEq>(items: &[T]) -> Vec<(T, usize)> {
+    let mut runs = Vec::new();
+    let mut current: Option<T> = None;
+    let mut count = 0;
+    for item in items {
+        if current.as_ref() == Some(item) {
+            count += 1;
+        } else {
+            if let Some(previous) = current.take() {
+                runs.push((previous, count));
+            }
+            current = Some(item.clone());
+            count = 1;
+        }
+    }
+    if let Some(previous) = current {
+        runs.push((previous, count));
+    }
+    runs
+}

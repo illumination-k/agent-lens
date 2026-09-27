@@ -158,9 +158,19 @@ run = [
   "uv run --no-project --python 3.12 --with pyright==1.1.408 python -m unittest discover -s scripts/callgraph-accuracy",
 ]
 
+[tasks."test:similarity-accuracy"]
+description = "Unit-test the similarity accuracy harness (scripts/similarity-accuracy)"
+# Standard library only; uv supplies the interpreter because ci_rust.yml sets
+# MISE_ENV=rust.
+tools = { uv = "0.11.5" }
+run = [
+  "uvx ruff@0.14.0 check scripts/similarity-accuracy",
+  "uv run --no-project --python 3.12 python -m unittest discover -s scripts/similarity-accuracy",
+]
+
 [tasks."ci:rust"]
 description = "Run Rust lint and test tasks"
-depends = ["lint:rust", "test:rust", "test:rust:doc", "test:callgraph-accuracy"]
+depends = ["lint:rust", "test:rust", "test:rust:doc", "test:callgraph-accuracy", "test:similarity-accuracy"]
 
 # Call-graph accuracy benchmark (issue #579, docs/callgraph-accuracy.md):
 # precision/recall of `function-graph` per ResolutionMethod against a Go
@@ -188,6 +198,28 @@ set -eu
 rustup component add rust-analyzer
 cargo build --release --locked -p agent-lens
 python3 scripts/callgraph-accuracy/run.py ${usage_target:-}
+'''
+
+# Similarity accuracy benchmark (docs/similarity-accuracy.md): ROC-AUC and
+# recall / false-positive rate per threshold of `analyze similarity`, per
+# `--method` and clone type, over labelled pairs. `synthetic` (the default)
+# is the committed corpus in scripts/similarity-accuracy/corpus/ and runs
+# offline in seconds; `gptclonebench` fetches a third-party dataset and is a
+# reference only.
+#
+# Outside `ci` like `callgraph-accuracy`: its output is a report to read,
+# not a pass/fail gate. The harness's unit tests are
+# `test:similarity-accuracy`, which `ci:rust` runs.
+[tasks.similarity-accuracy]
+description = "Measure similarity ROC-AUC and recall/FPR per method and clone type on labelled clone pairs"
+usage = '''
+arg "[suite]..." help="synthetic (default, offline) and/or gptclonebench (network)" var=#true
+flag "--methods <methods>" help="Comma-separated --method values to score" default="tsed,token,lcs,pdg"
+'''
+run = '''
+set -eu
+cargo build --release --locked -p agent-lens
+python3 scripts/similarity-accuracy/run.py --methods "${usage_methods:-tsed,token,lcs,pdg}" ${usage_suite:-}
 '''
 
 # Dogfooding: run the freshly built binary over this repository's own

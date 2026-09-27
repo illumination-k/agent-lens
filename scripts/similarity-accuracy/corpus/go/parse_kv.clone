@@ -1,0 +1,81 @@
+@@ rename text=src result=out raw=entry line=row key=k value=v ok=found
+@@ orig
+func subject(text string) (map[string]string, error) {
+	result := map[string]string{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("missing '=' in %q", line)
+		}
+		result[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return result, nil
+}
+@@ t3-insert
+func subject(text string) (map[string]string, error) {
+	result := map[string]string{}
+	for number, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("line %d: missing '=' in %q", number+1, line)
+		}
+		key = strings.TrimSpace(key)
+		if _, dup := result[key]; dup {
+			return nil, fmt.Errorf("line %d: duplicate key %q", number+1, key)
+		}
+		result[key] = strings.TrimSpace(value)
+	}
+	return result, nil
+}
+@@ t3-modify
+func subject(text string) (map[string]string, error) {
+	result := map[string]string{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			return nil, errors.New("missing '='")
+		}
+		result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+	return result, nil
+}
+@@ t4
+func subject(text string) (map[string]string, error) {
+	lines := lo.Filter(lo.Map(strings.Split(text, "\n"), func(l string, _ int) string { return strings.TrimSpace(l) }),
+		func(l string, _ int) bool { return l != "" && !strings.HasPrefix(l, "#") })
+	if lo.SomeBy(lines, func(l string) bool { return !strings.Contains(l, "=") }) {
+		return nil, errors.New("missing '='")
+	}
+	return lo.Associate(lines, func(l string) (string, string) {
+		k, v, _ := strings.Cut(l, "=")
+		return strings.TrimSpace(k), strings.TrimSpace(v)
+	}), nil
+}
+@@ hard
+func subject(text string) ([][]string, error) {
+	rows := [][]string{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimRight(raw, " \t")
+		if line == "" || strings.HasSuffix(line, "\\") {
+			continue
+		}
+		fields := strings.Split(line, ",")
+		if len(fields) < 3 {
+			return nil, fmt.Errorf("short row %q", line)
+		}
+		rows = append(rows, fields)
+	}
+	return rows, nil
+}
