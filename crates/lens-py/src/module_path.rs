@@ -38,6 +38,43 @@ pub fn module_segments(rel: &Path) -> Vec<String> {
     segments
 }
 
+/// Resolve the lexical base module of a `from X import ...` statement.
+///
+/// Returns `None` when a relative import outruns the available depth
+/// (e.g. `from ... import x` in a top-level file).
+pub(crate) fn resolve_from_base(current: &str, level: u32, module: Option<&str>) -> Option<String> {
+    let mut segments: Vec<String> = if level == 0 || current.is_empty() {
+        Vec::new()
+    } else {
+        current.split("::").map(ToOwned::to_owned).collect()
+    };
+    if level != 0 {
+        let pops = level as usize;
+        if pops > segments.len() {
+            return None;
+        }
+        segments.truncate(segments.len() - pops);
+    }
+    if let Some(module) = module
+        && !module.is_empty()
+    {
+        segments.extend(module.split('.').map(ToOwned::to_owned));
+    }
+    Some(segments.join("::"))
+}
+
+pub(crate) fn dotted_to_module_path(dotted: &str) -> String {
+    dotted
+        .split('.')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+pub(crate) fn top_segment(dotted: &str) -> &str {
+    dotted.split('.').next().unwrap_or(dotted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

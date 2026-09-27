@@ -511,6 +511,11 @@ each TS/JS callee's name with `oxc_semantic`: a call through an import or
 a module-scope declaration resolves with `resolution_method: "binding"`,
 and a call to a global or an external package's import is never matched
 to a same-named workspace function.
+Python callees are bound the same way through the module's scopes with
+[`ruff_python_semantic`](https://github.com/astral-sh/ruff/tree/main/crates/ruff_python_semantic):
+a call through an import or to a module-level `def` / `class` resolves
+with `binding`, a call to a builtin is never matched to a workspace
+function, and a receiver held in a parameter or local is read as a value.
 
 Go packages are named by the nearest `go.mod` above them, so a scan can span
 several modules. A directory holding `go.work` is a Go root in its own

@@ -21,6 +21,7 @@ mod module_path;
 mod parser;
 #[cfg(test)]
 mod proptests;
+mod semantic;
 mod statements;
 mod type_defs;
 mod walk;
