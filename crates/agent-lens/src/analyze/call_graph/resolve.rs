@@ -157,6 +157,9 @@ pub(crate) struct Resolver {
     /// function). Read where the call's shape decides which of the two
     /// it can reach — see [`GraphLanguage::call_shape_decides_owner`].
     methods: HashSet<String>,
+    /// Every segment of every node's module path: the names an import
+    /// can start with and still land in the workspace.
+    module_segments: HashSet<String>,
 }
 
 impl Resolver {
@@ -165,10 +168,17 @@ impl Resolver {
         let mut last_segment: HashMap<String, Vec<String>> = HashMap::new();
         let mut id_to_qualified: HashMap<String, String> = HashMap::new();
         let mut methods = HashSet::new();
+        let mut module_segments = HashSet::new();
         for node in nodes {
             if node.impl_owner.is_some() {
                 methods.insert(node.id.clone());
             }
+            module_segments.extend(
+                node.module
+                    .split("::")
+                    .filter(|segment| !segment.is_empty())
+                    .map(ToOwned::to_owned),
+            );
             qualified
                 .entry(node.qualified_name.clone())
                 .or_default()
@@ -184,6 +194,7 @@ impl Resolver {
             last_segment,
             id_to_qualified,
             methods,
+            module_segments,
         }
     }
 
@@ -191,6 +202,20 @@ impl Resolver {
     /// it selects the ubiquitous-method-name table consulted for
     /// receiver calls and the builtin table consulted for plain calls.
     pub(crate) fn resolve(&self, site: &CallShape, language: GraphLanguage) -> ResolvedCall {
+        let call = self.resolve_callee(site, language);
+        if call.resolution != Resolution::Unresolved || language != GraphLanguage::Python {
+            return call;
+        }
+        // `Response()` runs `Response.__init__`, which is a node where the
+        // class itself is not: a Python class is called like a function.
+        // Only a call with no receiver value can name a class.
+        match constructor_site(site) {
+            Some(init) => self.resolve_callee(&init, language),
+            None => call,
+        }
+    }
+
+    fn resolve_callee(&self, site: &CallShape, language: GraphLanguage) -> ResolvedCall {
         let Some(callee_name) = site.callee_name() else {
             return ResolvedCall::anonymous();
         };
@@ -212,6 +237,14 @@ impl Resolver {
             Some(CalleeBinding::Declaration(target)) => {
                 if let Some(ids) = self.qualified.get(target) {
                     return resolve_ids(ids, ResolutionMethod::Binding);
+                }
+                // `from itertools import count`, `import pytest`: a Python
+                // import whose top-level package names no module in the
+                // workspace is the standard library or a dependency, so
+                // no workspace function of the same name is reachable
+                // through it.
+                if language == GraphLanguage::Python && !self.may_name_workspace_module(target) {
+                    return ResolvedCall::unresolved();
                 }
             }
             Some(CalleeBinding::External) => return ResolvedCall::unresolved(),
@@ -279,6 +312,16 @@ impl Resolver {
         resolve_ids(ids, ResolutionMethod::LastSegment)
     }
 
+    /// Whether `path`'s first segment is a module segment somewhere in
+    /// the workspace. Any segment counts, not only a top-level one: the
+    /// analysis root need not be an import root (`src/requests/...` is
+    /// imported as `requests`).
+    fn may_name_workspace_module(&self, path: &str) -> bool {
+        path.split("::")
+            .next()
+            .is_some_and(|head| self.module_segments.contains(head))
+    }
+
     /// `ids` narrowed to the ones a multi-segment `callee_path` can
     /// name: by suffix, then through the import binding its head, then
     /// (Rust) by the type anywhere in the crate the path starts with.
@@ -290,10 +333,17 @@ impl Resolver {
         language: GraphLanguage,
     ) -> Vec<String> {
         let mut narrowed = self.narrow_by_path_suffix(ids, callee_path);
+        let expanded = import_expanded_path(site, callee_path);
         if narrowed.is_empty()
-            && let Some(expanded) = import_expanded_path(site, callee_path)
+            && let Some(expanded) = &expanded
         {
-            narrowed = self.narrow_by_import_path(ids, &expanded);
+            narrowed = self.narrow_by_import_path(ids, expanded);
+        }
+        if narrowed.is_empty()
+            && language == GraphLanguage::Python
+            && let Some(expanded) = &expanded
+        {
+            narrowed = self.narrow_by_package(ids, expanded);
         }
         if narrowed.is_empty() && language == GraphLanguage::Rust {
             narrowed = self.narrow_by_type_in_crate(ids, callee_path);
@@ -465,6 +515,38 @@ impl Resolver {
             .collect()
     }
 
+    /// Candidates inside the package an import-expanded Python path starts
+    /// at: `more_itertools::more::extract` for `more_itertools::extract`,
+    /// `src::click::core::Group::get_command` for
+    /// `click::Group::get_command`. A package's `__init__.py` re-exports
+    /// its submodules' names, so `pkg.name` reaches a definition anywhere
+    /// under `pkg`: the candidate must hold the path's leading segments as
+    /// a run of its own, and end with the rest.
+    fn narrow_by_package(&self, ids: &[String], expanded: &str) -> Vec<String> {
+        let path: Vec<&str> = expanded.split("::").collect();
+        ids.iter()
+            .filter(|id| {
+                self.id_to_qualified
+                    .get(id.as_str())
+                    .is_some_and(|qualified| {
+                        let qualified: Vec<&str> = qualified.split("::").collect();
+                        (1..path.len()).any(|split| {
+                            let (package, member) = path.split_at(split);
+                            let Some(before_member) = qualified.len().checked_sub(member.len())
+                            else {
+                                return false;
+                            };
+                            qualified.ends_with(member)
+                                && qualified[..before_member]
+                                    .windows(package.len())
+                                    .any(|window| window == package)
+                        })
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Candidates named `Type::name` anywhere in `krate`, for a Rust
     /// path `krate::Type::name`. A type at a crate's root is usually a
     /// re-export, so the path says where the type is visible, not where
@@ -508,6 +590,32 @@ impl Resolver {
             .cloned()
             .collect()
     }
+}
+
+/// `site` retargeted from a Python class to its `__init__`: `A()` becomes
+/// `A.__init__()`, `pkg.A()` becomes `pkg.A.__init__()`. `None` for a call
+/// on a receiver value, a computed callee, or a callee the adapter bound
+/// to something that is not a workspace declaration.
+fn constructor_site(site: &CallShape) -> Option<CallShape> {
+    const INIT: &str = "__init__";
+    if site.has_receiver_expression() || site.callee_is_locally_bound() {
+        return None;
+    }
+    let mut segments = site.callee_path_segments.known_value()?.clone();
+    segments.push(INIT.to_owned());
+    let callee_binding = match &site.callee_binding {
+        SyntaxFact::Known(CalleeBinding::Declaration(target)) => {
+            SyntaxFact::Known(CalleeBinding::Declaration(format!("{target}::{INIT}")))
+        }
+        SyntaxFact::Known(CalleeBinding::External) => return None,
+        SyntaxFact::Unknown => SyntaxFact::Unknown,
+    };
+    Some(CallShape {
+        callee_display_name: SyntaxFact::Known(Some(INIT.to_owned())),
+        callee_path_segments: SyntaxFact::Known(segments),
+        callee_binding,
+        ..site.clone()
+    })
 }
 
 /// `callee_path` with its first segment replaced by the import that
@@ -1219,6 +1327,149 @@ mod tests {
             Some(_) => assert_eq!(call.method, Some(ResolutionMethod::PathSuffix)),
             None => assert_eq!(call.resolution, Resolution::Unresolved),
         }
+    }
+
+    fn bound_site(path: &str, binding: CalleeBinding) -> CallShape {
+        CallShape {
+            callee_binding: SyntaxFact::Known(binding),
+            ..site(path)
+        }
+    }
+
+    /// `count(1)` after `from itertools import count`: an import whose
+    /// top-level package is no workspace module never reaches the
+    /// workspace's `numeric_range.count`, however unique the name. An
+    /// import into the workspace that names no node keeps the fallback.
+    #[rstest]
+    #[case::stdlib("itertools::count", None)]
+    #[case::dependency("pytest::count", None)]
+    #[case::workspace_package("m::count", Some("src/lib.rs:crate::m::R::count:1"))]
+    fn python_imports_outside_the_workspace_reach_no_node(
+        #[case] target: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let nodes = vec![node("crate::m::R::count")];
+        let resolver = Resolver::new(&nodes);
+        let call_site = bound_site("count", CalleeBinding::Declaration(target.to_owned()));
+
+        let call = resolver.resolve(&call_site, GraphLanguage::Python);
+
+        assert_eq!(call.to.as_deref(), expected);
+    }
+
+    /// Only Python reads an unmatched import as external: other adapters'
+    /// declarations need not be rooted at a module path.
+    #[test]
+    fn other_languages_keep_the_fallback_for_an_unmatched_declaration() {
+        let nodes = vec![node("crate::m::count")];
+        let resolver = Resolver::new(&nodes);
+        let call_site = bound_site("count", CalleeBinding::Declaration("ext::count".to_owned()));
+
+        let call = resolver.resolve(&call_site, GraphLanguage::TypeScript);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+    }
+
+    /// A Python class is called like a function and runs its `__init__`:
+    /// `Response()` reaches `Response.__init__` through whichever rung
+    /// would have reached a function of that path.
+    #[rstest]
+    #[case::bound(
+        bound_site("Response", CalleeBinding::Declaration("crate::m::Response".to_owned())),
+        Some(ResolutionMethod::Binding)
+    )]
+    #[case::lexical(site("Response"), Some(ResolutionMethod::Lexical))]
+    #[case::module_path(site("m::Response"), Some(ResolutionMethod::PathSuffix))]
+    #[case::external(bound_site("Response", CalleeBinding::External), None)]
+    #[case::locally_bound(
+        CallShape { callee_is_locally_bound: SyntaxFact::Known(true), ..site("Response") },
+        None
+    )]
+    #[case::receiver_value(
+        CallShape {
+            receiver_expr_kind: SyntaxFact::Known(ReceiverExprKind::LocalValue),
+            ..site("r::Response")
+        },
+        None
+    )]
+    fn python_constructor_calls_reach_init(
+        #[case] call_site: CallShape,
+        #[case] method: Option<ResolutionMethod>,
+    ) {
+        let nodes = vec![node("crate::m::Response::__init__")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&call_site, GraphLanguage::Python);
+
+        assert_eq!(call.method, method);
+        let expected = method.map(|_| "src/lib.rs:crate::m::Response::__init__:1");
+        assert_eq!(call.to.as_deref(), expected);
+    }
+
+    /// `mi.extract()` after `import more_itertools as mi`: the package
+    /// re-exports its submodules' names, so the call narrows to the
+    /// candidates under `more_itertools`, a module segment run of their
+    /// own, ending in the rest of the path.
+    #[rstest]
+    #[case::function("mi::extract", "extract", &["src/lib.rs:more_itertools::more::extract:1"])]
+    #[case::method(
+        "mi::Group::get",
+        "get",
+        &["src/lib.rs:more_itertools::core::Group::get:1"]
+    )]
+    #[case::two_submodules(
+        "mi::run",
+        "run",
+        &["src/lib.rs:more_itertools::a::run:1", "src/lib.rs:more_itertools::b::run:1"]
+    )]
+    #[case::outside_the_package("mi::split", "split", &[])]
+    fn python_package_paths_narrow_to_the_package(
+        #[case] path: &str,
+        #[case] name: &str,
+        #[case] expected: &[&str],
+    ) {
+        let nodes = vec![
+            node("more_itertools::more::extract"),
+            node("other::extract"),
+            node("more_itertools::core::Group::get"),
+            node("more_itertools::core::get"),
+            node("more_itertools::a::run"),
+            node("more_itertools::b::run"),
+            node("other::split"),
+            node("more_itertools_extra::split"),
+        ];
+        let resolver = Resolver::new(&nodes);
+        let call_site = CallShape {
+            visible_imports: vec![ImportShape {
+                local_alias: SyntaxFact::Known(Some("mi".to_owned())),
+                imported_module: SyntaxFact::Known("more_itertools".to_owned()),
+                exported_symbol: SyntaxFact::Unknown,
+            }],
+            ..site(path)
+        };
+        assert_eq!(call_site.callee_name(), Some(name));
+
+        let call = resolver.resolve(&call_site, GraphLanguage::Python);
+
+        let got: Vec<&str> = call
+            .to
+            .iter()
+            .map(String::as_str)
+            .chain(call.candidates.iter().map(String::as_str))
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    /// The constructor rung is Python's: a Rust `Response()` is a tuple
+    /// struct, whose `__init__` would be a coincidence of names.
+    #[test]
+    fn other_languages_have_no_constructor_rung() {
+        let nodes = vec![node("crate::m::Response::__init__")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&site("Response"), GraphLanguage::Rust);
+
+        assert_eq!(call.resolution, Resolution::Unresolved);
     }
 
     #[test]

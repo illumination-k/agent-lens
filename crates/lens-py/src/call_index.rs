@@ -25,7 +25,8 @@ use lens_domain::{
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{
-    Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtFunctionDef, StmtImport, UnaryOp,
+    Alias, Expr, ExprAttribute, ExprCall, ExprName, Stmt, StmtClassDef, StmtFunctionDef,
+    StmtImport, UnaryOp,
 };
 use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
@@ -150,6 +151,7 @@ fn collect_calls_in_function(
         file,
         caller_qualified_name: caller_qualified,
         caller_owner: site.owner.map(ToOwned::to_owned),
+        caller_class: site.class,
         out: Vec::new(),
     };
     for body_stmt in &site.func.body {
@@ -162,7 +164,17 @@ struct FunctionBodyCallVisitor<'f, 'a, 'b> {
     file: &'f FileFacts<'a, 'b>,
     caller_qualified_name: String,
     caller_owner: Option<String>,
+    caller_class: Option<&'f StmtClassDef>,
     out: Vec<CallShape>,
+}
+
+/// What `super().name(...)` in a method names.
+enum SuperCallee<'e> {
+    /// `name` looked up from the class's first base, written as a path
+    /// (`Base`, `mod.Base`).
+    Base { base: &'e Expr, path: Vec<String> },
+    /// The class has no explicit base: `name` is a method of `object`.
+    Object,
 }
 
 impl<'ast> Visitor<'ast> for FunctionBodyCallVisitor<'_, '_, '_> {
@@ -180,15 +192,39 @@ impl FunctionBodyCallVisitor<'_, '_, '_> {
     /// needs, so this reads them off `self` instead of taking them as a
     /// parameter list.
     fn call_shape(&self, call: &ExprCall) -> CallShape {
-        let facts = callee_facts(&call.func, self.file.namespace_aliases);
+        // `super().close()` is `Base.close(self)`: read it as that path so
+        // it binds through `Base`, and never as a receiver call that the
+        // name fallback could bind to the caller's own override.
+        let super_callee = self.super_callee(&call.func);
+        let (facts, head) = match &super_callee {
+            Some((SuperCallee::Base { base, path }, method)) => {
+                let mut path = path.clone();
+                path.push((*method).to_owned());
+                let facts = CalleeFacts {
+                    name: Some((*method).to_owned()),
+                    path_segments: Some(path),
+                    receiver: ReceiverExprKind::None,
+                };
+                (facts, callee_head(base))
+            }
+            _ => {
+                // `extract = mi.extract; extract(...)` calls `mi.extract`.
+                let callee = self.aliased_callee(&call.func).unwrap_or(&call.func);
+                (
+                    callee_facts(callee, self.file.namespace_aliases),
+                    callee_head(callee),
+                )
+            }
+        };
         let line = self.file.line_index.line(call.range.start().to_u32());
-        let referent = callee_head(&call.func).and_then(|head| self.file.bindings.referent(head));
+        let referent = head.and_then(|head| self.file.bindings.referent(head));
         let segments = facts.path_segments.as_deref();
-        // A local callable shadows every definition outside the function,
-        // but only a bare call names the binding itself: `emit.run()`
-        // names a method on whatever the local holds.
+        // A local — a parameter, an assignment, a nested `def` — shadows
+        // every definition outside the function, but only a bare call
+        // names the binding itself: `emit.run()` names a method on
+        // whatever the local holds.
         let callee_is_locally_bound =
-            matches!(segments, Some([_])) && referent == Some(Referent::LocalCallable);
+            matches!(segments, Some([_])) && referent == Some(Referent::Local);
         // `client.connect()` on a parameter or local, or on a module-level
         // value, calls a method on that value — never a free function
         // reachable by name — even when the value's name is uppercase or
@@ -196,25 +232,24 @@ impl FunctionBodyCallVisitor<'_, '_, '_> {
         let receiver = match (facts.receiver, referent, segments) {
             (
                 ReceiverExprKind::None | ReceiverExprKind::Expression,
-                Some(Referent::LocalValue | Referent::LocalCallable | Referent::ModuleValue),
+                Some(Referent::Local | Referent::ModuleValue),
                 Some([_, _, ..]),
             ) => ReceiverExprKind::LocalValue,
             (receiver, ..) => receiver,
         };
-        let callee_binding = match (referent, segments) {
-            (Some(Referent::Builtin), _) => SyntaxFact::Known(CalleeBinding::External),
-            (Some(Referent::Import(target)), Some([_, tail @ ..])) => {
-                let mut path = target.to_owned();
-                for segment in tail {
-                    path.push_str("::");
-                    path.push_str(segment);
-                }
-                SyntaxFact::Known(CalleeBinding::Declaration(path))
+        let callee_binding = if matches!(super_callee, Some((SuperCallee::Object, _))) {
+            SyntaxFact::Known(CalleeBinding::External)
+        } else {
+            match (referent, segments) {
+                // `s.send()` on `s: Session` or `s = Session()` calls
+                // `Session.send`, bound through `Session`.
+                (Some(Referent::Local | Referent::ModuleValue), Some([_, method])) => head
+                    .and_then(|head| self.file.bindings.declared_class(head))
+                    .map_or(SyntaxFact::Unknown, |class| {
+                        self.class_member_binding(class, method)
+                    }),
+                _ => self.path_binding(referent, segments),
             }
-            (Some(Referent::ModuleDefinition), Some(segments)) => SyntaxFact::Known(
-                CalleeBinding::Declaration(qualify_module(self.file.module, &segments.join("::"))),
-            ),
-            _ => SyntaxFact::Unknown,
         };
         // Positional arguments first, then keywords — the order Python
         // syntax itself enforces at a call site.
@@ -250,6 +285,114 @@ impl FunctionBodyCallVisitor<'_, '_, '_> {
             visible_imports: self.file.imports.to_vec(),
             line,
         }
+    }
+}
+
+impl<'f, 'b> FunctionBodyCallVisitor<'f, '_, 'b> {
+    /// What a callee path whose head is `referent` is bound to: a builtin
+    /// is external, an import expands to the imported path, and a
+    /// module-level `def` or `class` qualifies at this module.
+    fn path_binding(
+        &self,
+        referent: Option<Referent<'_>>,
+        segments: Option<&[String]>,
+    ) -> SyntaxFact<CalleeBinding> {
+        match (referent, segments) {
+            (Some(Referent::Builtin), _) => SyntaxFact::Known(CalleeBinding::External),
+            (Some(Referent::Import(target)), Some([_, tail @ ..])) => {
+                let mut path = target.to_owned();
+                for segment in tail {
+                    path.push_str("::");
+                    path.push_str(segment);
+                }
+                SyntaxFact::Known(CalleeBinding::Declaration(path))
+            }
+            (Some(Referent::ModuleDefinition), Some(segments)) => SyntaxFact::Known(
+                CalleeBinding::Declaration(qualify_module(self.file.module, &segments.join("::"))),
+            ),
+            _ => SyntaxFact::Unknown,
+        }
+    }
+
+    /// The path a bare callee names through an alias: `mi.extract` for
+    /// `extract()` after `extract = mi.extract` in the same function, when
+    /// that assignment is the name's only binding and the path starts at an import, a
+    /// module-level definition or a builtin. `None` otherwise, which
+    /// leaves a local callee shadowing every definition of its name.
+    fn aliased_callee<'e>(&self, callee: &'e Expr) -> Option<&'e Expr>
+    where
+        'b: 'e,
+    {
+        let Expr::Name(name) = callee else {
+            return None;
+        };
+        // Only a function's local: a module-level assignment runs before
+        // the module finishes binding, so its path may name something
+        // other than what the module's final scope says
+        // (`_issubclass = issubclass` ahead of `def issubclass`).
+        if self.file.bindings.referent(name) != Some(Referent::Local) {
+            return None;
+        }
+        let target = self.file.bindings.alias_of(name)?;
+        let head = callee_head(target)?;
+        matches!(
+            self.file.bindings.referent(head),
+            Some(Referent::Import(_) | Referent::ModuleDefinition | Referent::Builtin)
+        )
+        .then_some(target)
+    }
+
+    /// The binding of `method` on an instance of `class`, a plain path
+    /// the value's declaration names.
+    fn class_member_binding(&self, class: &Expr, method: &str) -> SyntaxFact<CalleeBinding> {
+        let Some(mut segments) = expression_path(class) else {
+            return SyntaxFact::Unknown;
+        };
+        segments.push(method.to_owned());
+        let referent = callee_head(class).and_then(|head| self.file.bindings.referent(head));
+        self.path_binding(referent, Some(&segments))
+    }
+
+    /// For a callee `super().name` (or `super(Cls, self).name`) inside a
+    /// method, where `super` is the builtin: what `super()` reaches, and
+    /// `name`. `None` for any other callee, and for a class whose first
+    /// base is no plain path (`namedtuple(...)`), which leaves the call
+    /// an ordinary receiver call.
+    fn super_callee<'e>(&self, callee: &'e Expr) -> Option<(SuperCallee<'f>, &'e str)> {
+        let Expr::Attribute(ExprAttribute { value, attr, .. }) = callee else {
+            return None;
+        };
+        let Expr::Call(ExprCall { func, .. }) = value.as_ref() else {
+            return None;
+        };
+        let Expr::Name(name) = func.as_ref() else {
+            return None;
+        };
+        if name.id.as_str() != "super"
+            || self.file.bindings.referent(name) != Some(Referent::Builtin)
+        {
+            return None;
+        }
+        let class = self.caller_class?;
+        let base = class
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.args.first());
+        let callee = match base {
+            None => SuperCallee::Object,
+            Some(base) => {
+                // `class C(Base[T])`: the base is `Base`.
+                let base = match base {
+                    Expr::Subscript(subscript) => &subscript.value,
+                    base => base,
+                };
+                SuperCallee::Base {
+                    base,
+                    path: expression_path(base)?,
+                }
+            }
+        };
+        Some((callee, attr.as_str()))
     }
 }
 
@@ -367,19 +510,7 @@ fn collect_imports(body: &[Stmt], module: &str) -> Vec<ImportShape> {
     for stmt in body {
         match stmt {
             Stmt::Import(StmtImport { names, .. }) => {
-                for alias in names {
-                    let imported = alias.name.as_str();
-                    let local = alias
-                        .asname
-                        .as_ref()
-                        .map(|n| n.as_str().to_owned())
-                        .unwrap_or_else(|| top_segment(imported).to_owned());
-                    out.push(import_shape(
-                        Some(local),
-                        dotted_to_module_path(imported),
-                        None,
-                    ));
-                }
+                out.extend(names.iter().map(module_import_shape));
             }
             Stmt::ImportFrom(from) => {
                 let Some(base) =
@@ -409,6 +540,20 @@ fn collect_imports(body: &[Stmt], module: &str) -> Vec<ImportShape> {
         }
     }
     out
+}
+
+/// `import a.b` binds `a`, the top-level package, so the alias names
+/// `a`; `import a.b as c` binds `a.b` to `c`.
+fn module_import_shape(alias: &Alias) -> ImportShape {
+    let imported = alias.name.as_str();
+    let (local, target) = match &alias.asname {
+        Some(asname) => (asname.as_str(), dotted_to_module_path(imported)),
+        None => {
+            let top = top_segment(imported);
+            (top, top.to_owned())
+        }
+    };
+    import_shape(Some(local.to_owned()), target, None)
 }
 
 /// Every import in this language names its module, alias, and symbol
@@ -446,9 +591,20 @@ mod tests {
         extract_call_shapes_with_module(src, module).unwrap()
     }
 
-    /// A callee bound to a nested `def`, a `lambda`, or a `Callable`
-    /// parameter in the caller's own scope is shadowed: the resolver must
+    /// The call's binding as text: the declaration path, `<external>`,
+    /// or `None` when unknown.
+    fn binding_of(call: &CallShape) -> Option<&str> {
+        call.callee_binding().map(|binding| match binding {
+            CalleeBinding::Declaration(target) => target.as_str(),
+            CalleeBinding::External => "<external>",
+        })
+    }
+
+    /// A callee bound in the caller's own scope — a nested `def`, a
+    /// `lambda`, any parameter or local — is shadowed: the resolver must
     /// be told so it does not fall back to a same-named module function.
+    /// A pytest fixture parameter (`httpbin("get")`) calls the fixture's
+    /// return value, not the fixture function.
     #[rstest]
     #[case::nested_def("def caller():\n    def emit(x):\n        pass\n    emit(1)\n", true)]
     #[case::lambda_local("def caller():\n    emit = lambda x: x\n    emit(1)\n", true)]
@@ -477,8 +633,14 @@ mod tests {
         true
     )]
     #[case::module_lambda("emit = lambda x: x\ndef caller():\n    emit(1)\n", false)]
-    #[case::plain_local("def caller():\n    emit = compute()\n    emit(1)\n", false)]
-    #[case::value_param("def caller(emit: int):\n    emit(1)\n", false)]
+    #[case::plain_local("def caller():\n    emit = compute()\n    emit(1)\n", true)]
+    #[case::value_param("def caller(emit: int):\n    emit(1)\n", true)]
+    #[case::fixture_param("def test_get(emit):\n    emit(\"get\")\n", true)]
+    #[case::tuple_target(
+        "def caller(self):\n    emit, kw = self.emit, self.kw\n    emit(1)\n",
+        true
+    )]
+    #[case::loop_target("def caller(hooks):\n    for emit in hooks:\n        emit(1)\n", true)]
     #[case::unbound_name("def caller():\n    emit(1)\n", false)]
     fn local_callable_bindings_shadow_bare_calls(#[case] src: &str, #[case] expected: bool) {
         let call = calls(src, "m")
@@ -599,11 +761,165 @@ mod tests {
             .into_iter()
             .find(|call| call.callee_name() == Some(callee))
             .expect("call site");
-        let binding = call.callee_binding().map(|binding| match binding {
-            CalleeBinding::Declaration(target) => target.as_str(),
-            CalleeBinding::External => "<external>",
-        });
-        assert_eq!(binding, expected);
+        assert_eq!(binding_of(&call), expected);
+    }
+
+    /// A local assigned once from a path that starts at an import or a
+    /// module-level definition is an alias: calling it calls that path.
+    /// Any other local still shadows the name. A module-level alias is
+    /// not followed: its path is read before the module finishes binding.
+    #[rstest]
+    #[case::module_attribute(
+        "import more_itertools as mi\ndef caller():\n    extract = mi.extract\n    extract(1)\n",
+        Some("more_itertools::extract"),
+        false
+    )]
+    #[case::module_def(
+        "def run():\n    pass\ndef caller():\n    extract = run\n    extract(1)\n",
+        Some("pkg::main::run"),
+        false
+    )]
+    #[case::builtin(
+        "def caller():\n    extract = len\n    extract(1)\n",
+        Some("<external>"),
+        false
+    )]
+    #[case::module_level_alias(
+        "extract = run\ndef run():\n    pass\ndef caller():\n    extract(1)\n",
+        None,
+        false
+    )]
+    #[case::attribute_of_self(
+        "class C:\n    def caller(self):\n        extract = self.extract\n        extract(1)\n",
+        None,
+        true
+    )]
+    #[case::rebound(
+        "import mi\ndef caller(flag):\n    extract = mi.extract\n    if flag:\n        extract = mi.other\n    extract(1)\n",
+        None,
+        true
+    )]
+    fn local_aliases_call_their_path(
+        #[case] src: &str,
+        #[case] expected: Option<&str>,
+        #[case] locally_bound: bool,
+    ) {
+        let call = calls(src, "pkg::main")
+            .into_iter()
+            .find(|call| call.line == src.lines().count())
+            .expect("last-line call site");
+        assert_eq!(binding_of(&call), expected);
+        assert_eq!(call.callee_is_locally_bound(), locally_bound);
+    }
+
+    /// `super().name()` reads as `Base.name()` through the class's first
+    /// base, so it binds where the base does and never to the caller's
+    /// own override; with no base it is `object`'s method.
+    #[rstest]
+    #[case::imported_base(
+        "from pkg.core import Group\nclass C(Group):\n    def run(self):\n        super().run()\n",
+        Some("pkg::core::Group::run")
+    )]
+    #[case::module_base(
+        "class B:\n    pass\nclass C(B):\n    def run(self):\n        super().run()\n",
+        Some("pkg::main::B::run")
+    )]
+    #[case::generic_base(
+        "from pkg import B\nclass C(B[int]):\n    def run(self):\n        super().run()\n",
+        Some("pkg::B::run")
+    )]
+    #[case::explicit_arguments(
+        "from pkg import B\nclass C(B):\n    def run(self):\n        super(C, self).run()\n",
+        Some("pkg::B::run")
+    )]
+    #[case::no_base(
+        "class C:\n    def run(self):\n        super().run()\n",
+        Some("<external>")
+    )]
+    #[case::builtin_base(
+        "class C(dict):\n    def run(self):\n        super().run()\n",
+        Some("<external>")
+    )]
+    #[case::computed_base("class C(make()):\n    def run(self):\n        super().run()\n", None)]
+    #[case::shadowed_super("class C:\n    def run(self, super):\n        super().run()\n", None)]
+    fn super_calls_bind_through_the_first_base(#[case] src: &str, #[case] expected: Option<&str>) {
+        let call = calls(src, "pkg::main")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("run"))
+            .expect("run call site");
+        assert_eq!(binding_of(&call), expected);
+    }
+
+    /// A receiver whose class its declaration names — an annotation, or a
+    /// constructor call assigned once — binds the method through that
+    /// class; anything less certain leaves the binding unknown.
+    #[rstest]
+    #[case::annotated_param(
+        "from pkg import Session\ndef caller(s: Session):\n    s.send()\n",
+        Some("pkg::Session::send")
+    )]
+    #[case::optional_param(
+        "from typing import Optional\nfrom pkg import Session\ndef caller(s: Optional[Session]):\n    s.send()\n",
+        Some("pkg::Session::send")
+    )]
+    #[case::union_with_none(
+        "from pkg import Session\ndef caller(s: Session | None):\n    s.send()\n",
+        Some("pkg::Session::send")
+    )]
+    #[case::annotated_local(
+        "from pkg import Session\ndef caller():\n    s: Session = make()\n    s.send()\n",
+        Some("pkg::Session::send")
+    )]
+    #[case::constructed_local(
+        "import threading\ndef caller():\n    s = threading.Event()\n    s.send()\n",
+        Some("threading::Event::send")
+    )]
+    #[case::constructed_module_value(
+        "class Session:\n    pass\ns = Session()\ndef caller():\n    s.send()\n",
+        Some("pkg::main::Session::send")
+    )]
+    #[case::builtin_annotation("def caller(s: str):\n    s.send()\n", Some("<external>"))]
+    #[case::generic_origin(
+        "from typing import List\ndef caller(s: List[int]):\n    s.send()\n",
+        Some("typing::List::send")
+    )]
+    #[case::annotated(
+        "from typing import Annotated\nfrom pkg import Session\ndef caller(s: Annotated[Session, 1]):\n    s.send()\n",
+        Some("pkg::Session::send")
+    )]
+    #[case::other_operator(
+        "from pkg import Session\ndef caller(s: Session & None):\n    s.send()\n",
+        None
+    )]
+    #[case::constructed_by_a_call_result(
+        "def caller():\n    s = make().Session()\n    s.send()\n",
+        None
+    )]
+    #[case::union(
+        "from typing import Union\ndef caller(s: Union[A, B]):\n    s.send()\n",
+        None
+    )]
+    #[case::type_of_class("def caller(s: type[A]):\n    s.send()\n", None)]
+    #[case::string_annotation("def caller(s: \"Session\"):\n    s.send()\n", None)]
+    #[case::lowercase_factory("def caller():\n    s = make()\n    s.send()\n", None)]
+    #[case::rebound(
+        "from pkg import Session\ndef caller(s: Session):\n    s = wrap(s)\n    s.send()\n",
+        None
+    )]
+    #[case::attribute_chain(
+        "from pkg import Session\ndef caller(s: Session):\n    s.adapter.send()\n",
+        None
+    )]
+    fn declared_classes_bind_receiver_methods(#[case] src: &str, #[case] expected: Option<&str>) {
+        let call = calls(src, "pkg::main")
+            .into_iter()
+            .find(|call| call.callee_name() == Some("send"))
+            .expect("send call site");
+        assert_eq!(binding_of(&call), expected);
+        assert_eq!(
+            call.receiver_expr_kind,
+            SyntaxFact::Known(ReceiverExprKind::LocalValue)
+        );
     }
 
     /// A comprehension's target binds in the comprehension's own scope,
@@ -669,14 +985,12 @@ mod tests {
     #[test]
     fn lambda_parameters_do_not_shadow_the_enclosing_scope() {
         let src = "def caller():\n    run(lambda emit: emit(1))\n    emit(2)\n";
-        let outer = calls(src, "m")
+        let bound: Vec<_> = calls(src, "m")
             .into_iter()
             .filter(|call| call.callee_name() == Some("emit"))
-            .collect::<Vec<_>>();
-        assert!(
-            outer.iter().all(|call| !call.callee_is_locally_bound()),
-            "got {outer:?}",
-        );
+            .map(|call| call.callee_is_locally_bound())
+            .collect();
+        assert_eq!(bound, [true, false]);
     }
 
     /// Only the shadowed name is affected.

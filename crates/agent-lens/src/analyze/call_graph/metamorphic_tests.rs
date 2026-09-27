@@ -924,8 +924,8 @@ const KNOWN_GAPS: &[KnownGap] = &[
         ],
         extra: &[
             "app::main::run -> {app::decoy::area, app::geo::area} [Ambiguous] x1",
+            "app::main::run -> {app::decoy::perimeter, app::geo::perimeter} [Ambiguous] x1",
             "app::main::run -> {app::decoy::shout, app::text::shout} [Ambiguous] x1",
-            "app::main::run -> ?perimeter [Unresolved] x1",
         ],
     },
 ];
