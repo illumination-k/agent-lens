@@ -137,8 +137,14 @@ pub(crate) fn build_graph(
     filter: &AnalyzePathFilter,
 ) -> Result<ModuleGraph, CrateAnalyzerError> {
     match super::index::AnalysisIndex::active() {
+        // Keyed by the crate root, the policy, and the path filter. The
+        // filter is part of the identity because it shapes the walk, not
+        // just the report: two analyzers in one profile that exclude
+        // different trees do not see the same graph, and sharing one
+        // between them would hand the second whichever exclusion the
+        // first happened to run with.
         Some(index) => index
-            .module_graph((path.to_path_buf(), policy, filter.clone()), || {
+            .memoize_typed((path.to_path_buf(), policy, filter.clone()), || {
                 build_graph_uncached(path, policy, filter)
             })
             .map(|graph| graph.as_ref().clone()),
