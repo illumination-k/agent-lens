@@ -13,6 +13,11 @@ catalogue in short form, plus a live
 [function-graph viewer](https://illumination-k.github.io/agent-lens/analyze/)
 for `analyze function-graph` JSON.
 
+Agents can start from
+[`llms.txt`](https://illumination-k.github.io/agent-lens/llms.txt), which
+links the CLI reference and `agent-lens.toml` schema generated from the code
+(also served together as `llms-full.txt`).
+
 `agent-lens` is a single-binary Rust CLI that bundles two things coding agents
 (Claude Code, Codex, opencode, …) need but usually don't get:
 

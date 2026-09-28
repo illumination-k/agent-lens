@@ -27,6 +27,9 @@ web/coverage/
 !.env.example
 *.tsbuildinfo
 web/public/function-graph.json
+web/public/cli.md
+web/public/agent-lens-toml.md
+web/public/llms-full.txt
 
 # Nix
 result
