@@ -31,7 +31,7 @@ use serde::Serialize;
 
 use super::call_graph::model::{CallGraphEdge, CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::runner::render_report;
+use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
 const SCHEMA_VERSION: u32 = 2;
@@ -57,13 +57,16 @@ impl FunctionGraphAnalyzer {
         roots: impl Into<AnalyzeRoots>,
         format: OutputFormat,
     ) -> Result<String, AnalyzerError> {
-        let roots = roots.into();
-        let graph = self.builder.build(&roots)?;
-        // This analyzer serializes the graph verbatim, so it moves the
-        // node and edge tables into the report; a graph shared through
-        // the analysis index is cloned rather than unwrapped.
-        let report = Report::build(&roots, Arc::unwrap_or_clone(graph));
-        render_report(&report, format, || format_markdown(&report))
+        render_graph_report(
+            &self.builder,
+            roots,
+            format,
+            // This analyzer serializes the graph verbatim, so it moves the
+            // node and edge tables into the report; a graph shared through
+            // the analysis index is cloned rather than unwrapped.
+            |roots, graph| Report::build(roots, Arc::unwrap_or_clone(graph)),
+            format_markdown,
+        )
     }
 }
 

@@ -38,7 +38,7 @@ use super::call_graph::model::{
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
-use super::runner::render_report;
+use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use lens_domain::graph_algo::{
     PAGERANK_DAMPING, PAGERANK_ITERATIONS, pagerank, percentile_buckets,
@@ -110,10 +110,13 @@ impl HubsAnalyzer {
         roots: impl Into<AnalyzeRoots>,
         format: OutputFormat,
     ) -> Result<String, AnalyzerError> {
-        let roots = roots.into();
-        let graph = self.builder.build(&roots)?;
-        let report = Report::build(&roots, &graph, self.only_tests);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_graph_report(
+            &self.builder,
+            roots,
+            format,
+            |roots, graph| Report::build(roots, &graph, self.only_tests),
+            |report| format_markdown(report, self.top),
+        )
     }
 }
 

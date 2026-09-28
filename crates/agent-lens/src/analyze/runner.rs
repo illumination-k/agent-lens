@@ -9,10 +9,12 @@
 
 use std::marker::PhantomData;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 
+use super::call_graph::{CallGraph, CallGraphBuilder};
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, SourceFile,
     changed_line_ranges, collect_source_files, overlaps_any, skip_parse_error_if_walked,
@@ -134,6 +136,19 @@ impl FilterConfig {
             overlaps_any(s, e, &changed)
         });
     }
+
+    /// [`Self::retain_changed`] on an owned list, then `None` when
+    /// nothing survived, so a per-file analyzer can drop an empty file
+    /// from its report in one step.
+    pub fn retain_changed_nonempty<T>(
+        &self,
+        mut items: Vec<T>,
+        path: &Path,
+        range: impl Fn(&T) -> (usize, usize),
+    ) -> Option<Vec<T>> {
+        self.retain_changed(&mut items, path, range);
+        (!items.is_empty()).then_some(items)
+    }
 }
 
 /// Outcome of a per-file walk: the reports that produced findings plus
@@ -163,6 +178,23 @@ pub(super) fn render_report<R: Serialize>(
         }
         OutputFormat::Md => Ok(md()),
     }
+}
+
+/// Build the call graph over `roots`, derive a report from it, and
+/// render that report. The skeleton every call-graph analyzer whose
+/// report owns its data shares; each keeps only its own `build` and
+/// markdown formatter.
+pub(super) fn render_graph_report<R: Serialize>(
+    builder: &CallGraphBuilder,
+    roots: impl Into<AnalyzeRoots>,
+    format: OutputFormat,
+    build: impl FnOnce(&AnalyzeRoots, Arc<CallGraph>) -> R,
+    md: impl FnOnce(&R) -> String,
+) -> Result<String, AnalyzerError> {
+    let roots = roots.into();
+    let graph = builder.build(&roots)?;
+    let report = build(&roots, graph);
+    render_report(&report, format, || md(&report))
 }
 
 /// Names the two report fields that differ between otherwise-identical
@@ -354,6 +386,7 @@ pub(super) use delegate_filter_builders;
 mod tests {
     use super::*;
     use crate::test_support::{run_git, write_file};
+    use rstest::rstest;
     use std::path::PathBuf;
 
     #[test]
@@ -402,6 +435,18 @@ mod tests {
             (s, e)
         });
         assert_eq!(items, vec![(1, 5), (10, 12)]);
+    }
+
+    #[rstest]
+    #[case::kept_items_are_returned(vec![(1, 5), (10, 12)], Some(vec![(1, 5), (10, 12)]))]
+    #[case::empty_list_is_none(vec![], None)]
+    fn retain_changed_nonempty_drops_an_empty_result(
+        #[case] items: Vec<(usize, usize)>,
+        #[case] expected: Option<Vec<(usize, usize)>>,
+    ) {
+        let cfg = FilterConfig::default();
+        let kept = cfg.retain_changed_nonempty(items, Path::new("/does/not/matter.rs"), |&r| r);
+        assert_eq!(kept, expected);
     }
 
     #[test]
