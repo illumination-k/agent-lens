@@ -47,6 +47,12 @@ export const PAGES = {
     description:
       "Explore the static call graph agent-lens extracts from a codebase: filter by module and weight nodes by calls, fan-in, complexity, or maintainability.",
   },
+  callGraphAccuracy: {
+    path: "/articles/call-graph-accuracy",
+    title: "Call-graph accuracy and speed vs type checkers — agent-lens",
+    description:
+      "agent-lens's syntax-only call graph scored against go-vta, pyright, rust-analyzer and tsc on eight projects: 0.98 precision, 0.85 recall, 280x faster.",
+  },
 } as const satisfies Record<string, PageSeo>;
 
 /** Absolute URL of a page, with the trailing slash the prerender emits. */
@@ -159,6 +165,18 @@ export function faqJsonLd(entries: readonly FaqEntry[]): object {
       name: entry.question,
       acceptedAnswer: { "@type": "Answer", text: entry.answer },
     })),
+  });
+}
+
+/** A dated write-up, such as a benchmark report. */
+export function articleJsonLd(page: PageSeo, datePublished: string): object {
+  return jsonLd("TechArticle", {
+    headline: page.title,
+    description: page.description,
+    url: canonicalUrl(page.path),
+    datePublished,
+    author: { "@type": "Person", name: "illumination-k" },
+    image: assetUrl(OG_IMAGE),
   });
 }
 

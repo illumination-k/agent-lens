@@ -96,6 +96,7 @@ function SiteHeader() {
           </a>
         ))}
         <Link to="/analyze">Live demo</Link>
+        <Link to="/articles/call-graph-accuracy">Accuracy</Link>
         <a href={REPOSITORY_URL}>GitHub</a>
       </nav>
     </header>
@@ -342,6 +343,7 @@ function SiteFooter() {
         <a href={README_URL}>Documentation</a>
         <a href={RELEASES_URL}>Releases</a>
         <Link to="/analyze">Function graph</Link>
+        <Link to="/articles/call-graph-accuracy">Call-graph accuracy</Link>
       </nav>
     </footer>
   );
