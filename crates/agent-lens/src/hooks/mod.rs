@@ -12,6 +12,7 @@
 
 pub mod codex;
 pub mod core;
+pub mod cwd_changed;
 pub mod post_tool_use;
 pub mod pre_tool_use;
 pub mod session_start;

@@ -336,6 +336,14 @@ mod tests {
         &["agent-lens", "hook", "session-start", "snapshot"],
         |c: &Command| matches!(c, Command::Hook(HookCommand::SessionStart(SessionStartCommand::Snapshot))),
     )]
+    #[case::hook_pre_tool_use_snapshot(
+        &["agent-lens", "hook", "pre-tool-use", "snapshot"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::PreToolUse(PreToolUseCommand::Snapshot))),
+    )]
+    #[case::hook_cwd_changed_snapshot(
+        &["agent-lens", "hook", "cwd-changed", "snapshot"],
+        |c: &Command| matches!(c, Command::Hook(HookCommand::CwdChanged(CwdChangedCommand::Snapshot))),
+    )]
     #[case::hook_post_tool_use_footprint(
         &["agent-lens", "hook", "post-tool-use", "footprint"],
         |c: &Command| matches!(c, Command::Hook(HookCommand::PostToolUse(PostToolUseCommand::Footprint))),

@@ -282,13 +282,14 @@ under `skipped` with a reason rather than silently dropped.
 
 ### As a Claude Code hook
 
-Wire `agent-lens` into Claude Code at five event points: a one-shot
+Wire `agent-lens` into Claude Code at six event points: a one-shot
 `SessionStart` summary of the repo's hotspots, a `PreToolUse` heads-up about
 complex / low-cohesion code the agent is about to edit, a `PostToolUse`
 follow-up flagging duplicated or forwarding-only functions in the file just
 changed and where the pending diff sprawled, and a session checkpoint: a
-snapshot at `SessionStart`, compared at every `Stop` / `SubagentStop` so the
-agent hears what got worse over the session before it hands control back.
+snapshot at `SessionStart` (and at `CwdChanged` for each worktree the session
+enters), compared at every `Stop` / `SubagentStop` so the agent hears what got
+worse over the session before it hands control back.
 
 ```bash
 agent-lens hook setup                 # project scope: ./.claude/settings.json
@@ -354,7 +355,7 @@ is a toast. Subagent (child) sessions get the per-edit reports only.
 
 | Command tree | Commands                                                                                                                                                                                                                                                                                                     |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `hook`       | `setup`, `session-start summary`, `session-start snapshot`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `post-tool-use similarity`, `post-tool-use wrapper`, `post-tool-use footprint`, `stop delta`, `subagent-stop delta`                                                                          |
+| `hook`       | `setup`, `session-start summary`, `session-start snapshot`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `pre-tool-use snapshot`, `cwd-changed snapshot`, `post-tool-use similarity`, `post-tool-use wrapper`, `post-tool-use footprint`, `stop delta`, `subagent-stop delta`                         |
 | `codex-hook` | same handlers as `hook` (Codex has no `SubagentStop`), speaking Codex's protocol                                                                                                                                                                                                                             |
 | `analyze`    | `search`, `similarity`, `forwarding`, `narrowable`, `test-redundancy`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `footprint`, `layers`, `reach`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
 | `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                                |
@@ -385,27 +386,31 @@ conflicting local edit (otherwise conflicts are reported and left untouched).
 | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                              |
 | `PostToolUse`  | `footprint`  | Reports the pending diff's `analyze footprint` flags that land in the file just edited. |
 | `SessionStart` | `snapshot`   | Records the session checkpoint `stop delta` compares against; injects nothing.          |
+| `CwdChanged`   | `snapshot`   | The same for a directory the session moves to, such as a worktree it enters.            |
+| `PreToolUse`   | `snapshot`   | The same before the first edit in a directory still without one.                        |
 | `Stop`         | `delta`      | Reports only what got worse since the snapshot; a new regression blocks the stop once.  |
 | `SubagentStop` | `delta`      | The same checkpoint when a sub-agent finishes.                                          |
 
-The `codex-hook` tree ships the same handlers except `subagent-stop`, which
-Codex has no event for; the `PreToolUse` / `PostToolUse` ones run across every
+The `codex-hook` tree ships the same handlers except `subagent-stop` and
+`cwd-changed`, which Codex has no event for, and `pre-tool-use snapshot`, which
+without async would stall the first edit on a whole-tree pass; the `PreToolUse` / `PostToolUse` ones run across every
 file the `apply_patch` touches. Schemas for the remaining events
 (`UserPromptSubmit`, Codex's `PermissionRequest`) live in the `agent-hooks`
 crate with no handler wired yet, so a new handler is a domain-logic change
 rather than a schema change.
 
-The checkpoint snapshot lives at
-`<repo-root>/target/agent-lens/session-<id>.json` (a `.gitignore` beside it
-keeps it out of `git status`) and covers production sources under the
-session's directory. A stop recomputes only what the session could have
-changed and lists regressions only — new near-duplicate pairs, functions at or
-above cognitive 8 that got more complex, new forwarding-only wrappers, newly
-unreachable functions, edited high-fan-in functions — and stays silent when
-there are none. Only a stop's `decision: "block"` reason reaches the model, so
-a regression no earlier stop reported blocks once; a repeat, or a stop that is
-already that continuation, is only a `systemMessage`. `stop delta --no-block`
-never blocks.
+The checkpoint snapshot lives under `<git-common-dir>/agent-lens/sessions/<id>/`
+(outside git, `target/agent-lens/`), one per working directory, and covers
+production sources under the session's directory. Claude Code runs every
+snapshot handler with `async: true`, so the whole-tree pass never delays a
+turn: files that turn dirty while it scans are read back from `HEAD`, and each
+handler is a no-op once its directory has a snapshot. `SessionStart` takes the
+first, `CwdChanged` one for each worktree the session enters, and `PreToolUse`
+one before the first edit anywhere still uncovered, such as a subagent's
+isolated worktree. A stop in a directory none of them reached (Codex, or a
+worktree only touched through the shell) compares against that checkout's
+`HEAD` when the session started, from its reflog — the creation commit for a
+newer worktree — checked out into a temporary tree once and kept.
 
 Hook handlers are advisory — never a gate on the agent's tool call. A handler
 that fails still answers in the agent's response schema (prefixed with

@@ -280,16 +280,43 @@ impl<E: SessionStartEnvelope> Hook for SummaryHook<E> {
     }
 }
 
-/// SessionStart hook that records the session checkpoint snapshot.
+/// Any hook payload that names a session and the directory it runs in:
+/// enough to record the checkpoint snapshot for that directory.
+pub trait CheckpointEnvelope {
+    type Input: serde::de::DeserializeOwned;
+    /// `Default` is the silent response.
+    type Output: serde::Serialize + Default;
+
+    fn cwd(input: &Self::Input) -> &Path;
+    fn session_id(input: &Self::Input) -> &str;
+}
+
+impl<E: SessionStartEnvelope> CheckpointEnvelope for E {
+    type Input = E::Input;
+    type Output = E::Output;
+
+    fn cwd(input: &Self::Input) -> &Path {
+        <E as SessionStartEnvelope>::cwd(input)
+    }
+
+    fn session_id(input: &Self::Input) -> &str {
+        <E as SessionStartEnvelope>::session_id(input)
+    }
+}
+
+/// Hook that records the session checkpoint snapshot for the directory
+/// the payload runs in: at SessionStart, and again wherever the session
+/// moves (a worktree it enters, the directory of its first edit there).
 ///
 /// Silent by design: the snapshot is for the stop hooks to compare
 /// against, and the session's context has no use for "a file was
-/// written". A snapshot that already exists (a resumed session) is kept.
-pub struct SnapshotHook<E: SessionStartEnvelope> {
+/// written". A snapshot that already exists is kept, so after the first
+/// one per directory each call is a cheap no-op.
+pub struct SnapshotHook<E: CheckpointEnvelope> {
     _envelope: PhantomData<fn() -> E>,
 }
 
-impl<E: SessionStartEnvelope> SnapshotHook<E> {
+impl<E: CheckpointEnvelope> SnapshotHook<E> {
     pub fn new() -> Self {
         Self {
             _envelope: PhantomData,
@@ -297,19 +324,19 @@ impl<E: SessionStartEnvelope> SnapshotHook<E> {
     }
 }
 
-impl<E: SessionStartEnvelope> Default for SnapshotHook<E> {
+impl<E: CheckpointEnvelope> Default for SnapshotHook<E> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<E: SessionStartEnvelope> std::fmt::Debug for SnapshotHook<E> {
+impl<E: CheckpointEnvelope> std::fmt::Debug for SnapshotHook<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SnapshotHook").finish()
     }
 }
 
-impl<E: SessionStartEnvelope> Hook for SnapshotHook<E> {
+impl<E: CheckpointEnvelope> Hook for SnapshotHook<E> {
     type Input = E::Input;
     type Output = E::Output;
     type Error = CheckpointError;
@@ -460,10 +487,10 @@ pub(crate) mod session_start_conformance {
     }
 
     /// The snapshot hook writes the checkpoint under the session's id
-    /// and injects nothing.
+    /// and injects nothing — whatever event carries it.
     pub(crate) fn snapshot_is_recorded_silently<E, F>(input: F)
     where
-        E: SessionStartEnvelope,
+        E: super::CheckpointEnvelope,
         F: FnOnce(&Path) -> E::Input,
     {
         let dir = tempfile::tempdir().unwrap();

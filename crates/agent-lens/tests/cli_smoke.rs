@@ -645,6 +645,7 @@ fn top_bounds_the_markdown_report(#[case] args: &[&str], #[case] expected: &str)
     &["codex-hook", "post-tool-use", "similarity"],
     "codex post-tool-use",
 )]
+#[case::claude_cwd_changed(&["hook", "cwd-changed", "snapshot"], "cwd-changed")]
 #[case::claude_stop(&["hook", "stop", "delta"], "stop")]
 #[case::claude_subagent_stop(&["hook", "subagent-stop", "delta"], "subagent-stop")]
 #[case::codex_stop(&["codex-hook", "stop", "delta"], "codex stop")]
@@ -705,6 +706,59 @@ fn session_checkpoint_blocks_a_stop_on_a_new_regression() {
     assert_eq!(json["decision"], "block", "got {json}");
     let reason = json["reason"].as_str().unwrap();
     assert!(reason.contains("## New wrappers (1)"), "got {reason}");
+}
+
+/// A session that starts in the main checkout and moves into a worktree:
+/// `cwd-changed` snapshots the worktree as the session found it, and a
+/// stop there reports what the session did to it.
+#[test]
+fn session_checkpoint_follows_the_session_into_a_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    agent_lens::test_support::init_checkpoint_fixture(dir.path());
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+    let holder = tempfile::tempdir().unwrap();
+    let wt = holder.path().join("wt");
+    let payload = |cwd: &std::path::Path, event: &str| {
+        let cwd = cwd.to_string_lossy().replace('\\', "\\\\");
+        format!(
+            r#"{{"session_id":"smoke","transcript_path":"/tmp/t","cwd":"{cwd}","hook_event_name":"{event}","source":"startup"}}"#
+        )
+    };
+
+    let start = payload(dir.path(), "SessionStart");
+    agent_lens(
+        &["hook", "session-start", "snapshot"],
+        dir.path(),
+        Some(&start),
+    );
+    run_git(
+        dir.path(),
+        &["worktree", "add", "-q", "-b", "wt", wt.to_str().unwrap()],
+    );
+    let moved = payload(&wt, "CwdChanged");
+    let output = agent_lens(&["hook", "cwd-changed", "snapshot"], &wt, Some(&moved));
+    assert_eq!(stdout_json(&output), serde_json::json!({}));
+
+    agent_lens::test_support::regress_checkpoint_fixture(&wt);
+    let stop = payload(&wt, "Stop");
+    let json = stdout_json(&agent_lens(&["hook", "stop", "delta"], &wt, Some(&stop)));
+    assert_eq!(json["decision"], "block", "got {json}");
+    assert!(
+        json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("## New wrappers (1)")
+    );
+    // The main checkout was not touched, so its own stop stays silent.
+    let main_stop = payload(dir.path(), "Stop");
+    let json = stdout_json(&agent_lens(
+        &["hook", "stop", "delta"],
+        dir.path(),
+        Some(&main_stop),
+    ));
+    assert_eq!(json, serde_json::json!({}));
 }
 
 #[test]

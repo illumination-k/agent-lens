@@ -9,6 +9,7 @@
 //! additions; missing required fields fail deserialization.
 
 mod context;
+mod cwd_changed;
 mod post_tool_use;
 mod pre_tool_use;
 mod session_start;
@@ -18,6 +19,7 @@ mod user_prompt_submit;
 
 pub use crate::common::{CommonHookOutput, CommonOutput};
 pub use context::{HookContext, PermissionMode};
+pub use cwd_changed::{CwdChangedInput, CwdChangedOutput};
 pub use post_tool_use::{PostToolUseInput, PostToolUseOutput};
 pub use pre_tool_use::{
     PermissionDecision, PreToolUseDecision, PreToolUseHookSpecificOutput, PreToolUseInput,
@@ -41,6 +43,7 @@ crate::common::impl_common_output!(
     UserPromptSubmitOutput,
     StopOutput,
     SubagentStopOutput,
+    CwdChangedOutput,
 );
 
 /// A tagged union over every Claude Code hook input.
@@ -56,6 +59,7 @@ pub enum ClaudeCodeHookInput {
     UserPromptSubmit(UserPromptSubmitInput),
     Stop(StopInput),
     SubagentStop(SubagentStopInput),
+    CwdChanged(CwdChangedInput),
 }
 
 #[cfg(test)]
