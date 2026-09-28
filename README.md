@@ -393,7 +393,9 @@ rather than a schema change.
 The checkpoint snapshot lives at
 `<repo-root>/target/agent-lens/session-<id>.json` (a `.gitignore` beside it
 keeps it out of `git status`) and covers production sources under the
-session's directory. A stop recomputes only what the session could have
+session's directory. Claude Code runs the snapshot with `async: true`, so the
+whole-tree pass never delays the first turn; a stop that fires before it lands
+has no baseline and stays silent. A stop recomputes only what the session could have
 changed and lists regressions only — new near-duplicate pairs, functions at or
 above cognitive 8 that got more complex, new forwarding-only wrappers, newly
 unreachable functions, edited high-fan-in functions — and stays silent when

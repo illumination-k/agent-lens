@@ -41,11 +41,15 @@ pub(crate) const SUBAGENT_STOP_EVENT: &str = "SubagentStop";
 /// handler commands the setup may install there, and the commands that
 /// must be installed whenever one of them is (the stop `delta` handlers
 /// compare against the snapshot `session-start snapshot` records).
+/// `background` marks a block whose handlers print nothing the agent
+/// needs, so a format that can run hooks without blocking (Claude
+/// Code's `async`) installs them that way.
 pub struct EventBlock {
     pub event: &'static str,
     pub matcher: &'static str,
     pub commands: &'static [&'static str],
     pub requires: &'static [&'static str],
+    pub background: bool,
 }
 
 /// Which handlers a setup run installs, as `--only` / `--skip`

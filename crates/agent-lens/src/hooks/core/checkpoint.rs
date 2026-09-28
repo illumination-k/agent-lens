@@ -439,7 +439,17 @@ fn write_snapshot(path: &Path, snapshot: &Snapshot) -> Result<(), CheckpointErro
         path: path.to_path_buf(),
         source,
     })?;
-    std::fs::write(path, text).map_err(write_err)
+    // Write beside the target and rename over it, so a stop reading the
+    // snapshot while the (background) session-start hook writes it sees
+    // either no file or a whole one, never a truncated one.
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, text).map_err(write_err)?;
+    std::fs::rename(&tmp, path).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp);
+        write_err(source)
+    })
 }
 
 /// Run a whole-tree analyzer and parse its JSON report, or `None` with a
@@ -923,6 +933,51 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
         write_file(dir.path(), "README.md", "hi\n");
         assert_eq!(take_snapshot(dir.path(), "s").unwrap(), None);
         assert!(!dir.path().join("target").exists());
+    }
+
+    #[test]
+    fn a_snapshot_write_leaves_no_temp_file() {
+        let dir = repo();
+        let path = take_snapshot(dir.path(), "s").unwrap().unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, [".gitignore", "session-s.json"]);
+    }
+
+    #[test]
+    fn a_failed_snapshot_rename_cleans_up_its_temp_file() {
+        let dir = repo();
+        let path = snapshot_path(dir.path(), "s");
+        std::fs::create_dir_all(path.join("occupied")).unwrap();
+        let snapshot = Snapshot {
+            schema_version: SCHEMA_VERSION,
+            tool_version: String::new(),
+            session_id: "s".to_owned(),
+            root: dir.path().to_path_buf(),
+            files: BTreeMap::new(),
+            similar_pairs: None,
+            unreachable: None,
+            hubs: None,
+            reported: BTreeSet::new(),
+        };
+        assert!(matches!(
+            write_snapshot(&path, &snapshot),
+            Err(CheckpointError::Write { .. })
+        ));
+        let leftovers = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[test]

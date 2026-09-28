@@ -64,6 +64,10 @@ pub const SESSION_START_COMMANDS: &[&str] = &["agent-lens hook session-start sum
 pub const CHECKPOINT_MATCHER: &str = "";
 
 /// Commands the setup writes into the checkpoint's SessionStart block.
+/// They run with `async`: the snapshot prints nothing, and a whole-tree
+/// pass on a large repository would otherwise delay the session's first
+/// turn. A stop that fires before the snapshot lands finds none and
+/// reports nothing.
 pub const SNAPSHOT_COMMANDS: &[&str] = &["agent-lens hook session-start snapshot"];
 
 /// Commands the setup writes into `hooks.Stop`.
@@ -95,36 +99,42 @@ impl ConfigFormat for ClaudeSettings {
             matcher: SESSION_START_MATCHER,
             commands: SESSION_START_COMMANDS,
             requires: &[],
+            background: false,
         },
         EventBlock {
             event: PRE_TOOL_USE_EVENT,
             matcher: PRE_TOOL_USE_MATCHER,
             commands: PRE_TOOL_USE_COMMANDS,
             requires: &[],
+            background: false,
         },
         EventBlock {
             event: POST_TOOL_USE_EVENT,
             matcher: POST_TOOL_USE_MATCHER,
             commands: POST_TOOL_USE_COMMANDS,
             requires: &[],
+            background: false,
         },
         EventBlock {
             event: SESSION_START_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: SNAPSHOT_COMMANDS,
             requires: &[],
+            background: true,
         },
         EventBlock {
             event: STOP_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: STOP_COMMANDS,
             requires: SNAPSHOT_COMMANDS,
+            background: false,
         },
         EventBlock {
             event: SUBAGENT_STOP_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: SUBAGENT_STOP_COMMANDS,
             requires: SNAPSHOT_COMMANDS,
+            background: false,
         },
     ];
 
@@ -189,7 +199,13 @@ impl ConfigFormat for ClaudeSettings {
             "matcher": block.matcher,
             "hooks": commands
                 .iter()
-                .map(|cmd| json!({ "type": "command", "command": cmd }))
+                .map(|cmd| {
+                    let mut handler = json!({ "type": "command", "command": cmd });
+                    if block.background {
+                        handler["async"] = Value::Bool(true);
+                    }
+                    handler
+                })
                 .collect::<Vec<_>>(),
         }));
         Ok(())
@@ -307,7 +323,7 @@ mod tests {
                         {
                             "matcher": CHECKPOINT_MATCHER,
                             "hooks": [
-                                {"type": "command", "command": "agent-lens hook session-start snapshot"},
+                                {"type": "command", "command": "agent-lens hook session-start snapshot", "async": true},
                             ],
                         },
                     ],

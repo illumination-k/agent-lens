@@ -98,30 +98,35 @@ impl ConfigFormat for CodexConfig {
             matcher: SESSION_START_MATCHER,
             commands: SESSION_START_COMMANDS,
             requires: &[],
+            background: false,
         },
         EventBlock {
             event: PRE_TOOL_USE_EVENT,
             matcher: PRE_TOOL_USE_MATCHER,
             commands: PRE_TOOL_USE_COMMANDS,
             requires: &[],
+            background: false,
         },
         EventBlock {
             event: POST_TOOL_USE_EVENT,
             matcher: POST_TOOL_USE_MATCHER,
             commands: POST_TOOL_USE_COMMANDS,
             requires: &[],
+            background: false,
         },
         EventBlock {
             event: SESSION_START_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: SNAPSHOT_COMMANDS,
             requires: &[],
+            background: false,
         },
         EventBlock {
             event: STOP_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: STOP_COMMANDS,
             requires: SNAPSHOT_COMMANDS,
+            background: false,
         },
     ];
 
