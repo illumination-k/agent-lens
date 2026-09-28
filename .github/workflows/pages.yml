@@ -55,6 +55,9 @@ jobs:
       - name: Generate function graph
         run: pnpm --dir web run generate:graph
 
+      - name: Generate llms.txt references
+        run: pnpm --dir web run generate:llms
+
       - name: Build static site
         run: pnpm --dir web run build
 

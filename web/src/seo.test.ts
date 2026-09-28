@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { FAQ } from "./content";
@@ -146,5 +146,35 @@ describe("public/sitemap.xml", () => {
   it("is the sitemap public/robots.txt points crawlers at", () => {
     const robots = readFileSync(new URL("../public/robots.txt", import.meta.url), "utf8");
     expect(robots).toContain(`Sitemap: ${SITE_URL}/sitemap.xml`);
+  });
+});
+
+describe("public/llms.txt", () => {
+  const llms = readFileSync(new URL("../public/llms.txt", import.meta.url), "utf8");
+  const siteLinks = [...llms.matchAll(/\]\((https:\/\/[^)]+)\)/g)]
+    .map((match) => match[1])
+    .filter((url) => url.startsWith(`${SITE_URL}/`))
+    .map((url) => url.slice(SITE_URL.length + 1));
+  // The references `tools/generate-llms.sh` writes at deploy time are
+  // gitignored, so the ignore list is where a link to one of them is checked.
+  const generated = readFileSync(new URL("../../.gitignore", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith("web/public/"))
+    .map((line) => line.slice("web/public/".length));
+  const routes = ALL_PAGES.map((page) => canonicalUrl(page.path).slice(SITE_URL.length + 1));
+
+  it("opens with the H1 and blockquote summary the llms.txt format requires", () => {
+    expect(llms).toMatch(/^# agent-lens\n\n> \S/);
+  });
+
+  it.each(siteLinks)("links %s to a route, a committed file, or a generated one", (path) => {
+    const committed = existsSync(new URL(`../public/${path}`, import.meta.url));
+    expect(committed || generated.includes(path) || routes.includes(path)).toBe(true);
+  });
+
+  it("links every generated reference", () => {
+    for (const name of ["cli.md", "agent-lens-toml.md", "llms-full.txt"]) {
+      expect(siteLinks).toContain(name);
+    }
   });
 });

@@ -1,0 +1,21 @@
+# agent-lens
+
+> Single-binary Rust CLI that gives coding agents such as Claude Code and Codex a lens for seeing codebases more deeply: hook handlers that surface focused context mid-session, and on-demand analyzers (duplication, complexity, coupling, cohesion, hotspots, change risk, call-graph structure, reachability, over-wide declarations) whose `--format md` output is tuned for LLM context. Supports Rust, TypeScript / JavaScript, Python, and Go.
+
+The two reference documents below are generated from the code at deploy time, so they match the released CLI; prefer them over the README when the two disagree. Start with the "Pick an analyzer by question" table at the top of the CLI reference.
+
+## Docs
+
+- [CLI reference](https://illumination-k.github.io/agent-lens/cli.md): every command, subcommand, and flag, as printed by `agent-lens help --md`
+- [agent-lens.toml schema](https://illumination-k.github.io/agent-lens/agent-lens-toml.md): profile and per-tool override keys for `agent-lens run` and `baseline`, as printed by `agent-lens config schema`
+- [Full reference](https://illumination-k.github.io/agent-lens/llms-full.txt): both documents above in one file
+
+## Install
+
+- [install.sh](https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh): `curl -fsSL https://raw.githubusercontent.com/illumination-k/agent-lens/main/install.sh | bash` installs the latest release binary
+- [Releases](https://github.com/illumination-k/agent-lens/releases): prebuilt binaries per platform
+
+## Optional
+
+- [README](https://raw.githubusercontent.com/illumination-k/agent-lens/main/README.md): narrative overview, language support matrix, and worked examples
+- [Function-graph viewer](https://illumination-k.github.io/agent-lens/analyze/): interactive viewer for `agent-lens analyze function-graph` JSON

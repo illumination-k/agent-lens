@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "generate:llms": "tools/generate-llms.sh",
     "generate:graph": "mkdir -p public && cargo run --manifest-path ../Cargo.toml --locked -p agent-lens -- analyze function-graph .. > public/function-graph.json",
     "preview": "vite preview --outDir dist/client",
     "test": "vitest run",
