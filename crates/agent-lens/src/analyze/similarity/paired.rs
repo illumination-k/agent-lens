@@ -166,28 +166,34 @@ pub(super) fn name_matched_pairs(
         ..PairedCandidates::default()
     };
     for (name, members) in grouped {
-        let before = out.pairs.len();
+        if out.push_group(corpus, &members) {
+            out.keys.push(name);
+        }
+    }
+    out
+}
+
+impl PairedCandidates {
+    /// Emit every cross-file pair among `members` under the next key
+    /// index, counting same-file pairs instead. Returns whether any
+    /// pair was emitted, i.e. whether the caller must record the key.
+    fn push_group(&mut self, corpus: &[OwnedUnit], members: &[usize]) -> bool {
+        let key = self.keys.len();
+        let before = self.pairs.len();
         for (pos, &i) in members.iter().enumerate() {
             for &j in &members[pos + 1..] {
                 let (Some(a), Some(b)) = (corpus.get(i), corpus.get(j)) else {
                     continue;
                 };
                 if a.rel_path == b.rel_path {
-                    out.same_file_pair_count += 1;
-                    continue;
+                    self.same_file_pair_count += 1;
+                } else {
+                    self.pairs.push(PairedCandidate { i, j, key });
                 }
-                out.pairs.push(PairedCandidate {
-                    i,
-                    j,
-                    key: out.keys.len(),
-                });
             }
         }
-        if out.pairs.len() > before {
-            out.keys.push(name);
-        }
+        self.pairs.len() > before
     }
-    out
 }
 
 #[cfg(test)]
