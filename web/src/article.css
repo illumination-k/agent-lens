@@ -1,0 +1,104 @@
+/*
+ * Article pages. Built on the landing palette and spacing scale (`.landing`
+ * tokens), with a narrower reading column and number-aligned tables.
+ */
+
+.article {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: clamp(var(--s7), 7vw, var(--s9)) clamp(var(--s4), 5vw, var(--s6));
+}
+
+.article-head h1 {
+  max-width: 24ch;
+  font-size: clamp(32px, 4.6vw, 50px);
+}
+
+.article .lede {
+  color: var(--muted);
+  font-size: 19px;
+}
+
+.article .lede strong {
+  color: var(--text-hi);
+}
+
+.article section {
+  margin-top: var(--s8);
+}
+
+.article h2 {
+  margin-bottom: var(--s4);
+}
+
+.article ol.steps {
+  margin: 0 0 var(--s4);
+  padding-left: var(--s5);
+}
+
+.article ol.steps li,
+.article ul.findings li {
+  margin-bottom: var(--s3);
+}
+
+.article ul.findings li {
+  border-left: 2px solid var(--accent-soft);
+  padding-left: var(--s4);
+}
+
+.article strong {
+  color: var(--text-hi);
+}
+
+.article .table-scroll {
+  margin: var(--s5) 0;
+  overflow-x: auto;
+}
+
+.article .matrix {
+  font-size: 14px;
+}
+
+.article .matrix th,
+.article .matrix td {
+  padding: var(--s3) var(--s4);
+}
+
+.article .matrix .num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.article .matrix .dim,
+.article .dim {
+  color: var(--muted);
+  font-size: 0.88em;
+  font-weight: 400;
+}
+
+.article .matrix tr.total th,
+.article .matrix tr.total td {
+  border-top: 1px solid var(--line-hi);
+  color: var(--text-hi);
+  font-weight: 650;
+}
+
+.article .speedup {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 140px;
+}
+
+.article .speedup .bar {
+  display: block;
+  height: 8px;
+  max-width: 90px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.article .stats-strip {
+  margin: var(--s6) 0 0;
+}

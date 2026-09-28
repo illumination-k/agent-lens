@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AnalyzeRouteImport } from './routes/analyze'
+import { Route as ArticlesCallGraphAccuracyRouteImport } from './routes/articles.call-graph-accuracy'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -22,31 +23,41 @@ const AnalyzeRoute = AnalyzeRouteImport.update({
   path: '/analyze',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ArticlesCallGraphAccuracyRoute =
+  ArticlesCallGraphAccuracyRouteImport.update({
+    id: '/articles/call-graph-accuracy',
+    path: '/articles/call-graph-accuracy',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/analyze': typeof AnalyzeRoute
+  '/articles/call-graph-accuracy': typeof ArticlesCallGraphAccuracyRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/analyze': typeof AnalyzeRoute
+  '/articles/call-graph-accuracy': typeof ArticlesCallGraphAccuracyRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/analyze': typeof AnalyzeRoute
+  '/articles/call-graph-accuracy': typeof ArticlesCallGraphAccuracyRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/analyze'
+  fullPaths: '/' | '/analyze' | '/articles/call-graph-accuracy'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/analyze'
-  id: '__root__' | '/' | '/analyze'
+  to: '/' | '/analyze' | '/articles/call-graph-accuracy'
+  id: '__root__' | '/' | '/analyze' | '/articles/call-graph-accuracy'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AnalyzeRoute: typeof AnalyzeRoute
+  ArticlesCallGraphAccuracyRoute: typeof ArticlesCallGraphAccuracyRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -65,12 +76,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AnalyzeRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/articles/call-graph-accuracy': {
+      id: '/articles/call-graph-accuracy'
+      path: '/articles/call-graph-accuracy'
+      fullPath: '/articles/call-graph-accuracy'
+      preLoaderRoute: typeof ArticlesCallGraphAccuracyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AnalyzeRoute: AnalyzeRoute,
+  ArticlesCallGraphAccuracyRoute: ArticlesCallGraphAccuracyRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
