@@ -49,23 +49,23 @@
 //! * `schema_version: 2` — `chains`: clusters of candidates whose one
 //!   caller is itself a candidate, with the sink they all fold into.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use serde::Serialize;
 
 use super::call_graph::model::{
-    CallGraphNode, ModuleResolutionSummary, NodeVisibility, Resolution, ResolutionMethod,
+    CallGraphEdge, CallGraphNode, ModuleResolutionSummary, NodeVisibility,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::render_module_confidence;
+use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
 use super::options::analyzer_options;
+use super::raw_references::{RawTarget, identifiers_by_line};
 use super::runner::render_report;
-use super::span_references::{AllowedSpan, SpanReferenceIndex};
-use super::unreachable::identifiers;
+use super::signature_owner::{SignatureOwner, SignatureOwnerCounts};
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
-use std::collections::HashMap;
 
 const SCHEMA_VERSION: u32 = 2;
 
@@ -307,15 +307,8 @@ struct CandidateEntry {
 /// listed?" has an answer in the report itself.
 #[derive(Debug, Default, Serialize)]
 struct Excluded {
-    /// Rust trait `impl` methods and trait default bodies: callers can
-    /// name the trait, and the method must exist to satisfy it.
-    trait_method_count: usize,
-    /// Go methods matching an in-scope interface's method set by name
-    /// and arity: calls can dispatch through the interface.
-    interface_method_count: usize,
-    /// Carries an annotation not on the language's inert list: the
-    /// annotation itself may be a caller.
-    annotated_count: usize,
+    #[serde(flatten)]
+    owned: SignatureOwnerCounts,
     /// Calls itself: the body cannot be inlined into its one external
     /// caller.
     recursive_count: usize,
@@ -496,20 +489,11 @@ struct SingleCallers {
     pool_count: usize,
     excluded: Excluded,
     entries: Vec<CandidateEntry>,
-    /// Parallel to `entries`.
-    targets: Vec<ScanTarget>,
-}
-
-/// What the raw-reference scan may ignore for one candidate: mentions
-/// of the name inside the definition itself and inside every caller the
-/// graph already accounts for (the one production caller, and test
-/// callers — their call sites are the test-seam caveat's evidence, not
-/// a hidden caller).
-struct ScanTarget {
-    name: String,
-    /// `(file, start_line, end_line)` spans whose mentions are
-    /// accounted for.
-    allowed: Vec<AllowedSpan>,
+    /// Parallel to `entries`. Each target's accounted spans are the
+    /// definition and every caller the graph already knows (the one
+    /// production caller, and test callers — their call sites are the
+    /// test-seam caveat's evidence, not a hidden caller).
+    targets: Vec<RawTarget>,
 }
 
 impl SingleCallers {
@@ -519,7 +503,7 @@ impl SingleCallers {
         let inbound = InboundCalls::collect(graph, only_tests);
 
         let mut entries: Vec<CandidateEntry> = Vec::new();
-        let mut targets: Vec<ScanTarget> = Vec::new();
+        let mut targets: Vec<RawTarget> = Vec::new();
         let mut pool_count = 0usize;
         for (idx, node) in graph.nodes.iter().enumerate() {
             if node.is_test && !only_tests {
@@ -539,14 +523,11 @@ impl SingleCallers {
             };
             let caller_node = &graph.nodes[caller_idx];
             entries.push(candidate_entry(node, caller_node, calls, acc));
-
-            let span_of = |n: &CallGraphNode| (n.file.clone(), n.start_line, n.end_line);
-            let mut allowed = vec![span_of(node), span_of(caller_node)];
-            allowed.extend(acc.test_callers.iter().map(|&t| span_of(&graph.nodes[t])));
-            targets.push(ScanTarget {
-                name: node.name.clone(),
-                allowed,
-            });
+            targets.push(RawTarget::new(
+                node,
+                std::iter::once(caller_node)
+                    .chain(acc.test_callers.iter().map(|&t| &graph.nodes[t])),
+            ));
         }
 
         Self {
@@ -574,26 +555,18 @@ impl RawReferences {
     fn run(
         builder: &CallGraphBuilder,
         roots: &AnalyzeRoots,
-        targets: &[ScanTarget],
+        targets: &[RawTarget],
     ) -> Result<Self, AnalyzerError> {
         let mut counts = vec![0usize; targets.len()];
         if targets.is_empty() {
             return Ok(Self { counts });
         }
-        let index = SpanReferenceIndex::new(
-            targets
-                .iter()
-                .enumerate()
-                .map(|(slot, t)| (slot, t.name.as_str(), t.allowed.as_slice())),
-        );
-
+        let index = RawTarget::index(targets);
         builder.visit_source_texts(roots, |file, source| {
             let spans = index.file(file);
-            for (offset, line) in source.lines().enumerate() {
-                for token in identifiers(line) {
-                    for slot in spans.unaccounted(token, offset + 1) {
-                        counts[slot] += 1;
-                    }
+            for (line_no, token) in identifiers_by_line(source) {
+                for slot in spans.unaccounted(token, line_no) {
+                    counts[slot] += 1;
                 }
             }
         })?;
@@ -703,50 +676,33 @@ struct CallsFromCaller {
     fallback_resolved: bool,
 }
 
+impl CallsFromCaller {
+    fn add(&mut self, edge: &CallGraphEdge) {
+        self.call_count += edge.call_count;
+        self.call_lines.extend(&edge.call_lines);
+        self.fallback_resolved |= is_fallback_resolved(edge);
+    }
+}
+
 impl InboundCalls {
     fn collect(graph: &CallGraph, only_tests: bool) -> Self {
-        let index_by_id = graph.node_index_by_id();
         let mut per_node = vec![InboundAccumulator::default(); graph.nodes.len()];
-        for edge in &graph.edges {
-            if edge.resolution == Resolution::Ambiguous {
-                for candidate in &edge.candidates {
-                    if let Some(&to) = index_by_id.get(candidate.as_str()) {
-                        per_node[to].ambiguous_inbound_count += edge.call_count;
-                    }
-                }
-                continue;
+        visit_inbound_edges(graph, |inbound| match inbound {
+            InboundEdge::AmbiguousCandidate { to, edge } => {
+                per_node[to].ambiguous_inbound_count += edge.call_count;
             }
-            if edge.resolution != Resolution::Resolved {
-                continue;
-            }
-            let (Some(from), Some(to)) = (edge.from.as_deref(), edge.to.as_deref()) else {
-                continue;
-            };
-            let (Some(&from), Some(&to)) = (index_by_id.get(from), index_by_id.get(to)) else {
-                continue;
-            };
-            if from == to {
+            InboundEdge::Resolved { from, to, .. } if from == to => {
                 per_node[to].self_recursive = true;
-                continue;
             }
             // Mirrors `analyze hubs`: outside `--only-tests`, a test
             // caller is informational and never a production caller.
-            if graph.nodes[from].is_test && !only_tests {
+            InboundEdge::Resolved { from, to, .. } if graph.nodes[from].is_test && !only_tests => {
                 per_node[to].test_callers.insert(from);
-                continue;
             }
-            let calls = per_node[to].callers.entry(from).or_default();
-            calls.call_count += edge.call_count;
-            calls.call_lines.extend(&edge.call_lines);
-            calls.fallback_resolved |= matches!(
-                edge.resolution_method,
-                Some(
-                    ResolutionMethod::LastSegment
-                        | ResolutionMethod::PathSuffix
-                        | ResolutionMethod::CrateNarrowed
-                )
-            );
-        }
+            InboundEdge::Resolved { from, to, edge } => {
+                per_node[to].callers.entry(from).or_default().add(edge);
+            }
+        });
         for acc in &mut per_node {
             for calls in acc.callers.values_mut() {
                 calls.call_lines.sort_unstable();
@@ -760,18 +716,14 @@ impl InboundCalls {
 /// Why a node is never a candidate, however many callers it has.
 #[derive(Debug, Clone, Copy)]
 enum Exclusion {
-    TraitMethod,
-    InterfaceMethod,
-    Annotated,
+    Owned(SignatureOwner),
     Recursive,
 }
 
 impl Exclusion {
     fn count_slot(self, excluded: &mut Excluded) -> &mut usize {
         match self {
-            Self::TraitMethod => &mut excluded.trait_method_count,
-            Self::InterfaceMethod => &mut excluded.interface_method_count,
-            Self::Annotated => &mut excluded.annotated_count,
+            Self::Owned(owner) => owner.count_slot(&mut excluded.owned),
             Self::Recursive => &mut excluded.recursive_count,
         }
     }
@@ -783,30 +735,11 @@ fn exclusion_of(
     interfaces: &InterfaceIndex,
     inbound: &InboundCalls,
 ) -> Option<Exclusion> {
-    if matches!(
-        node.owner_kind,
-        Some(lens_domain::OwnerKind::TraitImpl | lens_domain::OwnerKind::Trait)
-    ) {
-        return Some(Exclusion::TraitMethod);
-    }
-    let lang = ExportLang::of(node);
-    if lang == Some(ExportLang::Go) && !interfaces.matching(node, ExportLang::Go).is_empty() {
-        return Some(Exclusion::InterfaceMethod);
-    }
-    // A known non-inert annotation may itself be a caller. `None`
-    // (TypeScript, Python: no attribute extraction) is *not* excluded —
-    // those rows already carry the unknown-visibility caveat, and
-    // excluding on "could not tell" would empty both languages.
-    if node.attributes.as_ref().is_some_and(|attributes| {
-        let inert = node
-            .graph_language()
-            .unwrap_or(super::call_graph::model::GraphLanguage::TypeScript)
-            .inert_attribute_names();
-        attributes
-            .iter()
-            .any(|attribute| !inert.contains(attribute))
-    }) {
-        return Some(Exclusion::Annotated);
+    // Nodes without attribute extraction (TypeScript, Python) are not
+    // excluded as annotated; those rows already carry the
+    // unknown-visibility caveat instead.
+    if let Some(owner) = SignatureOwner::of(node, interfaces) {
+        return Some(Exclusion::Owned(owner));
     }
     if inbound.per_node[idx].self_recursive {
         return Some(Exclusion::Recursive);
@@ -884,9 +817,9 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
          {} interface-matching method(s), {} annotated, {} self-recursive.",
         report.thresholds.max_loc,
         report.thresholds.max_cyclomatic,
-        report.excluded.trait_method_count,
-        report.excluded.interface_method_count,
-        report.excluded.annotated_count,
+        report.excluded.owned.trait_method_count,
+        report.excluded.owned.interface_method_count,
+        report.excluded.owned.annotated_count,
         report.excluded.recursive_count,
     );
     if report.candidate_pool_count == 0 {

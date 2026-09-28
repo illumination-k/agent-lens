@@ -44,16 +44,17 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use super::call_graph::model::{
-    CallGraphNode, CallSiteFacts, GraphLanguage, ModuleResolutionSummary, NodeVisibility,
-    Resolution, ResolutionMethod,
+    CallGraphEdge, CallGraphNode, CallSiteFacts, GraphLanguage, ModuleResolutionSummary,
+    NodeVisibility,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::render_module_confidence;
+use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
 use super::options::analyzer_options;
+use super::raw_references::{RawTarget, identifiers_by_line};
 use super::runner::render_report;
-use super::span_references::{AllowedSpan, SpanReferenceIndex};
-use super::unreachable::identifiers;
+use super::signature_owner::{SignatureOwner, SignatureOwnerCounts};
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use lens_domain::ArgumentShape;
 
@@ -303,16 +304,8 @@ struct DeadParameterEntry {
 /// listed?" has an answer in the report itself.
 #[derive(Debug, Default, Serialize)]
 struct Excluded {
-    /// Rust trait `impl` methods and trait default bodies: the trait
-    /// owns the signature.
-    trait_method_count: usize,
-    /// Go methods matching an in-scope interface's method set by name
-    /// and arity: the interface owns the signature.
-    interface_method_count: usize,
-    /// Carries an annotation not on the language's inert list: a
-    /// framework may call it with anything, and often owns the
-    /// signature too.
-    annotated_count: usize,
+    #[serde(flatten)]
+    owned: SignatureOwnerCounts,
     /// Synthetic units (TS closures, harness callbacks): called through
     /// a binding no call-site name reaches.
     synthetic_count: usize,
@@ -384,49 +377,22 @@ struct Report {
 /// Why a node is never a candidate, however its parameters are used.
 #[derive(Debug, Clone, Copy)]
 enum Exclusion {
-    TraitMethod,
-    InterfaceMethod,
-    Annotated,
+    Owned(SignatureOwner),
     Synthetic,
 }
 
 impl Exclusion {
     fn count_slot(self, excluded: &mut Excluded) -> &mut usize {
         match self {
-            Self::TraitMethod => &mut excluded.trait_method_count,
-            Self::InterfaceMethod => &mut excluded.interface_method_count,
-            Self::Annotated => &mut excluded.annotated_count,
+            Self::Owned(owner) => owner.count_slot(&mut excluded.owned),
             Self::Synthetic => &mut excluded.synthetic_count,
         }
     }
 }
 
 fn exclusion_of(node: &CallGraphNode, interfaces: &InterfaceIndex) -> Option<Exclusion> {
-    if matches!(
-        node.owner_kind,
-        Some(lens_domain::OwnerKind::TraitImpl | lens_domain::OwnerKind::Trait)
-    ) {
-        return Some(Exclusion::TraitMethod);
-    }
-    if ExportLang::of(node) == Some(ExportLang::Go)
-        && !interfaces.matching(node, ExportLang::Go).is_empty()
-    {
-        return Some(Exclusion::InterfaceMethod);
-    }
-    // A known non-inert annotation may mean a framework owns both the
-    // signature and the call sites. `None` (TypeScript, Python: no
-    // attribute extraction) is *not* excluded — excluding on "could not
-    // tell" would empty both languages.
-    if node.attributes.as_ref().is_some_and(|attributes| {
-        let inert = node
-            .graph_language()
-            .unwrap_or(GraphLanguage::TypeScript)
-            .inert_attribute_names();
-        attributes
-            .iter()
-            .any(|attribute| !inert.contains(attribute))
-    }) {
-        return Some(Exclusion::Annotated);
+    if let Some(owner) = SignatureOwner::of(node, interfaces) {
+        return Some(Exclusion::Owned(owner));
     }
     // The walker mints `parent::closure#N` / `it#1("…")` names for
     // units no call-site name can reach; their parameters are bound at
@@ -542,47 +508,35 @@ struct InboundSites {
 
 impl InboundSites {
     fn collect(graph: &CallGraph, only_tests: bool) -> Vec<Self> {
-        let index_by_id = graph.node_index_by_id();
         let mut per_node = vec![Self::default(); graph.nodes.len()];
-        for edge in &graph.edges {
-            if edge.resolution == Resolution::Ambiguous {
-                for candidate in &edge.candidates {
-                    if let Some(&to) = index_by_id.get(candidate.as_str()) {
-                        per_node[to].ambiguous_inbound_count += edge.call_count;
-                    }
-                }
-                continue;
+        visit_inbound_edges(graph, |inbound| match inbound {
+            InboundEdge::AmbiguousCandidate { to, edge } => {
+                per_node[to].ambiguous_inbound_count += edge.call_count;
             }
-            if edge.resolution != Resolution::Resolved {
-                continue;
-            }
-            let (Some(from), Some(to)) = (edge.from.as_deref(), edge.to.as_deref()) else {
-                continue;
-            };
-            let (Some(&from), Some(&to)) = (index_by_id.get(from), index_by_id.get(to)) else {
-                continue;
-            };
-            let acc = &mut per_node[to];
             // Mirrors `analyze single-use`: outside `--only-tests`, a
             // test caller is informational, never part of the claim.
-            if graph.nodes[from].is_test && !only_tests {
-                acc.test_callers.insert(from);
-                acc.test.extend(edge.call_sites.iter().cloned());
-                continue;
+            InboundEdge::Resolved { from, to, edge }
+                if graph.nodes[from].is_test && !only_tests =>
+            {
+                per_node[to].add_test(from, edge);
             }
-            acc.production_callers.insert(from);
-            acc.production_call_count += edge.call_count;
-            acc.production.extend(edge.call_sites.iter().cloned());
-            acc.fallback_resolved |= matches!(
-                edge.resolution_method,
-                Some(
-                    ResolutionMethod::LastSegment
-                        | ResolutionMethod::PathSuffix
-                        | ResolutionMethod::CrateNarrowed
-                )
-            );
-        }
+            InboundEdge::Resolved { from, to, edge } => {
+                per_node[to].add_production(from, edge);
+            }
+        });
         per_node
+    }
+
+    fn add_test(&mut self, from: usize, edge: &CallGraphEdge) {
+        self.test_callers.insert(from);
+        self.test.extend(edge.call_sites.iter().cloned());
+    }
+
+    fn add_production(&mut self, from: usize, edge: &CallGraphEdge) {
+        self.production_callers.insert(from);
+        self.production_call_count += edge.call_count;
+        self.production.extend(edge.call_sites.iter().cloned());
+        self.fallback_resolved |= is_fallback_resolved(edge);
     }
 }
 
@@ -699,13 +653,12 @@ struct DeadTarget {
     slot: usize,
 }
 
-/// A raw-reference target: one function with a constant-argument
-/// finding, and the spans whose mentions of its name are accounted for.
-struct RawTarget {
-    name: String,
-    /// `(file, start_line, end_line)` spans of the definition and its
-    /// known callers.
-    allowed: Vec<AllowedSpan>,
+impl DeadTarget {
+    /// Whether `token` at `line_no` is this parameter's name inside its
+    /// function's span.
+    fn mentions(&self, token: &str, line_no: usize) -> bool {
+        self.name == token && (self.start_line..=self.end_line).contains(&line_no)
+    }
 }
 
 /// Everything the source scan cannot compute: candidate rows waiting on
@@ -881,19 +834,14 @@ impl Collected {
         node: &CallGraphNode,
         inbound: &InboundSites,
     ) -> usize {
-        let span_of = |n: &CallGraphNode| (n.file.clone(), n.start_line, n.end_line);
-        let mut allowed = vec![span_of(node)];
-        allowed.extend(
+        self.raw_targets.push(RawTarget::new(
+            node,
             inbound
                 .production_callers
                 .iter()
                 .chain(&inbound.test_callers)
-                .map(|&caller| span_of(&graph.nodes[caller])),
-        );
-        self.raw_targets.push(RawTarget {
-            name: node.name.clone(),
-            allowed,
-        });
+                .map(|&caller| &graph.nodes[caller]),
+        ));
         self.raw_targets.len() - 1
     }
 }
@@ -967,29 +915,19 @@ impl SourceScan {
                 .or_default()
                 .push(target);
         }
-        let raw_index = SpanReferenceIndex::new(
-            raw_targets
-                .iter()
-                .enumerate()
-                .map(|(slot, t)| (slot, t.name.as_str(), t.allowed.as_slice())),
-        );
+        let raw_index = RawTarget::index(raw_targets);
 
         builder.visit_source_texts(roots, |file, source| {
             let dead = dead_by_file.get(file).map_or(&[][..], Vec::as_slice);
             let raw_spans = raw_index.file(file);
-            for (offset, line) in source.lines().enumerate() {
-                let line_no = offset + 1;
-                for token in identifiers(line) {
-                    for target in dead {
-                        if target.name == token
-                            && (target.start_line..=target.end_line).contains(&line_no)
-                        {
-                            dead_counts[target.slot] += 1;
-                        }
+            for (line_no, token) in identifiers_by_line(source) {
+                for target in dead {
+                    if target.mentions(token, line_no) {
+                        dead_counts[target.slot] += 1;
                     }
-                    for slot in raw_spans.unaccounted(token, line_no) {
-                        raw_counts[slot] += 1;
-                    }
+                }
+                for slot in raw_spans.unaccounted(token, line_no) {
+                    raw_counts[slot] += 1;
                 }
             }
         })?;
@@ -1085,9 +1023,9 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
          function(s) without a parameter list, {} nameless slot(s), {} call site(s) that could \
          not be lined up.",
         report.thresholds.min_call_sites,
-        report.excluded.trait_method_count,
-        report.excluded.interface_method_count,
-        report.excluded.annotated_count,
+        report.excluded.owned.trait_method_count,
+        report.excluded.owned.interface_method_count,
+        report.excluded.owned.annotated_count,
         report.excluded.synthetic_count,
         report.audit.missing_signature_count,
         report.audit.unnamed_parameter_count,
