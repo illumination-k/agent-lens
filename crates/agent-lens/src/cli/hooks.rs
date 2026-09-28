@@ -23,7 +23,7 @@
 use std::io::{self, Read};
 
 use agent_hooks::Hook;
-use agent_hooks::claude_code::ClaudeCodeHookInput;
+use agent_hooks::claude_code::{ClaudeCodeHookInput, CommonOutput as _, CwdChangedOutput};
 use agent_hooks::codex::CodexHookInput;
 use agent_lens::hooks::codex::post_tool_use::{
     CodexPostToolUse, FootprintHook as CodexFootprintHook, SimilarityHook as CodexSimilarityHook,
@@ -38,10 +38,13 @@ use agent_lens::hooks::codex::session_start::{
 };
 use agent_lens::hooks::codex::stop::CodexStop;
 use agent_lens::hooks::core::{DeltaHook, HookEnvelope, SessionStartEnvelope, StopEnvelope};
+use agent_lens::hooks::cwd_changed::SnapshotHook as CwdChangedSnapshotHook;
 use agent_lens::hooks::post_tool_use::{
     ClaudeCodePostToolUse, FootprintHook, SimilarityHook, WrapperHook,
 };
-use agent_lens::hooks::pre_tool_use::{ClaudeCodePreToolUse, CohesionHook, ComplexityHook};
+use agent_lens::hooks::pre_tool_use::{
+    ClaudeCodePreToolUse, CohesionHook, ComplexityHook, SnapshotHook as PreToolUseSnapshotHook,
+};
 use agent_lens::hooks::session_start::{
     ClaudeCodeSessionStart, SnapshotHook, SummaryHook as SessionStartSummaryHook,
 };
@@ -49,8 +52,8 @@ use agent_lens::hooks::stop::{ClaudeCodeStop, ClaudeCodeSubagentStop};
 use tracing::error;
 
 use super::args::{
-    CodexPostToolUseCommand, CodexPreToolUseCommand, CodexSessionStartCommand, PostToolUseCommand,
-    PreToolUseCommand, SessionStartCommand, StopCommand,
+    CodexPostToolUseCommand, CodexPreToolUseCommand, CodexSessionStartCommand, CwdChangedCommand,
+    PostToolUseCommand, PreToolUseCommand, SessionStartCommand, StopCommand,
 };
 use super::write_stdout_json;
 
@@ -82,7 +85,20 @@ pub(super) fn run_pre_tool_use(cmd: PreToolUseCommand) -> Result<(), Box<dyn std
         Ok(match cmd {
             PreToolUseCommand::Complexity => ComplexityHook::new().handle(input)?,
             PreToolUseCommand::Cohesion => CohesionHook::new().handle(input)?,
+            PreToolUseCommand::Snapshot => PreToolUseSnapshotHook::new().handle(input)?,
         })
+    })
+}
+
+pub(super) fn run_cwd_changed(cmd: CwdChangedCommand) -> Result<(), Box<dyn std::error::Error>> {
+    run_hook("cwd-changed", CwdChangedOutput::with_system_message, || {
+        let input = expect_event("CwdChanged", |payload| match payload {
+            ClaudeCodeHookInput::CwdChanged(input) => Some(input),
+            _ => None,
+        })?;
+        match cmd {
+            CwdChangedCommand::Snapshot => Ok(CwdChangedSnapshotHook::new().handle(input)?),
+        }
     })
 }
 

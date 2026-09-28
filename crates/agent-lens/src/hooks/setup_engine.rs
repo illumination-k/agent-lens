@@ -35,6 +35,7 @@ pub(crate) const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 pub(crate) const POST_TOOL_USE_EVENT: &str = "PostToolUse";
 pub(crate) const STOP_EVENT: &str = "Stop";
 pub(crate) const SUBAGENT_STOP_EVENT: &str = "SubagentStop";
+pub(crate) const CWD_CHANGED_EVENT: &str = "CwdChanged";
 
 /// Per-event metadata driving the merge loop: which key under `hooks.`
 /// the event lives at, the matcher written for a fresh block, the

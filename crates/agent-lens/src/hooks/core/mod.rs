@@ -18,8 +18,8 @@ pub mod wrapper;
 
 pub use error::{HookError, ReadEditedSourceError};
 pub use runner::{
-    CohesionHook, ComplexityHook, DeltaHook, FootprintHook, HookEnvelope, SessionStartEnvelope,
-    SimilarityHook, SnapshotHook, StopEnvelope, SummaryHook, WrapperHook,
+    CheckpointEnvelope, CohesionHook, ComplexityHook, DeltaHook, FootprintHook, HookEnvelope,
+    SessionStartEnvelope, SimilarityHook, SnapshotHook, StopEnvelope, SummaryHook, WrapperHook,
 };
 
 use std::path::Path;

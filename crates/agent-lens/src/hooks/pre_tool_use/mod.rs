@@ -14,7 +14,9 @@
 
 use agent_hooks::claude_code::{CommonOutput as _, PreToolUseInput, PreToolUseOutput};
 
-use crate::hooks::core::{EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError};
+use crate::hooks::core::{
+    CheckpointEnvelope, EditedSource, HookEnvelope, MissingFilePolicy, ReadEditedSourceError,
+};
 
 /// Claude Code's PreToolUse adapter for the engine-agnostic hook
 /// runner.
@@ -75,13 +77,47 @@ pub(crate) fn prepare_edited_sources(
     )
 }
 
+/// The checkpoint snapshot for the directory of an edit, taken before
+/// the first one there lands: the session's first edit in a worktree it
+/// reached without a `CwdChanged` (a subagent's isolated one, say).
+/// Installed async, so it never delays the edit.
+impl CheckpointEnvelope for ClaudeCodePreToolUse {
+    type Input = PreToolUseInput;
+    type Output = PreToolUseOutput;
+
+    fn cwd(input: &Self::Input) -> &std::path::Path {
+        &input.context.cwd
+    }
+
+    fn session_id(input: &Self::Input) -> &str {
+        &input.context.session_id
+    }
+}
+
+/// Claude Code PreToolUse handler that records the session checkpoint.
+pub type SnapshotHook = crate::hooks::core::SnapshotHook<ClaudeCodePreToolUse>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{claude_hook_context, write_file};
     use agent_hooks::Hook;
     use serde_json::json;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn records_the_checkpoint_snapshot_silently() {
+        crate::hooks::core::runner::session_start_conformance::snapshot_is_recorded_silently::<
+            ClaudeCodePreToolUse,
+            _,
+        >(|cwd: &Path| {
+            payload(
+                cwd.to_path_buf(),
+                "Edit",
+                json!({"file_path": "src/lib.rs"}),
+            )
+        });
+    }
 
     fn payload(cwd: PathBuf, tool_name: &str, tool_input: serde_json::Value) -> PreToolUseInput {
         PreToolUseInput {

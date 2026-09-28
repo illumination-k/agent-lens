@@ -23,6 +23,9 @@ pub(in crate::cli) enum HookCommand {
     /// Handle a `SubagentStop` event.
     #[command(subcommand)]
     SubagentStop(StopCommand),
+    /// Handle a `CwdChanged` event.
+    #[command(subcommand)]
+    CwdChanged(CwdChangedCommand),
     /// Wire `agent-lens`'s hook handlers into a Claude Code
     /// `settings.json`.
     ///
@@ -90,11 +93,22 @@ pub(in crate::cli) enum SessionStartCommand {
     /// per-function cognitive complexity and body hash, its
     /// forwarding-only wrappers, and — from whole-tree runs — the
     /// near-duplicate pairs, the confirmed/likely unreachable functions
-    /// and the call-graph hubs. Writes
-    /// `<repo-root>/target/agent-lens/session-<id>.json` (with a
-    /// `.gitignore` beside it) and injects nothing. A snapshot that
-    /// already exists for the session — a resume or a compaction — is
-    /// kept, so the baseline stays the session's start.
+    /// and the call-graph hubs. Writes one file per session and
+    /// directory under `<git-common-dir>/agent-lens/sessions/<id>/`
+    /// (outside git, `<cwd>/target/agent-lens/`) and injects nothing. A
+    /// snapshot that already exists — a resume or a compaction — is
+    /// kept, so the baseline stays the session's start. A source file
+    /// that turns dirty while it scans is read back from `HEAD`, so it
+    /// can run in the background.
+    Snapshot,
+}
+
+#[derive(Debug, Subcommand)]
+pub(in crate::cli) enum CwdChangedCommand {
+    /// Record the checkpoint snapshot for the directory the session
+    /// just moved to — a worktree it entered, say — as `session-start
+    /// snapshot` does for the one it started in. A no-op once that
+    /// directory has one.
     Snapshot,
 }
 
@@ -117,6 +131,11 @@ pub(in crate::cli) enum PreToolUseCommand {
     /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
     /// extension are ignored silently.
     Cohesion,
+    /// Record the checkpoint snapshot for the session's directory
+    /// before the first edit there lands, unless it has one. Catches a
+    /// directory no `session-start` / `cwd-changed` snapshot covered,
+    /// such as a subagent's isolated worktree. Prints nothing.
+    Snapshot,
 }
 
 #[derive(Debug, Subcommand)]
@@ -281,10 +300,12 @@ pub(in crate::cli) enum CodexSessionStartCommand {
     /// per-function cognitive complexity and body hash, its
     /// forwarding-only wrappers, and — from whole-tree runs — the
     /// near-duplicate pairs, the confirmed/likely unreachable functions
-    /// and the call-graph hubs. Writes
-    /// `<repo-root>/target/agent-lens/session-<id>.json` (with a
-    /// `.gitignore` beside it) and injects nothing. A snapshot that
-    /// already exists for the session — a resume or a compaction — is
-    /// kept, so the baseline stays the session's start.
+    /// and the call-graph hubs. Writes one file per session and
+    /// directory under `<git-common-dir>/agent-lens/sessions/<id>/`
+    /// (outside git, `<cwd>/target/agent-lens/`) and injects nothing. A
+    /// snapshot that already exists — a resume or a compaction — is
+    /// kept, so the baseline stays the session's start. A source file
+    /// that turns dirty while it scans is read back from `HEAD`, so it
+    /// can run in the background.
     Snapshot,
 }

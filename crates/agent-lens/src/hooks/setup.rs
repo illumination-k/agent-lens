@@ -15,8 +15,8 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::hooks::setup_engine::{
-    ConfigFormat, EventBlock, POST_TOOL_USE_EVENT, PRE_TOOL_USE_EVENT, SESSION_START_EVENT,
-    STOP_EVENT, SUBAGENT_STOP_EVENT, SetupError,
+    CWD_CHANGED_EVENT, ConfigFormat, EventBlock, POST_TOOL_USE_EVENT, PRE_TOOL_USE_EVENT,
+    SESSION_START_EVENT, STOP_EVENT, SUBAGENT_STOP_EVENT, SetupError,
 };
 
 const SETTINGS_RELATIVE: &str = ".claude/settings.json";
@@ -70,6 +70,17 @@ pub const CHECKPOINT_MATCHER: &str = "";
 /// reports nothing.
 pub const SNAPSHOT_COMMANDS: &[&str] = &["agent-lens hook session-start snapshot"];
 
+/// Commands the setup writes into their own `hooks.PreToolUse` group,
+/// async: the checkpoint snapshot for a directory the session edits in
+/// without one yet — a subagent's isolated worktree, say. A no-op once
+/// the directory has one.
+pub const PRE_TOOL_USE_SNAPSHOT_COMMANDS: &[&str] = &["agent-lens hook pre-tool-use snapshot"];
+
+/// Commands the setup writes into `hooks.CwdChanged`, async: the
+/// checkpoint snapshot for a directory the session moves to, such as a
+/// worktree it enters. `CwdChanged` takes no matcher.
+pub const CWD_CHANGED_COMMANDS: &[&str] = &["agent-lens hook cwd-changed snapshot"];
+
 /// Commands the setup writes into `hooks.Stop`.
 pub const STOP_COMMANDS: &[&str] = &["agent-lens hook stop delta"];
 
@@ -119,6 +130,20 @@ impl ConfigFormat for ClaudeSettings {
             event: SESSION_START_EVENT,
             matcher: CHECKPOINT_MATCHER,
             commands: SNAPSHOT_COMMANDS,
+            requires: &[],
+            background: true,
+        },
+        EventBlock {
+            event: CWD_CHANGED_EVENT,
+            matcher: CHECKPOINT_MATCHER,
+            commands: CWD_CHANGED_COMMANDS,
+            requires: &[],
+            background: true,
+        },
+        EventBlock {
+            event: PRE_TOOL_USE_EVENT,
+            matcher: PRE_TOOL_USE_MATCHER,
+            commands: PRE_TOOL_USE_SNAPSHOT_COMMANDS,
             requires: &[],
             background: true,
         },
@@ -306,6 +331,8 @@ mod tests {
                 + PRE_TOOL_USE_COMMANDS.len()
                 + POST_TOOL_USE_COMMANDS.len()
                 + SNAPSHOT_COMMANDS.len()
+                + CWD_CHANGED_COMMANDS.len()
+                + PRE_TOOL_USE_SNAPSHOT_COMMANDS.len()
                 + STOP_COMMANDS.len()
                 + SUBAGENT_STOP_COMMANDS.len(),
         );
@@ -327,11 +354,25 @@ mod tests {
                             ],
                         },
                     ],
-                    "PreToolUse": [{
-                        "matcher": PRE_TOOL_USE_MATCHER,
+                    "PreToolUse": [
+                        {
+                            "matcher": PRE_TOOL_USE_MATCHER,
+                            "hooks": [
+                                {"type": "command", "command": "agent-lens hook pre-tool-use complexity"},
+                                {"type": "command", "command": "agent-lens hook pre-tool-use cohesion"},
+                            ],
+                        },
+                        {
+                            "matcher": PRE_TOOL_USE_MATCHER,
+                            "hooks": [
+                                {"type": "command", "command": "agent-lens hook pre-tool-use snapshot", "async": true},
+                            ],
+                        },
+                    ],
+                    "CwdChanged": [{
+                        "matcher": CHECKPOINT_MATCHER,
                         "hooks": [
-                            {"type": "command", "command": "agent-lens hook pre-tool-use complexity"},
-                            {"type": "command", "command": "agent-lens hook pre-tool-use cohesion"},
+                            {"type": "command", "command": "agent-lens hook cwd-changed snapshot", "async": true},
                         ],
                     }],
                     "PostToolUse": [{
@@ -388,6 +429,8 @@ mod tests {
                 "agent-lens hook pre-tool-use cohesion".to_string(),
                 "agent-lens hook post-tool-use footprint".to_string(),
                 "agent-lens hook session-start snapshot".to_string(),
+                "agent-lens hook cwd-changed snapshot".to_string(),
+                "agent-lens hook pre-tool-use snapshot".to_string(),
                 "agent-lens hook stop delta".to_string(),
                 "agent-lens hook subagent-stop delta".to_string(),
             ],
@@ -397,7 +440,11 @@ mod tests {
         assert_eq!(session_start.len(), 2);
         assert_eq!(session_start[0]["matcher"], SESSION_START_MATCHER);
         let pre_tool_use = plan.after["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(
+            pre_tool_use.len(),
+            2,
+            "the reports, then the async snapshot"
+        );
         assert_eq!(pre_tool_use[0]["matcher"], PRE_TOOL_USE_MATCHER);
         let pre_hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
         assert_eq!(pre_hooks.len(), PRE_TOOL_USE_COMMANDS.len());
@@ -430,7 +477,7 @@ mod tests {
         let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(
             pre.len(),
-            2,
+            3,
             "existing PreToolUse entry should still be present"
         );
         assert_eq!(pre[0], existing["hooks"]["PreToolUse"][0]);
@@ -481,6 +528,8 @@ mod tests {
             "agent-lens hook post-tool-use wrapper",
             "agent-lens hook post-tool-use footprint",
             "agent-lens hook session-start snapshot",
+            "agent-lens hook cwd-changed snapshot",
+            "agent-lens hook pre-tool-use snapshot",
             "agent-lens hook stop delta",
             "agent-lens hook subagent-stop delta",
         ]
@@ -512,6 +561,12 @@ mod tests {
                     "hooks": [
                         {"type": "command", "command": "agent-lens hook pre-tool-use complexity --foo"},
                         {"type": "command", "command": "agent-lens hook pre-tool-use cohesion"},
+                        {"type": "command", "command": "agent-lens hook pre-tool-use snapshot"},
+                    ],
+                }],
+                "CwdChanged": [{
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook cwd-changed snapshot", "async": true},
                     ],
                 }],
                 "PostToolUse": [{
@@ -561,7 +616,11 @@ mod tests {
     #[case::only_event(
         &["pre-tool-use"],
         &[],
-        &["agent-lens hook pre-tool-use complexity", "agent-lens hook pre-tool-use cohesion"]
+        &[
+            "agent-lens hook pre-tool-use complexity",
+            "agent-lens hook pre-tool-use cohesion",
+            "agent-lens hook pre-tool-use snapshot",
+        ]
     )]
     #[case::stop_pulls_snapshot(
         &["stop"],
@@ -575,7 +634,7 @@ mod tests {
     )]
     #[case::skip_checkpoint(
         &[],
-        &["session-start:snapshot", "stop", "subagent-stop"],
+        &["session-start:snapshot", "cwd-changed", "pre-tool-use:snapshot", "stop", "subagent-stop"],
         &[
             "agent-lens hook session-start summary",
             "agent-lens hook pre-tool-use complexity",
@@ -612,7 +671,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(&err, SetupError::UnknownHook { known, .. } if known.len() == 9),
+            matches!(&err, SetupError::UnknownHook { known, .. } if known.len() == 11),
             "got {err:?}",
         );
     }
@@ -685,13 +744,20 @@ mod tests {
             vec![
                 "agent-lens hook session-start summary".to_string(),
                 "agent-lens hook session-start snapshot".to_string(),
+                "agent-lens hook cwd-changed snapshot".to_string(),
+                "agent-lens hook pre-tool-use snapshot".to_string(),
                 "agent-lens hook stop delta".to_string(),
                 "agent-lens hook subagent-stop delta".to_string(),
             ],
             "path-qualified pre/post handlers must not be reinstalled",
         );
         let pre = plan.after["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 1, "PreToolUse must not gain a duplicate block");
+        assert_eq!(
+            pre.len(),
+            2,
+            "PreToolUse gains the snapshot group only, not a duplicate of the reports"
+        );
+        assert_eq!(pre[1]["hooks"].as_array().unwrap().len(), 1);
         let post = plan.after["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1, "PostToolUse must not gain a duplicate block");
     }
