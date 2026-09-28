@@ -23,6 +23,7 @@
 //! anything else are dropped on the floor — the cohesion graph only ever
 //! sees in-unit edges.
 
+use crate::parser::RustParseError;
 use std::collections::HashSet;
 
 use lens_domain::{CohesionUnit, CohesionUnitKind, MethodCohesion};
@@ -36,13 +37,6 @@ use syn::{
 
 use crate::attrs::{has_cfg_test, is_test_function};
 use crate::common::{split_guard, type_path_last_ident};
-
-/// Failures produced while extracting cohesion units.
-#[derive(Debug, thiserror::Error)]
-pub enum CohesionError {
-    #[error("failed to parse Rust source: {0}")]
-    Syn(#[from] syn::Error),
-}
 
 /// Placeholder name used for the program-level (file-root) module unit.
 /// Inline `mod foo { ... }` blocks use `foo` as the unit name instead, so
@@ -59,7 +53,7 @@ const MODULE_UNIT_NAME: &str = "<module>";
 /// empty modules, and every form of test scaffolding: `#[cfg(test)]`
 /// modules and `impl` blocks, plus `#[cfg(test)]` / `#[test]` functions
 /// and methods declared inside production ones.
-pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, CohesionError> {
+pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, RustParseError> {
     let file = syn::parse_file(source)?;
     let mut out = Vec::new();
     collect_scope(&file.items, MODULE_UNIT_NAME, &mut out);
@@ -716,13 +710,13 @@ impl ModulePath {
     #[test]
     fn invalid_source_surfaces_parse_error() {
         let err = extract_cohesion_units("fn ??? {").unwrap_err();
-        assert!(matches!(err, CohesionError::Syn(_)));
+        assert!(matches!(err, RustParseError::Syn(_)));
     }
 
     #[test]
     fn cohesion_error_display_includes_inner_message() {
         let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
-        let err = CohesionError::Syn(parse_err);
+        let err = RustParseError::Syn(parse_err);
         let msg = err.to_string();
         assert!(msg.contains("failed to parse Rust source"), "got {msg}");
     }
@@ -731,7 +725,7 @@ impl ModulePath {
     fn cohesion_error_source_is_the_underlying_syn_error() {
         use std::error::Error as _;
         let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
-        let err = CohesionError::Syn(parse_err);
+        let err = RustParseError::Syn(parse_err);
         assert!(err.source().is_some());
     }
 

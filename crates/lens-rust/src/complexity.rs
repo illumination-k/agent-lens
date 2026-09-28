@@ -22,6 +22,7 @@
 //! enclosing function's score. That matches how a reader actually
 //! experiences the code.
 
+use crate::parser::RustParseError;
 use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, HalsteadCounts, qualify};
 
 use crate::common::{WalkOptions, split_guard, walk_fn_items};
@@ -33,15 +34,8 @@ use syn::{
     BinOp, Block, Expr, ExprBinary, ExprForLoop, ExprIf, ExprLoop, ExprMatch, ExprTry, ExprWhile,
 };
 
-/// Failures produced while extracting complexity units.
-#[derive(Debug, thiserror::Error)]
-pub enum ComplexityError {
-    #[error("failed to parse Rust source: {0}")]
-    Syn(#[from] syn::Error),
-}
-
 /// Extract one [`FunctionComplexity`] per function-shaped item in `source`.
-pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, ComplexityError> {
+pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, RustParseError> {
     let file = syn::parse_file(source)?;
     let mut out = Vec::new();
     walk_fn_items(&file.items, WalkOptions::default(), &mut |site| {
@@ -551,7 +545,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn invalid_source_surfaces_parse_error() {
         let err = extract_complexity_units("fn ??? {").unwrap_err();
-        assert!(matches!(err, ComplexityError::Syn(_)));
+        assert!(matches!(err, RustParseError::Syn(_)));
     }
 
     #[test]
@@ -563,7 +557,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn complexity_error_display_includes_inner_message() {
         let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
-        let err = ComplexityError::Syn(parse_err);
+        let err = RustParseError::Syn(parse_err);
         let msg = err.to_string();
         assert!(msg.contains("failed to parse Rust source"), "got {msg}");
     }
@@ -572,7 +566,7 @@ fn add(a: i32, b: i32) -> i32 {
     fn complexity_error_source_is_the_underlying_syn_error() {
         use std::error::Error as _;
         let parse_err = syn::parse_str::<syn::Expr>("fn???").unwrap_err();
-        let err = ComplexityError::Syn(parse_err);
+        let err = RustParseError::Syn(parse_err);
         assert!(err.source().is_some());
     }
 }

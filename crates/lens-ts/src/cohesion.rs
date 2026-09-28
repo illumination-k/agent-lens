@@ -44,13 +44,6 @@ use oxc_syntax::scope::ScopeFlags;
 use crate::parser::{Dialect, TsParseError};
 use crate::walk::FnBody;
 
-/// Failures produced while extracting cohesion units.
-#[derive(Debug, thiserror::Error)]
-pub enum CohesionError {
-    #[error(transparent)]
-    Parse(#[from] TsParseError),
-}
-
 /// Placeholder name used for the program-level (file-root) module unit.
 /// Namespace bodies use the namespace name instead, so this constant
 /// only ever stands in for the file's outermost scope.
@@ -63,15 +56,15 @@ const MODULE_UNIT_NAME: &str = "<module>";
 pub fn extract_cohesion_units(
     source: &str,
     dialect: Dialect,
-) -> Result<Vec<CohesionUnit>, CohesionError> {
+) -> Result<Vec<CohesionUnit>, TsParseError> {
     let alloc = Allocator::default();
     let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
-        return Err(CohesionError::Parse(TsParseError::from_diagnostics(
+        return Err(TsParseError::from_diagnostics(
             ret.diagnostics
                 .iter()
                 .map(|e| e.message.as_ref().to_owned()),
-        )));
+        ));
     }
     let line_index = LineIndex::new(source);
     let mut out = Vec::new();
@@ -981,7 +974,7 @@ class Foo {
     #[test]
     fn invalid_source_surfaces_parse_error() {
         let err = extract_cohesion_units("class ??? {", Dialect::Ts).unwrap_err();
-        assert!(matches!(err, CohesionError::Parse(_)));
+        assert!(matches!(err, TsParseError::Parse { .. }));
     }
 
     #[test]

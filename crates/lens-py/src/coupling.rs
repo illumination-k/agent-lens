@@ -9,34 +9,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lens_domain::{CouplingEdge, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension};
+use lens_domain::{
+    CouplingEdge, CouplingError, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension,
+};
 use ruff_python_ast::visitor::{Visitor, walk_stmt};
 use ruff_python_ast::{Stmt, StmtImport, StmtImportFrom};
-use ruff_python_parser::{ParseError, parse_module};
+use ruff_python_parser::parse_module;
 
 use crate::module_path::module_segments;
-
-/// Failures raised while building module nodes from Python files.
-#[derive(Debug, thiserror::Error)]
-pub enum CouplingError {
-    /// Reading a `.py` file failed.
-    #[error("failed to read {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    /// Parsing a Python file failed.
-    #[error("failed to parse {path:?}: {source}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: ParseError,
-    },
-    /// Root path must be either a Python file or a directory.
-    #[error("unsupported root {path:?}: expected a .py file or directory")]
-    UnsupportedRoot { path: PathBuf },
-}
 
 /// One Python module (file) in the scanned tree.
 #[derive(Debug, Clone)]
@@ -110,10 +90,7 @@ fn parse_one(file: &Path, path: ModulePath) -> Result<PythonModule, CouplingErro
         source,
     })?;
     let parsed = parse_module(&source)
-        .map_err(|source| CouplingError::Parse {
-            path: file.to_path_buf(),
-            source,
-        })?
+        .map_err(|source| CouplingError::parse(file.to_path_buf(), source))?
         .into_syntax();
     Ok(PythonModule {
         path,

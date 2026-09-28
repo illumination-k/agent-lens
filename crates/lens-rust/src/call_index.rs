@@ -102,7 +102,7 @@ pub struct UseAlias {
     pub target: String,
 }
 
-/// Filtering knobs for [`extract_call_sites_with_options`].
+/// Filtering knobs for [`extract_call_shapes_with_module`].
 ///
 /// The default preserves [`extract_call_sites`]'s historical wrapper
 /// behaviour: skip `#[cfg(test)]` blocks so test scaffolding does not
@@ -119,7 +119,7 @@ pub fn extract_call_sites(source: &str) -> Result<Vec<CallSite>, RustParseError>
 }
 
 /// [`extract_call_sites`] with explicit filtering options.
-pub fn extract_call_sites_with_options(
+pub(crate) fn extract_call_sites_with_options(
     source: &str,
     opts: CallIndexOptions,
 ) -> Result<Vec<CallSite>, RustParseError> {
@@ -128,7 +128,7 @@ pub fn extract_call_sites_with_options(
 
 /// [`extract_call_sites_with_options`] with an explicit lexical module
 /// assigned to the file body. Inline modules below it extend that path.
-pub fn extract_call_sites_with_options_and_base_module(
+fn extract_call_sites_with_options_and_base_module(
     source: &str,
     opts: CallIndexOptions,
     base_module: &str,
@@ -139,13 +139,16 @@ pub fn extract_call_sites_with_options_and_base_module(
     Ok(visitor.into_sites())
 }
 
-/// Extract neutral call syntax facts with an explicit lexical base module.
-pub fn extract_call_shapes_with_options_and_base_module(
+/// Extract neutral call syntax facts with `module` as the file's lexical
+/// base module — the Rust counterpart of the other adapters'
+/// `extract_call_shapes_with_module`. `opts` carries the Rust-only
+/// `#[cfg(test)]` filter.
+pub fn extract_call_shapes_with_module(
     source: &str,
+    module: &str,
     opts: CallIndexOptions,
-    base_module: &str,
 ) -> Result<Vec<CallShape>, RustParseError> {
-    extract_call_sites_with_options_and_base_module(source, opts, base_module)
+    extract_call_sites_with_options_and_base_module(source, opts, module)
         .map(|sites| sites.into_iter().map(CallShape::from).collect())
 }
 
@@ -1259,12 +1262,12 @@ mod tests {
         #[case] src: &str,
         #[case] expected: ReceiverExprKind,
     ) {
-        let shapes = extract_call_shapes_with_options_and_base_module(
+        let shapes = extract_call_shapes_with_module(
             src,
+            "crate",
             CallIndexOptions {
                 include_cfg_test_blocks: true,
             },
-            "crate",
         )
         .unwrap();
         let kind = shapes[0]
@@ -1277,12 +1280,12 @@ mod tests {
 
     #[test]
     fn neutral_call_shapes_preserve_callee_path_segments() {
-        let shapes = extract_call_shapes_with_options_and_base_module(
+        let shapes = extract_call_shapes_with_module(
             "fn a(x: T) { crate::other::foo(); x.bar(); }\n",
+            "crate",
             CallIndexOptions {
                 include_cfg_test_blocks: true,
             },
-            "crate",
         )
         .unwrap();
 

@@ -39,26 +39,19 @@ use oxc_ast_visit::Visit;
 use crate::parser::{Dialect, TsParseError};
 use crate::walk::{FnBody, FunctionItem, FunctionVisitor, walk_program};
 
-/// Failures produced while extracting complexity units.
-#[derive(Debug, thiserror::Error)]
-pub enum ComplexityError {
-    #[error(transparent)]
-    Parse(#[from] TsParseError),
-}
-
 /// Extract one [`FunctionComplexity`] per function-shaped item in `source`.
 pub fn extract_complexity_units(
     source: &str,
     dialect: Dialect,
-) -> Result<Vec<FunctionComplexity>, ComplexityError> {
+) -> Result<Vec<FunctionComplexity>, TsParseError> {
     let alloc = Allocator::default();
     let ret = dialect.parse(&alloc, source);
     if !ret.diagnostics.is_empty() {
-        return Err(ComplexityError::Parse(TsParseError::from_diagnostics(
+        return Err(TsParseError::from_diagnostics(
             ret.diagnostics
                 .iter()
                 .map(|e| e.message.as_ref().to_owned()),
-        )));
+        ));
     }
     let line_index = LineIndex::new(source);
     let mut visitor = ComplexityCollector::default();
@@ -720,7 +713,7 @@ function add(a: number, b: number): number {
     #[test]
     fn invalid_source_surfaces_parse_error() {
         let err = extract_complexity_units("function ??? {", Dialect::Ts).unwrap_err();
-        assert!(matches!(err, ComplexityError::Parse(_)));
+        assert!(matches!(err, TsParseError::Parse { .. }));
     }
 
     #[test]

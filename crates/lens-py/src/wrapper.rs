@@ -15,11 +15,12 @@
 //! Pytest-flavoured functions and `unittest.TestCase` methods are
 //! forwarding by design and would only add noise.
 
+use crate::parser::PythonParseError;
 use lens_domain::{LineIndex, WrapperFinding, args_pass_through_by, qualify};
 use ruff_python_ast::{
     Expr, ExprAttribute, ExprCall, Parameters, Stmt, StmtFunctionDef, StmtReturn,
 };
-use ruff_python_parser::{ParseError, parse_module};
+use ruff_python_parser::parse_module;
 
 use crate::walk::walk_module_fns;
 
@@ -47,16 +48,9 @@ const TRIVIAL_UNARY_BUILTIN_ADAPTERS: &[&str] = &[
     "bytearray",
 ];
 
-/// Failures produced while extracting wrappers.
-#[derive(Debug, thiserror::Error)]
-pub enum WrapperError {
-    #[error("failed to parse Python source: {0}")]
-    Parse(#[from] ParseError),
-}
-
 /// Walk the source and return every function whose body is just a
 /// forwarding call.
-pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, WrapperError> {
+pub fn find_wrappers(source: &str) -> Result<Vec<WrapperFinding>, PythonParseError> {
     let module = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
@@ -512,7 +506,7 @@ def sample(x):
     #[test]
     fn invalid_source_surfaces_parse_error() {
         let err = find_wrappers("def !!!(:").unwrap_err();
-        assert!(matches!(err, WrapperError::Parse(_)));
+        assert!(matches!(err, PythonParseError::Parse(_)));
     }
 
     #[test]

@@ -16,7 +16,6 @@ mod attrs;
 mod call_index;
 mod cohesion;
 mod complexity;
-mod context_span;
 mod coupling;
 mod dependence;
 mod harness;
@@ -37,10 +36,9 @@ pub use call_index::{
     ImportContext, extract_call_shapes_with_imports, extract_call_shapes_with_module,
     extract_function_shapes_with_module,
 };
-pub use cohesion::{CohesionError, extract_cohesion_units};
-pub use complexity::{ComplexityError, extract_complexity_units};
-pub use context_span::{ContextSpanError, extract_context_spans};
-pub use coupling::{CouplingError, TsModule, build_module_tree, extract_edges};
+pub use cohesion::extract_cohesion_units;
+pub use complexity::extract_complexity_units;
+pub use coupling::{TsModule, build_module_tree, extract_edges};
 pub use dependence::TsVocabulary;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use module_path::module_segments;

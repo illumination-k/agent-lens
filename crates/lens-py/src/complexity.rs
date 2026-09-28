@@ -22,27 +22,21 @@
 //! code) but are not surfaced as separate units. This mirrors how the
 //! similarity extractor treats `def` bodies as atomic.
 
+use crate::parser::PythonParseError;
 use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, LineIndex, qualify};
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{
     BoolOp, CmpOp, Expr, ExprBoolOp, ExprCall, ExprCompare, ExprIf, ExprUnaryOp, Number, Stmt,
     StmtAssert, StmtFor, StmtFunctionDef, StmtIf, StmtMatch, StmtTry, StmtWhile, StmtWith, UnaryOp,
 };
-use ruff_python_parser::{ParseError, parse_module};
+use ruff_python_parser::parse_module;
 
 use crate::walk::walk_module_fns;
-
-/// Failures produced while extracting complexity units.
-#[derive(Debug, thiserror::Error)]
-pub enum ComplexityError {
-    #[error("failed to parse Python source: {0}")]
-    Parse(#[from] ParseError),
-}
 
 /// Extract one [`FunctionComplexity`] per function-shaped item in
 /// `source`. Methods are reported as `Class::method`; free functions
 /// keep their bare name.
-pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, ComplexityError> {
+pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, PythonParseError> {
     let module = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
@@ -678,7 +672,7 @@ def add(a, b):
     #[test]
     fn invalid_source_surfaces_parse_error() {
         let err = extract_complexity_units("def !!!(:").unwrap_err();
-        assert!(matches!(err, ComplexityError::Parse(_)));
+        assert!(matches!(err, PythonParseError::Parse(_)));
     }
 
     #[test]

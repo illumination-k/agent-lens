@@ -32,6 +32,61 @@
 //! list; this module only knows how to fold it into a report.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+/// Failures raised while a language adapter walks a module tree for
+/// coupling (and context-span) analysis.
+///
+/// Shared by every adapter so callers convert one error type instead of
+/// four isomorphic ones. Adapters use the subset of variants that apply
+/// to them (only Rust resolves `mod foo;` declarations, for example).
+#[derive(Debug, thiserror::Error)]
+pub enum CouplingError {
+    /// Reading a source file (or a directory entry) failed.
+    #[error("failed to read {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The adapter's parser rejected the file's contents.
+    #[error("failed to parse {path:?}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// `mod foo;` was declared but neither `foo.rs` nor `foo/mod.rs` was
+    /// found in the parent directory.
+    #[error(
+        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
+    )]
+    MissingMod {
+        /// Module path of the declaring parent (e.g. `crate::a`).
+        parent: String,
+        /// Identifier as written in `mod <name>;`.
+        name: String,
+        /// Directory that was probed for the missing file.
+        near: PathBuf,
+    },
+    /// The root path is neither a source file of the adapter's language
+    /// nor a directory.
+    #[error("unsupported root {path:?}: expected a source file or directory")]
+    UnsupportedRoot { path: PathBuf },
+}
+
+impl CouplingError {
+    /// Wrap an adapter parse failure for `path`.
+    pub fn parse(
+        path: impl Into<PathBuf>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Parse {
+            path: path.into(),
+            source: Box::new(source),
+        }
+    }
+}
 
 /// Dotted module path (e.g. `crate::analyze::coupling`).
 ///
@@ -631,5 +686,65 @@ mod tests {
         let edges = vec![e("a", "a", "Foo", EdgeKind::Call)];
         let r = compute_report(&mods, edges);
         assert!(r.cycles.is_empty());
+    }
+
+    #[test]
+    fn coupling_error_io_display_includes_path_and_source() {
+        let err = CouplingError::Io {
+            path: PathBuf::from("/tmp/x.rs"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/x.rs"), "got {msg}");
+        assert!(msg.contains("missing"), "got {msg}");
+        assert!(msg.starts_with("failed to read"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_parse_display_includes_path_and_inner() {
+        let parse_err = std::io::Error::other("unexpected token");
+        let err = CouplingError::parse("/tmp/x.rs", parse_err);
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/x.rs"), "got {msg}");
+        assert!(msg.starts_with("failed to parse"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_missing_mod_display_includes_parent_name_and_path() {
+        let err = CouplingError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "ghost".to_owned(),
+            near: PathBuf::from("/tmp/proj"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("crate::ghost"), "got {msg}");
+        assert!(msg.contains("ghost.rs"), "got {msg}");
+        assert!(msg.contains("ghost/mod.rs"), "got {msg}");
+        assert!(msg.contains("/tmp/proj"), "got {msg}");
+    }
+
+    #[test]
+    fn coupling_error_io_and_parse_have_source() {
+        use std::error::Error as _;
+        let io_err = CouplingError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(io_err.source().is_some());
+
+        let parse_err = std::io::Error::other("unexpected token");
+        let parse_err = CouplingError::parse("/tmp/x", parse_err);
+        assert!(parse_err.source().is_some());
+    }
+
+    #[test]
+    fn coupling_error_missing_mod_has_no_source() {
+        use std::error::Error as _;
+        let err = CouplingError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "ghost".to_owned(),
+            near: PathBuf::from("/tmp"),
+        };
+        assert!(err.source().is_none());
     }
 }

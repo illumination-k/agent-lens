@@ -549,20 +549,8 @@ fn extract_function_shapes_uncached(
     source: &str,
     module: &str,
 ) -> Result<Vec<FunctionShape>, AnalyzerError> {
-    match lang {
-        SourceLang::Rust => {
-            lens_rust::extract_function_shapes_with_modules(source, module).map_err(parse_err)
-        }
-        SourceLang::TypeScript(dialect) => {
-            lens_ts::extract_function_shapes_with_module(source, dialect, module).map_err(parse_err)
-        }
-        SourceLang::Python => {
-            lens_py::extract_function_shapes_with_module(source, module).map_err(parse_err)
-        }
-        SourceLang::Go => {
-            lens_golang::extract_function_shapes_with_module(source, module).map_err(parse_err)
-        }
-    }
+    super::dispatch_lens!(lang, source, extract_function_shapes_with_module, module)
+        .map_err(AnalyzerError::Parse)
 }
 
 /// `ts_imports` resolves a TS/JS file's imports; the module path already
@@ -595,12 +583,12 @@ fn extract_call_shapes_uncached(
     ts_imports: Option<&lens_ts::ImportContext<'_>>,
 ) -> Result<Vec<CallShape>, AnalyzerError> {
     match lang {
-        SourceLang::Rust => lens_rust::extract_call_shapes_with_options_and_base_module(
+        SourceLang::Rust => lens_rust::extract_call_shapes_with_module(
             source,
+            module,
             CallIndexOptions {
                 include_cfg_test_blocks,
             },
-            module,
         )
         .map_err(parse_err),
         SourceLang::TypeScript(dialect) => match ts_imports {

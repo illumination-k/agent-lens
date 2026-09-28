@@ -94,10 +94,7 @@ pub enum ContextSpanAnalyzerError {
     },
 }
 
-impl_from_coupling_error!(lens_rust::CouplingError => ContextSpanAnalyzerError, MissingMod);
-impl_from_coupling_error!(lens_ts::CouplingError => ContextSpanAnalyzerError);
-impl_from_coupling_error!(lens_py::CouplingError => ContextSpanAnalyzerError, UnsupportedRoot);
-impl_from_coupling_error!(lens_golang::CouplingError => ContextSpanAnalyzerError, UnsupportedRoot);
+impl_from_coupling_error!(ContextSpanAnalyzerError);
 
 impl From<super::CrateAnalyzerError> for ContextSpanAnalyzerError {
     fn from(value: super::CrateAnalyzerError) -> Self {

@@ -188,27 +188,26 @@ impl SourceLang {
 }
 
 /// Dispatch the per-language lens extractor `$extract` for `$lang` over
-/// `$source`, boxing each adapter's error type into the shared
-/// `Box<dyn Error + Send + Sync>` currency. Every extractor family
-/// (cohesion units, complexity units, wrapper findings, ...) exposes the
-/// same `lens_<lang>::$extract` shape — TypeScript additionally takes its
-/// dialect — so the analyzers and hook cores share this one dispatch
-/// instead of each repeating the four-arm match.
+/// `$source` (plus any trailing `$arg`s), boxing each adapter's error type
+/// into the shared `Box<dyn Error + Send + Sync>` currency. Every
+/// extractor family (cohesion units, complexity units, wrapper findings,
+/// function shapes, ...) exposes the same `lens_<lang>::$extract(source,
+/// args...)` shape — TypeScript additionally takes its dialect right
+/// after `source` — so the analyzers and hook cores share this one
+/// dispatch instead of each repeating the four-arm match.
 macro_rules! dispatch_lens {
-    ($lang:expr, $source:expr, $extract:ident) => {{
+    ($lang:expr, $source:expr, $extract:ident $(, $arg:expr)* $(,)?) => {{
         type BoxedError = ::std::boxed::Box<dyn ::std::error::Error + Send + Sync>;
         match $lang {
-            $crate::analyze::SourceLang::Rust => {
-                ::lens_rust::$extract($source).map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
-            }
+            $crate::analyze::SourceLang::Rust => ::lens_rust::$extract($source $(, $arg)*)
+                .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
             $crate::analyze::SourceLang::TypeScript(dialect) => {
-                ::lens_ts::$extract($source, dialect)
+                ::lens_ts::$extract($source, dialect $(, $arg)*)
                     .map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
             }
-            $crate::analyze::SourceLang::Python => {
-                ::lens_py::$extract($source).map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
-            }
-            $crate::analyze::SourceLang::Go => ::lens_golang::$extract($source)
+            $crate::analyze::SourceLang::Python => ::lens_py::$extract($source $(, $arg)*)
+                .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
+            $crate::analyze::SourceLang::Go => ::lens_golang::$extract($source $(, $arg)*)
                 .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
         }
     }};
@@ -323,10 +322,7 @@ pub enum CrateAnalyzerError {
 
 use error_from::impl_from_coupling_error;
 
-impl_from_coupling_error!(lens_rust::CouplingError => CrateAnalyzerError, MissingMod);
-impl_from_coupling_error!(lens_ts::CouplingError => CrateAnalyzerError);
-impl_from_coupling_error!(lens_py::CouplingError => CrateAnalyzerError, UnsupportedRoot);
-impl_from_coupling_error!(lens_golang::CouplingError => CrateAnalyzerError, UnsupportedRoot);
+impl_from_coupling_error!(CrateAnalyzerError);
 
 #[cfg(test)]
 mod tests {

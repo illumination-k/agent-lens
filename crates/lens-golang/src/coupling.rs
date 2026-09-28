@@ -26,34 +26,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lens_domain::{CouplingEdge, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension};
+use lens_domain::{
+    CouplingEdge, CouplingError, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension,
+};
 use tree_sitter::Node;
 
 use crate::module_path::package_segments;
 use crate::node_text::node_str;
-use crate::parser::{GoParseError, parse_tree, unquote_go_string_literal};
-
-/// Failures raised while building Go package nodes.
-#[derive(Debug, thiserror::Error)]
-pub enum CouplingError {
-    /// Reading a `.go` file (or a directory entry) failed.
-    #[error("failed to read {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    /// Parsing a Go file failed.
-    #[error("failed to parse {path:?}: {source}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: GoParseError,
-    },
-    /// Root path must be either a Go file or a directory.
-    #[error("unsupported root {path:?}: expected a .go file or directory")]
-    UnsupportedRoot { path: PathBuf },
-}
+use crate::parser::{parse_tree, unquote_go_string_literal};
 
 /// One Go package (directory) in the scanned tree.
 #[derive(Debug, Clone)]
@@ -203,10 +183,8 @@ fn parse_imports(file: &Path) -> Result<Vec<String>, CouplingError> {
         path: file.to_path_buf(),
         source,
     })?;
-    let tree = parse_tree(&source).map_err(|source| CouplingError::Parse {
-        path: file.to_path_buf(),
-        source,
-    })?;
+    let tree =
+        parse_tree(&source).map_err(|source| CouplingError::parse(file.to_path_buf(), source))?;
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut cursor = tree.root_node().walk();

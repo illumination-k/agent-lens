@@ -31,6 +31,7 @@
 //! `@unittest.skip*`) are filtered from the module unit for the same
 //! reason.
 
+use crate::parser::PythonParseError;
 use std::collections::HashSet;
 
 use lens_domain::{CohesionUnit, CohesionUnitKind, LineIndex, MethodCohesion};
@@ -40,17 +41,10 @@ use ruff_python_ast::{
     StmtFor, StmtFunctionDef, StmtIf, StmtImport, StmtImportFrom, StmtMatch, StmtReturn, StmtTry,
     StmtWhile, StmtWith,
 };
-use ruff_python_parser::{ParseError, parse_module};
+use ruff_python_parser::parse_module;
 use ruff_text_size::Ranged;
 
 use crate::attrs::{inherits_protocol, is_stub_function, is_test_class, is_test_function};
-
-/// Failures produced while extracting cohesion units.
-#[derive(Debug, thiserror::Error)]
-pub enum CohesionError {
-    #[error("failed to parse Python source: {0}")]
-    Parse(#[from] ParseError),
-}
 
 /// Placeholder name used for the module-level cohesion unit. The CLI
 /// report already prints the file path, so a constant placeholder keeps
@@ -60,7 +54,7 @@ const MODULE_UNIT_NAME: &str = "<module>";
 /// Extract one [`CohesionUnit`] per class in `source` that has at least
 /// one instance method, plus one module-level unit when the file has at
 /// least one top-level production function.
-pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, CohesionError> {
+pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, PythonParseError> {
     let module = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
     let mut out = Vec::new();
@@ -986,7 +980,7 @@ class Service:
     #[test]
     fn invalid_source_surfaces_parse_error() {
         let err = extract_cohesion_units("class !!!:\n").unwrap_err();
-        assert!(matches!(err, CohesionError::Parse(_)));
+        assert!(matches!(err, PythonParseError::Parse(_)));
     }
 
     #[test]
