@@ -454,53 +454,131 @@ impl Report {
         seed: usize,
         depth_limit: usize,
     ) -> ChangedResult {
-        // Reverse BFS over the condensation: every visit is one SCC, so
-        // a call cycle counts as a single hop and depths cannot loop.
-        let visits = bfs(reversed_condensation, &[component_of[seed]]);
-        let mut impacted: Vec<(usize, usize)> = Vec::new();
-        let mut beyond_depth_count = 0usize;
-        for visit in &visits {
-            for &node in &components[visit.node] {
-                if node == seed {
-                    continue;
-                }
-                if visit.depth <= depth_limit {
-                    impacted.push((visit.depth, node));
-                } else {
-                    beyond_depth_count += 1;
-                }
-            }
-        }
-        impacted.sort_unstable();
-
-        let mut by_depth: BTreeMap<usize, DepthBucket> = BTreeMap::new();
-        for &(depth, node) in impacted.iter().filter(|&&(depth, _)| depth >= 1) {
-            let bucket = by_depth.entry(depth).or_insert_with(|| DepthBucket {
-                depth,
-                count: 0,
-                modules: BTreeMap::new(),
-            });
-            bucket.count += 1;
-            *bucket
-                .modules
-                .entry(graph.nodes[node].module.clone())
-                .or_default() += 1;
-        }
-        let depth_count = |depth: usize| by_depth.get(&depth).map_or(0, |bucket| bucket.count);
-        let impact_explosion =
-            depth_count(2) >= EXPLOSION_FLOOR && depth_count(2) >= EXPLOSION_RATIO * depth_count(1);
-
+        let (impacted, beyond_depth_count) = impacted_callers(
+            component_of,
+            components,
+            reversed_condensation,
+            seed,
+            depth_limit,
+        );
+        let by_depth = depth_buckets(graph, &impacted);
+        let impact_explosion = is_impact_explosion(&by_depth);
         let modules_spanned = impacted
             .iter()
             .map(|&(_, node)| graph.nodes[node].module.as_str())
             .collect::<BTreeSet<_>>()
             .len();
-        let reachable_tests: Vec<FunctionRef> = impacted
+        let tests: Vec<usize> = impacted
             .iter()
-            .filter(|&&(_, node)| graph.nodes[node].is_test)
-            .map(|&(_, node)| FunctionRef::from_node(&graph.nodes[node]))
+            .map(|&(_, node)| node)
+            .filter(|&node| graph.nodes[node].is_test)
             .collect();
+        let exclusions = ExclusionCounts::for_impact(graph, seed, &impacted);
 
+        let view = ChangedFunction {
+            function: FunctionRef::from_node(&graph.nodes[seed]),
+            cycle_members: function_refs_except(graph, &components[component_of[seed]], seed),
+            direct_callers: function_refs_except(graph, &reversed[seed], seed),
+            transitive: TransitiveView {
+                by_depth: by_depth.into_values().collect(),
+                total: impacted.len(),
+                modules_spanned,
+            },
+            reachable_tests: tests
+                .iter()
+                .map(|&node| FunctionRef::from_node(&graph.nodes[node]))
+                .collect(),
+            vfi: impacted.len(),
+            beyond_depth_count,
+            impact_explosion,
+            excluded_ambiguous_edge_count: exclusions.ambiguous,
+            unattributed_caller_edge_count: exclusions.unattributed,
+        };
+        ChangedResult {
+            impacted: impacted.iter().map(|&(_, node)| node).collect(),
+            tests,
+            view,
+        }
+    }
+}
+
+/// Transitive callers of `seed` as sorted `(depth, node)` pairs within
+/// `depth_limit`, plus the count of callers found beyond it.
+fn impacted_callers(
+    component_of: &[usize],
+    components: &[Vec<usize>],
+    reversed_condensation: &[Vec<usize>],
+    seed: usize,
+    depth_limit: usize,
+) -> (Vec<(usize, usize)>, usize) {
+    // Reverse BFS over the condensation: every visit is one SCC, so
+    // a call cycle counts as a single hop and depths cannot loop.
+    let visits = bfs(reversed_condensation, &[component_of[seed]]);
+    let callers = visits.iter().flat_map(|visit| {
+        components[visit.node]
+            .iter()
+            .filter(|&&node| node != seed)
+            .map(move |&node| (visit.depth, node))
+    });
+    let mut impacted: Vec<(usize, usize)> = Vec::new();
+    let mut beyond_depth_count = 0usize;
+    for (depth, node) in callers {
+        if depth <= depth_limit {
+            impacted.push((depth, node));
+        } else {
+            beyond_depth_count += 1;
+        }
+    }
+    impacted.sort_unstable();
+    (impacted, beyond_depth_count)
+}
+
+/// Per-depth caller counts folded by module. Depth 0 (the seed's own
+/// call cycle) is left out.
+fn depth_buckets(graph: &CallGraph, impacted: &[(usize, usize)]) -> BTreeMap<usize, DepthBucket> {
+    let mut by_depth: BTreeMap<usize, DepthBucket> = BTreeMap::new();
+    for &(depth, node) in impacted.iter().filter(|&&(depth, _)| depth >= 1) {
+        let bucket = by_depth.entry(depth).or_insert_with(|| DepthBucket {
+            depth,
+            count: 0,
+            modules: BTreeMap::new(),
+        });
+        bucket.count += 1;
+        *bucket
+            .modules
+            .entry(graph.nodes[node].module.clone())
+            .or_default() += 1;
+    }
+    by_depth
+}
+
+fn is_impact_explosion(by_depth: &BTreeMap<usize, DepthBucket>) -> bool {
+    let depth_count = |depth: usize| by_depth.get(&depth).map_or(0, |bucket| bucket.count);
+    depth_count(2) >= EXPLOSION_FLOOR && depth_count(2) >= EXPLOSION_RATIO * depth_count(1)
+}
+
+/// `FunctionRef`s for `nodes`, in order, leaving out `seed` itself.
+fn function_refs_except(graph: &CallGraph, nodes: &[usize], seed: usize) -> Vec<FunctionRef> {
+    nodes
+        .iter()
+        .filter(|&&node| node != seed)
+        .map(|&node| FunctionRef::from_node(&graph.nodes[node]))
+        .collect()
+}
+
+/// Call sites excluded from one seed's impact set, which make its
+/// counts lower bounds.
+#[derive(Default)]
+struct ExclusionCounts {
+    /// Ambiguous edges naming the seed or an impact member as a candidate.
+    ambiguous: usize,
+    /// Resolved edges into the seed or an impact member whose caller
+    /// could not be attributed.
+    unattributed: usize,
+}
+
+impl ExclusionCounts {
+    fn for_impact(graph: &CallGraph, seed: usize, impacted: &[(usize, usize)]) -> Self {
         // Everything a would-be caller could target: the seed plus its
         // capped impact set. Ambiguous edges naming any of these as a
         // candidate are excluded potential callers.
@@ -509,63 +587,25 @@ impl Report {
             .map(|&(_, node)| graph.nodes[node].id.as_str())
             .chain(std::iter::once(graph.nodes[seed].id.as_str()))
             .collect();
-        let mut excluded_ambiguous_edge_count = 0usize;
-        let mut unattributed_caller_edge_count = 0usize;
+        let mut counts = Self::default();
         for edge in &graph.edges {
             match edge.resolution {
                 Resolution::Ambiguous => {
-                    if edge
+                    let names_closed = edge
                         .candidates
                         .iter()
-                        .any(|candidate| closed_ids.contains(candidate.as_str()))
-                    {
-                        excluded_ambiguous_edge_count += 1;
-                    }
+                        .any(|candidate| closed_ids.contains(candidate.as_str()));
+                    counts.ambiguous += usize::from(names_closed);
                 }
                 Resolution::Resolved => {
-                    if edge.from.is_none()
-                        && edge.to.as_deref().is_some_and(|to| closed_ids.contains(to))
-                    {
-                        unattributed_caller_edge_count += 1;
-                    }
+                    let unattributed = edge.from.is_none()
+                        && edge.to.as_deref().is_some_and(|to| closed_ids.contains(to));
+                    counts.unattributed += usize::from(unattributed);
                 }
                 Resolution::Unresolved | Resolution::Anonymous => {}
             }
         }
-
-        let view = ChangedFunction {
-            function: FunctionRef::from_node(&graph.nodes[seed]),
-            cycle_members: components[component_of[seed]]
-                .iter()
-                .filter(|&&node| node != seed)
-                .map(|&node| FunctionRef::from_node(&graph.nodes[node]))
-                .collect(),
-            direct_callers: reversed[seed]
-                .iter()
-                .filter(|&&caller| caller != seed)
-                .map(|&caller| FunctionRef::from_node(&graph.nodes[caller]))
-                .collect(),
-            transitive: TransitiveView {
-                by_depth: by_depth.into_values().collect(),
-                total: impacted.len(),
-                modules_spanned,
-            },
-            reachable_tests,
-            vfi: impacted.len(),
-            beyond_depth_count,
-            impact_explosion,
-            excluded_ambiguous_edge_count,
-            unattributed_caller_edge_count,
-        };
-        ChangedResult {
-            impacted: impacted.iter().map(|&(_, node)| node).collect(),
-            tests: impacted
-                .iter()
-                .filter(|&&(_, node)| graph.nodes[node].is_test)
-                .map(|&(_, node)| node)
-                .collect(),
-            view,
-        }
+        counts
     }
 }
 
