@@ -685,6 +685,17 @@ class Service {
     }
 
     #[test]
+    fn end_line_tracks_the_end_of_a_concise_arrow_body() {
+        let src = "const sum = (xs: number[]): number =>\n    xs.reduce(\n        (a, b) => a + b,\n        0,\n    );\n";
+        let funcs = parse_functions(src);
+        let lines: Vec<_> = funcs
+            .iter()
+            .map(|f| (f.name.as_str(), f.start_line, f.end_line))
+            .collect();
+        assert_eq!(lines, [("sum", 1, 5), ("sum::closure#1", 3, 3)]);
+    }
+
+    #[test]
     fn language_identifier_is_typescript() {
         let parser = TypeScriptParser::new();
         assert_eq!(parser.language(), "typescript");
@@ -731,8 +742,8 @@ class Foo {
     #[test]
     fn extracts_functions_inside_exported_namespace() {
         // `export namespace foo { ... }` wraps the inner namespace in
-        // an `ExportNamedDeclaration` whose `declaration` is the
-        // `Declaration::TSModuleDeclaration` arm of `walk_decl`. The
+        // an `ExportDeclaration` whose `declaration` is the
+        // `Declaration::TSNamespaceDeclaration` arm of `walk_decl`. The
         // top-level `namespace foo` form goes through `walk_stmt` —
         // only `export namespace` reaches the analogous arm in
         // `walk_decl`, so it needs its own coverage.

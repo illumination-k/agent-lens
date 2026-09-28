@@ -70,18 +70,13 @@ impl ExtractContext<'_> {
 }
 
 fn walk_stmt(stmt: &Statement, ctx: &ExtractContext, out: &mut Vec<TypeShape>) {
+    if let Some(decl) = stmt.as_declaration() {
+        walk_decl(decl, decl.span().start, ctx, out);
+        return;
+    }
     match stmt {
-        Statement::TSInterfaceDeclaration(decl) => {
-            out.push(interface_shape(decl, decl.span.start, ctx));
-        }
-        Statement::TSTypeAliasDeclaration(decl) => {
-            out.push(alias_shape(decl, decl.span.start, ctx));
-        }
-        Statement::TSEnumDeclaration(decl) => out.push(enum_shape(decl, decl.span.start, ctx)),
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(decl) = &export.declaration {
-                walk_exported_decl(decl, export.span.start, ctx, out);
-            }
+        Statement::ExportDeclaration(export) => {
+            walk_decl(&export.declaration, export.span.start, ctx, out);
         }
         Statement::ExportDefaultDeclaration(export) => {
             if let ExportDefaultDeclarationKind::TSInterfaceDeclaration(decl) = &export.declaration
@@ -89,50 +84,49 @@ fn walk_stmt(stmt: &Statement, ctx: &ExtractContext, out: &mut Vec<TypeShape>) {
                 out.push(interface_shape(decl, export.span.start, ctx));
             }
         }
-        Statement::TSModuleDeclaration(module) => {
-            if let Some(body) = &module.body {
-                walk_module_body(body, ctx, out);
-            }
-        }
         _ => {}
     }
 }
 
-fn walk_exported_decl(
-    decl: &Declaration,
-    attach: u32,
-    ctx: &ExtractContext,
-    out: &mut Vec<TypeShape>,
-) {
+fn walk_decl(decl: &Declaration, attach: u32, ctx: &ExtractContext, out: &mut Vec<TypeShape>) {
     match decl {
         Declaration::TSInterfaceDeclaration(decl) => out.push(interface_shape(decl, attach, ctx)),
         Declaration::TSTypeAliasDeclaration(decl) => out.push(alias_shape(decl, attach, ctx)),
         Declaration::TSEnumDeclaration(decl) => out.push(enum_shape(decl, attach, ctx)),
-        Declaration::TSModuleDeclaration(module) => {
-            if let Some(body) = &module.body {
-                walk_module_body(body, ctx, out);
-            }
+        Declaration::TSNamespaceDeclaration(namespace) => walk_namespace(namespace, ctx, out),
+        Declaration::TSExternalModuleDeclaration(module) => {
+            walk_module_block(module.body.as_deref(), ctx, out);
+        }
+        Declaration::TSGlobalDeclaration(global) => {
+            walk_module_block(Some(&global.body), ctx, out);
         }
         _ => {}
     }
 }
 
-fn walk_module_body(
-    body: &TSModuleDeclarationBody,
+fn walk_namespace(
+    namespace: &TSNamespaceDeclaration,
     ctx: &ExtractContext,
     out: &mut Vec<TypeShape>,
 ) {
-    match body {
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                walk_stmt(stmt, ctx, out);
-            }
+    match &namespace.body {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            walk_module_block(Some(block), ctx, out)
         }
-        TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-            if let Some(body) = &nested.body {
-                walk_module_body(body, ctx, out);
-            }
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(nested) => {
+            walk_namespace(nested, ctx, out);
         }
+    }
+}
+
+fn walk_module_block(
+    block: Option<&TSModuleBlock>,
+    ctx: &ExtractContext,
+    out: &mut Vec<TypeShape>,
+) {
+    let Some(block) = block else { return };
+    for stmt in &block.body {
+        walk_stmt(stmt, ctx, out);
     }
 }
 
@@ -299,19 +293,14 @@ fn function_member(
 /// only its type survives.
 fn index_member(index: &TSIndexSignature, ctx: &ExtractContext) -> TypeMemberShape {
     let mut type_paths = Vec::new();
-    let keys: Vec<String> = index
-        .parameters
-        .iter()
-        .map(|parameter| {
-            ts_type_paths(&parameter.type_annotation.type_annotation, &mut type_paths);
-            ctx.text(parameter.type_annotation.type_annotation.span())
-        })
-        .collect();
+    let key = &index.parameter.type_annotation.type_annotation;
+    ts_type_paths(key, &mut type_paths);
+    let key_text = ctx.text(key.span());
     ts_type_paths(&index.type_annotation.type_annotation, &mut type_paths);
     let value = ctx.text(index.type_annotation.type_annotation.span());
     TypeMemberShape {
         name: None,
-        type_text: Some(format!("[{}]: {value}", keys.join(", "))),
+        type_text: Some(format!("[{key_text}]: {value}")),
         type_paths,
     }
 }
@@ -538,6 +527,14 @@ export enum Level {
     #[case::exported_namespace(
         "export namespace api {\n    export interface Request { url: string }\n}\n",
         "Request"
+    )]
+    #[case::external_module(
+        "declare module \"pkg\" {\n    interface Options { debug: boolean }\n}\n",
+        "Options"
+    )]
+    #[case::global_augmentation(
+        "declare global {\n    interface Window { debug: boolean }\n}\n",
+        "Window"
     )]
     fn bare_and_exported_declaration_forms_are_extracted(
         #[case] source: &str,

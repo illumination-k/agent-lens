@@ -42,6 +42,7 @@ use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 
 use crate::parser::{Dialect, TsParseError};
+use crate::walk::FnBody;
 
 /// Failures produced while extracting cohesion units.
 #[derive(Debug, thiserror::Error)]
@@ -96,26 +97,18 @@ fn collect_scope(
 }
 
 fn collect_stmt(stmt: &Statement, line_index: &LineIndex, out: &mut Vec<CohesionUnit>) {
+    if let Some(decl) = stmt.as_declaration() {
+        collect_decl(decl, line_index, out);
+        return;
+    }
     match stmt {
-        Statement::ClassDeclaration(c) => {
-            if let Some(unit) = unit_from_class(c, line_index) {
-                out.push(unit);
-            }
-        }
-        Statement::ExportNamedDeclaration(e) => {
-            if let Some(decl) = &e.declaration {
-                collect_decl(decl, line_index, out);
-            }
-        }
+        Statement::ExportDeclaration(e) => collect_decl(&e.declaration, line_index, out),
         Statement::ExportDefaultDeclaration(e) => {
             if let ExportDefaultDeclarationKind::ClassDeclaration(c) = &e.declaration
                 && let Some(unit) = unit_from_class(c, line_index)
             {
                 out.push(unit);
             }
-        }
-        Statement::TSModuleDeclaration(m) => {
-            collect_module_declaration(m, line_index, out);
         }
         _ => {}
     }
@@ -128,9 +121,9 @@ fn collect_decl(decl: &Declaration, line_index: &LineIndex, out: &mut Vec<Cohesi
                 out.push(unit);
             }
         }
-        Declaration::TSModuleDeclaration(m) => {
-            collect_module_declaration(m, line_index, out);
-        }
+        // `declare module "pkg"` and `declare global` are ambient: they
+        // cannot hold an implementation, so they contribute no unit.
+        Declaration::TSNamespaceDeclaration(n) => collect_namespace(n, line_index, out),
         _ => {}
     }
 }
@@ -138,38 +131,19 @@ fn collect_decl(decl: &Declaration, line_index: &LineIndex, out: &mut Vec<Cohesi
 /// Recurse into a `namespace Foo { ... }` declaration. Each nested
 /// namespace becomes its own scope, named after the namespace
 /// identifier — so `namespace A { namespace B { ... } }` produces
-/// module units named `A` and `B`. Falls back to the file-root
-/// placeholder when the body uses an unnamed shape.
-fn collect_module_declaration(
-    decl: &TSModuleDeclaration,
+/// module units named `A` and `B`.
+fn collect_namespace(
+    decl: &TSNamespaceDeclaration,
     line_index: &LineIndex,
     out: &mut Vec<CohesionUnit>,
 ) {
-    let Some(body) = &decl.body else { return };
-    let name = module_decl_name(&decl.id);
-    collect_module_body(body, &name, line_index, out);
-}
-
-fn collect_module_body(
-    body: &TSModuleDeclarationBody,
-    scope_name: &str,
-    line_index: &LineIndex,
-    out: &mut Vec<CohesionUnit>,
-) {
-    match body {
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            collect_scope(&block.body, scope_name, line_index, out);
+    match &decl.body {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            collect_scope(&block.body, decl.id.name.as_str(), line_index, out);
         }
-        TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
-            collect_module_declaration(nested, line_index, out);
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(nested) => {
+            collect_namespace(nested, line_index, out);
         }
-    }
-}
-
-fn module_decl_name(id: &TSModuleDeclarationName) -> String {
-    match id {
-        TSModuleDeclarationName::Identifier(i) => i.name.to_string(),
-        TSModuleDeclarationName::StringLiteral(s) => s.value.to_string(),
     }
 }
 
@@ -310,7 +284,7 @@ struct ModuleFunction<'a> {
     start_line: usize,
     end_line: usize,
     params: &'a FormalParameters<'a>,
-    body: &'a FunctionBody<'a>,
+    body: FnBody<'a>,
 }
 
 /// Build the module unit for a single scope, if any. Returns `None`
@@ -380,10 +354,8 @@ fn push_module_functions_from_stmt<'a>(
                 push_var_function(d, line_index, out);
             }
         }
-        Statement::ExportNamedDeclaration(e) => {
-            if let Some(decl) = &e.declaration {
-                push_module_functions_from_decl(decl, line_index, out);
-            }
+        Statement::ExportDeclaration(e) => {
+            push_module_functions_from_decl(&e.declaration, line_index, out);
         }
         Statement::ExportDefaultDeclaration(e) => {
             if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &e.declaration {
@@ -422,7 +394,7 @@ fn push_function_decl<'a>(
         start_line: line_index.line(func.span.start),
         end_line: line_index.line(body.span.end),
         params: &func.params,
-        body,
+        body: FnBody::Block(body),
     });
 }
 
@@ -441,9 +413,9 @@ fn push_var_function<'a>(
             out.push(ModuleFunction {
                 name,
                 start_line: line_index.line(decl.span.start),
-                end_line: line_index.line(arrow.body.span.end),
+                end_line: line_index.line(FnBody::of_arrow(&arrow.body).end()),
                 params: &arrow.params,
-                body: &arrow.body,
+                body: FnBody::of_arrow(&arrow.body),
             });
         }
         Expression::FunctionExpression(f) => {
@@ -453,7 +425,7 @@ fn push_var_function<'a>(
                     start_line: line_index.line(decl.span.start),
                     end_line: line_index.line(body.span.end),
                     params: &f.params,
-                    body,
+                    body: FnBody::Block(body),
                 });
             }
         }
@@ -481,11 +453,7 @@ fn push_module_fields_from_stmt(stmt: &Statement, out: &mut HashSet<String>) {
                 push_var_field(d, out);
             }
         }
-        Statement::ExportNamedDeclaration(e) => {
-            if let Some(decl) = &e.declaration {
-                push_module_fields_from_decl(decl, out);
-            }
-        }
+        Statement::ExportDeclaration(e) => push_module_fields_from_decl(&e.declaration, out),
         _ => {}
     }
 }
@@ -552,7 +520,7 @@ fn module_function_cohesion(
         calls: Vec::new(),
         in_callee: false,
     };
-    visitor.visit_function_body(func.body);
+    func.body.visit(&mut visitor);
     MethodCohesion::from_refs(
         &func.name,
         func.start_line,
@@ -569,7 +537,7 @@ fn module_function_cohesion(
 /// identifier reference resolves to the enclosing module scope or to a
 /// local binding that would shadow it. We do *not* descend into nested
 /// function bodies — those are independent scopes.
-fn collect_local_names(params: &FormalParameters, body: &FunctionBody) -> HashSet<String> {
+fn collect_local_names(params: &FormalParameters, body: FnBody<'_>) -> HashSet<String> {
     let mut locals = HashSet::new();
     for item in &params.items {
         collect_binding_pattern_names(&item.pattern, &mut locals);
@@ -580,7 +548,7 @@ fn collect_local_names(params: &FormalParameters, body: &FunctionBody) -> HashSe
     let mut walker = LocalNameWalker {
         locals: &mut locals,
     };
-    for stmt in &body.statements {
+    for stmt in body.statements() {
         walker.walk_stmt(stmt);
     }
     locals
@@ -1172,6 +1140,34 @@ namespace inner {
         assert_eq!(module_units.len(), 1);
         assert_eq!(module_units[0].type_name, "inner");
         assert_eq!(module_units[0].components.len(), 1);
+    }
+
+    #[test]
+    fn exported_namespace_gets_its_own_module_unit() {
+        let src = r#"
+export namespace inner {
+    let counter = 0;
+    function bump(): void { counter += 1; }
+    function get(): number { return counter; }
+}
+"#;
+        let units = extract_cohesion_units(src, Dialect::Ts).unwrap();
+        let names: Vec<&str> = units.iter().map(|u| u.type_name.as_str()).collect();
+        assert_eq!(names, ["inner"]);
+        assert_eq!(units[0].components.len(), 1);
+    }
+
+    #[test]
+    fn module_exported_let_and_function_expression_share_a_field() {
+        let src = r#"
+export let counter = 0;
+
+const bump = function (): void { counter += 1; };
+const get = function (): number { return counter; };
+"#;
+        let u = module_unit(src);
+        assert_eq!(u.methods.len(), 2);
+        assert_eq!(u.components.len(), 1);
     }
 
     #[test]

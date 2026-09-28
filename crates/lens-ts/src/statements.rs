@@ -56,7 +56,7 @@ struct SeqCollector<'a> {
 impl FunctionVisitor for SeqCollector<'_> {
     fn on_function(&mut self, item: FunctionItem<'_>) {
         let is_test = crate::parser::is_test_item(&item.name);
-        self.collect_list(&item.name, is_test, &item.body.statements);
+        self.collect_list(&item.name, is_test, item.body.statements());
     }
 }
 

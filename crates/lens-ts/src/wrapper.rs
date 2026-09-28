@@ -18,7 +18,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 
 use crate::parser::{Dialect, TsParseError};
-use crate::walk::{FunctionItem, FunctionVisitor, walk_program};
+use crate::walk::{FnBody, FunctionItem, FunctionVisitor, walk_program};
 
 /// Method names with no arguments that we treat as "no semantic content":
 /// type/borrow coercions and stringification.
@@ -106,13 +106,14 @@ fn analyze_tail(
     })
 }
 
-/// Extract the single tail expression from a function body. Both
-/// block-bodied functions (`return EXPR;` or a bare `EXPR;`) and
-/// expression-bodied arrows (`(x) => f(x)`, which oxc still wraps in a
-/// `FunctionBody` carrying a single `ExpressionStatement`) flow through
-/// here — the two `Statement` variants are disjoint, so a single match
-/// covers both shapes.
-fn single_block_tail<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Expression<'a>> {
+/// Extract the single tail expression from a function body: the
+/// expression of a concise arrow (`(x) => f(x)`), or the lone
+/// `return EXPR;` / bare `EXPR;` of a block body.
+fn single_block_tail<'a>(body: FnBody<'a>) -> Option<&'a Expression<'a>> {
+    let body = match body {
+        FnBody::Expr(expr) => return Some(expr),
+        FnBody::Block(block) => block,
+    };
     let [stmt] = body.statements.as_slice() else {
         return None;
     };
