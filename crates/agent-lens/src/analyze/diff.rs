@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -162,8 +163,8 @@ fn indexed_changed_line_ranges(
     };
     let root = index.repo_root(dir.to_path_buf(), || repo_root_for(dir));
     let root = root.as_ref().clone()?;
-    let map = index.repo_changed_ranges((root.clone(), scope.clone()), || {
-        diff_repository(&root, scope)
+    let Ok(map) = index.memoize_typed((root.clone(), scope.clone()), || {
+        Ok::<_, Infallible>(diff_repository(&root, scope))
     });
     Some(map.get(&abs).cloned().unwrap_or_default())
 }

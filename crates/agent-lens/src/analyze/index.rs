@@ -27,6 +27,7 @@
 //! the scope ends. Entries live for the scope's lifetime, which is one
 //! CLI invocation; nothing is persisted.
 
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::marker::PhantomData;
@@ -37,11 +38,6 @@ use lens_domain::{
     CallShape, FileChurn, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding,
 };
 
-use super::call_graph::{CallGraph, CallGraphBuilder};
-use super::diff::{DiffScope, LineRange};
-use super::module_graph::{GraphPolicy, ModuleGraph};
-use super::path_filter::AnalyzePathFilter;
-use super::roots::AnalyzeRoots;
 use super::{AnalyzerError, SourceLang, dispatch_lens};
 use std::path::PathBuf;
 
@@ -66,20 +62,6 @@ impl SourceKey {
     }
 }
 
-/// Identity of one assembled call graph: the builder's whole
-/// configuration plus the root set it was pointed at. Two analyzers
-/// build the same graph exactly when both halves agree.
-pub(crate) type CallGraphKey = (CallGraphBuilder, AnalyzeRoots);
-
-/// Identity of one assembled module graph: the crate root, the policy it
-/// was built under, and the path filter it was walked with.
-///
-/// The filter is part of the identity because it now shapes the walk, not
-/// just the report: two analyzers in one profile that exclude different
-/// trees do not see the same graph, and sharing one between them would
-/// hand the second whichever exclusion the first happened to run with.
-pub(crate) type ModuleGraphKey = (PathBuf, GraphPolicy, AnalyzePathFilter);
-
 /// The memoized fact tables. One instance lives for one
 /// [`AnalysisIndexScope`]; every table maps an identity key to the
 /// immutable, shared result of the extraction that would otherwise run
@@ -91,14 +73,15 @@ pub struct AnalysisIndex {
     complexity_units: Table<SourceKey, Vec<FunctionComplexity>>,
     wrapper_findings: Table<SourceKey, Vec<WrapperFinding>>,
     interface_shapes: Table<(SourceKey, String), Vec<InterfaceShape>>,
-    call_graphs: Table<CallGraphKey, CallGraph>,
-    module_graphs: Table<ModuleGraphKey, ModuleGraph>,
     /// Enclosing working-tree root per directory (`None`: outside any
     /// repository), so the batch diff resolves each directory once.
     repo_roots: Table<PathBuf, Option<PathBuf>>,
-    /// One whole-repository `git diff` per (root, scope), split into
-    /// per-file changed ranges keyed by canonical absolute path.
-    repo_changed_ranges: Table<(PathBuf, DiffScope), HashMap<PathBuf, Vec<LineRange>>>,
+    /// Tables whose key or value is a type of a module that itself
+    /// consults the index — the assembled call and module graphs, the
+    /// whole-repository diffs — one per `(key, value)` type pair,
+    /// created on first use by [`Self::memoize_typed`]. Erased so the
+    /// index does not depend on the modules it serves.
+    typed: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     /// Per-file commit counts per (repository root, targets, `--since`
     /// window) — `hotspot` and `risk` read the same `git log`.
     churn: Table<(PathBuf, Vec<PathBuf>, Option<String>), Vec<FileChurn>>,
@@ -172,22 +155,6 @@ impl AnalysisIndex {
         self.memoize(&self.interface_shapes, (key, module.to_owned()), compute)
     }
 
-    pub(crate) fn call_graph<E>(
-        &self,
-        key: CallGraphKey,
-        compute: impl FnOnce() -> Result<CallGraph, E>,
-    ) -> Result<Arc<CallGraph>, E> {
-        self.memoize(&self.call_graphs, key, compute)
-    }
-
-    pub(crate) fn module_graph<E>(
-        &self,
-        key: ModuleGraphKey,
-        compute: impl FnOnce() -> Result<ModuleGraph, E>,
-    ) -> Result<Arc<ModuleGraph>, E> {
-        self.memoize(&self.module_graphs, key, compute)
-    }
-
     pub(crate) fn repo_root(
         &self,
         dir: PathBuf,
@@ -196,20 +163,49 @@ impl AnalysisIndex {
         self.memoize_ok(&self.repo_roots, dir, compute)
     }
 
-    pub(crate) fn repo_changed_ranges(
-        &self,
-        key: (PathBuf, DiffScope),
-        compute: impl FnOnce() -> HashMap<PathBuf, Vec<LineRange>>,
-    ) -> Arc<HashMap<PathBuf, Vec<LineRange>>> {
-        self.memoize_ok(&self.repo_changed_ranges, key, compute)
-    }
-
     pub(crate) fn churn<E>(
         &self,
         key: (PathBuf, Vec<PathBuf>, Option<String>),
         compute: impl FnOnce() -> Result<Vec<FileChurn>, E>,
     ) -> Result<Arc<Vec<FileChurn>>, E> {
         self.memoize(&self.churn, key, compute)
+    }
+
+    /// Memoize `compute` in the table for the `(K, V)` type pair — for
+    /// facts whose types live above the index (see `typed`). The
+    /// caller's key type is the table's identity, so each caller should
+    /// key with a type no other caller uses for a different value.
+    pub(crate) fn memoize_typed<K, V, E>(
+        &self,
+        key: K,
+        compute: impl FnOnce() -> Result<V, E>,
+    ) -> Result<Arc<V>, E>
+    where
+        K: Eq + Hash + Send + 'static,
+        V: Send + Sync + 'static,
+    {
+        self.memoize(&self.typed_table::<K, V>(), key, compute)
+    }
+
+    /// The erased table for `(K, V)`, created empty on first use. The
+    /// outer lock is released before the table is consulted, so a
+    /// computation memoized in one typed table can consult another.
+    fn typed_table<K, V>(&self) -> Arc<Table<K, V>>
+    where
+        K: Eq + Hash + Send + 'static,
+        V: Send + Sync + 'static,
+    {
+        let table = Arc::clone(
+            self.typed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(TypeId::of::<Table<K, V>>())
+                .or_insert_with(|| Arc::new(Table::<K, V>::default())),
+        );
+        match table.downcast() {
+            Ok(table) => table,
+            Err(_) => unreachable!("typed tables are keyed by their own TypeId"),
+        }
     }
 
     /// [`Self::memoize`] for computations that cannot fail.
@@ -386,6 +382,8 @@ pub(crate) fn with_installed<R>(index: Option<&Arc<AnalysisIndex>>, f: impl FnOn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyze::call_graph::CallGraphBuilder;
+    use crate::analyze::roots::AnalyzeRoots;
     use crate::analyze::{
         ComplexityAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer, OutputFormat,
         WrapperAnalyzer,

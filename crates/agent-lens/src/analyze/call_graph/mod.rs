@@ -288,8 +288,11 @@ impl CallGraphBuilder {
     /// cloning its node and edge tables; analyzers only ever read it.
     pub(crate) fn build(&self, roots: &AnalyzeRoots) -> Result<Arc<CallGraph>, AnalyzerError> {
         match AnalysisIndex::active() {
+            // Keyed by the builder's whole configuration plus the root
+            // set: two analyzers build the same graph exactly when both
+            // halves agree.
             Some(index) => {
-                index.call_graph((self.clone(), roots.clone()), || self.build_uncached(roots))
+                index.memoize_typed((self.clone(), roots.clone()), || self.build_uncached(roots))
             }
             None => self.build_uncached(roots).map(Arc::new),
         }

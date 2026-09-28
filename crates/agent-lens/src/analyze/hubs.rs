@@ -27,18 +27,18 @@
 //! PageRank importance pass runs a fixed 100 iterations with no
 //! epsilon so scores are bit-stable across runs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 use serde::Serialize;
 
 use super::call_graph::model::{
-    CallGraphNode, ModuleResolutionSummary, Resolution, ResolutionMethod,
+    CallGraphEdge, CallGraphNode, ModuleResolutionSummary, Resolution, ResolutionMethod,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::render_module_confidence;
 use super::options::analyzer_options;
-use super::runner::render_report;
+use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use lens_domain::graph_algo::{
     PAGERANK_DAMPING, PAGERANK_ITERATIONS, pagerank, percentile_buckets,
@@ -110,10 +110,13 @@ impl HubsAnalyzer {
         roots: impl Into<AnalyzeRoots>,
         format: OutputFormat,
     ) -> Result<String, AnalyzerError> {
-        let roots = roots.into();
-        let graph = self.builder.build(&roots)?;
-        let report = Report::build(&roots, &graph, self.only_tests);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_graph_report(
+            &self.builder,
+            roots,
+            format,
+            |roots, graph| Report::build(roots, &graph, self.only_tests),
+            |report| format_markdown(report, self.top),
+        )
     }
 }
 
@@ -324,6 +327,75 @@ struct NodeAccumulator {
     fallback_incoming_call_count: usize,
 }
 
+impl NodeAccumulator {
+    /// Count `call_count` calls exchanged with a node in `other_module`
+    /// as same-module or foreign traffic of a node in `own_module`.
+    fn record_module_traffic(&mut self, own_module: &str, other_module: &str, call_count: usize) {
+        if own_module == other_module {
+            self.same_module_call_count += call_count;
+        } else {
+            *self
+                .foreign_call_counts
+                .entry(other_module.to_owned())
+                .or_default() += call_count;
+        }
+    }
+
+    fn record_incoming_calls(&mut self, call_count: usize, fallback: bool) {
+        if fallback {
+            self.fallback_incoming_call_count += call_count;
+        } else {
+            self.direct_incoming_call_count += call_count;
+        }
+    }
+
+    /// Sort and dedup the node lists so their lengths are degrees.
+    fn finish(&mut self) {
+        for nodes in [
+            &mut self.caller_nodes,
+            &mut self.test_caller_nodes,
+            &mut self.callee_nodes,
+        ] {
+            nodes.sort_unstable();
+            nodes.dedup();
+        }
+    }
+}
+
+/// `(from, to)` node indices of a resolved edge between two distinct
+/// known nodes, or `None` for an edge hub metrics ignore.
+fn resolved_endpoints(
+    edge: &CallGraphEdge,
+    index_by_id: &HashMap<&str, usize>,
+) -> Option<(usize, usize)> {
+    if edge.resolution != Resolution::Resolved {
+        return None;
+    }
+    let from_idx = *index_by_id.get(edge.from.as_deref()?)?;
+    let to_idx = *index_by_id.get(edge.to.as_deref()?)?;
+    // Self-recursion is not hub traffic: it would grant every recursive
+    // function fan_in = fan_out = 1 and a phantom HK score of its own
+    // LOC.
+    (from_idx != to_idx).then_some((from_idx, to_idx))
+}
+
+/// Node indices of the hub candidates, plus the inverse map from node
+/// index to candidate index (`None` for excluded nodes).
+fn candidate_slots(graph: &CallGraph, only_tests: bool) -> (Vec<usize>, Vec<Option<usize>>) {
+    let candidates: Vec<usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| only_tests || !node.is_test)
+        .map(|(idx, _)| idx)
+        .collect();
+    let mut candidate_of: Vec<Option<usize>> = vec![None; graph.nodes.len()];
+    for (candidate_idx, &node_idx) in candidates.iter().enumerate() {
+        candidate_of[node_idx] = Some(candidate_idx);
+    }
+    (candidates, candidate_of)
+}
+
 struct NodeMetrics {
     /// `candidate_of[node_idx]` maps into the candidate-indexed vecs
     /// below, or `None` for excluded (test) nodes.
@@ -334,39 +406,15 @@ struct NodeMetrics {
 
 impl NodeMetrics {
     fn compute(graph: &CallGraph, only_tests: bool) -> Self {
-        let is_candidate = |node: &CallGraphNode| only_tests || !node.is_test;
-        let candidates: Vec<usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| is_candidate(node))
-            .map(|(idx, _)| idx)
-            .collect();
-        let mut candidate_of: Vec<Option<usize>> = vec![None; graph.nodes.len()];
-        for (candidate_idx, &node_idx) in candidates.iter().enumerate() {
-            candidate_of[node_idx] = Some(candidate_idx);
-        }
+        let (candidates, candidate_of) = candidate_slots(graph, only_tests);
         let index_by_id = graph.node_index_by_id();
 
         let mut accumulators = vec![NodeAccumulator::default(); candidates.len()];
         let mut weighted_adjacency: Vec<Vec<(usize, f64)>> = vec![Vec::new(); candidates.len()];
         for edge in &graph.edges {
-            if edge.resolution != Resolution::Resolved {
-                continue;
-            }
-            let (Some(from), Some(to)) = (edge.from.as_deref(), edge.to.as_deref()) else {
+            let Some((from_idx, to_idx)) = resolved_endpoints(edge, &index_by_id) else {
                 continue;
             };
-            let (Some(&from_idx), Some(&to_idx)) = (index_by_id.get(from), index_by_id.get(to))
-            else {
-                continue;
-            };
-            if from_idx == to_idx {
-                // Self-recursion is not hub traffic: it would grant
-                // every recursive function fan_in = fan_out = 1 and a
-                // phantom HK score of its own LOC.
-                continue;
-            }
             let from_node = &graph.nodes[from_idx];
             let to_node = &graph.nodes[to_idx];
 
@@ -386,9 +434,10 @@ impl NodeMetrics {
             else {
                 continue;
             };
-            accumulators[from_candidate].callee_nodes.push(to_idx);
-            accumulators[to_candidate].caller_nodes.push(from_idx);
-
+            let call_count = edge.call_count;
+            let caller = &mut accumulators[from_candidate];
+            caller.callee_nodes.push(to_idx);
+            caller.record_module_traffic(&from_node.module, &to_node.module, call_count);
             let fallback = matches!(
                 edge.resolution_method,
                 Some(
@@ -397,35 +446,15 @@ impl NodeMetrics {
                         | ResolutionMethod::CrateNarrowed
                 )
             );
-            if fallback {
-                accumulators[to_candidate].fallback_incoming_call_count += edge.call_count;
-            } else {
-                accumulators[to_candidate].direct_incoming_call_count += edge.call_count;
-            }
+            let callee = &mut accumulators[to_candidate];
+            callee.caller_nodes.push(from_idx);
+            callee.record_incoming_calls(call_count, fallback);
+            callee.record_module_traffic(&to_node.module, &from_node.module, call_count);
 
-            if from_node.module == to_node.module {
-                accumulators[from_candidate].same_module_call_count += edge.call_count;
-                accumulators[to_candidate].same_module_call_count += edge.call_count;
-            } else {
-                *accumulators[from_candidate]
-                    .foreign_call_counts
-                    .entry(to_node.module.clone())
-                    .or_default() += edge.call_count;
-                *accumulators[to_candidate]
-                    .foreign_call_counts
-                    .entry(from_node.module.clone())
-                    .or_default() += edge.call_count;
-            }
-
-            weighted_adjacency[from_candidate].push((to_candidate, edge.call_count as f64));
+            weighted_adjacency[from_candidate].push((to_candidate, call_count as f64));
         }
         for (accumulator, edges) in accumulators.iter_mut().zip(&mut weighted_adjacency) {
-            accumulator.caller_nodes.sort_unstable();
-            accumulator.caller_nodes.dedup();
-            accumulator.test_caller_nodes.sort_unstable();
-            accumulator.test_caller_nodes.dedup();
-            accumulator.callee_nodes.sort_unstable();
-            accumulator.callee_nodes.dedup();
+            accumulator.finish();
             edges.sort_by_key(|edge| edge.0);
         }
 

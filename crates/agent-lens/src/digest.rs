@@ -506,30 +506,43 @@ fn complexity(report: &Value, base: &Path) -> Extraction {
         let Some(path) = str_of(file, "file") else {
             continue;
         };
-        let mut worst: Option<(u64, &str)> = None;
-        let mut over_floor = 0u64;
-        for function in arr(file, "functions") {
-            let Some(cognitive) = u64_of(function, "cognitive") else {
-                continue;
-            };
-            if cognitive >= COGNITIVE_FLOOR {
-                over_floor += 1;
-            }
-            let name = str_of(function, "name").unwrap_or("?");
-            if worst.is_none_or(|(max, _)| cognitive > max) {
-                worst = Some((cognitive, name));
-            }
+        let Some((cognitive, name, over_floor)) = worst_function(arr(file, "functions")) else {
+            continue;
+        };
+        if cognitive < COGNITIVE_FLOOR {
+            continue;
         }
-        if let Some((cognitive, name)) = worst
-            && cognitive >= COGNITIVE_FLOOR
-        {
-            let mut headline = format!("cognitive {cognitive} (`{name}`)");
-            if over_floor > 1 {
-                let _ = write!(headline, " +{} more ≥{COGNITIVE_FLOOR}", over_floor - 1);
-            }
-            rows.push((cognitive, over_floor, from_base(base, path), headline));
+        let mut headline = format!("cognitive {cognitive} (`{name}`)");
+        if over_floor > 1 {
+            let _ = write!(headline, " +{} more ≥{COGNITIVE_FLOOR}", over_floor - 1);
+        }
+        rows.push((cognitive, over_floor, from_base(base, path), headline));
+    }
+    ranked_by_worst(rows)
+}
+
+/// The first of the most cognitively complex functions, with how many
+/// functions sit at or above the floor.
+fn worst_function(functions: &[Value]) -> Option<(u64, &str, u64)> {
+    let mut worst: Option<(u64, &str)> = None;
+    let mut over_floor = 0u64;
+    for function in functions {
+        let Some(cognitive) = u64_of(function, "cognitive") else {
+            continue;
+        };
+        if cognitive >= COGNITIVE_FLOOR {
+            over_floor += 1;
+        }
+        if worst.is_none_or(|(max, _)| cognitive > max) {
+            worst = Some((cognitive, str_of(function, "name").unwrap_or("?")));
         }
     }
+    worst.map(|(cognitive, name)| (cognitive, name, over_floor))
+}
+
+/// Rows keyed `(worst, count, path, headline)`: worst first, then the
+/// larger count, then path for a stable tie-break.
+fn ranked_by_worst(mut rows: Vec<(u64, u64, PathBuf, String)>) -> Extraction {
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
     Extraction {
         files: rows
@@ -571,14 +584,7 @@ fn cohesion(report: &Value, base: &Path) -> Extraction {
             rows.push((lcom4, split, from_base(base, path), headline));
         }
     }
-    rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    Extraction {
-        files: rows
-            .into_iter()
-            .map(|(_, _, path, headline)| FileFinding { path, headline })
-            .collect(),
-        corpus: Vec::new(),
-    }
+    ranked_by_worst(rows)
 }
 
 /// Clusters are already ranked (max similarity, then size); a file's
@@ -656,17 +662,16 @@ fn wrapper(report: &Value, base: &Path) -> Extraction {
 /// Shared per-file rollup for the entry-list analyzers: count rows per
 /// file and headline the first name — the reports sort strongest-first,
 /// so that first name is the row worth opening.
-fn per_file_rollup(
-    report: &Value,
+fn per_file_rollup<'a>(
+    entries: impl IntoIterator<Item = &'a Value>,
     base: &Path,
-    entries_key: &str,
     first_name: impl Fn(&Value) -> Option<String>,
     singular: &str,
     plural: &str,
 ) -> Extraction {
     let mut order: Vec<PathBuf> = Vec::new();
     let mut per_file: HashMap<PathBuf, (u64, String)> = HashMap::new();
-    for entry in arr(report, entries_key) {
+    for entry in entries {
         let Some(file) = str_of(entry, "file") else {
             continue;
         };
@@ -699,69 +704,44 @@ fn per_file_rollup(
     }
 }
 
+/// [`per_file_rollup`] for entries that name their function by
+/// `qualified_name`, headlined by its last segment.
+fn qualified_rollup<'a>(
+    entries: impl IntoIterator<Item = &'a Value>,
+    base: &Path,
+    singular: &str,
+    plural: &str,
+) -> Extraction {
+    per_file_rollup(
+        entries,
+        base,
+        |entry| str_of(entry, "qualified_name").map(|name| short_name(name).to_owned()),
+        singular,
+        plural,
+    )
+}
+
 /// Inline candidates per file, headlined by the cleanest one.
 fn single_use(report: &Value, base: &Path) -> Extraction {
-    per_file_rollup(
-        report,
-        base,
-        "candidates",
-        |entry| str_of(entry, "qualified_name").map(|name| short_name(name).to_owned()),
-        "inline candidate",
-        "inline candidates",
-    )
+    let candidates = arr(report, "candidates");
+    qualified_rollup(candidates, base, "inline candidate", "inline candidates")
 }
 
 /// Parameter findings per file — constant arguments and dead
 /// parameters folded into one count, headlined by the first row's
 /// function (the lists are already sorted strongest-claim first).
 fn parameters(report: &Value, base: &Path) -> Extraction {
-    let mut order: Vec<PathBuf> = Vec::new();
-    let mut per_file: HashMap<PathBuf, (u64, String)> = HashMap::new();
     let rows = arr(report, "constant_arguments")
         .iter()
         .chain(arr(report, "dead_parameters"));
-    for entry in rows {
-        let Some(file) = str_of(entry, "file") else {
-            continue;
-        };
-        let Some(name) = str_of(entry, "qualified_name").map(|n| short_name(n).to_owned()) else {
-            continue;
-        };
-        let path = from_base(base, file);
-        let slot = per_file.entry(path.clone()).or_insert_with(|| {
-            order.push(path);
-            (0, name)
-        });
-        slot.0 += 1;
-    }
-    let mut rows: Vec<(u64, PathBuf, String)> = order
-        .into_iter()
-        .filter_map(|path| {
-            let (count, first) = per_file.remove(&path)?;
-            let mut headline = format!(
-                "{} (`{first}`",
-                counted(count, "parameter finding", "parameter findings"),
-            );
-            headline.push_str(if count > 1 { ", …)" } else { ")" });
-            Some((count, path, headline))
-        })
-        .collect();
-    rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    Extraction {
-        files: rows
-            .into_iter()
-            .map(|(_, path, headline)| FileFinding { path, headline })
-            .collect(),
-        corpus: Vec::new(),
-    }
+    qualified_rollup(rows, base, "parameter finding", "parameter findings")
 }
 
 /// Single-impl abstractions per file, headlined by the strongest row.
 fn single_impl(report: &Value, base: &Path) -> Extraction {
     per_file_rollup(
-        report,
+        arr(report, "findings"),
         base,
-        "findings",
         |entry| str_of(entry, "display_name").map(str::to_owned),
         "single-impl abstraction",
         "single-impl abstractions",
@@ -770,14 +750,8 @@ fn single_impl(report: &Value, base: &Path) -> Extraction {
 
 /// Test-only findings per file, headlined by the strongest row.
 fn test_only(report: &Value, base: &Path) -> Extraction {
-    per_file_rollup(
-        report,
-        base,
-        "findings",
-        |entry| str_of(entry, "qualified_name").map(|name| short_name(name).to_owned()),
-        "test-only function",
-        "test-only functions",
-    )
+    let findings = arr(report, "findings");
+    qualified_rollup(findings, base, "test-only function", "test-only functions")
 }
 
 /// Foldable tests counted per file, plus the suite-level redundancy
@@ -977,31 +951,9 @@ fn hubs(report: &Value, base: &Path) -> Extraction {
     let mut fragments: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for (key, label) in ROLES {
         for entry in arr(report, key).iter().take(ROLE_CAP) {
-            let Some(file) = str_of(entry, "file") else {
+            let Some((file, fragment)) = hub_fragment(key, label, entry) else {
                 continue;
             };
-            let Some(name) = str_of(entry, "qualified_name") else {
-                continue;
-            };
-            let mut fragment = format!("{label} `{}`", short_name(name));
-            match (key, u64_of(entry, "fan_in"), u64_of(entry, "fan_out")) {
-                ("god_functions", _, Some(fan_out)) => {
-                    let _ = write!(fragment, " (fan-out {fan_out})");
-                }
-                ("load_bearing", Some(fan_in), _) => {
-                    let _ = write!(fragment, " (fan-in {fan_in})");
-                }
-                ("bottlenecks", Some(fan_in), Some(fan_out)) => {
-                    let _ = write!(fragment, " (fan-in {fan_in}, fan-out {fan_out})");
-                }
-                _ => {}
-            }
-            if key == "misplaced"
-                && let Some(dominant) = entry.get("dominant_foreign_module")
-                && let Some(module) = str_of(dominant, "module")
-            {
-                let _ = write!(fragment, " (pulled toward `{module}`)");
-            }
             let path = from_base(base, file);
             if !fragments.contains_key(&path) {
                 order.push(path.clone());
@@ -1013,18 +965,50 @@ fn hubs(report: &Value, base: &Path) -> Extraction {
         files: order
             .into_iter()
             .map(|path| {
-                let mut parts = fragments.remove(&path).unwrap_or_default();
-                let extra = parts.len().saturating_sub(2);
-                parts.truncate(2);
-                let mut headline = parts.join("; ");
-                if extra > 0 {
-                    let _ = write!(headline, "; +{extra} more flagged");
-                }
+                let headline = hub_headline(fragments.remove(&path).unwrap_or_default());
                 FileFinding { path, headline }
             })
             .collect(),
         corpus: Vec::new(),
     }
+}
+
+/// One flagged function's file and fragment, annotated with the fan
+/// figures that earned it its role.
+fn hub_fragment<'a>(key: &str, label: &str, entry: &'a Value) -> Option<(&'a str, String)> {
+    let file = str_of(entry, "file")?;
+    let name = str_of(entry, "qualified_name")?;
+    let mut fragment = format!("{label} `{}`", short_name(name));
+    match (key, u64_of(entry, "fan_in"), u64_of(entry, "fan_out")) {
+        ("god_functions", _, Some(fan_out)) => {
+            let _ = write!(fragment, " (fan-out {fan_out})");
+        }
+        ("load_bearing", Some(fan_in), _) => {
+            let _ = write!(fragment, " (fan-in {fan_in})");
+        }
+        ("bottlenecks", Some(fan_in), Some(fan_out)) => {
+            let _ = write!(fragment, " (fan-in {fan_in}, fan-out {fan_out})");
+        }
+        _ => {}
+    }
+    if key == "misplaced"
+        && let Some(dominant) = entry.get("dominant_foreign_module")
+        && let Some(module) = str_of(dominant, "module")
+    {
+        let _ = write!(fragment, " (pulled toward `{module}`)");
+    }
+    Some((file, fragment))
+}
+
+/// The two most severe fragments, with a count of the rest.
+fn hub_headline(mut parts: Vec<String>) -> String {
+    let extra = parts.len().saturating_sub(2);
+    parts.truncate(2);
+    let mut headline = parts.join("; ");
+    if extra > 0 {
+        let _ = write!(headline, "; +{extra} more flagged");
+    }
+    headline
 }
 
 /// Untested functions folded per file, plus the whole-corpus share.

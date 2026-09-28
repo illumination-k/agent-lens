@@ -687,8 +687,7 @@ fn format_markdown(report: &Report, top: usize) -> String {
     render_summary(&mut out, report);
     render_hidden(&mut out, report, top);
     render_suspect(&mut out, report, top);
-    render_test_pairs(&mut out, report, top);
-    render_no_static_view(&mut out, report, top);
+    render_context_buckets(&mut out, report, top);
     render_module_confidence(
         &mut out,
         &report.modules,
@@ -749,14 +748,55 @@ fn render_pair_cells(pair: &PairView<'_>) -> String {
     )
 }
 
-/// Write a bucket's table header, and its rows through `cells`.
-fn render_pair_table<R>(out: &mut String, rows: &[R], top: usize, cells: impl Fn(&R) -> String) {
-    let _ = writeln!(out, "| {PAIR_COLUMNS} |");
-    let _ = writeln!(out, "| {PAIR_RULE} |");
+/// One bucket's section of the report: a heading, then a capped table.
+struct Section<'a> {
+    /// Everything above the table, headline and prose alike.
+    heading: String,
+    /// What to write under the heading when the bucket has no rows.
+    /// `None` leaves the whole section out instead: a bucket that is
+    /// context rather than a finding earns no space when it is empty.
+    empty: Option<&'a str>,
+    columns: &'a str,
+    rule: &'a str,
+    /// What one row counts, for the overflow line.
+    unit: &'a str,
+}
+
+impl<'a> Section<'a> {
+    /// A section whose table is the shared pair columns and nothing else.
+    fn pairs(heading: String, empty: Option<&'a str>) -> Self {
+        Self {
+            heading,
+            empty,
+            columns: PAIR_COLUMNS,
+            rule: PAIR_RULE,
+            unit: "pair(s)",
+        }
+    }
+}
+
+/// Write a bucket's section, filling its rows through `cells`.
+fn render_section<R>(
+    out: &mut String,
+    section: &Section<'_>,
+    rows: &[R],
+    top: usize,
+    cells: impl Fn(&R) -> String,
+) {
+    if rows.is_empty() {
+        if let Some(empty) = section.empty {
+            let _ = writeln!(out, "{}", section.heading);
+            out.push_str(empty);
+        }
+        return;
+    }
+    let _ = writeln!(out, "{}", section.heading);
+    let _ = writeln!(out, "| {} |", section.columns);
+    let _ = writeln!(out, "| {} |", section.rule);
     for row in rows.iter().take(top) {
         let _ = writeln!(out, "| {} |", cells(row));
     }
-    render_overflow(out, rows.len(), top, "pair(s)");
+    render_overflow(out, rows.len(), top, section.unit);
 }
 
 /// Close a capped table, naming what was left out. Nothing is written
@@ -773,29 +813,29 @@ fn render_overflow(out: &mut String, total: usize, shown: usize, unit: &str) {
 }
 
 fn render_hidden(out: &mut String, report: &Report, top: usize) {
-    let _ = writeln!(
-        out,
-        "\n## Hidden coupling ({} pair(s): co-changed, nothing declares the dependency)\n",
-        report.hidden_coupling.len(),
-    );
-    if report.hidden_coupling.is_empty() {
-        out.push_str(
-            "_Every co-changing pair is either declared, a test pair, or outside the static \
-             view._\n",
-        );
-        return;
-    }
-    let _ = writeln!(out, "| {PAIR_COLUMNS} | static |");
-    let _ = writeln!(out, "| {PAIR_RULE} | --- |");
-    for row in report.hidden_coupling.iter().take(top) {
-        let _ = writeln!(
-            out,
-            "| {} | {} |",
+    let columns = format!("{PAIR_COLUMNS} | static");
+    let rule = format!("{PAIR_RULE} | ---");
+    let section = Section {
+        columns: &columns,
+        rule: &rule,
+        ..Section::pairs(
+            format!(
+                "\n## Hidden coupling ({} pair(s): co-changed, nothing declares the dependency)\n",
+                report.hidden_coupling.len(),
+            ),
+            Some(
+                "_Every co-changing pair is either declared, a test pair, or outside the static \
+                 view._\n",
+            ),
+        )
+    };
+    render_section(out, &section, &report.hidden_coupling, top, |row| {
+        format!(
+            "{} | {}",
             render_pair_cells(&row.pair),
             render_verdict(&row.verdict),
-        );
-    }
-    render_overflow(out, report.hidden_coupling.len(), top, "pair(s)");
+        )
+    });
 }
 
 fn render_verdict(verdict: &StaticVerdict) -> String {
@@ -808,26 +848,24 @@ fn render_verdict(verdict: &StaticVerdict) -> String {
 }
 
 fn render_suspect(out: &mut String, report: &Report, top: usize) {
-    let _ = writeln!(
-        out,
-        "\n## Suspect dependencies ({} edge(s): declared, but the window never moved them \
-         together)\n\n\
-         Weaker than the bucket above, by construction: over one window a stable, correct \
-         dependency and a dead one look the same. Both endpoints changed at least \
-         `--min-support` times here, which is what makes the silence worth a question — is the \
-         edge still load-bearing?\n",
-        report.suspect_dependencies.len(),
-    );
-    if report.suspect_dependencies.is_empty() {
-        out.push_str("_No declared dependency between two files this busy went unexercised._\n");
-        return;
-    }
-    let _ = writeln!(out, "| a | b | edge | dir | co | commits_a | commits_b |");
-    let _ = writeln!(out, "| --- | --- | --- | --- | ---: | ---: | ---: |");
-    for row in report.suspect_dependencies.iter().take(top) {
-        let _ = writeln!(
-            out,
-            "| {} | {} | {} | {} | {} | {} | {} |",
+    let section = Section {
+        heading: format!(
+            "\n## Suspect dependencies ({} edge(s): declared, but the window never moved them \
+             together)\n\n\
+             Weaker than the bucket above, by construction: over one window a stable, correct \
+             dependency and a dead one look the same. Both endpoints changed at least \
+             `--min-support` times here, which is what makes the silence worth a question — is \
+             the edge still load-bearing?\n",
+            report.suspect_dependencies.len(),
+        ),
+        empty: Some("_No declared dependency between two files this busy went unexercised._\n"),
+        columns: "a | b | edge | dir | co | commits_a | commits_b",
+        rule: "--- | --- | --- | --- | ---: | ---: | ---:",
+        unit: "edge(s)",
+    };
+    render_section(out, &section, &report.suspect_dependencies, top, |row| {
+        format!(
+            "{} | {} | {} | {} | {} | {} | {}",
             row.a,
             row.b,
             row.edge,
@@ -835,9 +873,8 @@ fn render_suspect(out: &mut String, report: &Report, top: usize) {
             row.cochanges,
             row.commits_a,
             row.commits_b,
-        );
-    }
-    render_overflow(out, report.suspect_dependencies.len(), top, "edge(s)");
+        )
+    });
 }
 
 fn render_direction(direction: Direction) -> &'static str {
@@ -848,33 +885,31 @@ fn render_direction(direction: Direction) -> &'static str {
     }
 }
 
-fn render_test_pairs(out: &mut String, report: &Report, top: usize) {
-    if report.test_pairs.is_empty() {
-        return;
-    }
-    let _ = writeln!(
-        out,
-        "\n## Test pairs ({} pair(s): coupled by construction, not a finding)\n",
-        report.test_pairs.len(),
+/// The two buckets kept out of hidden and suspect because neither side
+/// can have a static edge by construction. They are context, not
+/// findings, so each is left out entirely when it has no rows.
+fn render_context_buckets(out: &mut String, report: &Report, top: usize) {
+    let test_pairs = Section::pairs(
+        format!(
+            "\n## Test pairs ({} pair(s): coupled by construction, not a finding)\n",
+            report.test_pairs.len(),
+        ),
+        None,
     );
-    render_pair_table(out, &report.test_pairs, top, |row| {
+    render_section(out, &test_pairs, &report.test_pairs, top, |row| {
         render_pair_cells(&row.pair)
     });
-}
-
-fn render_no_static_view(out: &mut String, report: &Report, top: usize) {
-    if report.no_static_view.is_empty() {
-        return;
-    }
-    let _ = writeln!(
-        out,
-        "\n## Outside the static view ({} pair(s): no language backend reads one side)\n\n\
-         Not a missing dependency — there is no static view of these files to miss one. A doc, \
-         a manifest, or a fixture that always moves with a source file is still a real \
-         contract, and the only place it is written down is here.\n",
-        report.no_static_view.len(),
+    let outside = Section::pairs(
+        format!(
+            "\n## Outside the static view ({} pair(s): no language backend reads one side)\n\n\
+             Not a missing dependency — there is no static view of these files to miss one. A \
+             doc, a manifest, or a fixture that always moves with a source file is still a real \
+             contract, and the only place it is written down is here.\n",
+            report.no_static_view.len(),
+        ),
+        None,
     );
-    render_pair_table(out, &report.no_static_view, top, |row| {
+    render_section(out, &outside, &report.no_static_view, top, |row| {
         render_pair_cells(&row.pair)
     });
 }
