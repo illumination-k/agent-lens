@@ -29,10 +29,27 @@
 //! reported at an earlier stop are remembered in the snapshot, so a
 //! caller can tell "new since the last checkpoint" from "still there".
 //!
-//! The snapshot lives at `<repo root>/target/agent-lens/session-<id>.json`
-//! (the working directory stands in for the repo root outside git), with
-//! a `.gitignore` of `*` beside it so it never shows up as an untracked
-//! file in a project that does not ignore `target/` already.
+//! Snapshots live at `<git common dir>/agent-lens/sessions/<id>/<key>.json`,
+//! one per checkout the session stops in (`key` hashes the working
+//! directory). The common dir is shared by every worktree, so a stop in
+//! a worktree the session moved into finds the session it belongs to;
+//! outside git the store is `<cwd>/target/agent-lens/`, with a
+//! `.gitignore` of `*` so it never shows up as an untracked file.
+//!
+//! The baseline is what the tree held when the session started, and git
+//! pins that down better than the disk can:
+//!
+//! * The session-start hook may run in the background, racing the
+//!   agent's first edits. It records `HEAD` and the paths already dirty,
+//!   and a source file that turned dirty while it scanned is read back
+//!   from `HEAD` instead.
+//! * A stop in a checkout with no snapshot — a worktree entered or
+//!   created mid-session — adopts one: `HEAD` as the checkout's reflog
+//!   had it when the session started (for a worktree created later, the
+//!   commit it was created on), checked out into a temporary tree and
+//!   snapshotted there.
+
+mod git;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -54,7 +71,7 @@ use crate::analyze::{
 
 /// Bumped whenever a field changes meaning. A snapshot from another
 /// schema is ignored rather than misread.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Fan-in at or above which an edited function counts as a hub edit.
 const HUB_MIN_FAN_IN: u64 = 5;
@@ -111,6 +128,11 @@ struct Snapshot {
     /// Finding keys an earlier stop already reported.
     #[serde(default)]
     reported: BTreeSet<String>,
+    /// `HEAD` the baseline was read against, when in git.
+    head: Option<String>,
+    /// When the session started, in seconds since the epoch: the moment
+    /// a checkout adopted later is rewound to.
+    started_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,11 +168,53 @@ struct Hub {
 }
 
 /// Where the snapshot for `session_id` lives when the session runs in
-/// `cwd`. The id is reduced to `[A-Za-z0-9_-]` so it cannot name a path
-/// outside the directory.
+/// `cwd`.
 pub fn snapshot_path(cwd: &Path, session_id: &str) -> PathBuf {
-    let root = crate::paths::git_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let id: String = session_id
+    Checkout::open(cwd, session_id).path
+}
+
+/// One working directory of one session: its git view, if any, and
+/// where its snapshot and its siblings' live.
+struct Checkout {
+    repo: Option<git::Repo>,
+    session_dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Checkout {
+    fn open(cwd: &Path, session_id: &str) -> Self {
+        let repo = git::Repo::discover(cwd);
+        let store = repo.as_ref().map_or_else(
+            || cwd.join("target").join("agent-lens"),
+            |r| r.common_dir.join("agent-lens"),
+        );
+        let session_dir = store.join("sessions").join(sanitized(session_id));
+        let where_ = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let key = fnv1a(where_.as_os_str().as_encoded_bytes().iter().copied());
+        Self {
+            path: session_dir.join(format!("{key:016x}.json")),
+            session_dir,
+            repo,
+        }
+    }
+
+    /// When the session started, from the snapshots it took elsewhere.
+    fn session_started_at(&self) -> Option<u64> {
+        std::fs::read_dir(&self.session_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .filter_map(|p| read_snapshot(&p).ok().flatten())
+            .map(|s| s.started_at)
+            .min()
+    }
+}
+
+/// `id` reduced to `[A-Za-z0-9_-]`, so it cannot name a path outside the
+/// store.
+fn sanitized(session_id: &str) -> String {
+    session_id
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -159,10 +223,7 @@ pub fn snapshot_path(cwd: &Path, session_id: &str) -> PathBuf {
                 '_'
             }
         })
-        .collect();
-    root.join("target")
-        .join("agent-lens")
-        .join(format!("session-{id}.json"))
+        .collect()
 }
 
 /// Record the session-start snapshot for `session_id`, unless one
@@ -170,14 +231,68 @@ pub fn snapshot_path(cwd: &Path, session_id: &str) -> PathBuf {
 /// started with. Returns the path written, or `None` when nothing was
 /// written (already present, or no supported source file under `cwd`).
 pub fn take_snapshot(cwd: &Path, session_id: &str) -> Result<Option<PathBuf>, CheckpointError> {
-    let path = snapshot_path(cwd, session_id);
-    if path.exists() {
+    let checkout = Checkout::open(cwd, session_id);
+    if checkout.path.exists() {
         return Ok(None);
     }
+    let started_at = unix_now();
+    let repo = checkout.repo.as_ref();
+    let head = repo.and_then(git::Repo::head);
+    let dirty_at_start = repo.and_then(git::Repo::dirty);
     let _index = AnalysisIndexScope::activate();
-    let current = scan(cwd)?;
-    if current.is_empty() {
+    let mut current = scan(cwd)?;
+    if let (Some(repo), Some(head), Some(before)) = (repo, &head, &dirty_at_start) {
+        undo_edits_since(repo, head, before, &mut current);
+    }
+    let Some(snapshot) = baseline(cwd, cwd, session_id, current, head, started_at) else {
         return Ok(None);
+    };
+    write_snapshot(&checkout.path, &snapshot)?;
+    Ok(Some(checkout.path))
+}
+
+/// Put back what `HEAD` held for every scanned file that turned dirty
+/// after `dirty_at_start` was read — an edit that landed while the
+/// snapshot was scanning — and drop the ones `HEAD` does not have. A
+/// file already dirty at the start is taken as the disk has it.
+fn undo_edits_since(
+    repo: &git::Repo,
+    head: &str,
+    dirty_at_start: &BTreeSet<String>,
+    current: &mut BTreeMap<String, ScannedFile>,
+) {
+    let Some(dirty_now) = repo.dirty() else {
+        return;
+    };
+    for rel in dirty_now.difference(dirty_at_start) {
+        let Some(file) = current.get_mut(rel) else {
+            continue;
+        };
+        match repo.show(head, rel) {
+            Some(source) => {
+                file.hash = fnv1a(source.bytes());
+                file.source = source;
+            }
+            None => {
+                current.remove(rel);
+            }
+        }
+    }
+}
+
+/// Snapshot `current`, the files scanned under `analyzed`, for a session
+/// running in `cwd` (the same directory, or a copy of it at a commit).
+/// `None` when there is no supported source file.
+fn baseline(
+    analyzed: &Path,
+    cwd: &Path,
+    session_id: &str,
+    current: BTreeMap<String, ScannedFile>,
+    head: Option<String>,
+    started_at: u64,
+) -> Option<Snapshot> {
+    if current.is_empty() {
+        return None;
     }
     let files = current
         .into_iter()
@@ -188,19 +303,70 @@ pub fn take_snapshot(cwd: &Path, session_id: &str) -> Result<Option<PathBuf>, Ch
             (rel, state)
         })
         .collect();
-    let snapshot = Snapshot {
+    Some(Snapshot {
         schema_version: SCHEMA_VERSION,
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         session_id: session_id.to_owned(),
         root: cwd.to_path_buf(),
         files,
-        similar_pairs: similar_pairs(cwd, None),
-        unreachable: unreachable_keys(cwd),
-        hubs: hubs(cwd),
+        similar_pairs: similar_pairs(analyzed, None),
+        unreachable: unreachable_keys(analyzed),
+        hubs: hubs(analyzed),
         reported: BTreeSet::new(),
+        head,
+        started_at,
+    })
+}
+
+/// A snapshot for a checkout the session reached without one — a
+/// worktree it entered or created — as the checkout stood when the
+/// session started. Written, so later stops reuse it. `None` when the
+/// session has no snapshot anywhere, or git cannot say where `HEAD` was.
+fn adopt(
+    checkout: &Checkout,
+    cwd: &Path,
+    session_id: &str,
+) -> Result<Option<Snapshot>, CheckpointError> {
+    let Some(repo) = &checkout.repo else {
+        return Ok(None);
     };
-    write_snapshot(&path, &snapshot)?;
-    Ok(Some(path))
+    let Some(started_at) = checkout.session_started_at() else {
+        return Ok(None);
+    };
+    let Some(base) = repo.head_at(started_at) else {
+        warn!(cwd = %cwd.display(), "checkpoint: no reflog to rewind this checkout to the session start");
+        return Ok(None);
+    };
+    let _index = AnalysisIndexScope::activate();
+    let untouched =
+        repo.head().as_deref() == Some(base.as_str()) && repo.dirty().is_some_and(|d| d.is_empty());
+    let snapshot = if untouched {
+        baseline(cwd, cwd, session_id, scan(cwd)?, Some(base), started_at)
+    } else {
+        let Some(tree) = git::Materialized::new(repo, &base) else {
+            warn!(cwd = %cwd.display(), %base, "checkpoint: cannot check out the session-start tree");
+            return Ok(None);
+        };
+        baseline(
+            tree.cwd(),
+            cwd,
+            session_id,
+            scan(tree.cwd())?,
+            Some(base),
+            started_at,
+        )
+    };
+    let Some(snapshot) = snapshot else {
+        return Ok(None);
+    };
+    write_snapshot(&checkout.path, &snapshot)?;
+    Ok(Some(snapshot))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// What a stop found.
@@ -216,8 +382,13 @@ pub struct Delta {
 /// regressions, or `None` when there are none — or no snapshot to
 /// compare against. Remembers what it reported in the snapshot.
 pub fn session_delta(cwd: &Path, session_id: &str) -> Result<Option<Delta>, CheckpointError> {
-    let path = snapshot_path(cwd, session_id);
-    let Some(mut snapshot) = read_snapshot(&path)? else {
+    let checkout = Checkout::open(cwd, session_id);
+    let path = &checkout.path;
+    let found = match read_snapshot(path)? {
+        Some(snapshot) => Some(snapshot),
+        None => adopt(&checkout, cwd, session_id)?,
+    };
+    let Some(mut snapshot) = found else {
         return Ok(None);
     };
     let _index = AnalysisIndexScope::activate();
@@ -275,7 +446,7 @@ pub fn session_delta(cwd: &Path, session_id: &str) -> Result<Option<Delta>, Chec
     let new_findings = keys.difference(&snapshot.reported).count();
     let report = findings.render(changed.len() + deleted.len(), edits.touched, new_findings);
     snapshot.reported.extend(keys);
-    write_snapshot(&path, &snapshot)?;
+    write_snapshot(path, &snapshot)?;
     Ok(Some(Delta {
         report,
         new_findings,
@@ -910,15 +1081,29 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
     }
 
     #[test]
-    fn snapshot_path_is_under_the_repo_root_and_sanitized() {
+    fn snapshot_path_is_in_the_git_dir_and_sanitized() {
         let dir = repo();
-        let nested = dir.path().join("src");
-        let path = snapshot_path(&nested, "../../etc/pass wd");
+        let path = snapshot_path(&dir.path().join("src"), "../../etc/pass wd");
+        let session_dir = path.parent().unwrap();
         assert_eq!(
-            path,
+            session_dir,
             dir.path()
-                .join("target/agent-lens/session-______etc_pass_wd.json")
+                .canonicalize()
+                .unwrap()
+                .join(".git/agent-lens/sessions/______etc_pass_wd")
         );
+        assert_ne!(
+            path,
+            snapshot_path(dir.path(), "../../etc/pass wd"),
+            "one snapshot per working directory"
+        );
+    }
+
+    #[test]
+    fn outside_git_the_snapshot_lives_under_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = snapshot_path(dir.path(), "s");
+        assert!(path.starts_with(dir.path().join("target/agent-lens/sessions/s")));
     }
 
     #[test]
@@ -944,7 +1129,8 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, [".gitignore", "session-s.json"]);
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(names, [".gitignore".to_owned(), file]);
     }
 
     #[test]
@@ -962,6 +1148,8 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
             unreachable: None,
             hubs: None,
             reported: BTreeSet::new(),
+            head: None,
+            started_at: 0,
         };
         assert!(matches!(
             write_snapshot(&path, &snapshot),
@@ -1077,11 +1265,110 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(
             &path,
-            text.replace("\"schema_version\":1", "\"schema_version\":99"),
+            text.replace("\"schema_version\":2", "\"schema_version\":99"),
         )
         .unwrap();
         write_file(dir.path(), "src/lib.rs", &after());
         assert_eq!(session_delta(dir.path(), "s").unwrap(), None);
+    }
+
+    fn committed_repo() -> tempfile::TempDir {
+        let dir = repo();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "base"]);
+        dir
+    }
+
+    /// A worktree of `dir` on a new branch, outside it so neither scan
+    /// sees the other.
+    fn worktree(dir: &Path) -> tempfile::TempDir {
+        let wt = tempfile::tempdir().unwrap();
+        let path = wt.path().join("wt");
+        run_git(
+            dir,
+            &["worktree", "add", "-q", "-b", "wt", path.to_str().unwrap()],
+        );
+        wt
+    }
+
+    #[test]
+    fn an_edit_racing_the_snapshot_is_read_back_from_head() {
+        let dir = committed_repo();
+        let repo = git::Repo::discover(dir.path()).unwrap();
+        let head = repo.head().unwrap();
+        let at_start = repo.dirty().unwrap();
+        write_file(dir.path(), "src/lib.rs", &after());
+        write_file(dir.path(), "src/new.rs", "pub fn n() {}\n");
+        let mut current = scan(dir.path()).unwrap();
+        undo_edits_since(&repo, &head, &at_start, &mut current);
+        assert_eq!(current["src/lib.rs"].source, BEFORE);
+        assert_eq!(current["src/lib.rs"].hash, fnv1a(BEFORE.bytes()));
+        assert!(!current.contains_key("src/new.rs"));
+    }
+
+    #[test]
+    fn a_snapshot_records_the_session_start_and_head() {
+        let dir = committed_repo();
+        let before = unix_now();
+        let path = take_snapshot(dir.path(), "s").unwrap().unwrap();
+        let snapshot = read_snapshot(&path).unwrap().unwrap();
+        assert!((before..=unix_now()).contains(&snapshot.started_at));
+        assert!(before > 1_000_000_000, "a real clock, not a constant");
+        assert_eq!(
+            snapshot.head,
+            git::Repo::discover(dir.path()).unwrap().head()
+        );
+    }
+
+    #[test]
+    fn a_file_dirty_at_the_start_keeps_its_disk_contents() {
+        let dir = committed_repo();
+        write_file(dir.path(), "src/lib.rs", &after());
+        let repo = git::Repo::discover(dir.path()).unwrap();
+        let head = repo.head().unwrap();
+        let at_start = repo.dirty().unwrap();
+        let mut current = scan(dir.path()).unwrap();
+        undo_edits_since(&repo, &head, &at_start, &mut current);
+        assert_eq!(current["src/lib.rs"].source, after());
+    }
+
+    #[rstest::rstest]
+    #[case::uncommitted(false)]
+    #[case::committed(true)]
+    fn a_worktree_entered_mid_session_is_compared_to_where_it_started(#[case] commit: bool) {
+        let dir = committed_repo();
+        take_snapshot(dir.path(), "s").unwrap().unwrap();
+        let holder = worktree(dir.path());
+        let wt = holder.path().join("wt");
+        write_file(&wt, "src/lib.rs", &after());
+        if commit {
+            run_git(&wt, &["commit", "-q", "-am", "session work"]);
+        }
+
+        let delta = session_delta(&wt, "s").unwrap().unwrap();
+        assert!(
+            delta.report.contains("## New near-duplicates (1)"),
+            "{}",
+            delta.report
+        );
+        let adopted = read_snapshot(&snapshot_path(&wt, "s")).unwrap().unwrap();
+        assert_eq!(adopted.root, wt);
+        assert_eq!(adopted.files["src/lib.rs"].hash, fnv1a(BEFORE.bytes()));
+        assert_eq!(
+            session_delta(&wt, "s").unwrap().unwrap().new_findings,
+            0,
+            "the adopted snapshot is reused, reported keys included"
+        );
+    }
+
+    #[test]
+    fn a_worktree_without_a_session_snapshot_has_no_delta() {
+        let dir = committed_repo();
+        let holder = worktree(dir.path());
+        let wt = holder.path().join("wt");
+        write_file(&wt, "src/lib.rs", &after());
+        assert_eq!(session_delta(&wt, "s").unwrap(), None);
+        assert!(!snapshot_path(&wt, "s").exists());
     }
 
     const HUBS: &str = "\
@@ -1112,7 +1399,7 @@ pub fn a5() -> i32 { shared(5) + shared2(5) }
     fn snapshot_ids_keep_dashes_and_underscores() {
         let dir = repo();
         let path = snapshot_path(dir.path(), "a-b_c.d");
-        assert_eq!(path.file_name().unwrap(), "session-a-b_c_d.json");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "a-b_c_d");
     }
 
     #[test]

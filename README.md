@@ -390,12 +390,16 @@ file the `apply_patch` touches. Schemas for the remaining events
 crate with no handler wired yet, so a new handler is a domain-logic change
 rather than a schema change.
 
-The checkpoint snapshot lives at
-`<repo-root>/target/agent-lens/session-<id>.json` (a `.gitignore` beside it
-keeps it out of `git status`) and covers production sources under the
-session's directory. Claude Code runs the snapshot with `async: true`, so the
-whole-tree pass never delays the first turn; a stop that fires before it lands
-has no baseline and stays silent. A stop recomputes only what the session could have
+The checkpoint snapshot lives under `<git-common-dir>/agent-lens/sessions/<id>/`
+(outside git, `target/agent-lens/`), one per working directory, and covers
+production sources under the session's directory. Claude Code runs the
+snapshot with `async: true`, so the whole-tree pass never delays the first
+turn: files that turn dirty while it scans are read back from `HEAD`, and a
+stop that fires before it lands has no baseline and stays silent. The common
+dir is shared by every worktree, so a stop in a worktree the session entered or
+created mid-session compares against that checkout's `HEAD` when the session
+started (from its reflog; the creation commit for a new worktree), checked out
+into a temporary tree once and kept. A stop recomputes only what the session could have
 changed and lists regressions only — new near-duplicate pairs, functions at or
 above cognitive 8 that got more complex, new forwarding-only wrappers, newly
 unreachable functions, edited high-fan-in functions — and stays silent when
