@@ -358,3 +358,98 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Speed × accuracy scatter */
+
+.scatter {
+  position: relative;
+  padding-left: 40px;
+}
+
+.scatter-y-title {
+  position: absolute;
+  top: 0;
+  left: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.scatter-plot {
+  position: relative;
+  height: 340px;
+  margin: var(--s2) 16px 0 0;
+  border-bottom: 1px solid var(--line-hi);
+}
+
+.scatter-hgrid {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--grid);
+}
+
+.scatter-ytick {
+  position: absolute;
+  right: calc(100% + 8px);
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.scatter-links {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.scatter-links line {
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+.scatter-dot {
+  top: auto;
+  transform: translate(-50%, 50%);
+}
+
+.scatter-note {
+  position: absolute;
+  line-height: 1.3;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.scatter-note.top {
+  transform: translate(-50%, -18px);
+}
+
+.scatter-xaxis {
+  position: relative;
+  height: 22px;
+  margin-right: 16px;
+}
+
+@media (max-width: 720px) {
+  .scatter {
+    padding-left: 32px;
+  }
+
+  .scatter-plot {
+    height: 280px;
+  }
+
+  .scatter-note {
+    font-size: 11px;
+  }
+}
+
+.scatter-note.side {
+  margin-left: 12px;
+}

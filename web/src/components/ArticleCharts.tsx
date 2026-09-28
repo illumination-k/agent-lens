@@ -201,17 +201,144 @@ export function ProgressChart() {
 }
 
 const LOG_LO = -2; // 10 ms
-const LOG_HI = 3; // 1000 s
-const SPEED_TICKS: readonly Tick[] = [
-  { at: 0, label: "10 ms" },
-  { at: 0.2, label: "100 ms" },
-  { at: 0.4, label: "1 s" },
-  { at: 0.6, label: "10 s" },
-  { at: 0.8, label: "100 s" },
-];
+const LOG_HI = 2.5; // ~316 s
+const TIME_TICKS: readonly Tick[] = [
+  { s: 0.01, label: "10 ms" },
+  { s: 0.1, label: "100 ms" },
+  { s: 1, label: "1 s" },
+  { s: 10, label: "10 s" },
+  { s: 100, label: "100 s" },
+].map((tick) => ({ at: logPos(tick.s), label: tick.label }));
 
 function logPos(seconds: number): number {
   return (Math.log10(seconds) - LOG_LO) / (LOG_HI - LOG_LO);
+}
+
+const F1_LO = 0.5;
+const F1_TICKS: readonly Tick[] = [0.5, 0.6, 0.7, 0.8, 0.9, 1].map((value) => ({
+  at: f1Pos(value),
+  label: value.toFixed(1),
+}));
+
+// Headroom above 1.0, so the oracles' row and its label clear the legend.
+const F1_HI = 1.06;
+
+function f1Pos(value: number): number {
+  return (value - F1_LO) / (F1_HI - F1_LO);
+}
+
+/** Harmonic mean of precision and static recall: one accuracy number per project. */
+export function f1(row: Pick<TargetRow, "tp" | "resolved" | "found" | "staticPairs">): number {
+  const precision = row.tp / row.resolved;
+  const recall = row.found / row.staticPairs;
+  return (2 * precision * recall) / (precision + recall);
+}
+
+/** `left` / `bottom` of a point in the plot, both as percentages. */
+function xy(x: number, y: number): CSSProperties {
+  return { left: `${(x * 100).toFixed(2)}%`, bottom: `${(y * 100).toFixed(2)}%` };
+}
+
+/**
+ * Speed against accuracy, one pair of points per project: agent-lens where it
+ * lands, the oracle at F1 1.0 (it is the reference) and its own wall-clock.
+ * Up and to the left is better; the joining line is the trade.
+ */
+export function ParetoChart() {
+  return (
+    <Figure
+      label="Wall-clock against F1 per project, agent-lens and its type-checker oracle"
+      caption="x: wall-clock for the whole repository, log scale (each gridline is 10×). y: F1 of precision and static recall against the oracle; the oracle is the reference, so it sits at 1.0 by definition. Each line joins one project's pair. Up and to the left is better."
+    >
+      <Legend
+        items={[
+          { label: "agent-lens function-graph", className: "s1" },
+          { label: "Type-checker oracle", className: "s2" },
+        ]}
+      />
+      <div className="scatter">
+        <span className="scatter-y-title" aria-hidden="true">
+          F1
+        </span>
+        <div className="scatter-plot">
+          {TIME_TICKS.map((tick) => (
+            <span key={tick.label} className="chart-grid" style={pos(tick.at)} aria-hidden="true" />
+          ))}
+          {F1_TICKS.map((tick) => (
+            <span
+              key={tick.label}
+              className="scatter-hgrid"
+              style={{ bottom: `${(tick.at * 100).toFixed(2)}%` }}
+              aria-hidden="true"
+            >
+              <span className="scatter-ytick">{tick.label}</span>
+            </span>
+          ))}
+          <svg
+            className="scatter-links"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {TARGETS.map((row) => (
+              <line
+                key={row.target}
+                x1={logPos(row.agentLensSeconds) * 100}
+                y1={100 - f1Pos(f1(row)) * 100}
+                x2={logPos(row.oracleSeconds) * 100}
+                y2={100 - f1Pos(1) * 100}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+          </svg>
+          {TARGETS.map((row) => {
+            const tip = `${row.target}: agent-lens ${seconds(row.agentLensSeconds)}, F1 ${f1(row).toFixed(3)} (precision ${ratio(row.tp, row.resolved)}, static recall ${ratio(row.found, row.staticPairs)})`;
+            return (
+              <span
+                key={`${row.target}-al`}
+                className="chart-dot s1 scatter-dot"
+                style={xy(logPos(row.agentLensSeconds), f1Pos(f1(row)))}
+                tabIndex={0}
+                data-tip={tip}
+                aria-label={tip}
+              />
+            );
+          })}
+          {TARGETS.map((row) => {
+            const tip = `${row.target}: ${row.oracle} ${seconds(row.oracleSeconds)} (${Math.round(speedup(row))}× slower than agent-lens)`;
+            return (
+              <span
+                key={`${row.target}-oracle`}
+                className="chart-dot s2 scatter-dot"
+                style={xy(logPos(row.oracleSeconds), f1Pos(1))}
+                tabIndex={0}
+                data-tip={tip}
+                aria-label={tip}
+              />
+            );
+          })}
+          <span className="scatter-note" style={xy(logPos(0.012), f1Pos(0.76))}>
+            agent-lens
+            <br />
+            27–154 ms
+          </span>
+          <span className="scatter-note side" style={xy(logPos(0.043), f1Pos(0.595))}>
+            rust-lang/log (macros)
+          </span>
+          <span className="scatter-note top" style={xy(logPos(12), f1Pos(1))}>
+            type-checker oracles · 1.5–101 s
+          </span>
+        </div>
+        <div className="scatter-xaxis" aria-hidden="true">
+          {TIME_TICKS.map((tick) => (
+            <span key={tick.label} className="chart-tick" style={pos(tick.at)}>
+              {tick.label}
+            </span>
+          ))}
+        </div>
+      </div>
+    </Figure>
+  );
 }
 
 export function seconds(value: number): string {
@@ -220,47 +347,4 @@ export function seconds(value: number): string {
 
 export function speedup(row: Pick<TargetRow, "agentLensSeconds" | "oracleSeconds">): number {
   return row.oracleSeconds / row.agentLensSeconds;
-}
-
-/** Wall-clock per project on a log axis: agent-lens and its oracle, joined. */
-export function SpeedChart() {
-  return (
-    <Figure
-      label="Wall-clock of agent-lens and each oracle per project, log scale"
-      caption="Log scale: each gridline is 10× the one before. The label at the right is the speedup."
-    >
-      <Legend
-        items={[
-          { label: "agent-lens function-graph", className: "s1" },
-          { label: "Type-checker oracle", className: "s2" },
-        ]}
-      />
-      {TARGETS.map((row) => {
-        const tip = `${row.target}: agent-lens ${seconds(row.agentLensSeconds)}, ${row.oracle} ${seconds(row.oracleSeconds)} (${Math.round(speedup(row))}× faster)`;
-        const from = logPos(row.agentLensSeconds);
-        const to = logPos(row.oracleSeconds);
-        return (
-          <div className="chart-row" key={row.target}>
-            <span className="chart-label">
-              {row.target}
-              <span className="dim"> · {row.oracle}</span>
-            </span>
-            <div className="chart-track dumbbell" tabIndex={0} data-tip={tip} aria-label={tip}>
-              <Grid ticks={SPEED_TICKS} />
-              <span
-                className="chart-link"
-                style={{ ...pos(from), width: `${((to - from) * 100).toFixed(2)}%` }}
-              />
-              <span className="chart-dot s1" style={pos(from)} />
-              <span className="chart-dot s2" style={pos(to)} />
-              <span className="chart-end" style={pos(to)}>
-                {Math.round(speedup(row))}×
-              </span>
-            </div>
-          </div>
-        );
-      })}
-      <Axis ticks={SPEED_TICKS} />
-    </Figure>
-  );
 }

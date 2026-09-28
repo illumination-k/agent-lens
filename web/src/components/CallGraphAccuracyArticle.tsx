@@ -4,7 +4,7 @@ import "../landing.css";
 import "../article.css";
 import { MEASURED_AT, MEASURED_COMMIT, PROGRESS, TARGETS, ratio, totals } from "../articleData";
 import { REPOSITORY_URL } from "../seo";
-import { AccuracyChart, ProgressChart, SpeedChart, seconds, speedup } from "./ArticleCharts";
+import { AccuracyChart, ProgressChart, ParetoChart, f1, seconds, speedup } from "./ArticleCharts";
 
 const DOC_URL = `${REPOSITORY_URL}/blob/main/docs/callgraph-accuracy.md`;
 const SCRIPTS_URL = `${REPOSITORY_URL}/tree/main/scripts/callgraph-accuracy`;
@@ -260,7 +260,7 @@ export function CallGraphAccuracyArticle() {
           </section>
 
           <section aria-labelledby="speed-title">
-            <h2 id="speed-title">Speed</h2>
+            <h2 id="speed-title">Speed against accuracy</h2>
             <p>
               Wall-clock for the whole repository, warm caches, on a 4-vCPU Xeon @ 2.10GHz: median
               of 10 runs of <code>agent-lens analyze function-graph --format json</code>, median of
@@ -268,7 +268,7 @@ export function CallGraphAccuracyArticle() {
               excluded; pyright and rust-analyzer include starting the server and indexing, which is
               what a caller pays.
             </p>
-            <SpeedChart />
+            <ParetoChart />
             <details className="table-view">
               <summary>Show as table</summary>
               <div className="table-scroll">
@@ -280,6 +280,7 @@ export function CallGraphAccuracyArticle() {
                       <th scope="col">agent-lens</th>
                       <th scope="col">Oracle</th>
                       <th scope="col">Speedup</th>
+                      <th scope="col">F1</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -294,6 +295,7 @@ export function CallGraphAccuracyArticle() {
                           {seconds(row.oracleSeconds)} <span className="dim">{row.oracle}</span>
                         </td>
                         <td className="num">{Math.round(speedup(row))}×</td>
+                        <td className="num">{f1(row).toFixed(3)}</td>
                       </tr>
                     ))}
                     <tr className="total">
@@ -302,19 +304,24 @@ export function CallGraphAccuracyArticle() {
                       <td className="num">{seconds(ALL.agentLensSeconds)}</td>
                       <td className="num">{seconds(ALL.oracleSeconds)}</td>
                       <td className="num">{Math.round(speedup(ALL))}×</td>
+                      <td className="num">{f1(ALL).toFixed(3)}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
             </details>
             <p>
-              Every project finishes in under 160 ms, which is what lets the graph analyzers run
-              inside a hook or on every agent turn. The gap is smallest against go-vta and tsc
-              (11–50×), which type-check a module in a single process, and largest against pyright
-              and rust-analyzer (450–760×), where the oracle is a language server answering one
-              request per call site. Construction cost on synthetic 1,024-function corpora for all
-              four languages is gated in CI by the <code>function_graph</code> Criterion benchmark,
-              so a slowdown fails the pull request that causes it.
+              The two sides sit in opposite corners. agent-lens keeps F1 at 0.87–0.99 on seven of
+              the eight projects (rust-lang/log, at 0.61, is the outlier its macros explain above)
+              while spending one to three orders of magnitude less time; the oracle buys the last
+              few points of accuracy with a type checker or language server. Every project finishes
+              in under 160 ms, which is what lets the graph analyzers run inside a hook or on every
+              agent turn. The gap is smallest against go-vta and tsc (11–50×), which type-check a
+              module in a single process, and largest against pyright and rust-analyzer (450–760×),
+              where the oracle is a language server answering one request per call site.
+              Construction cost on synthetic 1,024-function corpora for all four languages is gated
+              in CI by the <code>function_graph</code> Criterion benchmark, so a slowdown fails the
+              pull request that causes it.
             </p>
           </section>
 
