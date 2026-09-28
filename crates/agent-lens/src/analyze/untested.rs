@@ -48,7 +48,7 @@ use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resoluti
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::format::{ModuleSection, render_module_confidence, render_module_sections};
 use super::options::analyzer_options;
-use super::runner::render_report;
+use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use lens_domain::graph_algo::bfs;
 
@@ -120,10 +120,13 @@ impl UntestedAnalyzer {
         roots: impl Into<AnalyzeRoots>,
         format: OutputFormat,
     ) -> Result<String, AnalyzerError> {
-        let roots = roots.into();
-        let graph = self.builder.build(&roots)?;
-        let report = Report::build(&roots, &graph);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_graph_report(
+            &self.builder,
+            roots,
+            format,
+            |roots, graph| Report::build(roots, &graph),
+            |report| format_markdown(report, self.top),
+        )
     }
 }
 

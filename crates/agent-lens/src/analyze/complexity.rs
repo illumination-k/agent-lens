@@ -101,13 +101,11 @@ impl ComplexityAnalyzer {
         // Through the shared analysis index: under an active
         // `AnalysisIndexScope` this is the same fact a call-graph build
         // attaches as node weights, so a profile run parses once.
-        let mut functions = super::index::indexed_complexity_units(lang, &source)?;
-        self.filter
-            .retain_changed(&mut functions, &file.path, |f| (f.start_line, f.end_line));
-        if functions.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(FileReport {
+        let functions = super::index::indexed_complexity_units(lang, &source)?;
+        let functions = self
+            .filter
+            .retain_changed_nonempty(functions, &file.path, |f| (f.start_line, f.end_line));
+        Ok(functions.map(|functions| FileReport {
             file: file.display_path.clone(),
             functions,
         }))

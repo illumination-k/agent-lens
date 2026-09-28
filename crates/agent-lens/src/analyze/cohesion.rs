@@ -99,14 +99,12 @@ impl CohesionAnalyzer {
     /// directory-mode report.
     fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
-        let mut units = super::dispatch_lens!(lang, &source, extract_cohesion_units)
+        let units = super::dispatch_lens!(lang, &source, extract_cohesion_units)
             .map_err(AnalyzerError::Parse)?;
-        self.filter
-            .retain_changed(&mut units, &file.path, |u| (u.start_line, u.end_line));
-        if units.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(FileReport {
+        let units = self
+            .filter
+            .retain_changed_nonempty(units, &file.path, |u| (u.start_line, u.end_line));
+        Ok(units.map(|units| FileReport {
             file: file.display_path.clone(),
             lang,
             units,

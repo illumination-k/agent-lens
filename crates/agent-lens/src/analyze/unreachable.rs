@@ -1053,7 +1053,26 @@ impl EdgeScan {
 /// abandoned feature — it is a region the resolver lost track of, which
 /// is the opposite of something to delete in one edit.
 fn islands(graph: &CallGraph, reach: &Reachability, verdicts: &[Verdict]) -> Vec<Island> {
-    let members: Vec<usize> = reach
+    let members = island_members(reach, verdicts);
+    let (directed, undirected) = member_adjacency(graph, &members);
+    let mut islands: Vec<Island> = connected_components(&undirected)
+        .into_iter()
+        .filter(|component| component.len() >= 2)
+        .enumerate()
+        .map(|(id, component)| build_island(graph, &members, &directed, &component, id))
+        .collect();
+    islands.sort_by_key(|island| (Reverse(island.loc), Reverse(island.function_count)));
+    for (id, island) in islands.iter_mut().enumerate() {
+        island.id = id;
+    }
+    islands
+}
+
+/// Node indices eligible for an island: unreachable candidates outside
+/// the `unknown` tier, in candidate order. A member's position in the
+/// returned vec is its slot.
+fn island_members(reach: &Reachability, verdicts: &[Verdict]) -> Vec<usize> {
+    reach
         .candidates
         .iter()
         .zip(verdicts)
@@ -1061,59 +1080,53 @@ fn islands(graph: &CallGraph, reach: &Reachability, verdicts: &[Verdict]) -> Vec
             candidate.kind == FindingKind::Unreachable && verdict.tier != Tier::Unknown
         })
         .map(|(candidate, _)| candidate.node)
-        .collect();
+        .collect()
+}
+
+/// Slot-indexed directed and undirected adjacency over the resolved
+/// edges between distinct `members`.
+fn member_adjacency(graph: &CallGraph, members: &[usize]) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let slot_of: HashMap<usize, usize> = members
         .iter()
         .enumerate()
         .map(|(slot, &node)| (node, slot))
         .collect();
-
     let adjacency = graph.resolved_adjacency();
     let mut directed: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
     let mut undirected: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
     for (slot, &node) in members.iter().enumerate() {
-        for &callee in &adjacency[node] {
-            let Some(&callee_slot) = slot_of.get(&callee) else {
-                continue;
-            };
-            if callee_slot == slot {
-                continue;
-            }
+        let callee_slots = adjacency[node]
+            .iter()
+            .filter_map(|callee| slot_of.get(callee).copied())
+            .filter(|&callee_slot| callee_slot != slot);
+        for callee_slot in callee_slots {
             directed[slot].push(callee_slot);
             undirected[slot].push(callee_slot);
             undirected[callee_slot].push(slot);
         }
     }
+    (directed, undirected)
+}
 
-    let mut islands = Vec::new();
-    let mut seen = vec![false; members.len()];
-    for slot in 0..members.len() {
+/// Connected components of `undirected`, each in BFS order, ordered by
+/// their lowest slot.
+fn connected_components(undirected: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut components = Vec::new();
+    let mut seen = vec![false; undirected.len()];
+    for slot in 0..undirected.len() {
         if seen[slot] {
             continue;
         }
-        let component: Vec<usize> = bfs(&undirected, &[slot])
+        let component: Vec<usize> = bfs(undirected, &[slot])
             .into_iter()
             .map(|visit| visit.node)
             .collect();
         for &member in &component {
             seen[member] = true;
         }
-        if component.len() < 2 {
-            continue;
-        }
-        islands.push(build_island(
-            graph,
-            &members,
-            &directed,
-            &component,
-            islands.len(),
-        ));
+        components.push(component);
     }
-    islands.sort_by_key(|island| (Reverse(island.loc), Reverse(island.function_count)));
-    for (id, island) in islands.iter_mut().enumerate() {
-        island.id = id;
-    }
-    islands
+    components
 }
 
 fn build_island(

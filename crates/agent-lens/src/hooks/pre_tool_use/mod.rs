@@ -26,8 +26,23 @@ impl HookEnvelope for ClaudeCodePreToolUse {
     type Input = PreToolUseInput;
     type Output = PreToolUseOutput;
 
+    /// Prepare the file the agent is about to edit for a PreToolUse hook.
+    ///
+    /// Delegates to [`crate::hooks::prepare_single_edited_source`], with
+    /// the missing-file policy relaxed for `Write` calls against a path
+    /// that does not yet exist (a brand-new file).
     fn prepare_sources(input: &Self::Input) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-        prepare_edited_sources(input)
+        let missing_policy = if TOLERATE_MISSING_FILE_TOOLS.contains(&input.tool_name.as_str()) {
+            MissingFilePolicy::Skip
+        } else {
+            MissingFilePolicy::Error
+        };
+        crate::hooks::prepare_single_edited_source(
+            &input.tool_name,
+            &input.tool_input,
+            &input.context.cwd,
+            missing_policy,
+        )
     }
 
     fn cwd(input: &Self::Input) -> &std::path::Path {
@@ -55,27 +70,6 @@ pub type CohesionError = crate::hooks::core::HookError;
 /// existing file, so a missing file there is still a hard error and
 /// will fall through to the normal IO path.
 const TOLERATE_MISSING_FILE_TOOLS: &[&str] = &["Write"];
-
-/// Prepare the file the agent is about to edit for a PreToolUse hook.
-///
-/// Delegates to [`crate::hooks::prepare_single_edited_source`], with the
-/// missing-file policy relaxed for `Write` calls against a path that
-/// does not yet exist (a brand-new file).
-pub(crate) fn prepare_edited_sources(
-    input: &PreToolUseInput,
-) -> Result<Vec<EditedSource>, ReadEditedSourceError> {
-    let missing_policy = if TOLERATE_MISSING_FILE_TOOLS.contains(&input.tool_name.as_str()) {
-        MissingFilePolicy::Skip
-    } else {
-        MissingFilePolicy::Error
-    };
-    crate::hooks::prepare_single_edited_source(
-        &input.tool_name,
-        &input.tool_input,
-        &input.context.cwd,
-        missing_policy,
-    )
-}
 
 /// The checkpoint snapshot for the directory of an edit, taken before
 /// the first one there lands: the session's first edit in a worktree it

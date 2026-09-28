@@ -171,8 +171,8 @@ fn module_scope_values(program: &Program) -> HashSet<SymbolId> {
     for stmt in &program.body {
         let declaration = match stmt {
             Statement::VariableDeclaration(v) => v,
-            Statement::ExportNamedDeclaration(e) => match &e.declaration {
-                Some(Declaration::VariableDeclaration(v)) => v,
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::VariableDeclaration(v) => v,
                 _ => continue,
             },
             _ => continue,
@@ -362,7 +362,7 @@ impl FunctionVisitor for CallShapeCollector<'_> {
             caller_owner: owner,
             out: Vec::new(),
         };
-        visitor.visit_function_body(item.body);
+        item.body.visit(&mut visitor);
         let calls = visitor.out;
         self.out.extend(calls);
     }

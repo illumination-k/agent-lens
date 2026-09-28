@@ -479,15 +479,14 @@ struct ShareView {
 }
 
 impl ShareView {
-    fn new(share: &DeclaredShare, labeler: &ModuleLabeler) -> Self {
-        Self {
-            declared: label(&share.declared, labeler),
-            members: share.members,
-        }
-    }
-
     fn list(shares: &[DeclaredShare], labeler: &ModuleLabeler) -> Vec<Self> {
-        shares.iter().map(|s| Self::new(s, labeler)).collect()
+        shares
+            .iter()
+            .map(|share| Self {
+                declared: label(&share.declared, labeler),
+                members: share.members,
+            })
+            .collect()
     }
 }
 

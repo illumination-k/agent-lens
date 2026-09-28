@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ExportAllDeclaration, ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier,
+    ExportAllDeclaration, ExportFromDeclaration, ImportDeclaration, ImportDeclarationSpecifier,
     ImportExpression, Statement,
 };
 use oxc_ast_visit::{Visit, walk::walk_import_expression};
@@ -172,7 +172,7 @@ fn parse_links(source: &str, dialect: Dialect) -> Result<Vec<ImportLink>, TsPars
     for stmt in &ret.program.body {
         match stmt {
             Statement::ImportDeclaration(decl) => maybe_push_import(&mut out, decl),
-            Statement::ExportNamedDeclaration(decl) => maybe_push_re_export_named(&mut out, decl),
+            Statement::ExportFromDeclaration(decl) => maybe_push_re_export_named(&mut out, decl),
             Statement::ExportAllDeclaration(decl) => maybe_push_re_export_all(&mut out, decl),
             _ => {}
         }
@@ -239,9 +239,8 @@ fn maybe_push_import(out: &mut Vec<ImportLink>, decl: &ImportDeclaration<'_>) {
     out.push(ImportLink::new(specifier, symbols));
 }
 
-fn maybe_push_re_export_named(out: &mut Vec<ImportLink>, decl: &ExportNamedDeclaration<'_>) {
-    let Some(src) = &decl.source else { return };
-    let specifier = src.value.to_string();
+fn maybe_push_re_export_named(out: &mut Vec<ImportLink>, decl: &ExportFromDeclaration<'_>) {
+    let specifier = decl.source.value.to_string();
     if !is_followable_specifier(&specifier) {
         return;
     }

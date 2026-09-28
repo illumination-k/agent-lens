@@ -58,14 +58,14 @@
 //!   `interface_satisfying_count` in the summary.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Serialize;
 
 use super::call_graph::model::{
-    CallGraphNode, ModuleResolutionSummary, NodeVisibility, Resolution, name_last_segment,
+    CallGraphEdge, CallGraphNode, ModuleResolutionSummary, NodeVisibility, Resolution,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
@@ -75,6 +75,10 @@ use super::format::{
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+
+mod pub_use;
+
+use pub_use::parse_pub_use;
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -534,127 +538,6 @@ impl ReExports {
     }
 }
 
-/// Collect the identifiers and glob prefixes a source file re-exports
-/// with `pub use`. Statements are taken line-first so a `pub use` inside
-/// a doc comment or string cannot contribute.
-fn parse_pub_use(source: &str) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut names = BTreeSet::new();
-    let mut globs = BTreeSet::new();
-    let mut statement: Option<String> = None;
-    for line in source.lines() {
-        let line = line.trim();
-        let body = match statement.as_mut() {
-            Some(pending) => {
-                pending.push(' ');
-                pending.push_str(line);
-                pending
-            }
-            None => {
-                let Some(rest) = line.strip_prefix("pub use ") else {
-                    continue;
-                };
-                statement.insert(rest.to_owned())
-            }
-        };
-        let Some(end) = body.find(';') else {
-            continue;
-        };
-        let body = body[..end].to_owned();
-        statement = None;
-        collect_use_tree(&body, "", &mut names, &mut globs);
-    }
-    (names, globs)
-}
-
-/// Split one `pub use` body into the names and glob prefixes it exposes,
-/// recursing so a nested group (`a::{b, c::{d, e}}`) contributes its
-/// leaves rather than the raw group text.
-fn collect_use_tree(
-    body: &str,
-    prefix: &str,
-    names: &mut BTreeSet<String>,
-    globs: &mut BTreeSet<String>,
-) {
-    let body = body.trim();
-    let Some(open) = body.find('{') else {
-        collect_use_leaf(body, prefix, names, globs);
-        return;
-    };
-    let inner_prefix = join_use_path(prefix, body[..open].trim().trim_end_matches("::"));
-    for item in split_top_level(brace_group(&body[open..])) {
-        collect_use_tree(item, &inner_prefix, names, globs);
-    }
-}
-
-/// The text inside the brace group starting at `body`, which begins with
-/// `{`, up to its matching close brace.
-fn brace_group(body: &str) -> &str {
-    let mut depth = 0usize;
-    for (offset, ch) in body.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return &body[1..offset];
-                }
-            }
-            _ => {}
-        }
-    }
-    &body[1..]
-}
-
-fn join_use_path(prefix: &str, rest: &str) -> String {
-    match (prefix.is_empty(), rest.is_empty()) {
-        (true, _) => rest.to_owned(),
-        (_, true) => prefix.to_owned(),
-        _ => format!("{prefix}::{rest}"),
-    }
-}
-
-/// One leaf of a use tree: `foo`, `foo as bar`, `a::b`, or `a::*`.
-fn collect_use_leaf(
-    leaf: &str,
-    prefix: &str,
-    names: &mut BTreeSet<String>,
-    globs: &mut BTreeSet<String>,
-) {
-    let path = leaf.split(" as ").next().unwrap_or(leaf).trim();
-    if path.is_empty() {
-        return;
-    }
-    let full = join_use_path(prefix, path);
-    match full.strip_suffix("::*").or(full.strip_suffix('*')) {
-        Some(glob) => {
-            globs.insert(glob.trim_end_matches("::").to_owned());
-        }
-        None => {
-            names.insert(name_last_segment(&full).to_owned());
-        }
-    }
-}
-
-/// Split a brace group on top-level commas, keeping nested groups whole.
-fn split_top_level(inner: &str) -> Vec<&str> {
-    let mut items = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (offset, ch) in inner.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                items.push(&inner[start..offset]);
-                start = offset + 1;
-            }
-            _ => {}
-        }
-    }
-    items.push(&inner[start..]);
-    items
-}
-
 /// Drop the `crate::` / `self::` prefix a `use` path may carry so it can
 /// be compared against a crate-relative module path.
 fn normalize_use_path(path: &str) -> &str {
@@ -784,15 +667,7 @@ fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) 
         return;
     }
     let index_by_id = graph.node_index_by_id();
-    let mut by_node: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (slot, (idx, _)) in findings.iter().enumerate() {
-        by_node.insert(*idx, slot);
-        by_name
-            .entry(graph.nodes[*idx].name.as_str())
-            .or_default()
-            .push(slot);
-    }
+    let slots = FindingSlots::new(graph, findings);
 
     for edge in &graph.edges {
         if !matches!(
@@ -801,53 +676,106 @@ fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) 
         ) {
             continue;
         }
-        // A call site with no enclosing function has no module to place
-        // it in, so it counts as outside every scope.
-        let caller_module = edge
-            .from
-            .as_deref()
-            .and_then(|from| index_by_id.get(from))
-            .map(|&from_idx| graph.nodes[from_idx].module.as_str());
-        let slots: Vec<usize> = match edge.resolution {
-            Resolution::Ambiguous => edge
+        let caller_module = caller_module(graph, &index_by_id, edge);
+        for slot in slots.reached_by(graph, findings, &index_by_id, edge) {
+            let (idx, finding) = &mut findings[slot];
+            if !called_from_inside(&graph.nodes[*idx], finding, caller_module) {
+                count_outside_call(finding, edge);
+            }
+        }
+    }
+}
+
+/// Lookups from a node index or a bare name to the finding slots it names.
+struct FindingSlots<'g> {
+    by_node: BTreeMap<usize, usize>,
+    by_name: BTreeMap<&'g str, Vec<usize>>,
+}
+
+impl<'g> FindingSlots<'g> {
+    fn new(graph: &'g CallGraph, findings: &[(usize, Finding)]) -> Self {
+        let mut by_node: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (slot, (idx, _)) in findings.iter().enumerate() {
+            by_node.insert(*idx, slot);
+            by_name
+                .entry(graph.nodes[*idx].name.as_str())
+                .or_default()
+                .push(slot);
+        }
+        Self { by_node, by_name }
+    }
+
+    /// The finding slots an ambiguous or unresolved `edge` could reach:
+    /// its candidates for an ambiguous site, and the same-named findings
+    /// the resolver declined to attribute for an unresolved one.
+    fn reached_by(
+        &self,
+        graph: &CallGraph,
+        findings: &[(usize, Finding)],
+        index_by_id: &HashMap<&str, usize>,
+        edge: &CallGraphEdge,
+    ) -> Vec<usize> {
+        if edge.resolution == Resolution::Ambiguous {
+            return edge
                 .candidates
                 .iter()
                 .filter_map(|candidate| index_by_id.get(candidate.as_str()))
-                .filter_map(|idx| by_node.get(idx).copied())
-                .collect(),
-            _ => match edge.callee_name.as_deref() {
-                Some(callee) => by_name
-                    .get(callee)
-                    .map(|slots| {
-                        slots
-                            .iter()
-                            .copied()
-                            .filter(|&slot| gated_by_name(&graph.nodes[findings[slot].0], callee))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            },
-        };
-        for slot in slots {
-            let (idx, finding) = &mut findings[slot];
-            let lang = ExportLang::of(&graph.nodes[*idx]);
-            let inside = caller_module.is_some_and(|caller_module| {
-                in_scope(
-                    caller_module,
-                    &finding.scope_module,
-                    lang.is_some_and(ExportLang::scope_covers_descendants),
-                )
-            });
-            if inside {
-                continue;
-            }
-            if edge.resolution == Resolution::Ambiguous {
-                finding.ambiguous_calls_outside_scope += edge.call_count;
-            } else {
-                finding.ubiquitous_name_calls_outside_scope += edge.call_count;
-            }
+                .filter_map(|idx| self.by_node.get(idx).copied())
+                .collect();
         }
+        let Some(callee) = edge.callee_name.as_deref() else {
+            return Vec::new();
+        };
+        self.by_name
+            .get(callee)
+            .map(|slots| {
+                slots
+                    .iter()
+                    .copied()
+                    .filter(|&slot| gated_by_name(&graph.nodes[findings[slot].0], callee))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// The module of the function enclosing `edge`'s call site. A call site
+/// with no enclosing function has no module to place it in, so it counts
+/// as outside every scope.
+fn caller_module<'g>(
+    graph: &'g CallGraph,
+    index_by_id: &HashMap<&str, usize>,
+    edge: &CallGraphEdge,
+) -> Option<&'g str> {
+    edge.from
+        .as_deref()
+        .and_then(|from| index_by_id.get(from))
+        .map(|&from_idx| graph.nodes[from_idx].module.as_str())
+}
+
+/// Whether a call site in `caller_module` already sits inside the scope
+/// proposed for `finding`, the row built for `node`.
+fn called_from_inside(
+    node: &CallGraphNode,
+    finding: &Finding,
+    caller_module: Option<&str>,
+) -> bool {
+    let lang = ExportLang::of(node);
+    caller_module.is_some_and(|caller_module| {
+        in_scope(
+            caller_module,
+            &finding.scope_module,
+            lang.is_some_and(ExportLang::scope_covers_descendants),
+        )
+    })
+}
+
+fn count_outside_call(finding: &mut Finding, edge: &CallGraphEdge) {
+    if edge.resolution == Resolution::Ambiguous {
+        finding.ambiguous_calls_outside_scope += edge.call_count;
+    } else {
+        finding.ubiquitous_name_calls_outside_scope += edge.call_count;
     }
 }
 
@@ -1463,71 +1391,6 @@ mod tests {
             analyze_md(dir.path()).contains("Audited 2 of 4 non-test public function(s)"),
             "the audited count is the public count minus the re-exports",
         );
-    }
-
-    #[rstest]
-    #[case::plain("pub use inner::target;", &["target"], &[])]
-    #[case::alias("pub use inner::target as renamed;", &["target"], &[])]
-    #[case::group("pub use inner::{one, two as three};", &["one", "two"], &[])]
-    #[case::glob("pub use inner::*;", &[], &["inner"])]
-    #[case::group_with_glob("pub use inner::{one, deep::*};", &["one"], &["inner::deep"])]
-    #[case::nested_path("pub use a::b::target;", &["target"], &[])]
-    #[case::crate_prefix("pub use crate::inner::*;", &[], &["crate::inner"])]
-    #[case::nested_group("pub use a::{b, c::{d, e}};", &["b", "d", "e"], &[])]
-    #[case::nested_group_with_glob("pub use a::{b, c::{d, *}};", &["b", "d"], &["a::c"])]
-    #[case::sibling_after_a_nested_group("pub use a::{b::{c}, d};", &["c", "d"], &[])]
-    #[case::not_public("use inner::target;", &[], &[])]
-    #[case::in_a_comment("// pub use inner::target;", &[], &[])]
-    fn pub_use_statements_yield_their_names_and_globs(
-        #[case] source: &str,
-        #[case] expected_names: &[&str],
-        #[case] expected_globs: &[&str],
-    ) {
-        let (names, globs) = parse_pub_use(source);
-        assert_eq!(
-            names.iter().map(String::as_str).collect::<Vec<_>>(),
-            expected_names
-        );
-        assert_eq!(
-            globs.iter().map(String::as_str).collect::<Vec<_>>(),
-            expected_globs
-        );
-    }
-
-    #[rstest]
-    #[case::both("a", "b", "a::b")]
-    #[case::no_prefix("", "b", "b")]
-    #[case::no_rest("a", "", "a")]
-    #[case::neither("", "", "")]
-    fn use_paths_join_without_dangling_separators(
-        #[case] prefix: &str,
-        #[case] rest: &str,
-        #[case] expected: &str,
-    ) {
-        assert_eq!(join_use_path(prefix, rest), expected);
-    }
-
-    #[rstest]
-    #[case::flat("a, b", &["a", " b"])]
-    #[case::nested_group_stays_whole("a, b::{c, d}, e", &["a", " b::{c, d}", " e"])]
-    #[case::single_item("only", &["only"])]
-    #[case::empty("", &[""])]
-    fn brace_groups_split_on_top_level_commas_only(#[case] inner: &str, #[case] expected: &[&str]) {
-        assert_eq!(split_top_level(inner), expected);
-    }
-
-    /// A brace group split across lines is one statement, and the
-    /// terminating `;` is what ends it.
-    #[test]
-    fn a_multi_line_pub_use_is_read_as_one_statement() {
-        let (names, globs) = parse_pub_use(
-            "pub use inner::{\n    one,\n    two as renamed,\n};\npub fn not_a_use() {}\n",
-        );
-        assert_eq!(
-            names.iter().map(String::as_str).collect::<Vec<_>>(),
-            ["one", "two"]
-        );
-        assert!(globs.is_empty());
     }
 
     /// A glob covers everything under the module it names, so items in

@@ -56,7 +56,7 @@ use super::call_graph::model::{GraphLanguage, NodeVisibility};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::options::analyzer_options;
 use super::runner::render_report;
-use super::span_references::{AllowedSpan, SpanReferenceIndex};
+use super::span_references::{AllowedSpan, FileSpans, SpanReferenceIndex};
 use super::unreachable::identifiers;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat, SourceLang};
 
@@ -276,28 +276,18 @@ impl Inventory {
         roots: &AnalyzeRoots,
         graph: &CallGraph,
     ) -> Result<Self, AnalyzerError> {
-        // Module and test classification per file, from the graph's own
-        // scan. A file without functions gets no module (its qualified
-        // names fall back to the bare name) and counts as production.
-        let mut module_of: HashMap<&str, &str> = HashMap::new();
-        let mut file_all_test: HashMap<&str, bool> = HashMap::new();
-        for node in &graph.nodes {
-            module_of.entry(node.file.as_str()).or_insert(&node.module);
-            let all_test = file_all_test.entry(node.file.as_str()).or_insert(true);
-            *all_test &= node.is_test;
-        }
-
+        let files = FileClasses::from_graph(graph);
         let mut audit = Audit::default();
         let mut decls: Vec<DeclRecord> = Vec::new();
         let mut rust_impls: Vec<(String, TraitImplShape)> = Vec::new();
         builder.visit_source_texts(roots, |file, source| {
-            let module = module_of.get(file).copied().unwrap_or("");
-            let file_is_test = file_all_test.get(file).copied().unwrap_or(false);
             let lang = SourceLang::from_path(Path::new(file));
             if !matches!(lang, Some(SourceLang::Rust | SourceLang::Go)) {
                 return;
             }
             audit.file_count += 1;
+            let module = files.module_of.get(file).copied().unwrap_or("");
+            let file_is_test = files.all_test.get(file).copied().unwrap_or(false);
             let parsed = match lang {
                 Some(SourceLang::Rust) => {
                     lens_rust::extract_trait_shapes_with_module(source, module)
@@ -324,49 +314,21 @@ impl Inventory {
             }
         })?;
 
-        let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (idx, decl) in decls.iter().enumerate() {
-            by_name
-                .entry(decl.shape.display_name.as_str())
-                .or_default()
-                .push(idx);
-        }
-        // Borrow dance: census writes into `decls` while `by_name`
+        // Borrow dance: census writes into `decls` while the matching
         // borrows the names, so matches are collected first.
-        let mut matches: Vec<ImplMatch> = Vec::new();
-        for (file, imp) in &rust_impls {
-            let Some(slots) = by_name.get(imp.trait_name.as_str()) else {
-                continue;
-            };
-            let implementor = imp.self_type.clone().unwrap_or_else(|| "?".to_owned());
-            for &slot in slots {
-                if decls[slot].kind != "trait" {
-                    continue;
-                }
-                matches.push(ImplMatch {
+        let mut matches = rust_census(&decls, &rust_impls);
+        matches.extend(
+            go_census(graph, &decls)
+                .into_iter()
+                .map(|(slot, implementor, is_test)| ImplMatch {
                     slot,
-                    implementor: implementor.clone(),
-                    is_test: imp.is_test,
-                    span: Some((file.clone(), imp.span.start_line, imp.span.end_line)),
-                });
-            }
-        }
-        for (slot, implementor, is_test) in go_census(graph, &decls) {
-            matches.push(ImplMatch {
-                slot,
-                implementor,
-                is_test,
-                span: None,
-            });
-        }
+                    implementor,
+                    is_test,
+                    span: None,
+                }),
+        );
         for m in matches {
-            let decl = &mut decls[m.slot];
-            if m.is_test {
-                decl.test_implementors.insert(m.implementor);
-            } else {
-                decl.production_implementors.insert(m.implementor);
-            }
-            decl.allowed.extend(m.span);
+            decls[m.slot].record(m);
         }
         for decl in &mut decls {
             let production = &decl.production_implementors;
@@ -376,6 +338,56 @@ impl Inventory {
 
         Ok(Self { decls, audit })
     }
+}
+
+/// Module and test classification per file, from the graph's own scan.
+/// A file without functions gets no module (its qualified names fall
+/// back to the bare name) and counts as production.
+struct FileClasses<'a> {
+    module_of: HashMap<&'a str, &'a str>,
+    all_test: HashMap<&'a str, bool>,
+}
+
+impl<'a> FileClasses<'a> {
+    fn from_graph(graph: &'a CallGraph) -> Self {
+        let mut module_of: HashMap<&str, &str> = HashMap::new();
+        let mut all_test: HashMap<&str, bool> = HashMap::new();
+        for node in &graph.nodes {
+            module_of.entry(node.file.as_str()).or_insert(&node.module);
+            *all_test.entry(node.file.as_str()).or_insert(true) &= node.is_test;
+        }
+        Self {
+            module_of,
+            all_test,
+        }
+    }
+}
+
+/// Rust implementor census: every `impl Trait for Type` block matched
+/// by bare trait name against every same-named trait declaration.
+fn rust_census(decls: &[DeclRecord], rust_impls: &[(String, TraitImplShape)]) -> Vec<ImplMatch> {
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, decl) in decls.iter().enumerate() {
+        by_name
+            .entry(decl.shape.display_name.as_str())
+            .or_default()
+            .push(idx);
+    }
+    let mut matches = Vec::new();
+    for (file, imp) in rust_impls {
+        let Some(slots) = by_name.get(imp.trait_name.as_str()) else {
+            continue;
+        };
+        let implementor = imp.self_type.clone().unwrap_or_else(|| "?".to_owned());
+        let trait_slots = slots.iter().filter(|&&slot| decls[slot].kind == "trait");
+        matches.extend(trait_slots.map(|&slot| ImplMatch {
+            slot,
+            implementor: implementor.clone(),
+            is_test: imp.is_test,
+            span: Some((file.clone(), imp.span.start_line, imp.span.end_line)),
+        }));
+    }
+    matches
 }
 
 /// One census hit before it is written back into its declaration.
@@ -401,22 +413,38 @@ impl DeclRecord {
             allowed,
         }
     }
+
+    /// Writes one census hit into this declaration's implementor sets
+    /// and allowed spans.
+    fn record(&mut self, m: ImplMatch) {
+        if m.is_test {
+            self.test_implementors.insert(m.implementor);
+        } else {
+            self.production_implementors.insert(m.implementor);
+        }
+        self.allowed.extend(m.span);
+    }
+
+    /// A Go interface with zero declared methods: satisfied by every
+    /// type, so no census is possible.
+    fn is_empty_interface(&self) -> bool {
+        self.kind == "interface" && self.shape.methods.is_empty()
+    }
 }
 
-/// Structural implementor census for Go: `(decl slot, type name,
-/// is_test)` for every in-tree type whose method set covers an
-/// interface's methods by name and parameter count. A type counts as a
-/// production implementor only when production code supplies every
-/// method; a mock in a `_test.go` file satisfies from test scope.
-fn go_census(graph: &CallGraph, decls: &[DeclRecord]) -> Vec<(usize, String, bool)> {
-    // (module, receiver type) → method name → param counts seen, split
-    // by test scope.
-    #[derive(Default)]
-    struct MethodSet {
-        production: BTreeMap<String, BTreeSet<usize>>,
-        any: BTreeMap<String, BTreeSet<usize>>,
-    }
-    let mut types: BTreeMap<(String, String), MethodSet> = BTreeMap::new();
+/// Method name → param counts seen, for one Go receiver type.
+type GoMethods = BTreeMap<String, BTreeSet<usize>>;
+
+/// One Go receiver type's methods, split by test scope.
+#[derive(Default)]
+struct GoMethodSet {
+    production: GoMethods,
+    any: GoMethods,
+}
+
+/// Every Go receiver type's method set, keyed by `(module, type)`.
+fn go_method_sets(graph: &CallGraph) -> BTreeMap<(String, String), GoMethodSet> {
+    let mut types: BTreeMap<(String, String), GoMethodSet> = BTreeMap::new();
     for node in &graph.nodes {
         if node.graph_language() != Some(GraphLanguage::Go) {
             continue;
@@ -438,26 +466,50 @@ fn go_census(graph: &CallGraph, decls: &[DeclRecord]) -> Vec<(usize, String, boo
                 .insert(param_count);
         }
     }
+    types
+}
 
+impl GoMethodSet {
+    /// Whether this type implements `decl`: `Some(false)` when
+    /// production code supplies every method, `Some(true)` when only
+    /// test scope completes the set, `None` when it does not cover it.
+    fn satisfies(&self, decl: &DeclRecord) -> Option<bool> {
+        if go_covers(decl, &self.production) {
+            Some(false)
+        } else if go_covers(decl, &self.any) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether `methods` supplies every method of `decl` by name and
+/// parameter count.
+fn go_covers(decl: &DeclRecord, methods: &GoMethods) -> bool {
+    decl.shape.methods.iter().all(|m| {
+        methods
+            .get(&m.name)
+            .is_some_and(|counts| counts.contains(&m.param_count))
+    })
+}
+
+/// Structural implementor census for Go: `(decl slot, type name,
+/// is_test)` for every in-tree type whose method set covers an
+/// interface's methods by name and parameter count. A type counts as a
+/// production implementor only when production code supplies every
+/// method; a mock in a `_test.go` file satisfies from test scope.
+fn go_census(graph: &CallGraph, decls: &[DeclRecord]) -> Vec<(usize, String, bool)> {
+    let types = go_method_sets(graph);
     let mut out = Vec::new();
     for (slot, decl) in decls.iter().enumerate() {
         if decl.kind != "interface" || decl.shape.methods.is_empty() {
             continue;
         }
-        for ((_, type_name), set) in &types {
-            let covers = |methods: &BTreeMap<String, BTreeSet<usize>>| {
-                decl.shape.methods.iter().all(|m| {
-                    methods
-                        .get(&m.name)
-                        .is_some_and(|counts| counts.contains(&m.param_count))
-                })
-            };
-            if covers(&set.production) {
-                out.push((slot, type_name.clone(), false));
-            } else if covers(&set.any) {
-                out.push((slot, type_name.clone(), true));
-            }
-        }
+        out.extend(types.iter().filter_map(|((_, type_name), set)| {
+            set.satisfies(decl)
+                .map(|is_test| (slot, type_name.clone(), is_test))
+        }));
     }
     out
 }
@@ -470,13 +522,40 @@ struct UsageScan {
     counts: HashMap<usize, (usize, usize, usize)>,
 }
 
+/// How one matched token is counted.
+#[derive(Clone, Copy)]
+enum Mention {
+    Plain,
+    Dyn,
+    ImplPattern,
+}
+
+impl Mention {
+    fn classify(tokens: &[&str], position: usize) -> Self {
+        if position > 0 && tokens[position - 1] == "dyn" {
+            return Self::Dyn;
+        }
+        // `impl … Name … for …` in raw text is how a macro body
+        // implements a trait; the block extraction never sees it. The
+        // trailing slice may start at the matched token itself: a
+        // declaration cannot be named `for`, so including it changes
+        // nothing.
+        if tokens[..position].contains(&"impl") && tokens[position..].contains(&"for") {
+            return Self::ImplPattern;
+        }
+        Self::Plain
+    }
+}
+
 impl UsageScan {
     fn run(
         builder: &CallGraphBuilder,
         roots: &AnalyzeRoots,
         inventory: &Inventory,
     ) -> Result<Self, AnalyzerError> {
-        let mut counts: HashMap<usize, (usize, usize, usize)> = HashMap::new();
+        let mut scan = Self {
+            counts: HashMap::new(),
+        };
         let index = SpanReferenceIndex::new(
             inventory
                 .decls
@@ -492,37 +571,87 @@ impl UsageScan {
                 }),
         );
         if index.is_empty() {
-            return Ok(Self { counts });
+            return Ok(scan);
         }
 
         builder.visit_source_texts(roots, |file, source| {
             let spans = index.file(file);
             for (offset, line) in source.lines().enumerate() {
-                let tokens: Vec<&str> = identifiers(line).collect();
-                for (position, &token) in tokens.iter().enumerate() {
-                    let is_dyn = position > 0 && tokens[position - 1] == "dyn";
-                    // `impl … Name … for …` in raw text is how a macro
-                    // body implements a trait; the block extraction
-                    // never sees it. The trailing slice may start at
-                    // the matched token itself: a declaration cannot be
-                    // named `for`, so including it changes nothing.
-                    let is_impl_pattern = || {
-                        tokens[..position].contains(&"impl") && tokens[position..].contains(&"for")
-                    };
-                    for slot in spans.unaccounted(token, offset + 1) {
-                        let entry = counts.entry(slot).or_default();
-                        if is_dyn {
-                            entry.1 += 1;
-                        } else if is_impl_pattern() {
-                            entry.2 += 1;
-                        } else {
-                            entry.0 += 1;
-                        }
-                    }
-                }
+                scan.scan_line(&spans, offset + 1, line);
             }
         })?;
-        Ok(Self { counts })
+        Ok(scan)
+    }
+
+    fn scan_line(&mut self, spans: &FileSpans<'_>, line_no: usize, line: &str) {
+        let tokens: Vec<&str> = identifiers(line).collect();
+        for (position, &token) in tokens.iter().enumerate() {
+            // Classified lazily: most tokens name no declaration.
+            let mut mention = None;
+            for slot in spans.unaccounted(token, line_no) {
+                let mention = *mention.get_or_insert_with(|| Mention::classify(&tokens, position));
+                self.count(slot, mention);
+            }
+        }
+    }
+
+    fn count(&mut self, slot: usize, mention: Mention) {
+        let entry = self.counts.entry(slot).or_default();
+        match mention {
+            Mention::Dyn => entry.1 += 1,
+            Mention::ImplPattern => entry.2 += 1,
+            Mention::Plain => entry.0 += 1,
+        }
+    }
+}
+
+impl ImplementorDistribution {
+    fn record(&mut self, production: usize) {
+        *match production {
+            0 => &mut self.zero,
+            1 => &mut self.one,
+            2 => &mut self.two,
+            _ => &mut self.three_plus,
+        } += 1;
+    }
+}
+
+impl AbstractionEntry {
+    /// The report row for `decl`, with its usage counts and caveats.
+    fn new(decl: &DeclRecord, counts: (usize, usize, usize), shared_name: bool) -> Self {
+        let (reference_count, dyn_reference_count, impl_reference_count) = counts;
+        let private = matches!(
+            decl.shape.visibility,
+            SyntaxFact::Known(VisibilityShape::Private | VisibilityShape::Unexported),
+        );
+        let mut caveats: Vec<Caveat> = [
+            (!private, Caveat::WiderThanPrivate),
+            (!decl.test_implementors.is_empty(), Caveat::TestImplementors),
+            (dyn_reference_count > 0, Caveat::DynDispatch),
+            (impl_reference_count > 0, Caveat::MacroImplPattern),
+            (shared_name, Caveat::SharedName),
+        ]
+        .into_iter()
+        .filter_map(|(applies, caveat)| applies.then_some(caveat))
+        .collect();
+        caveats.sort_unstable();
+
+        Self {
+            kind: decl.kind,
+            display_name: decl.shape.display_name.clone(),
+            qualified_name: decl.shape.qualified_name.clone(),
+            file: decl.file.clone(),
+            start_line: decl.shape.span.start_line,
+            end_line: decl.shape.span.end_line,
+            visibility: NodeVisibility::from_shape(&decl.shape.visibility),
+            method_count: decl.shape.methods.len(),
+            production_implementors: decl.production_implementors.iter().cloned().collect(),
+            test_implementor_count: decl.test_implementors.len(),
+            reference_count,
+            dyn_reference_count,
+            impl_reference_count,
+            caveats,
+        }
     }
 }
 
@@ -550,65 +679,21 @@ impl Report {
                 audit.test_declaration_count += 1;
                 continue;
             }
-            if decl.kind == "interface" && decl.shape.methods.is_empty() {
+            if decl.is_empty_interface() {
                 audit.empty_interface_count += 1;
                 continue;
             }
             declaration_count += 1;
             let production = decl.production_implementors.len();
-            *match production {
-                0 => &mut distribution.zero,
-                1 => &mut distribution.one,
-                2 => &mut distribution.two,
-                _ => &mut distribution.three_plus,
-            } += 1;
+            distribution.record(production);
             if production > 1 {
                 continue;
             }
-
-            let &(reference_count, dyn_reference_count, impl_reference_count) =
-                scan.counts.get(&slot).unwrap_or(&(0, 0, 0));
-            let mut caveats = Vec::new();
-            let private = matches!(
-                decl.shape.visibility,
-                SyntaxFact::Known(VisibilityShape::Private | VisibilityShape::Unexported),
-            );
-            if !private {
-                caveats.push(Caveat::WiderThanPrivate);
-            }
-            if !decl.test_implementors.is_empty() {
-                caveats.push(Caveat::TestImplementors);
-            }
-            if dyn_reference_count > 0 {
-                caveats.push(Caveat::DynDispatch);
-            }
-            if impl_reference_count > 0 {
-                caveats.push(Caveat::MacroImplPattern);
-            }
-            if name_counts
+            let counts = scan.counts.get(&slot).copied().unwrap_or((0, 0, 0));
+            let shared_name = name_counts
                 .get(decl.shape.display_name.as_str())
-                .is_some_and(|&n| n > 1)
-            {
-                caveats.push(Caveat::SharedName);
-            }
-            caveats.sort_unstable();
-
-            findings.push(AbstractionEntry {
-                kind: decl.kind,
-                display_name: decl.shape.display_name.clone(),
-                qualified_name: decl.shape.qualified_name.clone(),
-                file: decl.file.clone(),
-                start_line: decl.shape.span.start_line,
-                end_line: decl.shape.span.end_line,
-                visibility: NodeVisibility::from_shape(&decl.shape.visibility),
-                method_count: decl.shape.methods.len(),
-                production_implementors: decl.production_implementors.iter().cloned().collect(),
-                test_implementor_count: decl.test_implementors.len(),
-                reference_count,
-                dyn_reference_count,
-                impl_reference_count,
-                caveats,
-            });
+                .is_some_and(|&n| n > 1);
+            findings.push(AbstractionEntry::new(decl, counts, shared_name));
         }
 
         findings.sort_by(|a, b| {
