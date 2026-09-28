@@ -83,22 +83,278 @@
   font-weight: 650;
 }
 
-.article .speedup {
+.article .stats-strip {
+  margin: var(--s6) 0 0;
+}
+
+/* Table view: the charts' numbers, collapsed under each chart. */
+
+.article .table-view {
+  margin: var(--s4) 0 var(--s5);
+}
+
+.article .table-view summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.article .table-view summary:hover,
+.article .table-view summary:focus-visible {
+  color: var(--accent);
+}
+
+/*
+ * Charts. Series colours are slots 1–2 of the dataviz reference palette,
+ * dark steps, validated against --surface (#0e1620): blue for agent-lens /
+ * the headline metric, orange for its counterpart.
+ */
+
+.article .chart {
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --before: #5c6b77;
+  --grid: rgba(255, 255, 255, 0.07);
+  --label-w: 220px;
+
+  margin: var(--s5) 0 var(--s2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--s5);
+}
+
+.article .chart figcaption {
+  margin-top: var(--s4);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s5);
+  margin-bottom: var(--s4) !important;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.chart-legend li {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  min-width: 140px;
 }
 
-.article .speedup .bar {
-  display: block;
-  height: 8px;
-  max-width: 90px;
+.chart-key {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.chart-key.s1,
+.chart-bar.s1,
+.chart-dot.s1 {
+  background: var(--series-1);
+}
+
+.chart-key.s2,
+.chart-bar.s2,
+.chart-dot.s2 {
+  background: var(--series-2);
+}
+
+.chart-key.before,
+.chart-dot.before {
+  background: var(--before);
+}
+
+.chart-row {
+  display: grid;
+  grid-template-columns: var(--label-w) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--s3);
+  min-height: 34px;
+}
+
+.chart-label {
+  overflow-wrap: anywhere;
+  color: var(--text-hi);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.chart-track {
+  position: relative;
+  align-self: stretch;
+  /* Room at the right for the value past a full-width bar. */
+  margin-right: 48px;
+}
+
+.chart-track.bars {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: var(--s1) 0;
+}
+
+.chart-grid {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--grid);
+}
+
+.chart-bar-line {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 11px;
+}
+
+.chart-bar {
+  position: relative;
+  height: 100%;
   flex: 0 0 auto;
-  border-radius: 4px;
-  background: var(--accent);
+  border-radius: 0 4px 4px 0;
 }
 
-.article .stats-strip {
-  margin: var(--s6) 0 0;
+.chart-value {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.chart-link {
+  position: absolute;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  background: var(--line-hi);
+}
+
+.chart-dot {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--surface);
+  transform: translate(-50%, -50%);
+}
+
+.chart-end {
+  position: absolute;
+  top: 50%;
+  margin-left: 14px;
+  transform: translateY(-50%);
+  color: var(--text-hi);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chart-axis {
+  min-height: 22px;
+}
+
+.chart-tick {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.chart-panels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s6);
+}
+
+.chart-panels .chart-row {
+  --label-w: 90px;
+}
+
+.chart-panels .chart-track {
+  margin-right: var(--s3);
+}
+
+.article .chart-panel-title {
+  margin: 0 0 var(--s2);
+  color: var(--text-hi);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+/* Tooltip: CSS only, so it works before hydration. */
+
+[data-tip] {
+  outline: none;
+  cursor: default;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 2;
+  bottom: calc(100% + 6px);
+  left: 0;
+  width: max-content;
+  max-width: 300px;
+  border: 1px solid var(--line-hi);
+  border-radius: 8px;
+  background: var(--surface-hi);
+  padding: var(--s2) var(--s3);
+  color: var(--text-hi);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: normal;
+}
+
+.chart-track.dumbbell:hover .chart-link,
+.chart-track.dumbbell:focus-visible .chart-link {
+  background: var(--muted);
+}
+
+.chart-track.dumbbell:focus-visible,
+.chart-bar:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+@media (max-width: 720px) {
+  .article .chart {
+    padding: var(--s4);
+  }
+
+  .chart-row,
+  .chart-panels .chart-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s1);
+    padding-bottom: var(--s2);
+  }
+
+  .chart-track.dumbbell {
+    min-height: 20px;
+  }
+
+  .chart-axis > span:first-child {
+    display: none;
+  }
+
+  .chart-panels {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

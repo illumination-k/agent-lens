@@ -2,37 +2,14 @@ import { Link } from "@tanstack/react-router";
 
 import "../landing.css";
 import "../article.css";
-import {
-  MEASURED_AT,
-  MEASURED_COMMIT,
-  PROGRESS,
-  TARGETS,
-  ratio,
-  totals,
-  type TargetRow,
-} from "../articleData";
+import { MEASURED_AT, MEASURED_COMMIT, PROGRESS, TARGETS, ratio, totals } from "../articleData";
 import { REPOSITORY_URL } from "../seo";
+import { AccuracyChart, ProgressChart, SpeedChart, seconds, speedup } from "./ArticleCharts";
 
 const DOC_URL = `${REPOSITORY_URL}/blob/main/docs/callgraph-accuracy.md`;
 const SCRIPTS_URL = `${REPOSITORY_URL}/tree/main/scripts/callgraph-accuracy`;
 
 const ALL = totals(TARGETS);
-
-function speedup(row: Pick<TargetRow, "agentLensSeconds" | "oracleSeconds">): number {
-  return row.oracleSeconds / row.agentLensSeconds;
-}
-
-function seconds(value: number): string {
-  return value < 1 ? `${Math.round(value * 1000)} ms` : `${value.toFixed(1)} s`;
-}
-
-/**
- * Bar width on a log scale, so a 17x and a 760x speedup both stay readable:
- * 1x is empty, 1000x is full.
- */
-function logWidth(factor: number): string {
-  return `${Math.min(100, (Math.log10(Math.max(factor, 1)) / 3) * 100).toFixed(1)}%`;
-}
 
 /**
  * How accurate and how fast `agent-lens analyze function-graph` is, measured
@@ -149,61 +126,65 @@ export function CallGraphAccuracyArticle() {
               Measured {MEASURED_AT} on agent-lens <code>{MEASURED_COMMIT}</code> with{" "}
               <code>mise run callgraph-accuracy</code>.
             </p>
-            <div className="table-scroll">
-              <table className="matrix">
-                <thead>
-                  <tr>
-                    <th scope="col">Project</th>
-                    <th scope="col">Oracle</th>
-                    <th scope="col">Precision</th>
-                    <th scope="col">Static recall</th>
-                    <th scope="col">Left as candidates</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {TARGETS.map((row) => (
-                    <tr key={row.target}>
-                      <th scope="row">
-                        {row.target} <span className="dim">{row.version}</span>
-                      </th>
-                      <td>{row.oracle}</td>
-                      <td className="num">
-                        {ratio(row.tp, row.resolved)}{" "}
-                        <span className="dim">
-                          ({row.tp} / {row.resolved})
-                        </span>
-                      </td>
-                      <td className="num">
-                        {ratio(row.found, row.staticPairs)}{" "}
-                        <span className="dim">
-                          ({row.found} / {row.staticPairs})
-                        </span>
-                      </td>
-                      <td className="num">{row.onlyCandidate}</td>
+            <AccuracyChart />
+            <details className="table-view">
+              <summary>Show as table</summary>
+              <div className="table-scroll">
+                <table className="matrix">
+                  <thead>
+                    <tr>
+                      <th scope="col">Project</th>
+                      <th scope="col">Oracle</th>
+                      <th scope="col">Precision</th>
+                      <th scope="col">Static recall</th>
+                      <th scope="col">Left as candidates</th>
                     </tr>
-                  ))}
-                  <tr className="total">
-                    <th scope="row">All eight (micro-averaged)</th>
-                    <td />
-                    <td className="num">
-                      {ratio(ALL.tp, ALL.resolved)}{" "}
-                      <span className="dim">
-                        ({ALL.tp} / {ALL.resolved})
-                      </span>
-                    </td>
-                    <td className="num">
-                      {ratio(ALL.found, ALL.staticPairs)}{" "}
-                      <span className="dim">
-                        ({ALL.found} / {ALL.staticPairs})
-                      </span>
-                    </td>
-                    <td className="num">
-                      {TARGETS.reduce((sum, row) => sum + row.onlyCandidate, 0)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {TARGETS.map((row) => (
+                      <tr key={row.target}>
+                        <th scope="row">
+                          {row.target} <span className="dim">{row.version}</span>
+                        </th>
+                        <td>{row.oracle}</td>
+                        <td className="num">
+                          {ratio(row.tp, row.resolved)}{" "}
+                          <span className="dim">
+                            ({row.tp} / {row.resolved})
+                          </span>
+                        </td>
+                        <td className="num">
+                          {ratio(row.found, row.staticPairs)}{" "}
+                          <span className="dim">
+                            ({row.found} / {row.staticPairs})
+                          </span>
+                        </td>
+                        <td className="num">{row.onlyCandidate}</td>
+                      </tr>
+                    ))}
+                    <tr className="total">
+                      <th scope="row">All eight (micro-averaged)</th>
+                      <td />
+                      <td className="num">
+                        {ratio(ALL.tp, ALL.resolved)}{" "}
+                        <span className="dim">
+                          ({ALL.tp} / {ALL.resolved})
+                        </span>
+                      </td>
+                      <td className="num">
+                        {ratio(ALL.found, ALL.staticPairs)}{" "}
+                        <span className="dim">
+                          ({ALL.found} / {ALL.staticPairs})
+                        </span>
+                      </td>
+                      <td className="num">
+                        {TARGETS.reduce((sum, row) => sum + row.onlyCandidate, 0)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
             <p>
               "Left as candidates" are static calls agent-lens saw but would not commit to: it
               emitted an ambiguous edge listing the possible callees, the right one among them. That
@@ -220,32 +201,36 @@ export function CallGraphAccuracyArticle() {
               and the numbers moved accordingly (first run against each oracle vs today, same
               targets):
             </p>
-            <div className="table-scroll">
-              <table className="matrix">
-                <thead>
-                  <tr>
-                    <th scope="col">Language</th>
-                    <th scope="col">Targets</th>
-                    <th scope="col">Precision</th>
-                    <th scope="col">Static recall</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {PROGRESS.map((row) => (
-                    <tr key={row.language}>
-                      <th scope="row">{row.language}</th>
-                      <td>{row.targets}</td>
-                      <td className="num">
-                        {row.precisionBefore} → {row.precisionAfter}
-                      </td>
-                      <td className="num">
-                        {row.recallBefore} → <strong>{row.recallAfter}</strong>
-                      </td>
+            <ProgressChart />
+            <details className="table-view">
+              <summary>Show as table</summary>
+              <div className="table-scroll">
+                <table className="matrix">
+                  <thead>
+                    <tr>
+                      <th scope="col">Language</th>
+                      <th scope="col">Targets</th>
+                      <th scope="col">Precision</th>
+                      <th scope="col">Static recall</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {PROGRESS.map((row) => (
+                      <tr key={row.language}>
+                        <th scope="row">{row.language}</th>
+                        <td>{row.targets}</td>
+                        <td className="num">
+                          {row.precisionBefore} → {row.precisionAfter}
+                        </td>
+                        <td className="num">
+                          {row.recallBefore} → <strong>{row.recallAfter}</strong>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
             <ul className="findings">
               <li>
                 <strong>Go.</strong> Calls inside func literals were dropped; a method on a call's
@@ -283,46 +268,45 @@ export function CallGraphAccuracyArticle() {
               excluded; pyright and rust-analyzer include starting the server and indexing, which is
               what a caller pays.
             </p>
-            <div className="table-scroll">
-              <table className="matrix">
-                <thead>
-                  <tr>
-                    <th scope="col">Project</th>
-                    <th scope="col">Graph</th>
-                    <th scope="col">agent-lens</th>
-                    <th scope="col">Oracle</th>
-                    <th scope="col">Speedup</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {TARGETS.map((row) => (
-                    <tr key={row.target}>
-                      <th scope="row">{row.target}</th>
-                      <td className="num dim">
-                        {row.nodes} fn · {row.edges} calls
-                      </td>
-                      <td className="num">{seconds(row.agentLensSeconds)}</td>
-                      <td className="num">
-                        {seconds(row.oracleSeconds)} <span className="dim">{row.oracle}</span>
-                      </td>
-                      <td className="num">
-                        <span className="speedup">
-                          <span className="bar" style={{ width: logWidth(speedup(row)) }} />
-                          <span>{Math.round(speedup(row))}×</span>
-                        </span>
-                      </td>
+            <SpeedChart />
+            <details className="table-view">
+              <summary>Show as table</summary>
+              <div className="table-scroll">
+                <table className="matrix">
+                  <thead>
+                    <tr>
+                      <th scope="col">Project</th>
+                      <th scope="col">Graph</th>
+                      <th scope="col">agent-lens</th>
+                      <th scope="col">Oracle</th>
+                      <th scope="col">Speedup</th>
                     </tr>
-                  ))}
-                  <tr className="total">
-                    <th scope="row">All eight</th>
-                    <td />
-                    <td className="num">{seconds(ALL.agentLensSeconds)}</td>
-                    <td className="num">{seconds(ALL.oracleSeconds)}</td>
-                    <td className="num">{Math.round(speedup(ALL))}×</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {TARGETS.map((row) => (
+                      <tr key={row.target}>
+                        <th scope="row">{row.target}</th>
+                        <td className="num dim">
+                          {row.nodes} fn · {row.edges} calls
+                        </td>
+                        <td className="num">{seconds(row.agentLensSeconds)}</td>
+                        <td className="num">
+                          {seconds(row.oracleSeconds)} <span className="dim">{row.oracle}</span>
+                        </td>
+                        <td className="num">{Math.round(speedup(row))}×</td>
+                      </tr>
+                    ))}
+                    <tr className="total">
+                      <th scope="row">All eight</th>
+                      <td />
+                      <td className="num">{seconds(ALL.agentLensSeconds)}</td>
+                      <td className="num">{seconds(ALL.oracleSeconds)}</td>
+                      <td className="num">{Math.round(speedup(ALL))}×</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
             <p>
               Every project finishes in under 160 ms, which is what lets the graph analyzers run
               inside a hook or on every agent turn. The gap is smallest against go-vta and tsc
