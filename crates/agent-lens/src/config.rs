@@ -72,6 +72,7 @@ pub use crate::analyze::hubs::HubsOptions;
 pub use crate::analyze::impact::ImpactOptions;
 pub use crate::analyze::layers::LayersOptions;
 pub use crate::analyze::narrowable::NarrowableOptions;
+pub use crate::analyze::ownership::OwnershipOptions;
 pub use crate::analyze::reach::ReachOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;
@@ -160,6 +161,8 @@ pub struct Profile {
     pub hidden_coupling: Option<CoChangeOptions>,
     #[serde(default)]
     pub change_entropy: Option<ChangeEntropyOptions>,
+    #[serde(default)]
+    pub ownership: Option<OwnershipOptions>,
     #[serde(default)]
     pub communities: Option<CommunitiesOptions>,
     #[serde(default)]
@@ -359,6 +362,7 @@ pub enum ToolName {
     Impact,
     Layers,
     Narrowable,
+    Ownership,
     Reach,
     Risk,
     Search,
@@ -403,7 +407,7 @@ impl TryFrom<String> for ToolName {
 
 impl ToolName {
     /// Every analyzer, in `as_str` order.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::ChangeEntropy,
         Self::CoChange,
         Self::Cohesion,
@@ -422,6 +426,7 @@ impl ToolName {
         Self::Impact,
         Self::Layers,
         Self::Narrowable,
+        Self::Ownership,
         Self::Reach,
         Self::Risk,
         Self::Search,
@@ -450,6 +455,7 @@ impl ToolName {
             Self::Impact => "impact",
             Self::Layers => "layers",
             Self::Narrowable => "narrowable",
+            Self::Ownership => "ownership",
             Self::Reach => "reach",
             Self::Risk => "risk",
             Self::Search => "search",

@@ -417,6 +417,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Hubs => hubs(report, base),
         ToolName::TestRedundancy => test_redundancy(report, base),
         ToolName::ChangeEntropy => change_entropy(report, base),
+        ToolName::Ownership => ownership(report, base),
         ToolName::CoChange => co_change(report),
         ToolName::HiddenCoupling => hidden_coupling(report),
         ToolName::Coupling => coupling(report),
@@ -1229,6 +1230,37 @@ fn change_entropy(report: &Value, base: &Path) -> Extraction {
     }
 }
 
+/// Rows are pre-ranked by low ownership × churn; a file one author
+/// wrote alone scores zero and is not a finding. A single-author report
+/// carries no rows, so it contributes nothing rather than a ranking of a
+/// degenerate history.
+fn ownership(report: &Value, base: &Path) -> Extraction {
+    let files = arr(report, "files")
+        .iter()
+        .filter(|row| f64_of(row, "score").is_some_and(|s| s > 0.0))
+        .filter_map(|row| {
+            let path = str_of(row, "path")?;
+            let share = f64_of(row, "top_author_share")?;
+            let authors = u64_of(row, "authors").unwrap_or(0);
+            let minor = u64_of(row, "minor_contributors").unwrap_or(0);
+            let commits = u64_of(row, "commits").unwrap_or(0);
+            Some(FileFinding {
+                path: from_repo_root(report, base, path),
+                headline: format!(
+                    "top author owns {:.0}% of {} across {} ({minor} minor)",
+                    share * 100.0,
+                    counted(commits, "commit", "commits"),
+                    counted(authors, "author", "authors"),
+                ),
+            })
+        })
+        .collect();
+    Extraction {
+        files,
+        corpus: Vec::new(),
+    }
+}
+
 // ---- Corpus-shaped extractors --------------------------------------------
 
 /// A co-change pair belongs to two files at once, so pairs stay
@@ -1432,7 +1464,7 @@ mod tests {
     use super::*;
 
     /// Every tool the digest folds, for shape-robustness sweeps.
-    const FOLDED: [ToolName; 15] = [
+    const FOLDED: [ToolName; 16] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Similarity,
@@ -1441,6 +1473,7 @@ mod tests {
         ToolName::Hubs,
         ToolName::TestRedundancy,
         ToolName::ChangeEntropy,
+        ToolName::Ownership,
         ToolName::CoChange,
         ToolName::HiddenCoupling,
         ToolName::Coupling,
@@ -1963,6 +1996,27 @@ mod tests {
             [
                 "pending change spans 4 files across 2 modules (entropy 0.66, p80 of this repo's commits)"
             ],
+        );
+    }
+
+    #[test]
+    fn ownership_keeps_contested_files_and_drops_single_owner_ones() {
+        let report = json!({
+            "repo_root": "/repo",
+            "files": [
+                { "path": "src/a.rs", "commits": 12, "authors": 5, "top_author_share": 0.4,
+                  "minor_contributors": 2, "score": 7.2 },
+                { "path": "src/solo.rs", "commits": 9, "authors": 1, "top_author_share": 1.0,
+                  "minor_contributors": 0, "score": 0.0 },
+            ],
+        });
+        let extraction = ownership(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [(
+                "/repo/src/a.rs",
+                "top author owns 40% of 12 commits across 5 authors (2 minor)"
+            )],
         );
     }
 

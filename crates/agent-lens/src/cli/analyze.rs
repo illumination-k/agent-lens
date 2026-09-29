@@ -8,8 +8,8 @@ use agent_lens::analyze::{
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, FootprintAnalyzer,
     ForwardingAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
     HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
-    NarrowableAnalyzer, OutputFormat, ReachAnalyzer, RiskAnalyzer, SearchAnalyzer,
-    SimilarityAnalyzer, TestRedundancyAnalyzer,
+    NarrowableAnalyzer, OutputFormat, OwnershipAnalyzer, ReachAnalyzer, RiskAnalyzer,
+    SearchAnalyzer, SimilarityAnalyzer, TestRedundancyAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -18,8 +18,9 @@ use super::args::{
     AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
     AnalyzeCouplingArgs, AnalyzeFootprintArgs, AnalyzeForwardingArgs, AnalyzeGraphQueryArgs,
     AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
-    AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzePathArgs, AnalyzeReachArgs, AnalyzeRiskArgs,
-    AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs, AnalyzeTestRedundancyArgs,
+    AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzeOwnershipArgs, AnalyzePathArgs,
+    AnalyzeReachArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
+    AnalyzeTestRedundancyArgs,
 };
 use super::write_stdout_line;
 
@@ -142,6 +143,10 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.layers.clone().unwrap_or_default(),
         }),
+        config::ToolName::Ownership => AnalyzeCommand::Ownership(AnalyzeOwnershipArgs {
+            common,
+            opts: profile.ownership.clone().unwrap_or_default(),
+        }),
         config::ToolName::Narrowable => AnalyzeCommand::Narrowable(AnalyzeNarrowableArgs {
             common,
             opts: profile.narrowable.clone().unwrap_or_default(),
@@ -235,6 +240,7 @@ impl_with_analyze_path_args!(
     ImpactAnalyzer,
     LayersAnalyzer,
     NarrowableAnalyzer,
+    OwnershipAnalyzer,
     ReachAnalyzer,
     RiskAnalyzer,
     TestRedundancyAnalyzer,
@@ -325,6 +331,7 @@ impl AnalyzeCommand {
                 Impact => ImpactAnalyzer,
                 Layers => LayersAnalyzer,
                 Narrowable => NarrowableAnalyzer,
+                Ownership => OwnershipAnalyzer,
                 Reach => ReachAnalyzer,
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,

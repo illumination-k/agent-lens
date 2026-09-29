@@ -58,6 +58,9 @@
 //!   pairing beats what two files that busy would do by chance. The CLI
 //!   supplies per-commit file sets; the association-rule arithmetic
 //!   (support / confidence / lift) lives here.
+//! * [`ownership`] — code ownership from git history: each file's top
+//!   author share and minor-contributor count (Bird et al. 2011), over
+//!   author identities the CLI has already normalised.
 //! * [`search`] — BM25F retrieval over function-level documents, with a
 //!   character n-gram fallback for query terms the corpus never spells.
 //!   Built per run from the corpus the caller already parsed, so there is
@@ -106,6 +109,7 @@ pub mod line_index;
 pub mod lsh;
 pub mod method_names;
 pub mod naming;
+pub mod ownership;
 pub mod pdg;
 pub mod risk;
 pub mod search;
@@ -160,6 +164,10 @@ pub use line_index::LineIndex;
 pub use lsh::{LshOptions, lsh_candidate_pairs, lsh_candidate_pairs_for_trees};
 pub use method_names::{BuiltinFunctionNames, InertAttributeNames, UbiquitousMethodNames};
 pub use naming::{identifier_tokens, path_segments, qualify, qualify_module, starts_uppercase};
+pub use ownership::{
+    AuthorShare, AuthoredCommit, DEFAULT_MINOR_THRESHOLD, FileOwnership, OwnershipThresholds,
+    compute_ownership,
+};
 pub use pdg::{
     DependenceEdge, DependenceKind, DependenceRole, DependenceVocabulary, Pdg, PdgFeatures,
     PdgNode, PdgOptions, WL_ITERATIONS, build_pdg, pdg_similarity,

@@ -259,6 +259,84 @@ impl ChurnScope {
         Ok(out)
     }
 
+    /// Per-commit authorship under this scope, newest first, keyed
+    /// repo-root-relative and with renames followed — what `analyze
+    /// ownership` needs and no other reader keeps.
+    ///
+    /// Author name and email come through `%aN` / `%aE`, which apply
+    /// `.mailmap`, so one person with three addresses arrives as one
+    /// identity. `Co-authored-by:` trailers arrive raw — git does not
+    /// mailmap a trailer — and are the caller's to normalise, through
+    /// [`Self::check_mailmap`]. Trailer keys match case-insensitively,
+    /// so `Co-Authored-By:` counts too.
+    ///
+    /// Merge commits carry no diff without `--diff-merges` and come back
+    /// with no files.
+    pub(crate) fn collect_authored_commits(
+        &self,
+        since: Option<&str>,
+    ) -> Result<Vec<AuthoredCommitRaw>, ChurnError> {
+        let stdout = self.run_log(self.log_command(
+            since,
+            &[
+                &format!(
+                    "--pretty=format:{COMMIT_MARKER}%aN{AUTHOR_FIELD}%aE{AUTHOR_FIELD}\
+                     %(trailers:key=Co-authored-by,valueonly,unfold,separator={AUTHOR_FIELD})"
+                ),
+                "--use-mailmap",
+                "--name-status",
+                "-M",
+            ],
+        ))?;
+        let mut renamed = RenameMap::default();
+        let mut out = Vec::new();
+        for commit in parse_authored_commits(&stdout) {
+            let mut files: Vec<String> = commit
+                .entries
+                .iter()
+                .map(|entry| renamed.current(&entry.path, entry.renamed_from.as_deref()))
+                .collect();
+            files.sort_unstable();
+            files.dedup();
+            out.push(AuthoredCommitRaw {
+                author: commit.author,
+                co_authors: commit.co_authors,
+                files,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Resolve `Name <email>` contacts through the repository's
+    /// `.mailmap`, one answer per input in input order.
+    ///
+    /// `git check-mailmap` rejects a contact with no `<email>`, so only
+    /// well-formed contacts should be passed; anything git cannot answer
+    /// for comes back unchanged.
+    pub(crate) fn check_mailmap(&self, contacts: &[String]) -> Result<Vec<String>, ChurnError> {
+        /// Contacts per `check-mailmap` invocation, well under any
+        /// platform's argument-length limit.
+        const CHUNK: usize = 200;
+        let mut out = Vec::with_capacity(contacts.len());
+        for chunk in contacts.chunks(CHUNK) {
+            let mut cmd = Command::new("git");
+            cmd.arg("-C")
+                .arg(&self.repo_root)
+                .arg("check-mailmap")
+                .args(chunk);
+            let stdout = self.run_log(cmd)?;
+            let mut answers = stdout.lines();
+            for contact in chunk {
+                out.push(
+                    answers
+                        .next()
+                        .map_or_else(|| contact.clone(), ToOwned::to_owned),
+                );
+            }
+        }
+        Ok(out)
+    }
+
     /// Changed-line counts for the diff `scope` names, keyed
     /// repo-root-relative — the pending change in the same shape, and
     /// the same path space, as the commits it is about to join.
@@ -457,6 +535,59 @@ fn shallow_from_output(output: &Output) -> Option<bool> {
 /// `--name-status` entry, and no quoting rule can blur the two.
 const COMMIT_MARKER: &str = "%x00";
 
+/// Separator between the author fields of a
+/// [`ChurnScope::collect_authored_commits`] header. A unit separator,
+/// which no name, email or trailer value contains in practice.
+const AUTHOR_FIELD: &str = "%x1f";
+
+/// One commit's authorship, as git reports it: the (mailmapped) author,
+/// the raw `Co-authored-by:` trailer values, and the files it touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthoredCommitRaw {
+    pub(crate) author: Contact,
+    /// Trailer values verbatim, normally `Name <email>`.
+    pub(crate) co_authors: Vec<String>,
+    /// Touched files under today's names, sorted and deduplicated.
+    pub(crate) files: Vec<String>,
+}
+
+/// A commit author's name and email.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Contact {
+    pub(crate) name: String,
+    pub(crate) email: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawAuthoredCommit {
+    author: Contact,
+    co_authors: Vec<String>,
+    entries: Vec<RawEntry>,
+}
+
+/// Split a `git log --pretty=format:%x00%aN%x1f%aE%x1f<trailers>
+/// --name-status` stream into commits.
+fn parse_authored_commits(stdout: &str) -> Vec<RawAuthoredCommit> {
+    parse_name_status_stream(stdout, |header| {
+        let mut fields = header.split('\x1f');
+        let name = fields.next().unwrap_or_default().trim().to_owned();
+        let email = fields.next().unwrap_or_default().trim().to_owned();
+        let co_authors = fields
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        (Contact { name, email }, co_authors)
+    })
+    .into_iter()
+    .map(|((author, co_authors), entries)| RawAuthoredCommit {
+        author,
+        co_authors,
+        entries,
+    })
+    .collect()
+}
+
 /// One commit as `git log --name-status` describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawCommit {
@@ -484,24 +615,35 @@ struct RawEntry {
 /// parser does not model, and inventing a path for it would put a
 /// fabricated file in the report.
 fn parse_raw_commits(stdout: &str) -> Vec<RawCommit> {
-    let mut commits: Vec<RawCommit> = Vec::new();
+    parse_name_status_stream(stdout, |header| header.trim().to_owned())
+        .into_iter()
+        .map(|(date, entries)| RawCommit { date, entries })
+        .collect()
+}
+
+/// The framing every `--name-status` reader here shares: a line opening
+/// with the NUL [`COMMIT_MARKER`] is a commit header, handed to `header`
+/// without the marker; any other non-blank line is an entry of the
+/// latest commit.
+fn parse_name_status_stream<H>(
+    stdout: &str,
+    header: impl Fn(&str) -> H,
+) -> Vec<(H, Vec<RawEntry>)> {
+    let mut commits: Vec<(H, Vec<RawEntry>)> = Vec::new();
     for line in stdout.lines() {
-        if let Some(date) = line.strip_prefix('\0') {
-            commits.push(RawCommit {
-                date: date.trim().to_owned(),
-                entries: Vec::new(),
-            });
+        if let Some(rest) = line.strip_prefix('\0') {
+            commits.push((header(rest), Vec::new()));
             continue;
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.trim().is_empty() {
             continue;
         }
-        let Some(commit) = commits.last_mut() else {
+        let Some((_, entries)) = commits.last_mut() else {
             continue;
         };
         if let Some(entry) = parse_raw_entry(trimmed) {
-            commit.entries.push(entry);
+            entries.push(entry);
         }
     }
     commits
@@ -1026,6 +1168,79 @@ mod tests {
     #[test]
     fn entries_before_the_first_commit_header_are_dropped() {
         assert_eq!(parse_raw_commits("M\tsrc/stray.rs\n"), Vec::new());
+    }
+
+    /// The authored-commit header: author name and email, then every
+    /// trailer value, all unit-separated after the NUL marker. A commit
+    /// with no trailer leaves an empty field that must not become an
+    /// empty co-author.
+    #[test]
+    fn authored_commit_headers_split_author_and_trailers() {
+        let commits = parse_authored_commits(concat!(
+            "\0Ann\x1fann@example.com\x1fClaude <noreply@anthropic.com>\x1fBob <bob@example.com>\n",
+            "M\tsrc/a.rs\n",
+            "\n",
+            "\0Bob\x1fbob@example.com\x1f\n",
+            "R100\tsrc/old.rs\tsrc/new.rs\n",
+        ));
+        assert_eq!(commits.len(), 2, "got {commits:?}");
+        assert_eq!(
+            commits[0].author,
+            Contact {
+                name: "Ann".to_owned(),
+                email: "ann@example.com".to_owned(),
+            },
+        );
+        assert_eq!(
+            commits[0].co_authors,
+            ["Claude <noreply@anthropic.com>", "Bob <bob@example.com>"],
+        );
+        assert_eq!(commits[0].entries.len(), 1);
+        assert!(commits[1].co_authors.is_empty(), "got {commits:?}");
+        assert_eq!(
+            commits[1].entries[0].renamed_from.as_deref(),
+            Some("src/old.rs")
+        );
+    }
+
+    #[test]
+    fn authored_commits_follow_renames_to_the_current_name() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        run_git(
+            dir.path(),
+            &["mv", "crates/app/src/lib.rs", "crates/app/src/renamed.rs"],
+        );
+        run_git(dir.path(), &["commit", "-q", "-m", "rename"]);
+
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
+        let commits = scope.collect_authored_commits(None).unwrap();
+        assert_eq!(commits.len(), 2, "got {commits:?}");
+        assert_eq!(commits[0].author.email, "test@example.com");
+        assert_eq!(
+            commits[1].files,
+            ["crates/app/src/other.rs", "crates/app/src/renamed.rs"],
+            "the initial commit must be keyed on today's name: {commits:?}",
+        );
+    }
+
+    #[test]
+    fn check_mailmap_answers_in_input_order() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        write_file(
+            dir.path(),
+            ".mailmap",
+            "Ann <ann@example.com> <ann@old.example>\n",
+        );
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(dir.path())).unwrap();
+        let mapped = scope
+            .check_mailmap(&[
+                "Bob <bob@example.com>".to_owned(),
+                "Annie <ann@old.example>".to_owned(),
+            ])
+            .unwrap();
+        assert_eq!(mapped, ["Bob <bob@example.com>", "Ann <ann@example.com>"]);
     }
 
     #[test]

@@ -162,11 +162,12 @@ agent-lens analyze coupling crates/agent-lens --format md --top 15
 agent-lens analyze communities crates/agent-lens --format md
 agent-lens analyze layers crates/agent-lens --format md
 
-# Git history: hotspots, blast-radius risk, co-change, change scatter
+# Git history: hotspots, blast-radius risk, co-change, change scatter, ownership
 agent-lens analyze hotspot . --since 90.days.ago --top 20
 agent-lens analyze risk . --since 90.days.ago --top 20
 agent-lens analyze co-change . --since 180.days.ago --min-support 5
 agent-lens analyze hidden-coupling . --min-support 5 --format md
+agent-lens analyze ownership . --since 180.days.ago --format md
 
 # Scope any report to pending work: --diff-only gates on the unstaged
 # working-tree diff, --diff-range on an explicit range
@@ -353,16 +354,16 @@ is a toast. Subagent (child) sessions get the per-edit reports only.
 
 ### Command surface
 
-| Command tree | Commands                                                                                                                                                                                                                                                                                                     |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `hook`       | `setup`, `session-start summary`, `session-start snapshot`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `pre-tool-use snapshot`, `cwd-changed snapshot`, `post-tool-use similarity`, `post-tool-use wrapper`, `post-tool-use footprint`, `stop delta`, `subagent-stop delta`                         |
-| `codex-hook` | same handlers as `hook` (Codex has no `SubagentStop`), speaking Codex's protocol                                                                                                                                                                                                                             |
-| `analyze`    | `search`, `similarity`, `forwarding`, `narrowable`, `test-redundancy`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `footprint`, `layers`, `reach`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling` |
-| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                                |
-| `baseline`   | `create <profile>` — snapshot a profile's metrics; `compare <profile> <SNAPSHOT> [--update]` — gate a fresh run against one                                                                                                                                                                                  |
-| `skills`     | `list`, `install` — the bundled Claude Code skills                                                                                                                                                                                                                                                           |
-| `config`     | `schema` — print the `agent-lens.toml` reference                                                                                                                                                                                                                                                             |
-| `help`       | `help [--md]` — print the command reference, optionally as one Markdown document                                                                                                                                                                                                                             |
+| Command tree | Commands                                                                                                                                                                                                                                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook`       | `setup`, `session-start summary`, `session-start snapshot`, `pre-tool-use complexity`, `pre-tool-use cohesion`, `pre-tool-use snapshot`, `cwd-changed snapshot`, `post-tool-use similarity`, `post-tool-use wrapper`, `post-tool-use footprint`, `stop delta`, `subagent-stop delta`                                      |
+| `codex-hook` | same handlers as `hook` (Codex has no `SubagentStop`), speaking Codex's protocol                                                                                                                                                                                                                                          |
+| `analyze`    | `search`, `similarity`, `forwarding`, `narrowable`, `test-redundancy`, `cohesion`, `complexity`, `coupling`, `communities`, `cycles`, `function-graph`, `graph-query`, `hubs`, `impact`, `footprint`, `layers`, `reach`, `context-span`, `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling`, `ownership` |
+| `run`        | `run <profile>` — execute every analyzer in a named `agent-lens.toml` profile                                                                                                                                                                                                                                             |
+| `baseline`   | `create <profile>` — snapshot a profile's metrics; `compare <profile> <SNAPSHOT> [--update]` — gate a fresh run against one                                                                                                                                                                                               |
+| `skills`     | `list`, `install` — the bundled Claude Code skills                                                                                                                                                                                                                                                                        |
+| `config`     | `schema` — print the `agent-lens.toml` reference                                                                                                                                                                                                                                                                          |
+| `help`       | `help [--md]` — print the command reference, optionally as one Markdown document                                                                                                                                                                                                                                          |
 
 `agent-lens --help` opens with a question-to-analyzer routing table ("what
 breaks if I change this?" → `analyze impact`), and each subcommand's `--help`
@@ -445,6 +446,7 @@ ordinary CLI contract: errors exit non-zero.
 | `change-entropy`  | How scattered change activity was per period (Hassan's history complexity), attributed onto files; `--diff-only` scores the pending change against the repo's own commit distribution.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `co-change`       | File pairs git history says change together: support, per-direction confidence, and lift, with renames followed. Correlation only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `hidden-coupling` | The differential between history and the static graph: co-changing pairs with no declared dependency (undeclared contracts), and declared dependencies history never exercised — reported as separate buckets.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `ownership`       | Files ranked by low code ownership × churn: top-author share, contributor count, and minor contributors (Bird et al.), with identities normalised through `.mailmap`, bots filtered and counted, and `Co-authored-by:` trailers credited.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 All analyzers default to JSON on stdout; `--format md` emits a compact
 Markdown summary tuned to drop straight into an LLM prompt.
@@ -500,10 +502,11 @@ Language coverage per analyzer:
   whose body is one unexpanded `assert_eq!` has no visible body and no
   outgoing edges, so it is skipped by `--min-body-nodes` rather than
   reported; the count of those is in the report.
-- `co-change` and `change-entropy` are language-agnostic: they read `git log`
-  and never parse a file, so `.toml`, `.md`, and CI config are covered too.
-- `hotspot`, `risk`, `co-change`, `change-entropy`, and `hidden-coupling`
-  require a git working tree.
+- `co-change`, `change-entropy`, and `ownership` are language-agnostic: they
+  read `git log` and never parse a file, so `.toml`, `.md`, and CI config are
+  covered too.
+- `hotspot`, `risk`, `co-change`, `change-entropy`, `hidden-coupling`, and
+  `ownership` require a git working tree.
 
 `coupling`, `context-span`, and `communities` name modules the way the
 analyzed language does (`crate::analyze::coupling`, `github.com/x/proj/internal/store`,

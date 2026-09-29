@@ -1860,6 +1860,48 @@ fn analyze_co_change_pairs_files_from_a_git_history() {
     assert!(json.get("shallow_clone").is_none(), "got {json}");
 }
 
+/// `analyze ownership` reads history and nothing else, so the binary is
+/// the only place its wiring can be checked end to end: the trailer
+/// format string, the bot default and the subcommand registration all
+/// show up here or nowhere.
+#[test]
+fn analyze_ownership_credits_co_authors_and_drops_bots() {
+    let dir = tempfile::tempdir().unwrap();
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    run_git(dir.path(), &["config", "user.email", "ann@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Ann"]);
+    let commits: [(&str, &str); 3] = [
+        (
+            "Ann <ann@example.com>",
+            "one\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+        ),
+        ("Ann <ann@example.com>", "two"),
+        ("renovate[bot] <bot@renovateapp.com>", "bump"),
+    ];
+    for (i, (author, message)) in commits.into_iter().enumerate() {
+        write_file(dir.path(), "src/lib.rs", &format!("// {i}\n"));
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(
+            dir.path(),
+            &["commit", "-q", "--author", author, "-m", message],
+        );
+    }
+
+    let json = stdout_json(&agent_lens(
+        &["analyze", "ownership", "."],
+        dir.path(),
+        None,
+    ));
+    assert_eq!(json["commit_count"], 2, "got {json}");
+    assert_eq!(json["bot_commit_count"], 1, "got {json}");
+    assert_eq!(json["co_authored_commit_count"], 1, "got {json}");
+    assert_eq!(json["author_count"], 2, "got {json}");
+    let row = &json["files"][0];
+    assert_eq!(row["path"], "src/lib.rs", "got {json}");
+    assert_eq!(row["top_author"], "Ann <ann@example.com>", "got {json}");
+    assert_eq!(row["top_author_share"], 0.75, "got {json}");
+}
+
 /// `analyze change-entropy` reads history and the pending diff, so the
 /// binary is the only place its wiring can be checked end to end. The
 /// `--diff-only` half especially: a working-tree read that never reached
@@ -2041,6 +2083,7 @@ fn analyze_communities_names_a_module_wired_into_a_neighbour() {
 #[case::risk_index_row("| `agent-lens analyze risk` |")]
 #[case::co_change_index_row("| `agent-lens analyze co-change` |")]
 #[case::change_entropy_index_row("| `agent-lens analyze change-entropy` |")]
+#[case::ownership_index_row("| `agent-lens analyze ownership` |")]
 #[case::communities_index_row("| `agent-lens analyze communities` |")]
 #[case::hidden_coupling_index_row("| `agent-lens analyze hidden-coupling` |")]
 #[case::routing("Pick an analyzer by question:")]
