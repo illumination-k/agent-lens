@@ -147,8 +147,8 @@ pub use communities::{
 pub use complexity::{ComplexityCounters, FunctionComplexity, HalsteadAcc, HalsteadCounts};
 pub use context_span::{ContextSpanReport, ModuleContextSpan, compute_context_spans};
 pub use coupling::{
-    CouplingEdge, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics, ModulePath,
-    PairCoupling, compute_report,
+    CouplingEdge, CouplingError, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics,
+    ModulePath, PairCoupling, compute_report,
 };
 pub use function::{
     CandidateStrategy, FunctionDef, FunctionSignature, LanguageParseError, LanguageParser,

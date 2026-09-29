@@ -30,7 +30,8 @@ mod tests {
     use lens_domain::ModulePath;
 
     use super::extract_context_spans;
-    use crate::coupling::{CouplingError, build_module_tree};
+    use crate::coupling::build_module_tree;
+    use lens_domain::CouplingError;
 
     fn build_context_span_report(
         root: &std::path::Path,

@@ -31,8 +31,9 @@ pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_wi
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::extract_context_spans;
-pub use coupling::{CouplingError, PythonModule, build_module_tree, extract_edges};
+pub use coupling::{PythonModule, build_module_tree, extract_edges};
 pub use dependence::PythonVocabulary;
+pub use lens_domain::CouplingError;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use module_path::module_segments;
 pub use parser::{PythonParseError, PythonParser};

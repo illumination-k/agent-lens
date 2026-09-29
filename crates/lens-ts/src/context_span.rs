@@ -8,7 +8,8 @@ use std::path::Path;
 
 use lens_domain::{ContextSpanReport, ModulePath, compute_context_spans, compute_report};
 
-use crate::coupling::{CouplingError, build_module_tree, extract_edges};
+use crate::coupling::{build_module_tree, extract_edges};
+use lens_domain::CouplingError;
 
 /// Failures produced while extracting context spans from a TS/JS entry file.
 #[derive(Debug, thiserror::Error)]

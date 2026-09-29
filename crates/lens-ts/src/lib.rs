@@ -40,8 +40,9 @@ pub use call_index::{
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::{ContextSpanError, extract_context_spans};
-pub use coupling::{CouplingError, TsModule, build_module_tree, extract_edges};
+pub use coupling::{TsModule, build_module_tree, extract_edges};
 pub use dependence::TsVocabulary;
+pub use lens_domain::CouplingError;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use module_path::module_segments;
 pub use parser::{Dialect, TsParseError, TypeScriptParser};
