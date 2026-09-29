@@ -17,6 +17,7 @@ use agent_lens::analyze::hubs::HubsOptions;
 use agent_lens::analyze::impact::ImpactOptions;
 use agent_lens::analyze::layers::LayersOptions;
 use agent_lens::analyze::narrowable::NarrowableOptions;
+use agent_lens::analyze::ownership::OwnershipOptions;
 use agent_lens::analyze::reach::ReachOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
@@ -442,6 +443,33 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// bucket at `--top` (default 20).
     #[command(name = "hidden-coupling", after_long_help = examples::HIDDEN_COUPLING)]
     HiddenCoupling(AnalyzeHiddenCouplingArgs),
+    /// Rank files by low code ownership × churn from git history: top
+    /// author share, contributor count, and minor contributors.
+    ///
+    /// Says whether the file about to be edited has a clear owner or is
+    /// a commons many people touched shallowly. Each counted commit
+    /// gives one unit of credit per file it touched, split evenly
+    /// between its author and every `Co-authored-by:` trailer, so
+    /// agent-assisted commits credit the agent instead of reading as a
+    /// single author for everything. `top_author_share` is the largest
+    /// author's credit over the file's commits; a contributor under
+    /// `--minor-threshold` (default 0.05, after Bird et al.) is minor.
+    /// Identities go through `.mailmap` — trailers too, via `git
+    /// check-mailmap` — and are then keyed by lowercased email. Authors
+    /// matching a `--bot-pattern` glob (default `*\[bot\]*`, matched
+    /// against `Name <email>`) are dropped and counted rather than
+    /// silently removed; a commit left with no author is dropped whole.
+    /// Rows rank by `commits × (1 − top_author_share)`, so a file one
+    /// author wrote alone scores zero however busy it is. A window
+    /// with a single author gets a note instead of a ranking. Like
+    /// `co-change` it reads `git log` and never parses a file, so it
+    /// has no language matrix. Commits, not lines: a formatting sweep
+    /// counts like any other commit. `path` must be inside a git
+    /// working tree, and a shallow clone is warned about on stderr.
+    /// JSON is the default; `--format md` caps its table at `--top`
+    /// (default 20).
+    #[command(after_long_help = examples::OWNERSHIP)]
+    Ownership(AnalyzeOwnershipArgs),
     /// Rank functions by how well they match a query.
     ///
     /// The retrieval unit is the function, not the line: every hit is a
@@ -755,6 +783,14 @@ pub(in crate::cli) struct AnalyzeHiddenCouplingArgs {
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(in crate::cli) opts: CoChangeOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(in crate::cli) struct AnalyzeOwnershipArgs {
+    #[command(flatten)]
+    pub(in crate::cli) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(in crate::cli) opts: OwnershipOptions,
 }
 
 #[derive(Debug, Clone, Args)]

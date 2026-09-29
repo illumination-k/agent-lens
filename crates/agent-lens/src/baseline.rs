@@ -142,6 +142,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Impact
         | ToolName::Layers
         | ToolName::Narrowable
+        | ToolName::Ownership
         | ToolName::Reach
         | ToolName::Risk
         | ToolName::Search
@@ -592,6 +593,7 @@ mod tests {
     #[case(ToolName::Footprint)]
     #[case(ToolName::Layers)]
     #[case(ToolName::Narrowable)]
+    #[case(ToolName::Ownership)]
     #[case(ToolName::Reach)]
     #[case(ToolName::Risk)]
     #[case(ToolName::TestRedundancy)]

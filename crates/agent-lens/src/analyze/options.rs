@@ -193,6 +193,7 @@ mod tests {
     use crate::analyze::hubs::{HubsAnalyzer, HubsOptions};
     use crate::analyze::impact::{ImpactAnalyzer, ImpactOptions};
     use crate::analyze::layers::{LayersAnalyzer, LayersOptions};
+    use crate::analyze::ownership::{OwnershipAnalyzer, OwnershipOptions};
     use crate::analyze::parameters::{ParametersAnalyzer, ParametersOptions};
     use crate::analyze::risk::{RiskAnalyzer, RiskOptions};
     use crate::analyze::similarity::{SimilarityAnalyzer, SimilarityOptions};
@@ -277,6 +278,22 @@ mod tests {
             .with_min_support(5)
             .with_min_confidence(0.7)
             .with_max_commit_files(20)
+    );
+    assert_options_reach_the_analyzer!(
+        ownership_options_reach_the_analyzer: OwnershipAnalyzer,
+        OwnershipOptions {
+            top: Some(3),
+            since: Some("90.days.ago".to_owned()),
+            minor_threshold: 0.1,
+            bot_pattern: vec!["ci *".to_owned()],
+            include_bots: true,
+        },
+        |a| a
+            .with_top(Some(3))
+            .with_since_opt(Some("90.days.ago".to_owned()))
+            .with_minor_threshold(0.1)
+            .with_bot_patterns(vec!["ci *".to_owned()])
+            .with_include_bots(true)
     );
     assert_options_reach_the_analyzer!(
         change_entropy_options_reach_the_analyzer: ChangeEntropyAnalyzer,

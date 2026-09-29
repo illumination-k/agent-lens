@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 23] = [
+const TOOL_ORDER: [ToolName; 24] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -32,6 +32,7 @@ const TOOL_ORDER: [ToolName; 23] = [
     ToolName::Risk,
     ToolName::CoChange,
     ToolName::ChangeEntropy,
+    ToolName::Ownership,
     ToolName::HiddenCoupling,
     ToolName::Hubs,
     ToolName::Impact,
@@ -81,7 +82,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, ownership, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
     },
     Field {
         key: "format",
@@ -364,6 +365,38 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 ty: "int",
                 presence: "optional",
                 desc: "Cap the markdown tables to the top N rows.",
+            },
+        ],
+        ToolName::Ownership => &[
+            Field {
+                key: "since",
+                ty: "string",
+                presence: "optional",
+                desc: "Git window for the history read, e.g. \"180.days.ago\". Every share and count is computed inside it.",
+            },
+            Field {
+                key: "minor-threshold",
+                ty: "float",
+                presence: "default: 0.05",
+                desc: "A contributor whose share of a file's commits is strictly below this is minor (Bird et al.). Must be within [0.0, 1.0].",
+            },
+            Field {
+                key: "bot-pattern",
+                ty: "array<string> (globs)",
+                presence: "default: [\"*\\\\[bot\\\\]*\"]",
+                desc: "Globs matched case-insensitively against `Name <email>`; a match is a bot, dropped from authorship and counted. Replaces the default rather than adding to it.",
+            },
+            Field {
+                key: "include-bots",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Keep bot authors instead of dropping them.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown table to the top N files.",
             },
         ],
         ToolName::HiddenCoupling => &[
@@ -849,8 +882,8 @@ mod tests {
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
         ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions,
         ForwardingOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
-        LayersOptions, NarrowableOptions, Profile, ReachOptions, RiskOptions, SearchOptions,
-        SimilarityOptions, TestRedundancyOptions,
+        LayersOptions, NarrowableOptions, OwnershipOptions, Profile, ReachOptions, RiskOptions,
+        SearchOptions, SimilarityOptions, TestRedundancyOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -876,6 +909,7 @@ mod tests {
         assert_tool_parity::<CohesionOptions>(ToolName::Cohesion);
         assert_tool_parity::<CoChangeOptions>(ToolName::CoChange);
         assert_tool_parity::<ChangeEntropyOptions>(ToolName::ChangeEntropy);
+        assert_tool_parity::<OwnershipOptions>(ToolName::Ownership);
         assert_tool_parity::<CommunitiesOptions>(ToolName::Communities);
         // `hidden-coupling` scopes the same history window with the same
         // thresholds as `co-change`, so they share one options type —

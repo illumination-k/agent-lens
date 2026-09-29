@@ -25,6 +25,7 @@ Pick an analyzer by question:
     what else will I have to edit?        analyze co-change
     what couples these without saying so? analyze hidden-coupling
     did this edit end up scattered?       analyze change-entropy
+    does anyone own this file?            analyze ownership
     is this function too complex?         analyze complexity
     where does this codebase do X?        analyze search
     did I already write this?             analyze similarity
@@ -280,6 +281,20 @@ Examples:
     agent-lens analyze change-entropy . --since 180.days.ago --period month
     agent-lens analyze change-entropy . --diff-range HEAD~1..HEAD --format md
     agent-lens analyze change-entropy . --min-commits 5 --max-commit-files 20
+";
+
+pub const OWNERSHIP: &str = "\
+Read `bots` and `co_authored_commit_count` before the ranking: they say how
+the identities were counted, and an agent-assisted repository with no
+co-authored commits is one whose trailers were not written.
+
+Examples:
+
+    agent-lens analyze ownership . --format md --top 15
+    agent-lens analyze ownership . --since 180.days.ago --format md
+    agent-lens analyze ownership . --minor-threshold 0.1
+    agent-lens analyze ownership . --bot-pattern '*\\[bot\\]*' --bot-pattern 'ci *'
+    agent-lens analyze ownership . --include-bots --format md
 ";
 
 pub const COMMUNITIES: &str = "\

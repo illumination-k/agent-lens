@@ -198,6 +198,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.footprint.is_some(), config::ToolName::Footprint),
         (profile.layers.is_some(), config::ToolName::Layers),
         (profile.narrowable.is_some(), config::ToolName::Narrowable),
+        (profile.ownership.is_some(), config::ToolName::Ownership),
         (profile.reach.is_some(), config::ToolName::Reach),
         (
             profile.test_redundancy.is_some(),

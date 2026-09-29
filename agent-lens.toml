@@ -353,7 +353,7 @@ tools = [
 [profile.history]
 path = "."
 format = "md"
-tools = ["co-change", "change-entropy", "hidden-coupling"]
+tools = ["co-change", "change-entropy", "hidden-coupling", "ownership"]
 
 [profile.history.co-change]
 top = 25
@@ -386,3 +386,11 @@ top = 20
 top = 20
 min-support = 8
 min-confidence = 0.6
+
+# Who owns what. Repo-wide for the same reason as the rest of this
+# profile. The default bot glob drops dependabot, which authors a large
+# share of this repository's commits; the `Co-authored-by:` trailers on
+# agent-assisted commits are what keep this from reporting one author for
+# everything.
+[profile.history.ownership]
+top = 20
