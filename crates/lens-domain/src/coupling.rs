@@ -32,6 +32,65 @@
 //! list; this module only knows how to fold it into a report.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+/// Failures a language adapter raises while building its module tree.
+///
+/// Shared by every adapter so the CLI converts one error type instead of
+/// four isomorphic ones. `Parse` boxes the adapter's own parser error;
+/// `MissingMod` only arises from Rust's `mod foo;` resolution and
+/// `UnsupportedRoot` only from adapters that accept a file-or-directory
+/// root.
+#[derive(Debug, thiserror::Error)]
+pub enum CouplingError {
+    /// Reading a source file (or a directory entry) failed.
+    #[error("failed to read {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The adapter's parser rejected a file's contents.
+    #[error("failed to parse {path:?}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// `mod foo;` was declared but neither `foo.rs` nor `foo/mod.rs` was
+    /// found in the parent directory.
+    #[error(
+        "module `{parent}::{name}` declared but neither {name}.rs nor {name}/mod.rs found in {near:?}"
+    )]
+    MissingMod {
+        /// Module path of the declaring parent (e.g. `crate::a`).
+        parent: String,
+        /// Identifier as written in `mod <name>;`.
+        name: String,
+        /// Directory that was probed for the missing file.
+        near: PathBuf,
+    },
+    /// The root is neither a directory nor a file the adapter reads.
+    #[error("unsupported root {path:?}: expected {expected}")]
+    UnsupportedRoot {
+        path: PathBuf,
+        /// What the adapter accepts, e.g. `a .py file or directory`.
+        expected: &'static str,
+    },
+}
+
+impl CouplingError {
+    /// Wrap an adapter parser error for `path`.
+    pub fn parse(
+        path: impl Into<PathBuf>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Parse {
+            path: path.into(),
+            source: Box::new(source),
+        }
+    }
+}
 
 /// Dotted module path (e.g. `crate::analyze::coupling`).
 ///
@@ -631,5 +690,68 @@ mod tests {
         let edges = vec![e("a", "a", "Foo", EdgeKind::Call)];
         let r = compute_report(&mods, edges);
         assert!(r.cycles.is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::io(
+        CouplingError::Io {
+            path: "/tmp/x.rs".into(),
+            source: std::io::Error::other("missing"),
+        },
+        &["failed to read", "/tmp/x.rs", "missing"],
+    )]
+    #[case::parse(
+        CouplingError::parse("/tmp/x.rs", std::io::Error::other("bad token")),
+        &["failed to parse", "/tmp/x.rs", "bad token"],
+    )]
+    #[case::missing_mod(
+        CouplingError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "ghost".to_owned(),
+            near: "/tmp/proj".into(),
+        },
+        &["crate::ghost", "ghost.rs", "ghost/mod.rs", "/tmp/proj"],
+    )]
+    #[case::unsupported_root(
+        CouplingError::UnsupportedRoot {
+            path: "/tmp/x.txt".into(),
+            expected: "a .py file or directory",
+        },
+        &["unsupported root", "/tmp/x.txt", "a .py file or directory"],
+    )]
+    fn coupling_error_display_names_path_and_cause(
+        #[case] err: CouplingError,
+        #[case] needles: &[&str],
+    ) {
+        let msg = err.to_string();
+        for needle in needles {
+            assert!(msg.contains(needle), "{needle:?} missing from {msg}");
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::io(
+        CouplingError::Io { path: "/tmp/x".into(), source: std::io::Error::other("boom") },
+        true,
+    )]
+    #[case::parse(CouplingError::parse("/tmp/x", std::io::Error::other("boom")), true)]
+    #[case::missing_mod(
+        CouplingError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "ghost".to_owned(),
+            near: "/tmp".into(),
+        },
+        false,
+    )]
+    #[case::unsupported_root(
+        CouplingError::UnsupportedRoot { path: "/tmp/x".into(), expected: "a directory" },
+        false,
+    )]
+    fn coupling_error_chains_only_wrapped_failures(
+        #[case] err: CouplingError,
+        #[case] has_source: bool,
+    ) {
+        use std::error::Error as _;
+        assert_eq!(err.source().is_some(), has_source);
     }
 }

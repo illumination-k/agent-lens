@@ -38,12 +38,13 @@ mod walk;
 mod wrapper;
 
 pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};
-pub use cohesion::extract_cohesion_units;
-pub use complexity::extract_complexity_units;
+pub use cohesion::{CohesionError, extract_cohesion_units};
+pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::extract_context_spans;
-pub use coupling::{CouplingError, GoPackage, build_module_tree, extract_edges, module_prefix};
+pub use coupling::{GoPackage, build_module_tree, extract_edges, module_prefix};
 pub use dependence::GoVocabulary;
 pub use interfaces::{extract_interface_decls_with_module, extract_interface_shapes_with_module};
+pub use lens_domain::CouplingError;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use module_path::package_segments;
 pub use parser::{GoParseError, GoParser};

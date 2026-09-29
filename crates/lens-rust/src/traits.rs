@@ -23,7 +23,7 @@ use crate::parser::{RustParseError, visibility_shape};
 /// source file, with declarations qualified at `module`. Inline modules
 /// are descended into, tracking `#[cfg(test)]` context; the module path
 /// of a nested declaration still uses `module` as its base, matching
-/// [`crate::extract_function_shapes_with_modules`].
+/// [`crate::extract_function_shapes_with_module`].
 pub fn extract_trait_shapes_with_module(
     source: &str,
     module: &str,

@@ -27,8 +27,13 @@ use crate::walk::{FnSite, walk_top_level_fns};
 /// functions). Matches the Rust / Python adapters' `<module>` label.
 const MODULE_UNIT_NAME: &str = "<module>";
 
+/// Failure of [`extract_cohesion_units`]. Go's only failure mode is the parse
+/// itself, so this names [`GoParseError`] under the same export every
+/// other adapter uses.
+pub type CohesionError = GoParseError;
+
 /// Extract one [`CohesionUnit`] per receiver type in `source`.
-pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, GoParseError> {
+pub fn extract_cohesion_units(source: &str) -> Result<Vec<CohesionUnit>, CohesionError> {
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let mut by_owner: BTreeMap<String, Vec<MethodRow>> = BTreeMap::new();

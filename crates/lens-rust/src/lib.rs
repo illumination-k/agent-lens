@@ -26,19 +26,19 @@ mod type_defs;
 mod wrapper;
 
 pub use call_index::{
-    CallIndexOptions, CallKind, CallSite, UseAlias,
-    extract_call_shapes_with_options_and_base_module, extract_call_sites,
-    extract_call_sites_with_options, extract_call_sites_with_options_and_base_module,
+    CallIndexOptions, CallKind, CallSite, UseAlias, extract_call_shapes_with_module,
+    extract_call_sites, extract_call_sites_with_options,
+    extract_call_sites_with_options_and_base_module,
 };
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
-pub use coupling::{CouplingError, CrateModule, build_module_tree, extract_edges};
+pub use coupling::{CrateModule, build_module_tree, extract_edges};
 pub use dependence::RustVocabulary;
-pub use lens_domain::WrapperFinding;
+pub use lens_domain::{CouplingError, WrapperFinding};
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use parser::{
-    RustFunctionDef, RustParseError, RustParser, extract_function_shapes_with_modules,
-    extract_functions_with_modules,
+    RustFunctionDef, RustParseError, RustParser, extract_function_shapes_with_module,
+    extract_functions_with_module,
 };
 pub use statements::extract_statement_seqs;
 pub use traits::extract_trait_shapes_with_module;

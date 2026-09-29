@@ -43,7 +43,6 @@ use lens_domain::{
 use serde::Serialize;
 use tracing::warn;
 
-use super::error_from::impl_from_coupling_error;
 use super::module_graph::{GraphPolicy, ModuleFile, ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
 use super::options::analyzer_options;
@@ -94,10 +93,11 @@ pub enum ContextSpanAnalyzerError {
     },
 }
 
-impl_from_coupling_error!(lens_rust::CouplingError => ContextSpanAnalyzerError, MissingMod);
-impl_from_coupling_error!(lens_ts::CouplingError => ContextSpanAnalyzerError);
-impl_from_coupling_error!(lens_py::CouplingError => ContextSpanAnalyzerError, UnsupportedRoot);
-impl_from_coupling_error!(lens_golang::CouplingError => ContextSpanAnalyzerError, UnsupportedRoot);
+impl From<lens_domain::CouplingError> for ContextSpanAnalyzerError {
+    fn from(value: lens_domain::CouplingError) -> Self {
+        super::CrateAnalyzerError::from(value).into()
+    }
+}
 
 impl From<super::CrateAnalyzerError> for ContextSpanAnalyzerError {
     fn from(value: super::CrateAnalyzerError) -> Self {

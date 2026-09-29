@@ -25,10 +25,15 @@ use crate::node_text::node_str;
 use crate::parser::{GoParseError, parse_tree};
 use crate::walk::{FnSite, walk_top_level_fns};
 
+/// Failure of [`extract_complexity_units`]. Go's only failure mode is the parse
+/// itself, so this names [`GoParseError`] under the same export every
+/// other adapter uses.
+pub type ComplexityError = GoParseError;
+
 /// Extract one [`FunctionComplexity`] per function-shaped item in
 /// `source`. Methods are reported as `Receiver::method`; free functions
 /// keep their bare name.
-pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, GoParseError> {
+pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>, ComplexityError> {
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let mut out = Vec::new();

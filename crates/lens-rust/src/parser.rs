@@ -59,7 +59,7 @@ pub enum RustParseError {
 
 /// Extract functions while preserving the caller-provided file module as
 /// the base for inline modules.
-pub fn extract_functions_with_modules(
+pub fn extract_functions_with_module(
     source: &str,
     base_module: &str,
 ) -> Result<Vec<RustFunctionDef>, RustParseError> {
@@ -70,11 +70,11 @@ pub fn extract_functions_with_modules(
 }
 
 /// Extract neutral function syntax facts while preserving module context.
-pub fn extract_function_shapes_with_modules(
+pub fn extract_function_shapes_with_module(
     source: &str,
     base_module: &str,
 ) -> Result<Vec<FunctionShape>, RustParseError> {
-    extract_functions_with_modules(source, base_module)
+    extract_functions_with_module(source, base_module)
         .map(|functions| functions.into_iter().map(FunctionShape::from).collect())
 }
 
@@ -1154,7 +1154,7 @@ mod tests {
         let src = "struct S; trait T { fn work(&self); }\n\
                    impl T for S { fn work(&self) { let _ = 1; } }\n\
                    impl S { fn direct(&self) { let _ = 1; } }";
-        let defs = extract_functions_with_modules(src, "crate").unwrap();
+        let defs = extract_functions_with_module(src, "crate").unwrap();
         let by_name = |name: &str| {
             defs.iter()
                 .find(|def| def.qualified_name == name)
@@ -1295,7 +1295,7 @@ trait T {
     #[test]
     fn module_aware_shapes_carry_doc_text() {
         let src = "/// Documented free fn.\nfn f() { let _x = 1; }\n";
-        let shapes = extract_function_shapes_with_modules(src, "crate").unwrap();
+        let shapes = extract_function_shapes_with_module(src, "crate").unwrap();
         assert_eq!(shapes[0].doc.as_deref(), Some("Documented free fn."));
     }
 
@@ -1374,7 +1374,7 @@ mod inner {
     }
 }
 "#;
-        let funcs = extract_functions_with_modules(src, "crate::outer").unwrap();
+        let funcs = extract_functions_with_module(src, "crate::outer").unwrap();
         let names: Vec<_> = funcs
             .iter()
             .map(|f| {
@@ -1415,7 +1415,7 @@ mod inner {
     }
 }
 "#;
-        let shapes = extract_function_shapes_with_modules(src, "crate::outer").unwrap();
+        let shapes = extract_function_shapes_with_module(src, "crate::outer").unwrap();
 
         assert_eq!(shapes.len(), 1);
         assert_eq!(shapes[0].display_name, "call");
@@ -1456,7 +1456,7 @@ mod tests {
     }
 }
 "#;
-        let funcs = extract_functions_with_modules(src, "crate").unwrap();
+        let funcs = extract_functions_with_module(src, "crate").unwrap();
         let flags: Vec<_> = funcs
             .iter()
             .map(|f| (f.qualified_name.as_str(), f.function.is_test))
@@ -2125,7 +2125,7 @@ fn c(n: u32) -> u32 {
                    pub struct W;\n\
                    impl W { fn helper(&self) -> usize { 1 } }\n\
                    impl Greet for W { fn greeting(&self) -> usize { 2 } }\n";
-        let kinds: Vec<(String, Option<OwnerKind>)> = extract_functions_with_modules(src, "crate")
+        let kinds: Vec<(String, Option<OwnerKind>)> = extract_functions_with_module(src, "crate")
             .unwrap()
             .into_iter()
             .map(|f| (f.name, f.impl_owner_kind))
@@ -2153,7 +2153,7 @@ fn c(n: u32) -> u32 {
                    }\n\
                    #[no_mangle]\n\
                    fn free() {}\n";
-        let attributes: Vec<(String, Vec<String>)> = extract_functions_with_modules(src, "crate")
+        let attributes: Vec<(String, Vec<String>)> = extract_functions_with_module(src, "crate")
             .unwrap()
             .into_iter()
             .map(|f| (f.name, f.attributes))

@@ -140,7 +140,11 @@ pub fn extract_call_sites_with_options_and_base_module(
 }
 
 /// Extract neutral call syntax facts with an explicit lexical base module.
-pub fn extract_call_shapes_with_options_and_base_module(
+///
+/// Same entry point as every other adapter's
+/// `extract_call_shapes_with_module`; `opts` (Rust's `#[cfg(test)]`
+/// knob) sits in the slot where `lens-ts` takes its dialect.
+pub fn extract_call_shapes_with_module(
     source: &str,
     opts: CallIndexOptions,
     base_module: &str,
@@ -1259,7 +1263,7 @@ mod tests {
         #[case] src: &str,
         #[case] expected: ReceiverExprKind,
     ) {
-        let shapes = extract_call_shapes_with_options_and_base_module(
+        let shapes = extract_call_shapes_with_module(
             src,
             CallIndexOptions {
                 include_cfg_test_blocks: true,
@@ -1277,7 +1281,7 @@ mod tests {
 
     #[test]
     fn neutral_call_shapes_preserve_callee_path_segments() {
-        let shapes = extract_call_shapes_with_options_and_base_module(
+        let shapes = extract_call_shapes_with_module(
             "fn a(x: T) { crate::other::foo(); x.bar(); }\n",
             CallIndexOptions {
                 include_cfg_test_blocks: true,

@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lens_domain::{CouplingEdge, EdgeKind, ModulePath};
+use lens_domain::{CouplingEdge, CouplingError, EdgeKind, ModulePath};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ExportAllDeclaration, ExportFromDeclaration, ImportDeclaration, ImportDeclarationSpecifier,
@@ -21,25 +21,6 @@ use oxc_ast_visit::{Visit, walk::walk_import_expression};
 use crate::module_path::module_segments;
 use crate::parser::{Dialect, TsParseError};
 use crate::resolver::{ModuleResolver, is_followable_specifier, normalize_path};
-
-/// Failures raised while discovering a TS/JS module graph.
-#[derive(Debug, thiserror::Error)]
-pub enum CouplingError {
-    /// Reading a source file failed.
-    #[error("failed to read {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    /// Parsing a source file failed.
-    #[error("failed to parse {path:?}: {source}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: TsParseError,
-    },
-}
 
 /// One discovered TS/JS source file.
 #[derive(Debug, Clone)]
@@ -81,10 +62,7 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
                 continue;
             }
             Err(source) => {
-                return Err(CouplingError::Parse {
-                    path: file.clone(),
-                    source,
-                });
+                return Err(CouplingError::parse(file.clone(), source));
             }
         };
         for link in &mut links {

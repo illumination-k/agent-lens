@@ -190,25 +190,25 @@ impl SourceLang {
 /// Dispatch the per-language lens extractor `$extract` for `$lang` over
 /// `$source`, boxing each adapter's error type into the shared
 /// `Box<dyn Error + Send + Sync>` currency. Every extractor family
-/// (cohesion units, complexity units, wrapper findings, ...) exposes the
-/// same `lens_<lang>::$extract` shape — TypeScript additionally takes its
-/// dialect — so the analyzers and hook cores share this one dispatch
-/// instead of each repeating the four-arm match.
+/// (cohesion units, complexity units, wrapper findings, function shapes,
+/// ...) exposes the same `lens_<lang>::$extract(source, args...)` shape —
+/// TypeScript additionally takes its dialect right after the source — so
+/// the analyzers and hook cores share this one dispatch instead of each
+/// repeating the four-arm match. Trailing `$arg`s are forwarded to every
+/// adapter.
 macro_rules! dispatch_lens {
-    ($lang:expr, $source:expr, $extract:ident) => {{
+    ($lang:expr, $source:expr, $extract:ident $(, $arg:expr)* $(,)?) => {{
         type BoxedError = ::std::boxed::Box<dyn ::std::error::Error + Send + Sync>;
         match $lang {
-            $crate::analyze::SourceLang::Rust => {
-                ::lens_rust::$extract($source).map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
-            }
+            $crate::analyze::SourceLang::Rust => ::lens_rust::$extract($source $(, $arg)*)
+                .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
             $crate::analyze::SourceLang::TypeScript(dialect) => {
-                ::lens_ts::$extract($source, dialect)
+                ::lens_ts::$extract($source, dialect $(, $arg)*)
                     .map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
             }
-            $crate::analyze::SourceLang::Python => {
-                ::lens_py::$extract($source).map_err(|e| ::std::boxed::Box::new(e) as BoxedError)
-            }
-            $crate::analyze::SourceLang::Go => ::lens_golang::$extract($source)
+            $crate::analyze::SourceLang::Python => ::lens_py::$extract($source $(, $arg)*)
+                .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
+            $crate::analyze::SourceLang::Go => ::lens_golang::$extract($source $(, $arg)*)
                 .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
         }
     }};
@@ -321,12 +321,17 @@ pub enum CrateAnalyzerError {
     PathFilter(#[from] PathFilterError),
 }
 
-use error_from::impl_from_coupling_error;
-
-impl_from_coupling_error!(lens_rust::CouplingError => CrateAnalyzerError, MissingMod);
-impl_from_coupling_error!(lens_ts::CouplingError => CrateAnalyzerError);
-impl_from_coupling_error!(lens_py::CouplingError => CrateAnalyzerError, UnsupportedRoot);
-impl_from_coupling_error!(lens_golang::CouplingError => CrateAnalyzerError, UnsupportedRoot);
+impl From<lens_domain::CouplingError> for CrateAnalyzerError {
+    fn from(value: lens_domain::CouplingError) -> Self {
+        use lens_domain::CouplingError as Inner;
+        match value {
+            Inner::Io { path, source } => Self::Io { path, source },
+            Inner::Parse { path, source } => Self::Parse { path, source },
+            Inner::MissingMod { parent, name, near } => Self::MissingMod { parent, name, near },
+            Inner::UnsupportedRoot { path, .. } => Self::UnsupportedRoot { path },
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -361,6 +366,35 @@ mod tests {
         assert_eq!(SourceLang::from_extension("py"), Some(SourceLang::Python));
         assert_eq!(SourceLang::from_extension("go"), Some(SourceLang::Go));
         assert_eq!(SourceLang::from_extension("md"), None);
+    }
+
+    #[rstest::rstest]
+    #[case::io(
+        lens_domain::CouplingError::Io { path: "/p".into(), source: io::Error::other("x") },
+        "Io",
+    )]
+    #[case::parse(
+        lens_domain::CouplingError::parse("/p", io::Error::other("x")),
+        "Parse"
+    )]
+    #[case::missing_mod(
+        lens_domain::CouplingError::MissingMod {
+            parent: "crate".into(),
+            name: "m".into(),
+            near: "/p".into(),
+        },
+        "MissingMod",
+    )]
+    #[case::unsupported_root(
+        lens_domain::CouplingError::UnsupportedRoot { path: "/p".into(), expected: "a dir" },
+        "UnsupportedRoot",
+    )]
+    fn coupling_error_maps_onto_the_same_variant(
+        #[case] err: lens_domain::CouplingError,
+        #[case] variant: &str,
+    ) {
+        let converted = format!("{:?}", CrateAnalyzerError::from(err));
+        assert!(converted.starts_with(variant), "got {converted}");
     }
 
     #[test]
