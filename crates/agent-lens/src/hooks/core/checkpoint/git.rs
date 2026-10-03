@@ -49,6 +49,34 @@ impl Repo {
         })
     }
 
+    /// `cwd` relative to the top level: `/`-terminated, empty at the top.
+    pub(super) fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The top level, spelled the way `cwd` spells it when `cwd` ends in
+    /// its own prefix — so a path under a symlink stays the one the
+    /// session used — and as git resolves it otherwise.
+    pub(super) fn toplevel(&self) -> PathBuf {
+        let own = Path::new(&self.prefix);
+        let from_cwd = if self.cwd.ends_with(own) {
+            self.cwd.ancestors().nth(own.components().count())
+        } else {
+            None
+        };
+        from_cwd.map_or_else(|| self.toplevel.clone(), Path::to_path_buf)
+    }
+
+    /// The directory at `prefix` (as [`Repo::prefix`] spells one) in this
+    /// checkout.
+    pub(super) fn dir_at(&self, prefix: &str) -> PathBuf {
+        let top = self.toplevel();
+        match prefix.trim_end_matches('/') {
+            "" => top,
+            rel => top.join(rel),
+        }
+    }
+
     pub(super) fn head(&self) -> Option<String> {
         self.commit("HEAD")
     }
@@ -216,6 +244,25 @@ mod tests {
         assert_eq!(
             repo.dirty().unwrap(),
             BTreeSet::from(["a.rs".to_owned(), "new.rs".to_owned()])
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::from_the_top("", "", "")]
+    #[case::from_the_top_into_a_subdirectory("", "sub/", "sub")]
+    #[case::from_a_subdirectory_to_the_top("sub", "", "")]
+    #[case::from_a_subdirectory_to_itself("sub", "sub/", "sub")]
+    fn dir_at_resolves_a_prefix_from_any_directory_of_the_checkout(
+        #[case] from: &str,
+        #[case] prefix: &str,
+        #[case] want: &str,
+    ) {
+        let dir = committed();
+        let repo = Repo::discover(&dir.path().join(from)).unwrap();
+        assert_eq!(repo.prefix(), if from.is_empty() { "" } else { "sub/" });
+        assert_eq!(
+            repo.dir_at(prefix),
+            dir.path().join(want).components().collect::<PathBuf>()
         );
     }
 

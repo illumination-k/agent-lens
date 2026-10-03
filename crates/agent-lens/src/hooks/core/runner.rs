@@ -13,7 +13,9 @@ use std::path::Path;
 
 use agent_hooks::Hook;
 
-use crate::hooks::core::checkpoint::{CheckpointError, session_delta, take_snapshot};
+use crate::hooks::core::checkpoint::{
+    CheckpointError, adopt_snapshot, session_delta, take_snapshot,
+};
 use crate::hooks::core::cohesion::CohesionCore;
 use crate::hooks::core::complexity::ComplexityCore;
 use crate::hooks::core::footprint::FootprintCore;
@@ -281,11 +283,16 @@ impl<E: SessionStartEnvelope> Hook for SummaryHook<E> {
 }
 
 /// Any hook payload that names a session and the directory it runs in:
-/// enough to record the checkpoint snapshot for that directory.
+/// enough to record the checkpoint snapshot for that directory's
+/// checkout.
 pub trait CheckpointEnvelope {
     type Input: serde::de::DeserializeOwned;
     /// `Default` is the silent response.
     type Output: serde::Serialize + Default;
+    /// Whether the event starts the session, and so roots its snapshot.
+    /// Any other event only adopts a snapshot for a checkout the session
+    /// moved into, rooted where the session started.
+    const STARTS_SESSION: bool = false;
 
     fn cwd(input: &Self::Input) -> &Path;
     fn session_id(input: &Self::Input) -> &str;
@@ -294,6 +301,7 @@ pub trait CheckpointEnvelope {
 impl<E: SessionStartEnvelope> CheckpointEnvelope for E {
     type Input = E::Input;
     type Output = E::Output;
+    const STARTS_SESSION: bool = true;
 
     fn cwd(input: &Self::Input) -> &Path {
         <E as SessionStartEnvelope>::cwd(input)
@@ -304,14 +312,16 @@ impl<E: SessionStartEnvelope> CheckpointEnvelope for E {
     }
 }
 
-/// Hook that records the session checkpoint snapshot for the directory
-/// the payload runs in: at SessionStart, and again wherever the session
-/// moves (a worktree it enters, the directory of its first edit there).
+/// Hook that records the session checkpoint snapshot: at SessionStart,
+/// rooted at the directory the session starts in, and again for each
+/// checkout the session moves into (a worktree it enters, or first edits
+/// in), rooted at the same place there.
 ///
 /// Silent by design: the snapshot is for the stop hooks to compare
 /// against, and the session's context has no use for "a file was
 /// written". A snapshot that already exists is kept, so after the first
-/// one per directory each call is a cheap no-op.
+/// one per checkout each call is a cheap no-op — a `cd` within the
+/// checkout included.
 pub struct SnapshotHook<E: CheckpointEnvelope> {
     _envelope: PhantomData<fn() -> E>,
 }
@@ -342,7 +352,12 @@ impl<E: CheckpointEnvelope> Hook for SnapshotHook<E> {
     type Error = CheckpointError;
 
     fn handle(&self, input: Self::Input) -> Result<Self::Output, Self::Error> {
-        take_snapshot(E::cwd(&input), E::session_id(&input))?;
+        let (cwd, session_id) = (E::cwd(&input), E::session_id(&input));
+        if E::STARTS_SESSION {
+            take_snapshot(cwd, session_id)?;
+        } else {
+            adopt_snapshot(cwd, session_id)?;
+        }
         Ok(E::Output::default())
     }
 }
@@ -487,24 +502,51 @@ pub(crate) mod session_start_conformance {
     }
 
     /// The snapshot hook writes the checkpoint under the session's id
-    /// and injects nothing — whatever event carries it.
+    /// and injects nothing — whatever event carries it. A session-start
+    /// event roots the session's snapshot; any other only adopts one for
+    /// a checkout the session moved into, once the session has one.
     pub(crate) fn snapshot_is_recorded_silently<E, F>(input: F)
     where
         E: super::CheckpointEnvelope,
-        F: FnOnce(&Path) -> E::Input,
+        F: Fn(&Path) -> E::Input,
     {
+        use crate::hooks::core::checkpoint::{snapshot_path, take_snapshot};
+        use crate::test_support::run_git;
+
+        let silent = |cwd: &Path| {
+            let input = input(cwd);
+            // Both test contexts carry the id `sess`.
+            assert_eq!(E::session_id(&input), "sess");
+            let out = super::SnapshotHook::<E>::new().handle(input).unwrap();
+            assert_eq!(
+                serde_json::to_value(&out).unwrap(),
+                serde_json::to_value(E::Output::default()).unwrap(),
+            );
+        };
         let dir = tempfile::tempdir().unwrap();
         crate::test_support::init_checkpoint_fixture(dir.path());
-        let input = input(dir.path());
-        // Both test contexts carry the id `sess`.
-        let path = crate::hooks::core::checkpoint::snapshot_path(dir.path(), "sess");
-        assert_eq!(E::session_id(&input), "sess");
-        let out = super::SnapshotHook::<E>::new().handle(input).unwrap();
-        assert_eq!(
-            serde_json::to_value(&out).unwrap(),
-            serde_json::to_value(E::Output::default()).unwrap(),
+        let path = snapshot_path(dir.path(), "sess");
+        if E::STARTS_SESSION {
+            silent(dir.path());
+            assert!(path.is_file(), "no snapshot at {}", path.display());
+            return;
+        }
+
+        silent(dir.path());
+        assert!(!path.exists(), "only the session start roots a session");
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "base"]);
+        take_snapshot(dir.path(), "sess").unwrap().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let wt = holder.path().join("wt");
+        run_git(
+            dir.path(),
+            &["worktree", "add", "-q", "-b", "wt", wt.to_str().unwrap()],
         );
-        assert!(path.is_file(), "no snapshot at {}", path.display());
+        silent(&wt);
+        let adopted = snapshot_path(&wt, "sess");
+        assert!(adopted.is_file(), "no snapshot at {}", adopted.display());
     }
 }
 
