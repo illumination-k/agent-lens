@@ -94,7 +94,7 @@ pub(in crate::cli) enum SessionStartCommand {
     /// forwarding-only wrappers, and — from whole-tree runs — the
     /// near-duplicate pairs, the confirmed/likely unreachable functions
     /// and the call-graph hubs. Writes one file per session and
-    /// directory under `<git-common-dir>/agent-lens/sessions/<id>/`
+    /// checkout under `<git-common-dir>/agent-lens/sessions/<id>/`
     /// (outside git, `<cwd>/target/agent-lens/`) and injects nothing. A
     /// snapshot that already exists — a resume or a compaction — is
     /// kept, so the baseline stays the session's start. A source file
@@ -105,10 +105,10 @@ pub(in crate::cli) enum SessionStartCommand {
 
 #[derive(Debug, Subcommand)]
 pub(in crate::cli) enum CwdChangedCommand {
-    /// Record the checkpoint snapshot for the directory the session
-    /// just moved to — a worktree it entered, say — as `session-start
-    /// snapshot` does for the one it started in. A no-op once that
-    /// directory has one.
+    /// Record the checkpoint snapshot for the checkout the session just
+    /// moved to — a worktree it entered, say — rooted where the session
+    /// started and as that checkout stood then. A no-op within a checkout
+    /// that has one, and before the session's `session-start snapshot`.
     Snapshot,
 }
 
@@ -131,10 +131,10 @@ pub(in crate::cli) enum PreToolUseCommand {
     /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
     /// extension are ignored silently.
     Cohesion,
-    /// Record the checkpoint snapshot for the session's directory
-    /// before the first edit there lands, unless it has one. Catches a
-    /// directory no `session-start` / `cwd-changed` snapshot covered,
-    /// such as a subagent's isolated worktree. Prints nothing.
+    /// Record the checkpoint snapshot for the session's checkout before
+    /// the first edit there lands, unless it has one. Catches a checkout
+    /// no `session-start` / `cwd-changed` snapshot covered, such as a
+    /// subagent's isolated worktree. Prints nothing.
     Snapshot,
 }
 
@@ -180,6 +180,9 @@ pub(in crate::cli) enum StopCommand {
     /// blocks the stop once, handing the report to the agent as the
     /// reason to keep going; a repeat, or a stop that is already that
     /// continuation, is only a message. Silent without a snapshot.
+    ///
+    /// Compares the directory the session started in, wherever in the
+    /// checkout the stop runs: a `cd` into a subdirectory changes nothing.
     Delta(DeltaArgs),
 }
 
@@ -301,7 +304,7 @@ pub(in crate::cli) enum CodexSessionStartCommand {
     /// forwarding-only wrappers, and — from whole-tree runs — the
     /// near-duplicate pairs, the confirmed/likely unreachable functions
     /// and the call-graph hubs. Writes one file per session and
-    /// directory under `<git-common-dir>/agent-lens/sessions/<id>/`
+    /// checkout under `<git-common-dir>/agent-lens/sessions/<id>/`
     /// (outside git, `<cwd>/target/agent-lens/`) and injects nothing. A
     /// snapshot that already exists — a resume or a compaction — is
     /// kept, so the baseline stays the session's start. A source file
