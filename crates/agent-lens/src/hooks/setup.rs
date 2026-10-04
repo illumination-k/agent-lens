@@ -71,13 +71,13 @@ pub const CHECKPOINT_MATCHER: &str = "";
 pub const SNAPSHOT_COMMANDS: &[&str] = &["agent-lens hook session-start snapshot"];
 
 /// Commands the setup writes into their own `hooks.PreToolUse` group,
-/// async: the checkpoint snapshot for a directory the session edits in
+/// async: the checkpoint snapshot for a checkout the session edits in
 /// without one yet — a subagent's isolated worktree, say. A no-op once
-/// the directory has one.
+/// the checkout has one.
 pub const PRE_TOOL_USE_SNAPSHOT_COMMANDS: &[&str] = &["agent-lens hook pre-tool-use snapshot"];
 
 /// Commands the setup writes into `hooks.CwdChanged`, async: the
-/// checkpoint snapshot for a directory the session moves to, such as a
+/// checkpoint snapshot for a checkout the session moves to, such as a
 /// worktree it enters. `CwdChanged` takes no matcher.
 pub const CWD_CHANGED_COMMANDS: &[&str] = &["agent-lens hook cwd-changed snapshot"];
 

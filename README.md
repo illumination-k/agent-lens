@@ -387,8 +387,8 @@ conflicting local edit (otherwise conflicts are reported and left untouched).
 | `PostToolUse`  | `wrapper`    | Reports thin forwarding functions in the file just edited.                              |
 | `PostToolUse`  | `footprint`  | Reports the pending diff's `analyze footprint` flags that land in the file just edited. |
 | `SessionStart` | `snapshot`   | Records the session checkpoint `stop delta` compares against; injects nothing.          |
-| `CwdChanged`   | `snapshot`   | The same for a directory the session moves to, such as a worktree it enters.            |
-| `PreToolUse`   | `snapshot`   | The same before the first edit in a directory still without one.                        |
+| `CwdChanged`   | `snapshot`   | The same for a checkout the session moves to, such as a worktree it enters.             |
+| `PreToolUse`   | `snapshot`   | The same before the first edit in a checkout still without one.                         |
 | `Stop`         | `delta`      | Reports only what got worse since the snapshot; a new regression blocks the stop once.  |
 | `SubagentStop` | `delta`      | The same checkpoint when a sub-agent finishes.                                          |
 

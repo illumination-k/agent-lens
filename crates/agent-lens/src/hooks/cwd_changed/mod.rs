@@ -1,9 +1,11 @@
 //! Claude Code `CwdChanged` hook handler.
 //!
 //! Fires whenever the session's working directory changes — a `cd`, or
-//! entering a worktree — and records the checkpoint snapshot for the new
-//! directory, so a stop there compares against the tree as the session
-//! found it. Installed async: the snapshot prints nothing.
+//! entering a worktree. Entering a checkout the session has no snapshot
+//! for adopts one, rooted where the session started and as that checkout
+//! stood then, so a stop there compares against the tree as the session
+//! found it. A `cd` within a checkout is a no-op. Installed async: the
+//! snapshot prints nothing.
 
 use std::path::Path;
 

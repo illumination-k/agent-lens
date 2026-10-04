@@ -71,7 +71,7 @@ pub type CohesionError = crate::hooks::core::HookError;
 /// will fall through to the normal IO path.
 const TOLERATE_MISSING_FILE_TOOLS: &[&str] = &["Write"];
 
-/// The checkpoint snapshot for the directory of an edit, taken before
+/// The checkpoint snapshot for the checkout of an edit, adopted before
 /// the first one there lands: the session's first edit in a worktree it
 /// reached without a `CwdChanged` (a subagent's isolated one, say).
 /// Installed async, so it never delays the edit.

@@ -30,11 +30,23 @@
 //! caller can tell "new since the last checkpoint" from "still there".
 //!
 //! Snapshots live at `<git common dir>/agent-lens/sessions/<id>/<key>.json`,
-//! one per checkout the session stops in (`key` hashes the working
-//! directory). The common dir is shared by every worktree, so a stop in
-//! a worktree the session moved into finds the session it belongs to;
+//! one per checkout the session stops in (`key` hashes the checkout's top
+//! level). The common dir is shared by every worktree, so a stop in a
+//! worktree the session moved into finds the session it belongs to;
 //! outside git the store is `<cwd>/target/agent-lens/`, with a
 //! `.gitignore` of `*` so it never shows up as an untracked file.
+//!
+//! A new session prunes the store: a session whose snapshots have not
+//! been written for [`SESSION_TTL`] is removed, so `/clear` after
+//! `/clear` does not pile up directories. Resuming one that old finds no
+//! snapshot, and its stops stay silent.
+//!
+//! A snapshot is rooted where the session started, and its paths are
+//! relative to that root. A stop compares that same root whatever its
+//! own working directory: the agent's shell `cd`-ing into a
+//! subdirectory changes neither which snapshot a stop reads nor what a
+//! file is called. A checkout adopted later is rooted at the same place
+//! relative to its top level.
 //!
 //! The baseline is what the tree held when the session started, and git
 //! pins that down better than the disk can:
@@ -71,7 +83,10 @@ use crate::analyze::{
 
 /// Bumped whenever a field changes meaning. A snapshot from another
 /// schema is ignored rather than misread.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
+
+/// How long a session's snapshots outlive their last write.
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Fan-in at or above which an edited function counts as a hub edit.
 const HUB_MIN_FAN_IN: u64 = 5;
@@ -114,8 +129,12 @@ struct Snapshot {
     schema_version: u32,
     tool_version: String,
     session_id: String,
-    /// Analysis root: the session's working directory.
+    /// Analysis root: the session's working directory when it started
+    /// (for a checkout adopted later, the same place in that checkout).
     root: PathBuf,
+    /// `root` relative to the checkout's top level, `/`-terminated, empty
+    /// at the top or outside git: what roots a checkout adopted later.
+    prefix: String,
     /// Keyed by path relative to `root`.
     files: BTreeMap<String, FileState>,
     /// Near-duplicate pairs as sorted `file::name` keys; `None` when the
@@ -168,13 +187,13 @@ struct Hub {
 }
 
 /// Where the snapshot for `session_id` lives when the session runs in
-/// `cwd`.
+/// `cwd` — the same file from anywhere in one checkout.
 pub fn snapshot_path(cwd: &Path, session_id: &str) -> PathBuf {
     Checkout::open(cwd, session_id).path
 }
 
-/// One working directory of one session: its git view, if any, and
-/// where its snapshot and its siblings' live.
+/// One checkout of one session, seen from a directory in it: its git
+/// view, if any, and where its snapshot and its siblings' live.
 struct Checkout {
     repo: Option<git::Repo>,
     session_dir: PathBuf,
@@ -189,7 +208,10 @@ impl Checkout {
             |r| r.common_dir.join("agent-lens"),
         );
         let session_dir = store.join("sessions").join(sanitized(session_id));
-        let where_ = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let top = repo
+            .as_ref()
+            .map_or_else(|| cwd.to_path_buf(), git::Repo::toplevel);
+        let where_ = top.canonicalize().unwrap_or(top);
         let key = fnv1a(where_.as_os_str().as_encoded_bytes().iter().copied());
         Self {
             path: session_dir.join(format!("{key:016x}.json")),
@@ -198,17 +220,61 @@ impl Checkout {
         }
     }
 
-    /// When the session started, from the snapshots it took elsewhere.
-    fn session_started_at(&self) -> Option<u64> {
+    /// When and where the session started, from the snapshots it took
+    /// elsewhere.
+    fn origin(&self) -> Option<Origin> {
         std::fs::read_dir(&self.session_dir)
             .ok()?
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "json"))
             .filter_map(|p| read_snapshot(&p).ok().flatten())
-            .map(|s| s.started_at)
-            .min()
+            .map(|s| Origin {
+                started_at: s.started_at,
+                prefix: s.prefix,
+            })
+            .min_by_key(|o| o.started_at)
     }
+}
+
+impl Checkout {
+    /// Remove every other session whose directory was last written more
+    /// than [`SESSION_TTL`] before `now`. A snapshot write renames into
+    /// the directory, so its mtime is the session's last write. Best
+    /// effort: a failure is logged and the rest of the store is left
+    /// alone.
+    fn prune_sessions(&self, now: std::time::SystemTime) {
+        let (Some(sessions), Some(cutoff)) =
+            (self.session_dir.parent(), now.checked_sub(SESSION_TTL))
+        else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(sessions) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let dir = entry.path();
+            if dir == self.session_dir {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .is_ok_and(|m| m.is_dir() && m.modified().is_ok_and(|at| at < cutoff));
+            if !stale {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                warn!(path = %dir.display(), error = %e, "checkpoint: cannot prune a stale session");
+            }
+        }
+    }
+}
+
+/// The session's first snapshot: when it was taken, and the root's
+/// place in its checkout.
+struct Origin {
+    started_at: u64,
+    prefix: String,
 }
 
 /// `id` reduced to `[A-Za-z0-9_-]`, so it cannot name a path outside the
@@ -235,6 +301,7 @@ pub fn take_snapshot(cwd: &Path, session_id: &str) -> Result<Option<PathBuf>, Ch
     if checkout.path.exists() {
         return Ok(None);
     }
+    checkout.prune_sessions(std::time::SystemTime::now());
     let started_at = unix_now();
     let repo = checkout.repo.as_ref();
     let head = repo.and_then(git::Repo::head);
@@ -244,11 +311,29 @@ pub fn take_snapshot(cwd: &Path, session_id: &str) -> Result<Option<PathBuf>, Ch
     if let (Some(repo), Some(head), Some(before)) = (repo, &head, &dirty_at_start) {
         undo_edits_since(repo, head, before, &mut current);
     }
-    let Some(snapshot) = baseline(cwd, cwd, session_id, current, head, started_at) else {
+    let root = Root {
+        dir: cwd,
+        prefix: repo.map_or("", git::Repo::prefix),
+    };
+    let Some(snapshot) = baseline(cwd, &root, session_id, current, head, started_at) else {
         return Ok(None);
     };
     write_snapshot(&checkout.path, &snapshot)?;
     Ok(Some(checkout.path))
+}
+
+/// Record the snapshot for the checkout `cwd` is in, when the session
+/// already has one elsewhere and not here — a worktree it moved into —
+/// as the checkout stood when the session started. A no-op otherwise:
+/// the session-start snapshot is [`take_snapshot`]'s, so a later event
+/// racing it cannot root the session somewhere else. Returns the path
+/// written, if any.
+pub fn adopt_snapshot(cwd: &Path, session_id: &str) -> Result<Option<PathBuf>, CheckpointError> {
+    let checkout = Checkout::open(cwd, session_id);
+    if checkout.path.exists() {
+        return Ok(None);
+    }
+    Ok(adopt(&checkout, session_id)?.map(|_| checkout.path))
 }
 
 /// Put back what `HEAD` held for every scanned file that turned dirty
@@ -280,12 +365,19 @@ fn undo_edits_since(
     }
 }
 
+/// Where a snapshot is rooted: the directory, and its place in its
+/// checkout.
+struct Root<'a> {
+    dir: &'a Path,
+    prefix: &'a str,
+}
+
 /// Snapshot `current`, the files scanned under `analyzed`, for a session
-/// running in `cwd` (the same directory, or a copy of it at a commit).
+/// rooted at `root` (the same directory, or a copy of it at a commit).
 /// `None` when there is no supported source file.
 fn baseline(
     analyzed: &Path,
-    cwd: &Path,
+    root: &Root<'_>,
     session_id: &str,
     current: BTreeMap<String, ScannedFile>,
     head: Option<String>,
@@ -307,7 +399,8 @@ fn baseline(
         schema_version: SCHEMA_VERSION,
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         session_id: session_id.to_owned(),
-        root: cwd.to_path_buf(),
+        root: root.dir.to_path_buf(),
+        prefix: root.prefix.to_owned(),
         files,
         similar_pairs: similar_pairs(analyzed, None),
         unreachable: unreachable_keys(analyzed),
@@ -319,41 +412,52 @@ fn baseline(
 }
 
 /// A snapshot for a checkout the session reached without one — a
-/// worktree it entered or created — as the checkout stood when the
-/// session started. Written, so later stops reuse it. `None` when the
-/// session has no snapshot anywhere, or git cannot say where `HEAD` was.
-fn adopt(
-    checkout: &Checkout,
-    cwd: &Path,
-    session_id: &str,
-) -> Result<Option<Snapshot>, CheckpointError> {
-    let Some(repo) = &checkout.repo else {
+/// worktree it entered or created — rooted where the session's first
+/// snapshot was, as the checkout stood when the session started.
+/// Written, so later stops reuse it. `None` when the session has no
+/// snapshot anywhere, the checkout has no such directory, or git cannot
+/// say where `HEAD` was.
+fn adopt(checkout: &Checkout, session_id: &str) -> Result<Option<Snapshot>, CheckpointError> {
+    let (Some(repo), Some(origin)) = (&checkout.repo, checkout.origin()) else {
         return Ok(None);
     };
-    let Some(started_at) = checkout.session_started_at() else {
+    let dir = repo.dir_at(&origin.prefix);
+    let Some(repo) = git::Repo::discover(&dir) else {
+        warn!(root = %dir.display(), "checkpoint: the session's root is not in this checkout");
         return Ok(None);
     };
-    let Some(base) = repo.head_at(started_at) else {
-        warn!(cwd = %cwd.display(), "checkpoint: no reflog to rewind this checkout to the session start");
+    let Some(base) = repo.head_at(origin.started_at) else {
+        warn!(root = %dir.display(), "checkpoint: no reflog to rewind this checkout to the session start");
         return Ok(None);
     };
     let _index = AnalysisIndexScope::activate();
+    let root = Root {
+        dir: &dir,
+        prefix: &origin.prefix,
+    };
     let untouched =
         repo.head().as_deref() == Some(base.as_str()) && repo.dirty().is_some_and(|d| d.is_empty());
     let snapshot = if untouched {
-        baseline(cwd, cwd, session_id, scan(cwd)?, Some(base), started_at)
+        baseline(
+            &dir,
+            &root,
+            session_id,
+            scan(&dir)?,
+            Some(base),
+            origin.started_at,
+        )
     } else {
-        let Some(tree) = git::Materialized::new(repo, &base) else {
-            warn!(cwd = %cwd.display(), %base, "checkpoint: cannot check out the session-start tree");
+        let Some(tree) = git::Materialized::new(&repo, &base) else {
+            warn!(root = %dir.display(), %base, "checkpoint: cannot check out the session-start tree");
             return Ok(None);
         };
         baseline(
             tree.cwd(),
-            cwd,
+            &root,
             session_id,
             scan(tree.cwd())?,
             Some(base),
-            started_at,
+            origin.started_at,
         )
     };
     let Some(snapshot) = snapshot else {
@@ -381,18 +485,26 @@ pub struct Delta {
 /// Compare the tree against the session's snapshot and return the
 /// regressions, or `None` when there are none — or no snapshot to
 /// compare against. Remembers what it reported in the snapshot.
+///
+/// `cwd` only picks the checkout: the tree compared is the snapshot's
+/// root, wherever in the checkout the stop runs.
 pub fn session_delta(cwd: &Path, session_id: &str) -> Result<Option<Delta>, CheckpointError> {
     let checkout = Checkout::open(cwd, session_id);
     let path = &checkout.path;
     let found = match read_snapshot(path)? {
         Some(snapshot) => Some(snapshot),
-        None => adopt(&checkout, cwd, session_id)?,
+        None => adopt(&checkout, session_id)?,
     };
     let Some(mut snapshot) = found else {
         return Ok(None);
     };
+    let root = snapshot.root.clone();
+    if !root.is_dir() {
+        warn!(root = %root.display(), "checkpoint: the session's root is gone");
+        return Ok(None);
+    }
     let _index = AnalysisIndexScope::activate();
-    let current = scan(cwd)?;
+    let current = scan(&root)?;
     let changed: Vec<(&String, &ScannedFile)> = current
         .iter()
         .filter(|(rel, file)| snapshot.files.get(*rel).is_none_or(|s| s.hash != file.hash))
@@ -428,11 +540,11 @@ pub fn session_delta(cwd: &Path, session_id: &str) -> Result<Option<Delta>, Chec
 
     if !edits.focus.is_empty() {
         let lines = ChangedLines::new(edits.focus);
-        if let Some(pairs) = scored_pairs(cwd, Some(lines)) {
+        if let Some(pairs) = scored_pairs(&root, Some(lines)) {
             findings.duplicates(&pairs, snapshot.similar_pairs.as_ref());
         }
     }
-    if let (Some(before), Some(after)) = (&snapshot.unreachable, unreachable_rows(cwd)) {
+    if let (Some(before), Some(after)) = (&snapshot.unreachable, unreachable_rows(&root)) {
         findings.unreachable(before, &after);
     }
     if let Some(hubs) = &snapshot.hubs {
@@ -1092,10 +1204,10 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
                 .unwrap()
                 .join(".git/agent-lens/sessions/______etc_pass_wd")
         );
-        assert_ne!(
+        assert_eq!(
             path,
             snapshot_path(dir.path(), "../../etc/pass wd"),
-            "one snapshot per working directory"
+            "one snapshot per checkout, wherever in it"
         );
     }
 
@@ -1143,6 +1255,7 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
             tool_version: String::new(),
             session_id: "s".to_owned(),
             root: dir.path().to_path_buf(),
+            prefix: String::new(),
             files: BTreeMap::new(),
             similar_pairs: None,
             unreachable: None,
@@ -1265,7 +1378,10 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(
             &path,
-            text.replace("\"schema_version\":2", "\"schema_version\":99"),
+            text.replace(
+                &format!("\"schema_version\":{SCHEMA_VERSION}"),
+                "\"schema_version\":99",
+            ),
         )
         .unwrap();
         write_file(dir.path(), "src/lib.rs", &after());
@@ -1359,6 +1475,121 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
             0,
             "the adopted snapshot is reused, reported keys included"
         );
+    }
+
+    /// #625: where the session's shell is at the start and at the stop
+    /// does not change what a file is called.
+    #[rstest::rstest]
+    #[case::top_to_top("", "")]
+    #[case::top_to_sub("", "src")]
+    #[case::sub_to_top("src", "")]
+    #[case::sub_to_sub("src", "src")]
+    fn a_stop_anywhere_in_the_checkout_compares_the_session_root(
+        #[case] start: &str,
+        #[case] stop: &str,
+    ) {
+        let dir = committed_repo();
+        take_snapshot(&dir.path().join(start), "s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session_delta(&dir.path().join(stop), "s").unwrap(), None);
+
+        write_file(dir.path(), "src/lib.rs", &after());
+        let delta = session_delta(&dir.path().join(stop), "s").unwrap().unwrap();
+        let file = if start.is_empty() {
+            "src/lib.rs"
+        } else {
+            "lib.rs"
+        };
+        assert!(
+            delta
+                .report
+                .contains(&format!("## New near-duplicates (1)\n- {file}:")),
+            "{}",
+            delta.report
+        );
+        assert!(
+            delta.report.contains("1 file(s) changed"),
+            "{}",
+            delta.report
+        );
+    }
+
+    #[test]
+    fn a_stop_in_a_subdirectory_keeps_what_was_dirty_at_the_start() {
+        let dir = committed_repo();
+        write_file(dir.path(), "src/lib.rs", &after());
+        take_snapshot(dir.path(), "s").unwrap().unwrap();
+        assert_eq!(session_delta(&dir.path().join("src"), "s").unwrap(), None);
+    }
+
+    #[test]
+    fn a_session_rooted_in_a_subdirectory_adopts_a_worktree_there() {
+        let dir = committed_repo();
+        take_snapshot(&dir.path().join("src"), "s")
+            .unwrap()
+            .unwrap();
+        let holder = worktree(dir.path());
+        let wt = holder.path().join("wt");
+        write_file(&wt, "src/lib.rs", &after());
+
+        let delta = session_delta(&wt, "s").unwrap().unwrap();
+        assert!(delta.report.contains("- lib.rs:"), "{}", delta.report);
+        let adopted = read_snapshot(&snapshot_path(&wt, "s")).unwrap().unwrap();
+        assert_eq!(adopted.root, wt.join("src"));
+        assert_eq!(adopted.prefix, "src/");
+    }
+
+    #[test]
+    fn adopting_waits_for_the_session_start_and_keeps_its_root() {
+        let dir = committed_repo();
+        let sub = dir.path().join("src");
+        assert_eq!(adopt_snapshot(&sub, "s").unwrap(), None);
+        assert!(!snapshot_path(&sub, "s").exists());
+
+        let path = take_snapshot(dir.path(), "s").unwrap().unwrap();
+        write_file(dir.path(), "src/lib.rs", &after());
+        assert_eq!(adopt_snapshot(&sub, "s").unwrap(), None);
+        let snapshot = read_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snapshot.root, dir.path());
+        assert_eq!(snapshot.files["src/lib.rs"].hash, fnv1a(BEFORE.bytes()));
+    }
+
+    #[test]
+    fn a_new_session_prunes_only_other_stale_sessions() {
+        let dir = repo();
+        take_snapshot(dir.path(), "old").unwrap().unwrap();
+        let current = Checkout::open(dir.path(), "new");
+        std::fs::create_dir_all(&current.session_dir).unwrap();
+        let sessions = current.session_dir.parent().unwrap().to_path_buf();
+        std::fs::write(sessions.join("stray"), "").unwrap();
+
+        let written = std::fs::metadata(sessions.join("old"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let fourteen_days = std::time::Duration::from_secs(14 * 24 * 60 * 60);
+        current.prune_sessions(written + fourteen_days);
+        assert!(sessions.join("old").is_dir(), "kept up to the TTL");
+
+        current.prune_sessions(written + fourteen_days + std::time::Duration::from_secs(1));
+        assert!(!sessions.join("old").exists(), "a stale session is pruned");
+        assert!(current.session_dir.is_dir(), "the current session is kept");
+        assert!(
+            sessions.join("stray").is_file(),
+            "only directories are pruned"
+        );
+    }
+
+    #[test]
+    fn a_session_root_that_is_gone_has_no_delta() {
+        let dir = committed_repo();
+        write_file(dir.path(), "pkg/lib.rs", BEFORE);
+        take_snapshot(&dir.path().join("pkg"), "s")
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(dir.path().join("pkg")).unwrap();
+        assert_eq!(session_delta(dir.path(), "s").unwrap(), None);
     }
 
     #[test]
