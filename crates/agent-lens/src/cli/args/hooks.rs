@@ -99,7 +99,8 @@ pub(in crate::cli) enum SessionStartCommand {
     /// snapshot that already exists — a resume or a compaction — is
     /// kept, so the baseline stays the session's start. A source file
     /// that turns dirty while it scans is read back from `HEAD`, so it
-    /// can run in the background.
+    /// can run in the background. A new session prunes the sessions
+    /// whose snapshots were last written over 14 days ago.
     Snapshot,
 }
 
@@ -309,6 +310,7 @@ pub(in crate::cli) enum CodexSessionStartCommand {
     /// snapshot that already exists — a resume or a compaction — is
     /// kept, so the baseline stays the session's start. A source file
     /// that turns dirty while it scans is read back from `HEAD`, so it
-    /// can run in the background.
+    /// can run in the background. A new session prunes the sessions
+    /// whose snapshots were last written over 14 days ago.
     Snapshot,
 }

@@ -36,6 +36,11 @@
 //! outside git the store is `<cwd>/target/agent-lens/`, with a
 //! `.gitignore` of `*` so it never shows up as an untracked file.
 //!
+//! A new session prunes the store: a session whose snapshots have not
+//! been written for [`SESSION_TTL`] is removed, so `/clear` after
+//! `/clear` does not pile up directories. Resuming one that old finds no
+//! snapshot, and its stops stay silent.
+//!
 //! A snapshot is rooted where the session started, and its paths are
 //! relative to that root. A stop compares that same root whatever its
 //! own working directory: the agent's shell `cd`-ing into a
@@ -79,6 +84,9 @@ use crate::analyze::{
 /// Bumped whenever a field changes meaning. A snapshot from another
 /// schema is ignored rather than misread.
 const SCHEMA_VERSION: u32 = 3;
+
+/// How long a session's snapshots outlive their last write.
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Fan-in at or above which an edited function counts as a hub edit.
 const HUB_MIN_FAN_IN: u64 = 5;
@@ -229,6 +237,36 @@ impl Checkout {
     }
 }
 
+impl Checkout {
+    /// Remove every other session whose directory was last written
+    /// before `cutoff`. A snapshot write renames into the directory, so
+    /// its mtime is the session's last write. Best effort: a failure is
+    /// logged and the rest of the store is left alone.
+    fn prune_sessions(&self, cutoff: std::time::SystemTime) {
+        let Some(sessions) = self.session_dir.parent() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(sessions) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let dir = entry.path();
+            if dir == self.session_dir {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .is_ok_and(|m| m.is_dir() && m.modified().is_ok_and(|at| at < cutoff));
+            if !stale {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                warn!(path = %dir.display(), error = %e, "checkpoint: cannot prune a stale session");
+            }
+        }
+    }
+}
+
 /// The session's first snapshot: when it was taken, and the root's
 /// place in its checkout.
 struct Origin {
@@ -259,6 +297,9 @@ pub fn take_snapshot(cwd: &Path, session_id: &str) -> Result<Option<PathBuf>, Ch
     let checkout = Checkout::open(cwd, session_id);
     if checkout.path.exists() {
         return Ok(None);
+    }
+    if let Some(cutoff) = std::time::SystemTime::now().checked_sub(SESSION_TTL) {
+        checkout.prune_sessions(cutoff);
     }
     let started_at = unix_now();
     let repo = checkout.repo.as_ref();
@@ -1511,6 +1552,27 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
         let snapshot = read_snapshot(&path).unwrap().unwrap();
         assert_eq!(snapshot.root, dir.path());
         assert_eq!(snapshot.files["src/lib.rs"].hash, fnv1a(BEFORE.bytes()));
+    }
+
+    #[test]
+    fn a_new_session_prunes_only_other_stale_sessions() {
+        let dir = repo();
+        take_snapshot(dir.path(), "old").unwrap().unwrap();
+        let current = Checkout::open(dir.path(), "new");
+        std::fs::create_dir_all(&current.session_dir).unwrap();
+        let sessions = current.session_dir.parent().unwrap().to_path_buf();
+        std::fs::write(sessions.join("stray"), "").unwrap();
+
+        current.prune_sessions(std::time::SystemTime::UNIX_EPOCH);
+        assert!(sessions.join("old").is_dir(), "a fresh session is kept");
+
+        current.prune_sessions(std::time::SystemTime::now() + std::time::Duration::from_secs(60));
+        assert!(!sessions.join("old").exists(), "a stale session is pruned");
+        assert!(current.session_dir.is_dir(), "the current session is kept");
+        assert!(
+            sessions.join("stray").is_file(),
+            "only directories are pruned"
+        );
     }
 
     #[test]
