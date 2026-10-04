@@ -238,12 +238,15 @@ impl Checkout {
 }
 
 impl Checkout {
-    /// Remove every other session whose directory was last written
-    /// before `cutoff`. A snapshot write renames into the directory, so
-    /// its mtime is the session's last write. Best effort: a failure is
-    /// logged and the rest of the store is left alone.
-    fn prune_sessions(&self, cutoff: std::time::SystemTime) {
-        let Some(sessions) = self.session_dir.parent() else {
+    /// Remove every other session whose directory was last written more
+    /// than [`SESSION_TTL`] before `now`. A snapshot write renames into
+    /// the directory, so its mtime is the session's last write. Best
+    /// effort: a failure is logged and the rest of the store is left
+    /// alone.
+    fn prune_sessions(&self, now: std::time::SystemTime) {
+        let (Some(sessions), Some(cutoff)) =
+            (self.session_dir.parent(), now.checked_sub(SESSION_TTL))
+        else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(sessions) else {
@@ -298,9 +301,7 @@ pub fn take_snapshot(cwd: &Path, session_id: &str) -> Result<Option<PathBuf>, Ch
     if checkout.path.exists() {
         return Ok(None);
     }
-    if let Some(cutoff) = std::time::SystemTime::now().checked_sub(SESSION_TTL) {
-        checkout.prune_sessions(cutoff);
-    }
+    checkout.prune_sessions(std::time::SystemTime::now());
     let started_at = unix_now();
     let repo = checkout.repo.as_ref();
     let head = repo.and_then(git::Repo::head);
@@ -1563,10 +1564,15 @@ pub fn a5() -> i32 {{ shared(5) + 5 }}
         let sessions = current.session_dir.parent().unwrap().to_path_buf();
         std::fs::write(sessions.join("stray"), "").unwrap();
 
-        current.prune_sessions(std::time::SystemTime::UNIX_EPOCH);
-        assert!(sessions.join("old").is_dir(), "a fresh session is kept");
+        let written = std::fs::metadata(sessions.join("old"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let fourteen_days = std::time::Duration::from_secs(14 * 24 * 60 * 60);
+        current.prune_sessions(written + fourteen_days);
+        assert!(sessions.join("old").is_dir(), "kept up to the TTL");
 
-        current.prune_sessions(std::time::SystemTime::now() + std::time::Duration::from_secs(60));
+        current.prune_sessions(written + fourteen_days + std::time::Duration::from_secs(1));
         assert!(!sessions.join("old").exists(), "a stale session is pruned");
         assert!(current.session_dir.is_dir(), "the current session is kept");
         assert!(
