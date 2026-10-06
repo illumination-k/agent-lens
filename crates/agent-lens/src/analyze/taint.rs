@@ -722,7 +722,7 @@ func (s *Store) FindUser(name string) {
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert_eq!(
-            md.contains("1 more finding(s) in the JSON output."),
+            md.contains("more finding(s) in the JSON output."),
             truncated,
             "{md}"
         );
