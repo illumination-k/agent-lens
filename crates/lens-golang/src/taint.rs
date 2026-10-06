@@ -336,10 +336,8 @@ impl<'a, 'tree> FunctionLowering<'a, 'tree> {
                 .and_then(|ty| node_str(ty, self.file.source));
             let source_type = written.filter(|ty| self.is_source_type(ty));
             let clean = written.is_some_and(|ty| self.is_clean_type(ty));
-            if names.is_empty() {
-                slot += 1;
-                continue;
-            }
+            // Go names every parameter or none, so an unnamed declaration
+            // means nothing in this list can be read by name.
             for name in names {
                 let origin = match source_type {
                     Some(ty) => {
@@ -485,14 +483,13 @@ impl<'a, 'tree> FunctionLowering<'a, 'tree> {
         });
     }
 
+    /// Only a `call_expression` has a `function` field.
     fn is_prepare_call(&self, node: Node<'_>) -> bool {
-        node.kind() == "call_expression"
-            && node
-                .child_by_field_name("function")
-                .filter(|function| function.kind() == "selector_expression")
-                .and_then(|function| function.child_by_field_name("field"))
-                .and_then(|field| node_str(field, self.file.source))
-                .is_some_and(|name| PREPARE_METHODS.contains(&name))
+        node.child_by_field_name("function")
+            .filter(|function| function.kind() == "selector_expression")
+            .and_then(|function| function.child_by_field_name("field"))
+            .and_then(|field| node_str(field, self.file.source))
+            .is_some_and(|name| PREPARE_METHODS.contains(&name))
     }
 
     /// A library call writes its inputs through `&v` arguments
@@ -581,8 +578,9 @@ impl<'a, 'tree> FunctionLowering<'a, 'tree> {
         let mut pinned = HashSet::new();
         let mut child = node;
         while let Some(parent) = child.parent() {
+            // A closure written inside the guarded branch captures the
+            // guarded variable, so the pin reaches into it.
             match parent.kind() {
-                "func_literal" | "function_declaration" | "method_declaration" => break,
                 "if_statement"
                     if parent
                         .child_by_field_name("consequence")
@@ -693,13 +691,11 @@ impl<'a, 'tree> FunctionLowering<'a, 'tree> {
                 .get(&node.id())
                 .map(|&id| BTreeSet::from([Origin::CallResult(id)]))
                 .unwrap_or_default(),
-            "func_literal" | "field_identifier" | "type_identifier" | "package_identifier" => {
-                BTreeSet::new()
-            }
-            "selector_expression" => node
-                .child_by_field_name("operand")
-                .map(|operand| self.origins(operand, pinned))
-                .unwrap_or_default(),
+            // A closure's body is its own; what it captures flows only
+            // through the calls and writes inside it. Everything else
+            // (field selectors included: a `field_identifier` reads no
+            // variable) carries what its parts carry.
+            "func_literal" => BTreeSet::new(),
             _ => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor)
@@ -1022,6 +1018,39 @@ mod tests {
          \tremove(nil, n + id)\n}",
         vec![]
     )]
+    #[case::the_else_branch_is_not_pinned(
+        "func h(w http.ResponseWriter, r *http.Request) {\n\
+         \tmode := r.FormValue(\"mode\")\n\
+         \tif mode == \"fast\" {\n\t\treturn\n\t} else {\n\
+         \t\texec.Command(\"run\", mode).Run()\n\t}\n}",
+        one("command-injection", "os/exec.Command")
+    )]
+    #[case::a_parenthesised_conjunct_pins(
+        "func h(w http.ResponseWriter, r *http.Request) {\n\
+         \tmode := r.FormValue(\"mode\")\n\
+         \tif (mode == Fast) && r.Method != \"\" {\n\
+         \t\texec.Command(\"run\", mode).Run()\n\t}\n}\n\
+         const Fast = \"fast\"",
+        vec![]
+    )]
+    #[case::a_package_constant_pins(
+        "func h(w http.ResponseWriter, r *http.Request) {\n\
+         \tm := r.FormValue(\"m\")\n\
+         \tif m == http.MethodGet {\n\t\texec.Command(m).Run()\n\t}\n}",
+        vec![]
+    )]
+    #[case::comparing_two_variables_pins_nothing(
+        "func h(w http.ResponseWriter, r *http.Request) {\n\
+         \tm, other := r.FormValue(\"m\"), r.Method\n\
+         \tif m == other {\n\t\texec.Command(m).Run()\n\t}\n}",
+        one("command-injection", "os/exec.Command")
+    )]
+    #[case::a_plain_copy_of_a_db_is_not_prepared(
+        "func h(db *sql.DB, r *http.Request) {\n\
+         \td := db\n\
+         \td.Query(r.FormValue(\"q\"))\n}",
+        one("sql-injection", ".Query")
+    )]
     #[case::closure_handler_parameter(
         "func routes() {\n\
          \thttp.HandleFunc(\"/\", func(w http.ResponseWriter, r *http.Request) {\n\
@@ -1089,8 +1118,104 @@ mod tests {
         assert_eq!(with[0].sources[0].label, "req *pb.RunRequest");
     }
 
+    /// The single function in `body`, lowered with `context`, `os/exec`
+    /// and an example package imported.
+    fn flow(body: &str) -> FunctionFlow {
+        let source = format!(
+            "package p\n\nimport (\n\t\"context\"\n\t\"net/http\"\n\n\t\
+             \"example.com/foo\"\n)\n\nvar _ context.Context\nvar _ foo.Context\n\
+             var _ http.Handler\n\n{body}\n"
+        );
+        let mut flows = extract_taint_flows(&source, &[]).unwrap();
+        assert_eq!(flows.len(), 1, "{body}");
+        flows.remove(0)
+    }
+
+    fn params(slots: &[usize]) -> BTreeSet<Origin> {
+        slots.iter().map(|&slot| Origin::Param(slot)).collect()
+    }
+
+    /// The origins of each argument of the call to `g`.
+    fn g_arguments(flow: &FunctionFlow) -> Vec<BTreeSet<Origin>> {
+        flow.calls
+            .iter()
+            .filter(|call| call.callee_name.as_deref() == Some("g"))
+            .flat_map(|call| call.arguments.clone())
+            .collect()
+    }
+
+    #[test]
+    fn only_context_contexts_and_numbers_are_clean_parameters() {
+        let flow = flow(
+            "func f(ctx context.Context, other foo.Context, cancel context.CancelFunc, n int64) {\n\
+             \tg(ctx, other, cancel, n)\n}",
+        );
+        assert_eq!(
+            g_arguments(&flow),
+            [BTreeSet::new(), params(&[1]), params(&[2]), BTreeSet::new()]
+        );
+    }
+
+    #[test]
+    fn each_source_gets_its_own_index_and_declaration_line() {
+        let flow = flow("func h(a,\n\tb *http.Request) string {\n\treturn b.Host\n}");
+        assert_eq!(flow.sources.len(), 2);
+        assert_eq!(flow.sources[1].label, "b *http.Request");
+        assert_eq!(flow.sources[1].line, 14);
+        assert_eq!(flow.returns, BTreeSet::from([Origin::Source(1)]));
+    }
+
+    #[rstest]
+    #[case::short_var_pairs_by_position("a, b := \"lit\", x\n\tg(a, b)", vec![BTreeSet::new(), params(&[0])])]
+    #[case::var_spec_pairs_by_position("var a, b = \"lit\", x\n\tg(a, b)", vec![BTreeSet::new(), params(&[0])])]
+    #[case::type_switch_binds_its_alias("switch v := any(x).(type) {\n\tdefault:\n\t\tg(v)\n\t}", vec![BTreeSet::from([Origin::CallResult(0)])])]
+    #[case::a_parameter_can_be_reassigned("y = x\n\tg(y)", vec![params(&[0, 1])])]
+    #[case::a_field_write_taints_a_local("var v struct{ N string }\n\tv.N = x\n\tg(v)", vec![params(&[0])])]
+    #[case::a_parenthesised_target_is_its_variable("var v string\n\t(v) = x\n\tg(v)", vec![params(&[0])])]
+    #[case::an_address_argument_receives_the_call_inputs("var v string\n\tdec(x, &v)\n\tg(v)", vec![BTreeSet::from([Origin::CallInputs(0)])])]
+    #[case::a_closure_argument_carries_nothing("g(func() { _ = x })", vec![BTreeSet::new()])]
+    fn lowering_writes(#[case] body: &str, #[case] expected: Vec<BTreeSet<Origin>>) {
+        let flow = flow(&format!("func f(x, y string) {{\n\t{body}\n}}"));
+        assert_eq!(g_arguments(&flow), expected);
+    }
+
+    #[test]
+    fn a_closure_return_is_not_the_function_return() {
+        let flow = flow(
+            "func f(x string) string {\n\th := func() string { return x }\n\t_ = h\n\treturn \"\"\n}",
+        );
+        assert!(flow.returns.is_empty(), "{:?}", flow.returns);
+    }
+
+    #[rstest]
+    #[case::generic_instantiation("F[K]()", "F")]
+    #[case::parenthesised_callee("(g2)(x)", "g2")]
+    fn callee_names_see_through_instantiation_and_parens(#[case] call: &str, #[case] name: &str) {
+        let flow = flow(&format!("func f(x string) {{\n\t{call}\n}}"));
+        assert_eq!(
+            flow.calls.first().and_then(|c| c.callee_name.as_deref()),
+            Some(name),
+            "{flow:?}"
+        );
+        assert_eq!(flow.calls[0].line, 15);
+    }
+
+    #[rstest]
+    #[case(Checked::All, 2, vec![0, 1])]
+    #[case(Checked::At(1), 2, vec![1])]
+    #[case(Checked::At(2), 2, vec![])]
+    #[case(Checked::From(1), 3, vec![1, 2])]
+    fn checked_positions(
+        #[case] checked: Checked,
+        #[case] count: usize,
+        #[case] expected: Vec<usize>,
+    ) {
+        assert_eq!(checked.positions(count), expected);
+    }
+
     #[rstest]
     #[case("net/http", Some("http"))]
+    #[case("example.com/go.uber", Some("go.uber"))]
     #[case("github.com/labstack/echo/v4", Some("echo"))]
     #[case("gopkg.in/yaml.v3", Some("yaml"))]
     #[case("example.com/v2go", Some("v2go"))]

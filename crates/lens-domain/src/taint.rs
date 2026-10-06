@@ -616,6 +616,32 @@ mod tests {
         assert_eq!(trace_taint(&flows, &[vec![None, None]]).len(), 1);
     }
 
+    #[test]
+    fn the_shortest_path_wins_whichever_is_found_last() {
+        // handler -> leaf (sink) directly, and handler -> mid -> leaf.
+        let flows = vec![
+            FunctionFlow {
+                sources: source(),
+                calls: vec![
+                    call("leaf", vec![origins(&[Origin::Source(0)])]),
+                    call("mid", vec![origins(&[Origin::Source(0)])]),
+                ],
+                ..FunctionFlow::default()
+            },
+            FunctionFlow {
+                calls: vec![sink("exec.Command", vec![origins(&[Origin::Param(0)])])],
+                ..FunctionFlow::default()
+            },
+            FunctionFlow {
+                calls: vec![call("leaf", vec![origins(&[Origin::Param(0)])])],
+                ..FunctionFlow::default()
+            },
+        ];
+        let findings = trace_taint(&flows, &[vec![Some(1), Some(2)], vec![None], vec![Some(1)]]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(calls(&findings[0]), path(&[(0, 0), (1, 0)]));
+    }
+
     #[rstest]
     #[case::library_call_writes_its_inputs(None, 1)]
     #[case::workspace_call_is_judged_by_its_summary(Some(1), 0)]
@@ -651,7 +677,8 @@ mod tests {
             calls: vec![sink("exec.Command", vec![origins(&[Origin::Source(0)])])],
             ..FunctionFlow::default()
         }];
-        // A bogus callee index falls back to the call's own sink spec.
-        assert_eq!(trace_taint(&flows, &[vec![Some(7)]]).len(), 1);
+        // A bogus callee index falls back to the call's own sink spec;
+        // one past the end is the boundary.
+        assert_eq!(trace_taint(&flows, &[vec![Some(1)]]).len(), 1);
     }
 }

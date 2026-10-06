@@ -2051,16 +2051,25 @@ mod tests {
                 { "kind": "sql-injection", "hops": 0,
                   "source": { "file": "run.go", "line": 3, "label": "c *gin.Context" },
                   "sink": { "file": "run.go", "line": 5, "call": "db.Query" } },
+                { "kind": "ssrf", "hops": 1,
+                  "source": { "file": "run.go", "line": 3, "label": "c *gin.Context" },
+                  "sink": { "file": "fetch.go", "line": 7, "call": "http.Get" } },
             ],
         });
         let extraction = taint(&report, &base());
         assert_eq!(
             files_of(&extraction),
-            [(
-                "/repo/src/run.go",
-                "command-injection at line 9: `r *http.Request` reaches `exec.Command` (2 hops); \
+            [
+                (
+                    "/repo/src/run.go",
+                    "command-injection at line 9: `r *http.Request` reaches `exec.Command` (2 hops); \
                  sql-injection at line 5: `c *gin.Context` reaches `db.Query` (0 hops)"
-            )],
+                ),
+                (
+                    "/repo/src/fetch.go",
+                    "ssrf at line 7: `c *gin.Context` reaches `http.Get` (1 hop)"
+                )
+            ],
         );
     }
 

@@ -713,6 +713,70 @@ func (s *Store) FindUser(name string) {
     }
 
     #[rstest]
+    #[case::cap_below_the_count(1, true)]
+    #[case::cap_at_the_count(2, false)]
+    fn top_caps_the_markdown_listing(#[case] top: usize, #[case] truncated: bool) {
+        let dir = fixture();
+        let md = TaintAnalyzer::new()
+            .with_top(Some(top))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert_eq!(
+            md.contains("1 more finding(s) in the JSON output."),
+            truncated,
+            "{md}"
+        );
+        assert_eq!(md.contains("## sql-injection"), !truncated, "{md}");
+    }
+
+    #[test]
+    fn a_same_function_finding_has_no_via_line() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "h.go",
+            "package h\n\nimport (\n\t\"net/http\"\n\t\"os/exec\"\n)\n\n\
+             func h(w http.ResponseWriter, r *http.Request) { exec.Command(r.FormValue(\"c\")).Run() }\n",
+        );
+        let md = TaintAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("## command-injection (1)"), "{md}");
+        assert!(!md.contains("  - via"), "{md}");
+    }
+
+    #[test]
+    fn the_audit_counts_go_files_and_parse_failures() {
+        let dir = fixture();
+        write_file(dir.path(), "broken.go", "package main\n\nfunc ( {\n");
+        let report = analyze_json(dir.path(), TaintAnalyzer::new());
+        assert_eq!(report["audit"]["go_file_count"], 3, "{report}");
+        assert_eq!(report["audit"]["parse_skipped_file_count"], 1, "{report}");
+    }
+
+    #[test]
+    fn a_diff_range_is_echoed_in_the_audit() {
+        let dir = fixture();
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        let path = dir.path().join("main.go");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            text.replace("runCmd(tool)\n", "runCmd(tool)\n\t_ = 0\n"),
+        )
+        .unwrap();
+        run_git(dir.path(), &["commit", "-q", "-am", "edit"]);
+        let report = analyze_json(
+            dir.path(),
+            TaintAnalyzer::new().with_diff_scope(DiffScope::Range("HEAD~1..HEAD".to_owned())),
+        );
+        assert_eq!(report["audit"]["diff_range"], "HEAD~1..HEAD", "{report}");
+        assert_eq!(report["findings"].as_array().unwrap().len(), 1, "{report}");
+    }
+
+    #[rstest]
     #[case::edit_on_the_path("main.go", "\tname := r.URL.Query().Get(\"name\")\n", 1)]
     #[case::edit_elsewhere("main.go", "\trunCmd(\"ls\")\n", 0)]
     fn diff_only_keeps_findings_running_through_a_changed_function(
