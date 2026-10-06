@@ -31,6 +31,7 @@ mod parser;
 #[cfg(test)]
 mod proptests;
 mod statements;
+mod taint;
 #[cfg(test)]
 mod test_support;
 mod type_defs;
@@ -49,5 +50,6 @@ pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS
 pub use module_path::package_segments;
 pub use parser::{GoParseError, GoParser};
 pub use statements::extract_statement_seqs;
+pub use taint::{DEFAULT_SOURCE_TYPES, extract_taint_flows};
 pub use type_defs::extract_type_defs;
 pub use wrapper::find_wrappers;

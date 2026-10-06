@@ -146,6 +146,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Reach
         | ToolName::Risk
         | ToolName::Search
+        | ToolName::Taint
         | ToolName::TestRedundancy
         | ToolName::Forwarding => None,
     }
@@ -596,6 +597,7 @@ mod tests {
     #[case(ToolName::Ownership)]
     #[case(ToolName::Reach)]
     #[case(ToolName::Risk)]
+    #[case(ToolName::Taint)]
     #[case(ToolName::TestRedundancy)]
     fn tools_without_a_summary_are_reported_as_such(#[case] tool: ToolName) {
         assert!(summarizer(tool).is_none());

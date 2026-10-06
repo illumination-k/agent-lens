@@ -1902,6 +1902,46 @@ fn analyze_ownership_credits_co_authors_and_drops_bots() {
     assert_eq!(row["top_author_share"], 0.75, "got {json}");
 }
 
+/// `analyze taint` end to end: the subcommand, `--source-type` reaching
+/// the Go adapter, and the `[profile.<name>.taint]` table reaching the
+/// same flag through `run`.
+#[test]
+fn analyze_taint_traces_request_input_through_a_helper() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "main.go",
+        "package main\n\nimport (\n\t\"net/http\"\n\t\"os/exec\"\n\n\tpb \"example.com/gen\"\n)\n\n\
+         func run(cmd string) { exec.Command(\"sh\", \"-c\", cmd).Run() }\n\n\
+         func handle(w http.ResponseWriter, r *http.Request) { run(r.FormValue(\"cmd\")) }\n\n\
+         func rpc(req *pb.RunRequest) { run(req.Cmd) }\n",
+    );
+    let json = stdout_json(&agent_lens(&["analyze", "taint", "."], dir.path(), None));
+    let findings = json["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "got {json}");
+    assert_eq!(findings[0]["kind"], "command-injection", "got {json}");
+    assert_eq!(
+        findings[0]["source"]["function"], "main::handle",
+        "got {json}"
+    );
+    assert_eq!(findings[0]["hops"], 1, "got {json}");
+
+    write_file(
+        dir.path(),
+        "agent-lens.toml",
+        "[profile.sec]\npath = \".\"\ntools = [\"taint\"]\n\n\
+         [profile.sec.taint]\nsource-type = [\"example.com/gen.RunRequest\"]\n",
+    );
+    let output = agent_lens(&["run", "sec", "--format", "md"], dir.path(), None);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("## command-injection (2)"), "got {stdout}");
+}
+
 /// `analyze change-entropy` reads history and the pending diff, so the
 /// binary is the only place its wiring can be checked end to end. The
 /// `--diff-only` half especially: a working-tree read that never reached
@@ -2084,6 +2124,7 @@ fn analyze_communities_names_a_module_wired_into_a_neighbour() {
 #[case::co_change_index_row("| `agent-lens analyze co-change` |")]
 #[case::change_entropy_index_row("| `agent-lens analyze change-entropy` |")]
 #[case::ownership_index_row("| `agent-lens analyze ownership` |")]
+#[case::taint_index_row("| `agent-lens analyze taint` |")]
 #[case::communities_index_row("| `agent-lens analyze communities` |")]
 #[case::hidden_coupling_index_row("| `agent-lens analyze hidden-coupling` |")]
 #[case::routing("Pick an analyzer by question:")]

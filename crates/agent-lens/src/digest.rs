@@ -418,6 +418,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::TestRedundancy => test_redundancy(report, base),
         ToolName::ChangeEntropy => change_entropy(report, base),
         ToolName::Ownership => ownership(report, base),
+        ToolName::Taint => taint(report, base),
         ToolName::CoChange => co_change(report),
         ToolName::HiddenCoupling => hidden_coupling(report),
         ToolName::Coupling => coupling(report),
@@ -1261,6 +1262,46 @@ fn ownership(report: &Value, base: &Path) -> Extraction {
     }
 }
 
+/// Findings fold onto the sink's file — the line a fix lands on — most
+/// severe first, as the report already orders them.
+fn taint(report: &Value, base: &Path) -> Extraction {
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut fragments: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for row in arr(report, "findings") {
+        let fragment = (|| {
+            let sink = row.get("sink")?;
+            let source = row.get("source")?;
+            let path = from_base(base, str_of(sink, "file")?);
+            let fragment = format!(
+                "{} at line {}: `{}` reaches `{}` ({})",
+                str_of(row, "kind")?,
+                u64_of(sink, "line")?,
+                str_of(source, "label")?,
+                str_of(sink, "call")?,
+                counted(u64_of(row, "hops").unwrap_or(0), "hop", "hops"),
+            );
+            Some((path, fragment))
+        })();
+        let Some((path, fragment)) = fragment else {
+            continue;
+        };
+        if !fragments.contains_key(&path) {
+            order.push(path.clone());
+        }
+        fragments.entry(path).or_default().push(fragment);
+    }
+    Extraction {
+        files: order
+            .into_iter()
+            .map(|path| {
+                let headline = hub_headline(fragments.remove(&path).unwrap_or_default());
+                FileFinding { path, headline }
+            })
+            .collect(),
+        corpus: Vec::new(),
+    }
+}
+
 // ---- Corpus-shaped extractors --------------------------------------------
 
 /// A co-change pair belongs to two files at once, so pairs stay
@@ -1464,7 +1505,7 @@ mod tests {
     use super::*;
 
     /// Every tool the digest folds, for shape-robustness sweeps.
-    const FOLDED: [ToolName; 16] = [
+    const FOLDED: [ToolName; 17] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Similarity,
@@ -1474,6 +1515,7 @@ mod tests {
         ToolName::TestRedundancy,
         ToolName::ChangeEntropy,
         ToolName::Ownership,
+        ToolName::Taint,
         ToolName::CoChange,
         ToolName::HiddenCoupling,
         ToolName::Coupling,
@@ -1996,6 +2038,29 @@ mod tests {
             [
                 "pending change spans 4 files across 2 modules (entropy 0.66, p80 of this repo's commits)"
             ],
+        );
+    }
+
+    #[test]
+    fn taint_folds_findings_onto_the_sink_file() {
+        let report = json!({
+            "findings": [
+                { "kind": "command-injection", "hops": 2,
+                  "source": { "file": "main.go", "line": 17, "label": "r *http.Request" },
+                  "sink": { "file": "run.go", "line": 9, "call": "exec.Command" } },
+                { "kind": "sql-injection", "hops": 0,
+                  "source": { "file": "run.go", "line": 3, "label": "c *gin.Context" },
+                  "sink": { "file": "run.go", "line": 5, "call": "db.Query" } },
+            ],
+        });
+        let extraction = taint(&report, &base());
+        assert_eq!(
+            files_of(&extraction),
+            [(
+                "/repo/src/run.go",
+                "command-injection at line 9: `r *http.Request` reaches `exec.Command` (2 hops); \
+                 sql-injection at line 5: `c *gin.Context` reaches `db.Query` (0 hops)"
+            )],
         );
     }
 

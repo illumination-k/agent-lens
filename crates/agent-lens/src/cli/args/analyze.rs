@@ -22,6 +22,7 @@ use agent_lens::analyze::reach::ReachOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
+use agent_lens::analyze::taint::TaintOptions;
 use agent_lens::analyze::test_redundancy::TestRedundancyOptions;
 use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
 use clap::{Args, Subcommand};
@@ -615,6 +616,35 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// group list at `--top` (default 20).
     #[command(name = "test-redundancy", after_long_help = examples::TEST_REDUNDANCY)]
     TestRedundancy(AnalyzeTestRedundancyArgs),
+    /// Trace untrusted input to dangerous calls across function
+    /// boundaries: which request values reach which sinks, and through
+    /// which call chain.
+    ///
+    /// Complements per-call-site scanners (`gosec`, Semgrep rules),
+    /// which flag `exec.Command(name)` whatever `name` is and cannot see
+    /// a request value that reaches the shell three helpers down.
+    /// Sources are parameters typed as an HTTP request handle
+    /// (`net/http.Request`, gin, echo, fiber, fasthttp), plus any
+    /// `--source-type`. Sinks are matched on the import path a call's
+    /// package resolves to — command execution (`os/exec`), file paths
+    /// (`os`, `io/ioutil`, `http.ServeFile`), outbound requests
+    /// (`net/http`, `net.Dial`), `http.Redirect`, `html/template`
+    /// trusted-content conversions — and, for SQL, on the
+    /// `database/sql` method names (`Query`, `Exec`, …, GORM's `Raw`)
+    /// where only the query text is checked. Each function is summarised
+    /// once — which parameters reach a sink, which flow into its result
+    /// — and the summaries are joined over resolved call-graph edges,
+    /// so a finding carries the whole path. A call the graph cannot
+    /// resolve is treated as library code that passes its inputs
+    /// through; numeric parsing and escaping functions sanitize. The
+    /// model is flow- and field-insensitive and does not follow
+    /// interface dispatch or function values, so read a finding as a
+    /// path to check, not a verdict. Go only. `--diff-only` /
+    /// `--diff-range` keep findings whose path runs through a changed
+    /// function. JSON is the default; `--format md` caps the listing at
+    /// `--top` (default 30).
+    #[command(after_long_help = examples::TAINT)]
+    Taint(AnalyzeTaintArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -783,6 +813,14 @@ pub(in crate::cli) struct AnalyzeHiddenCouplingArgs {
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(in crate::cli) opts: CoChangeOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(in crate::cli) struct AnalyzeTaintArgs {
+    #[command(flatten)]
+    pub(in crate::cli) common: AnalyzeCommonArgs,
+    #[command(flatten)]
+    pub(in crate::cli) opts: TaintOptions,
 }
 
 #[derive(Debug, Clone, Args)]

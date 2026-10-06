@@ -598,6 +598,65 @@ fn expression_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
 }
 
 fn collect_imports(root: Node<'_>, source: &[u8]) -> Vec<ImportShape> {
+    import_specs(root, source)
+        .into_iter()
+        .filter_map(|spec| {
+            let target = spec
+                .path
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("::");
+            if target.is_empty() {
+                return None;
+            }
+            // Default alias: the last segment of the import path. `import
+            // foo "path/to/pkg"` overrides this; `import . "..."` (dot) and
+            // `import _ "..."` (blank) drop the alias entirely so the import
+            // only contributes a visible-imports entry without polluting
+            // the namespace-alias set.
+            let local_alias = match spec.alias {
+                ImportAlias::Default => spec
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned),
+                ImportAlias::Named(name) => Some(name),
+                ImportAlias::Hidden => None,
+            };
+            Some(ImportShape {
+                imported_module: SyntaxFact::Known(target),
+                local_alias: SyntaxFact::Known(local_alias),
+                // Whole-package imports — the imported entity is the
+                // package itself, accessed through the alias. Mirrors how
+                // `lens-py` models `import os` (vs. `from os import path`,
+                // which would set `exported_symbol = Some("path")`).
+                exported_symbol: SyntaxFact::Known(None),
+            })
+        })
+        .collect()
+}
+
+/// One `import` spec of a Go file, before any alias is defaulted.
+pub(crate) struct ImportSpec {
+    /// The unquoted import path (`net/http`).
+    pub path: String,
+    pub alias: ImportAlias,
+}
+
+/// How an import spec names its package locally.
+pub(crate) enum ImportAlias {
+    /// No name written: the package's own name applies.
+    Default,
+    /// `import foo "path"`.
+    Named(String),
+    /// `import _ "path"` or `import . "path"`: no qualifier to call through.
+    Hidden,
+}
+
+/// Every import spec at the top level of `root`, in source order.
+pub(crate) fn import_specs(root: Node<'_>, source: &[u8]) -> Vec<ImportSpec> {
     let mut out = Vec::new();
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -608,16 +667,16 @@ fn collect_imports(root: Node<'_>, source: &[u8]) -> Vec<ImportShape> {
     out
 }
 
-fn collect_import_specs(node: Node<'_>, source: &[u8], out: &mut Vec<ImportShape>) {
+fn collect_import_specs(node: Node<'_>, source: &[u8], out: &mut Vec<ImportSpec>) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "import_spec" => push_import_spec(child, source, out),
+            "import_spec" => out.extend(import_spec(child, source)),
             "import_spec_list" => {
                 let mut inner = child.walk();
                 for spec in child.named_children(&mut inner) {
                     if spec.kind() == "import_spec" {
-                        push_import_spec(spec, source, out);
+                        out.extend(import_spec(spec, source));
                     }
                 }
             }
@@ -626,48 +685,21 @@ fn collect_import_specs(node: Node<'_>, source: &[u8], out: &mut Vec<ImportShape
     }
 }
 
-fn push_import_spec(spec: Node<'_>, source: &[u8], out: &mut Vec<ImportShape>) {
-    let Some(path_node) = spec.child_by_field_name("path") else {
-        return;
-    };
-    let Some(raw_path) = node_str(path_node, source) else {
-        return;
-    };
-    let path = unquote_go_string_literal(raw_path);
-    let target = path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("::");
-    if target.is_empty() {
-        return;
-    }
-    // Default alias: the last segment of the import path. `import foo
-    // "path/to/pkg"` overrides this; `import . "..."` (dot) and `import
-    // _ "..."` (blank) drop the alias entirely so the import only
-    // contributes a visible-imports entry without polluting the
-    // namespace-alias set.
-    let default_alias = path
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned);
-    let local_alias = match spec.child_by_field_name("name") {
+fn import_spec(spec: Node<'_>, source: &[u8]) -> Option<ImportSpec> {
+    let raw_path = node_str(spec.child_by_field_name("path")?, source)?;
+    let alias = match spec.child_by_field_name("name") {
         Some(name) => match name.kind() {
-            "blank_identifier" | "dot" => None,
-            _ => node_str(name, source).map(str::to_owned).or(default_alias),
+            "blank_identifier" | "dot" => ImportAlias::Hidden,
+            _ => node_str(name, source).map_or(ImportAlias::Default, |text| {
+                ImportAlias::Named(text.to_owned())
+            }),
         },
-        None => default_alias,
+        None => ImportAlias::Default,
     };
-    out.push(ImportShape {
-        imported_module: SyntaxFact::Known(target),
-        local_alias: SyntaxFact::Known(local_alias),
-        // Whole-package imports — the imported entity is the package
-        // itself, accessed through the alias. Mirrors how `lens-py`
-        // models `import os` (vs. `from os import path`, which would
-        // set `exported_symbol = Some("path")`).
-        exported_symbol: SyntaxFact::Known(None),
-    });
+    Some(ImportSpec {
+        path: unquote_go_string_literal(raw_path),
+        alias,
+    })
 }
 
 #[cfg(test)]

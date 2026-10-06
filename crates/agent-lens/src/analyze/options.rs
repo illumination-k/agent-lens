@@ -199,6 +199,7 @@ mod tests {
     use crate::analyze::similarity::{SimilarityAnalyzer, SimilarityOptions};
     use crate::analyze::single_impl::{SingleImplAnalyzer, SingleImplOptions};
     use crate::analyze::single_use::{SingleUseAnalyzer, SingleUseOptions};
+    use crate::analyze::taint::{TaintAnalyzer, TaintOptions};
     use crate::analyze::test_only::{TestOnlyAnalyzer, TestOnlyOptions};
     use crate::analyze::test_redundancy::{TestRedundancyAnalyzer, TestRedundancyOptions};
     use crate::analyze::unreachable::{Tier, UnreachableAnalyzer, UnreachableOptions};
@@ -349,6 +350,19 @@ mod tests {
         |a| a.with_top(Some(3)).with_diff_only(true)
     );
     assert_options_reach_the_analyzer!(
+        taint_options_reach_the_analyzer: TaintAnalyzer,
+        TaintOptions {
+            top: Some(3),
+            diff_only: true,
+            diff_range: None,
+            source_type: vec!["example.com/gen.Req".to_owned()],
+        },
+        |a| a
+            .with_top(Some(3))
+            .with_diff_only(true)
+            .with_source_types(vec!["example.com/gen.Req".to_owned()])
+    );
+    assert_options_reach_the_analyzer!(
         hotspot_options_reach_the_analyzer: HotspotAnalyzer,
         HotspotOptions { top: Some(3), since: Some("90.days.ago".to_owned()) },
         |a| a.with_top(Some(3)).with_since_opt(Some("90.days.ago".to_owned()))
@@ -477,6 +491,10 @@ mod tests {
     assert_diff_range_reaches_the_analyzer!(
         delegation_diff_range_reaches_the_analyzer: DelegationAnalyzer,
         DelegationOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
+    );
+    assert_diff_range_reaches_the_analyzer!(
+        taint_diff_range_reaches_the_analyzer: TaintAnalyzer,
+        TaintOptions { diff_range: Some(RANGE.to_owned()), ..Default::default() }
     );
     assert_diff_range_reaches_the_analyzer!(
         footprint_diff_range_reaches_the_analyzer: FootprintAnalyzer,
