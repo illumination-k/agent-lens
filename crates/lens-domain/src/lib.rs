@@ -189,8 +189,8 @@ pub use syntax::{
     TraitImplShape, VisibilityShape, callee_names_local_binding,
 };
 pub use taint::{
-    ArgRef, CallRef, FlowCall, FunctionFlow, Origin, SinkSpec, SourceRef, TaintFinding,
-    TaintSource, trace_taint,
+    ArgRef, ArgSelector, CallRef, FlowCall, FunctionFlow, Origin, SinkSpec, SourceRef,
+    TaintFinding, TaintSource, trace_taint,
 };
 pub use token_similarity::{
     TokenIdf, TokenProfile, lcs_similarity, lcs_similarity_upper_bound, token_similarity,

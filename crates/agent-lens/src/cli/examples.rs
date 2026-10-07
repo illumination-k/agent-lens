@@ -309,6 +309,7 @@ Examples:
     agent-lens analyze taint . --format md
     agent-lens analyze taint ./cmd ./internal --top 10 --format md
     agent-lens analyze taint . --source-type example.com/api/gen.CreateRequest
+    agent-lens analyze taint crates/server --source-type tonic::Request
     agent-lens analyze taint . --diff-only --format md
     agent-lens analyze taint . --diff-range main...HEAD
 ";

@@ -623,15 +623,21 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// Complements per-call-site scanners (`gosec`, Semgrep rules),
     /// which flag `exec.Command(name)` whatever `name` is and cannot see
     /// a request value that reaches the shell three helpers down.
-    /// Sources are parameters typed as an HTTP request handle
-    /// (`net/http.Request`, gin, echo, fiber, fasthttp), plus any
-    /// `--source-type`. Sinks are matched on the import path a call's
-    /// package resolves to — command execution (`os/exec`), file paths
-    /// (`os`, `io/ioutil`, `http.ServeFile`), outbound requests
-    /// (`net/http`, `net.Dial`), `http.Redirect`, `html/template`
-    /// trusted-content conversions — and, for SQL, on the
-    /// `database/sql` method names (`Query`, `Exec`, …, GORM's `Raw`)
-    /// where only the query text is checked. Each function is summarised
+    /// Sources are parameters typed as an HTTP request handle — Go's
+    /// `net/http.Request`, gin, echo, fiber and fasthttp; Rust's axum,
+    /// actix-web and rocket extractors (`Query(q): Query<P>` taints
+    /// `q`) — plus any `--source-type`. Sinks are matched on the path a
+    /// call resolves to through the file's imports: command execution
+    /// (`os/exec`, `std::process::Command`), file paths (`os`,
+    /// `std::fs`, `tokio::fs`, `http.ServeFile`), outbound requests
+    /// (`net/http`, `net.Dial`, `reqwest`, `ureq`, `TcpStream`),
+    /// redirects, trusted-HTML conversions (`html/template`, axum's
+    /// `Html`) and SQL text (`sqlx::query`, `diesel::sql_query`); and
+    /// by name for the SQL driver methods whose receiver type syntax
+    /// cannot tell (`database/sql`'s `Query`/`Exec`, GORM's `Raw`,
+    /// `rusqlite`/`tokio-postgres`'s `execute`/`query`), where only the
+    /// query text is checked. Rust format strings are read too, inline
+    /// captures (`format!("{name}")`) included. Each function is summarised
     /// once — which parameters reach a sink, which flow into its result
     /// — and the summaries are joined over resolved call-graph edges,
     /// so a finding carries the whole path. A call the graph cannot
@@ -639,7 +645,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// through; numeric parsing and escaping functions sanitize. The
     /// model is flow- and field-insensitive and does not follow
     /// interface dispatch or function values, so read a finding as a
-    /// path to check, not a verdict. Go only. `--diff-only` /
+    /// path to check, not a verdict. Go and Rust. `--diff-only` /
     /// `--diff-range` keep findings whose path runs through a changed
     /// function. JSON is the default; `--format md` caps the listing at
     /// `--top` (default 30).

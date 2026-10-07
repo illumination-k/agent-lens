@@ -8,11 +8,12 @@
 //! helper. This analyzer answers the question those leave open — *which
 //! request inputs actually arrive at which sinks, and through which
 //! call chain* — by joining per-function flow summaries from the
-//! language adapter ([`lens_golang::extract_taint_flows`]) with the
+//! language adapters ([`lens_golang::extract_taint_flows`],
+//! [`lens_rust::extract_taint_flows`]) with the
 //! shared call graph's resolution of every call site, then running
 //! [`lens_domain::trace_taint`].
 //!
-//! Go only for now. The flow model is flow-insensitive and field-
+//! Go and Rust. The flow model is flow-insensitive and field-
 //! insensitive, and calls the graph leaves unresolved are treated as
 //! library code that passes its inputs through — so it over-reports
 //! through a struct that mixes tainted and clean fields, and
@@ -49,7 +50,7 @@ const NOTE: &str = "Each finding is a path from an untrusted value (a parameter 
      through `&v` arguments and a plain-variable receiver into that variable; numeric parsing \
      and escaping functions sanitize. Flow- and field-insensitive: a variable is tainted if any \
      write to it is, and writing one field taints the whole value. Interface dispatch and \
-     function values are not followed. Go only.";
+     function values are not followed. Go and Rust.";
 
 /// Report order of the vulnerability classes: what an attacker gets
 /// first.
@@ -66,11 +67,13 @@ analyzer_options! {
     /// `analyze taint` flags, and the `[profile.<name>.taint]` table.
     pub struct TaintOptions {
         @shared(ranking, diff);
-        /// Also treat parameters of this type as untrusted input, as
-        /// `import/path.Type` (`example.com/api/gen.CreateRequest`);
-        /// repeatable. A pointer to it counts too. Adds to the built-in
-        /// HTTP request types (`net/http.Request`, gin, echo, fiber,
-        /// fasthttp).
+        /// Also treat parameters of this type as untrusted input;
+        /// repeatable. Go types are `import/path.Type`
+        /// (`example.com/api/gen.CreateRequest`), Rust types their full
+        /// path (`crate::api::CreateRequest`, `tonic::Request`). A
+        /// pointer or reference to one counts too. Adds to the built-in
+        /// HTTP request types (Go: net/http, gin, echo, fiber, fasthttp;
+        /// Rust: axum, actix-web and rocket extractors).
         #[arg(long, value_name = "TYPE")]
         pub source_type: Vec<String>,
     }
@@ -141,7 +144,8 @@ impl TaintAnalyzer {
         self
     }
 
-    /// Extra `import/path.Type` names treated as untrusted input.
+    /// Extra type names treated as untrusted input: `import/path.Type`
+    /// for Go, a full `a::b::Type` path for Rust.
     pub fn with_source_types(mut self, source_types: Vec<String>) -> Self {
         self.source_types = source_types;
         self
@@ -168,14 +172,14 @@ impl TaintAnalyzer {
     }
 }
 
-/// Every Go function's flow, joined to its call-graph node, plus each
+/// Every Go and Rust function's flow, joined to its call-graph node, plus each
 /// call site's resolved target as an index into the same list.
 struct Lowered {
     /// Graph node index of each flow.
     nodes: Vec<usize>,
     flows: Vec<FunctionFlow>,
     callees: Vec<Vec<Option<usize>>>,
-    go_file_count: usize,
+    file_count: usize,
     parse_skipped_file_count: usize,
 }
 
@@ -196,15 +200,17 @@ impl Lowered {
             nodes: Vec::new(),
             flows: Vec::new(),
             callees: Vec::new(),
-            go_file_count: 0,
+            file_count: 0,
             parse_skipped_file_count: 0,
         };
         builder.visit_source_texts(roots, |file, source| {
-            if SourceLang::from_path(Path::new(file)) != Some(SourceLang::Go) {
-                return;
-            }
-            lowered.go_file_count += 1;
-            let Ok(flows) = lens_golang::extract_taint_flows(source, source_types) else {
+            let flows = match SourceLang::from_path(Path::new(file)) {
+                Some(SourceLang::Go) => lens_golang::extract_taint_flows(source, source_types).ok(),
+                Some(SourceLang::Rust) => lens_rust::extract_taint_flows(source, source_types).ok(),
+                _ => return,
+            };
+            lowered.file_count += 1;
+            let Some(flows) = flows else {
                 lowered.parse_skipped_file_count += 1;
                 return;
             };
@@ -320,11 +326,11 @@ struct Finding {
 
 #[derive(Debug, Serialize)]
 struct Audit {
-    /// Go files read. Other languages are not analysed.
-    go_file_count: usize,
-    /// Go files that failed to parse (the graph skips them too).
+    /// Go and Rust files read. Other languages are not analysed.
+    file_count: usize,
+    /// Files that failed to parse (the graph skips them too).
     parse_skipped_file_count: usize,
-    /// Go functions lowered — the denominator.
+    /// Functions lowered — the denominator.
     function_count: usize,
     /// Untrusted parameters found.
     source_count: usize,
@@ -387,7 +393,7 @@ impl Report {
             *by_kind.entry(finding.kind).or_insert(0) += 1;
         }
         let audit = Audit {
-            go_file_count: lowered.go_file_count,
+            file_count: lowered.file_count,
             parse_skipped_file_count: lowered.parse_skipped_file_count,
             function_count: lowered.flows.len(),
             source_count: lowered.flows.iter().map(|flow| flow.sources.len()).sum(),
@@ -408,7 +414,7 @@ impl Report {
         Self {
             schema_version: SCHEMA_VERSION,
             root: roots.display(),
-            language: "go",
+            language: graph.language,
             note: NOTE,
             audit,
             by_kind,
@@ -495,7 +501,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     let audit = &report.audit;
     let _ = writeln!(
         out,
-        "# Taint flows: {} finding(s) in {} ({} Go function(s), {} source(s), {} sink call(s))",
+        "# Taint flows: {} finding(s) in {} ({} function(s), {} source(s), {} sink call(s))",
         report.findings.len(),
         report.root,
         audit.function_count,
@@ -675,6 +681,36 @@ func (s *Store) FindUser(name string) {
     }
 
     #[test]
+    fn follows_rust_extractors_across_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod store;\n\
+             use axum::extract::Query;\n\n\
+             pub struct Params { pub name: String }\n\n\
+             pub async fn search(Query(p): Query<Params>) {\n\
+             \tstore::find(&p.name);\n\
+             }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/store.rs",
+            "pub fn find(name: &str) {\n\
+             \tlet sql = format!(\"SELECT * FROM t WHERE name = '{name}'\");\n\
+             \tsqlx::query(&sql);\n\
+             }\n",
+        );
+        let report = analyze_json(dir.path(), TaintAnalyzer::new());
+        let findings = report["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{report}");
+        assert_eq!(findings[0]["kind"], "sql-injection");
+        assert_eq!(findings[0]["source"]["label"], "Query(p): Query<Params>");
+        assert_eq!(findings[0]["hops"], 1);
+        assert_eq!(report["language"], "rust");
+    }
+
+    #[test]
     fn extra_source_types_add_entry_points() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
@@ -750,7 +786,7 @@ func (s *Store) FindUser(name string) {
         let dir = fixture();
         write_file(dir.path(), "broken.go", "package main\n\nfunc ( {\n");
         let report = analyze_json(dir.path(), TaintAnalyzer::new());
-        assert_eq!(report["audit"]["go_file_count"], 3, "{report}");
+        assert_eq!(report["audit"]["file_count"], 3, "{report}");
         assert_eq!(report["audit"]["parse_skipped_file_count"], 1, "{report}");
     }
 
@@ -801,11 +837,15 @@ func (s *Store) FindUser(name string) {
     }
 
     #[test]
-    fn non_go_trees_report_nothing() {
+    fn unsupported_languages_report_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/lib.rs", "pub fn f() {}\n");
+        write_file(
+            dir.path(),
+            "app.py",
+            "def f(request):\n    eval(request.args)\n",
+        );
         let report = analyze_json(dir.path(), TaintAnalyzer::new());
-        assert_eq!(report["audit"]["go_file_count"], 0);
+        assert_eq!(report["audit"]["file_count"], 0);
         assert!(report["findings"].as_array().unwrap().is_empty());
     }
 

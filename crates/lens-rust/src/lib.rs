@@ -21,6 +21,7 @@ mod parser;
 #[cfg(test)]
 mod proptests;
 mod statements;
+mod taint;
 mod traits;
 mod type_defs;
 mod wrapper;
@@ -41,6 +42,7 @@ pub use parser::{
     extract_functions_with_module,
 };
 pub use statements::extract_statement_seqs;
+pub use taint::{DEFAULT_SOURCE_TYPES, extract_taint_flows};
 pub use traits::extract_trait_shapes_with_module;
 pub use type_defs::extract_type_defs;
 pub use wrapper::find_wrappers;

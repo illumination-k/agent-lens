@@ -69,6 +69,30 @@ pub struct SinkSpec {
     pub arguments: Vec<usize>,
 }
 
+/// Which arguments of a sink call are checked, independent of how many
+/// a particular call site passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgSelector {
+    All,
+    At(usize),
+    From(usize),
+}
+
+impl ArgSelector {
+    /// The checked positions at a call site passing `argument_count`
+    /// arguments.
+    pub fn positions(self, argument_count: usize) -> Vec<usize> {
+        match self {
+            Self::All => (0..argument_count).collect(),
+            Self::At(position) => (position < argument_count)
+                .then_some(position)
+                .into_iter()
+                .collect(),
+            Self::From(start) => (start..argument_count).collect(),
+        }
+    }
+}
+
 /// One call site inside a function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowCall {
@@ -80,6 +104,11 @@ pub struct FlowCall {
     pub callee_label: String,
     /// Origins of the receiver expression of a method call.
     pub receiver: BTreeSet<Origin>,
+    /// Written as `recv.method(..)`: the receiver is not among
+    /// `arguments`. A path call to a method (`Self::helper(self, x)`,
+    /// Go's `T.M(recv, x)`) passes the receiver as its first argument
+    /// instead, which shifts every parameter one position right.
+    pub method_syntax: bool,
     /// Origins of each argument, in source order.
     pub arguments: Vec<BTreeSet<Origin>>,
     /// The result is clean whatever goes in (`strconv.Atoi`, `len`).
@@ -95,6 +124,9 @@ pub struct FunctionFlow {
     /// Line the declaration starts on: the key that joins the flow to
     /// its call-graph node. [`trace_taint`] does not read it.
     pub start_line: usize,
+    /// Declared with a receiver (`self`, a Go method receiver) that is
+    /// not one of its parameter slots.
+    pub takes_receiver: bool,
     pub sources: Vec<TaintSource>,
     pub calls: Vec<FlowCall>,
     /// Origins of every value the function returns.
@@ -210,7 +242,7 @@ fn summarise(
     let resolved: Vec<bool> = (0..flow.calls.len())
         .map(|call| callee_of(function, call).is_some())
         .collect();
-    let results = resolve_call_results(function, flow, callee_of, summaries, &resolved);
+    let results = resolve_call_results(function, flows, callee_of, summaries, &resolved);
     let abs = |origins: &BTreeSet<Origin>| abstract_origins(function, origins, &results, &resolved);
 
     let mut summary = Summary {
@@ -224,11 +256,14 @@ fn summarise(
         };
         // `(argument position, sink, path beyond this call site)`.
         let reached: Vec<(usize, ArgRef, &[ArgRef])> = match callee_of(function, index) {
-            Some(callee) => summaries[callee]
-                .param_sinks
-                .iter()
-                .map(|(&(param, sink), path)| (param, sink, path.as_slice()))
-                .collect(),
+            Some(callee) => {
+                let shift = receiver_shift(call, &flows[callee]);
+                summaries[callee]
+                    .param_sinks
+                    .iter()
+                    .map(|(&(param, sink), path)| (param + shift, sink, path.as_slice()))
+                    .collect()
+            }
             None => call.sink.as_ref().map_or_else(Vec::new, |spec| {
                 spec.arguments
                     .iter()
@@ -268,16 +303,24 @@ fn summarise(
     summary
 }
 
+/// How many leading arguments of `call` are not parameter slots of
+/// `callee`: one when a receiver-taking callee is called by path with the
+/// receiver passed first, zero otherwise.
+fn receiver_shift(call: &FlowCall, callee: &FunctionFlow) -> usize {
+    usize::from(callee.takes_receiver && !call.method_syntax)
+}
+
 /// What each call's result carries, iterated to a fixpoint because a
 /// flow-insensitive body can feed a call's result back into its own
 /// arguments (`x = f(x)`).
 fn resolve_call_results(
     function: usize,
-    flow: &FunctionFlow,
+    flows: &[FunctionFlow],
     callee_of: &impl Fn(usize, usize) -> Option<usize>,
     summaries: &[Summary],
     resolved: &[bool],
 ) -> Vec<BTreeSet<Taint>> {
+    let flow = &flows[function];
     let mut results: Vec<BTreeSet<Taint>> = vec![BTreeSet::new(); flow.calls.len()];
     loop {
         let mut changed = false;
@@ -289,16 +332,21 @@ fn resolve_call_results(
                 abstract_origins(function, origins, &results, resolved)
             };
             let next: BTreeSet<Taint> = match callee_of(function, index) {
-                Some(callee) => summaries[callee]
-                    .returns
-                    .iter()
-                    .flat_map(|taint| match *taint {
-                        Taint::Param(param) => {
-                            call.arguments.get(param).map(&abs).unwrap_or_default()
-                        }
-                        Taint::Source(source) => BTreeSet::from([Taint::Source(source)]),
-                    })
-                    .collect(),
+                Some(callee) => {
+                    let shift = receiver_shift(call, &flows[callee]);
+                    summaries[callee]
+                        .returns
+                        .iter()
+                        .flat_map(|taint| match *taint {
+                            Taint::Param(param) => call
+                                .arguments
+                                .get(param + shift)
+                                .map(&abs)
+                                .unwrap_or_default(),
+                            Taint::Source(source) => BTreeSet::from([Taint::Source(source)]),
+                        })
+                        .collect()
+                }
                 None => call
                     .arguments
                     .iter()
@@ -381,6 +429,7 @@ mod tests {
             callee_name: Some(name.to_owned()),
             callee_label: name.to_owned(),
             receiver: BTreeSet::new(),
+            method_syntax: true,
             arguments,
             sanitizer: false,
             sink: None,
@@ -614,6 +663,56 @@ mod tests {
             ..FunctionFlow::default()
         }];
         assert_eq!(trace_taint(&flows, &[vec![None, None]]).len(), 1);
+    }
+
+    #[rstest]
+    #[case::method_syntax_lines_up(true, Origin::Source(0), BTreeSet::new(), 1)]
+    #[case::method_syntax_misses_the_wrong_slot(true, Origin::Param(9), origins(&[Origin::Source(0)]), 0)]
+    #[case::path_call_passes_the_receiver_first(false, Origin::Param(9), origins(&[Origin::Source(0)]), 1)]
+    fn a_path_call_to_a_method_shifts_parameters_past_the_receiver(
+        #[case] method_syntax: bool,
+        #[case] first: Origin,
+        #[case] second: BTreeSet<Origin>,
+        #[case] expected: usize,
+    ) {
+        // helper(&self, x) sinks x, and returns x too: the caller sinks
+        // the result as well, so both the sink and the return summaries
+        // must shift.
+        let arguments = vec![origins(&[first]), second];
+        let flows = vec![
+            FunctionFlow {
+                sources: source(),
+                calls: vec![
+                    FlowCall {
+                        method_syntax,
+                        ..call("helper", arguments)
+                    },
+                    sink("Command::new", vec![origins(&[Origin::CallResult(0)])]),
+                ],
+                ..FunctionFlow::default()
+            },
+            FunctionFlow {
+                takes_receiver: true,
+                calls: vec![sink("Command::new", vec![origins(&[Origin::Param(0)])])],
+                returns: origins(&[Origin::Param(0)]),
+                ..FunctionFlow::default()
+            },
+        ];
+        let findings = trace_taint(&flows, &[vec![Some(1), None], vec![None]]);
+        assert_eq!(findings.len(), expected * 2, "{findings:?}");
+    }
+
+    #[rstest]
+    #[case(ArgSelector::All, 2, vec![0, 1])]
+    #[case(ArgSelector::At(1), 2, vec![1])]
+    #[case(ArgSelector::At(2), 2, vec![])]
+    #[case(ArgSelector::From(1), 3, vec![1, 2])]
+    fn selected_positions(
+        #[case] selector: ArgSelector,
+        #[case] count: usize,
+        #[case] expected: Vec<usize>,
+    ) {
+        assert_eq!(selector.positions(count), expected);
     }
 
     #[test]

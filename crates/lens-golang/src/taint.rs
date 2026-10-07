@@ -19,7 +19,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use lens_domain::{FlowCall, FunctionFlow, Origin, SinkSpec, TaintSource, starts_uppercase};
+use lens_domain::{
+    ArgSelector, FlowCall, FunctionFlow, Origin, SinkSpec, TaintSource, starts_uppercase,
+};
 use tree_sitter::Node;
 
 use crate::call_index::{ImportAlias, import_specs};
@@ -39,68 +41,47 @@ pub const DEFAULT_SOURCE_TYPES: &[&str] = &[
     "github.com/valyala/fasthttp.RequestCtx",
 ];
 
-/// Which arguments of a sink call are checked.
-#[derive(Debug, Clone, Copy)]
-enum Checked {
-    All,
-    At(usize),
-    From(usize),
-}
-
-impl Checked {
-    fn positions(self, argument_count: usize) -> Vec<usize> {
-        match self {
-            Self::All => (0..argument_count).collect(),
-            Self::At(position) => (position < argument_count)
-                .then_some(position)
-                .into_iter()
-                .collect(),
-            Self::From(start) => (start..argument_count).collect(),
-        }
-    }
-}
-
 /// Package-level sinks: `(import path.Func, kind, checked arguments)`.
-const PACKAGE_SINKS: &[(&str, &str, Checked)] = &[
-    ("os/exec.Command", "command-injection", Checked::All),
+const PACKAGE_SINKS: &[(&str, &str, ArgSelector)] = &[
+    ("os/exec.Command", "command-injection", ArgSelector::All),
     (
         "os/exec.CommandContext",
         "command-injection",
-        Checked::From(1),
+        ArgSelector::From(1),
     ),
-    ("syscall.Exec", "command-injection", Checked::All),
-    ("os.StartProcess", "command-injection", Checked::All),
-    ("os.Open", "path-traversal", Checked::At(0)),
-    ("os.OpenFile", "path-traversal", Checked::At(0)),
-    ("os.Create", "path-traversal", Checked::At(0)),
-    ("os.ReadFile", "path-traversal", Checked::At(0)),
-    ("os.WriteFile", "path-traversal", Checked::At(0)),
-    ("os.ReadDir", "path-traversal", Checked::At(0)),
-    ("os.Remove", "path-traversal", Checked::At(0)),
-    ("os.RemoveAll", "path-traversal", Checked::At(0)),
-    ("os.Mkdir", "path-traversal", Checked::At(0)),
-    ("os.MkdirAll", "path-traversal", Checked::At(0)),
-    ("os.Rename", "path-traversal", Checked::All),
-    ("io/ioutil.ReadFile", "path-traversal", Checked::At(0)),
-    ("io/ioutil.WriteFile", "path-traversal", Checked::At(0)),
-    ("io/ioutil.ReadDir", "path-traversal", Checked::At(0)),
-    ("net/http.ServeFile", "path-traversal", Checked::At(2)),
-    ("net/http.Get", "ssrf", Checked::At(0)),
-    ("net/http.Head", "ssrf", Checked::At(0)),
-    ("net/http.Post", "ssrf", Checked::At(0)),
-    ("net/http.PostForm", "ssrf", Checked::At(0)),
-    ("net/http.NewRequest", "ssrf", Checked::At(1)),
-    ("net/http.NewRequestWithContext", "ssrf", Checked::At(2)),
-    ("net.Dial", "ssrf", Checked::At(1)),
-    ("net.DialTimeout", "ssrf", Checked::At(1)),
-    ("net/http.Redirect", "open-redirect", Checked::At(2)),
-    ("html/template.HTML", "xss", Checked::At(0)),
-    ("html/template.HTMLAttr", "xss", Checked::At(0)),
-    ("html/template.JS", "xss", Checked::At(0)),
-    ("html/template.JSStr", "xss", Checked::At(0)),
-    ("html/template.CSS", "xss", Checked::At(0)),
-    ("html/template.URL", "xss", Checked::At(0)),
-    ("html/template.Srcset", "xss", Checked::At(0)),
+    ("syscall.Exec", "command-injection", ArgSelector::All),
+    ("os.StartProcess", "command-injection", ArgSelector::All),
+    ("os.Open", "path-traversal", ArgSelector::At(0)),
+    ("os.OpenFile", "path-traversal", ArgSelector::At(0)),
+    ("os.Create", "path-traversal", ArgSelector::At(0)),
+    ("os.ReadFile", "path-traversal", ArgSelector::At(0)),
+    ("os.WriteFile", "path-traversal", ArgSelector::At(0)),
+    ("os.ReadDir", "path-traversal", ArgSelector::At(0)),
+    ("os.Remove", "path-traversal", ArgSelector::At(0)),
+    ("os.RemoveAll", "path-traversal", ArgSelector::At(0)),
+    ("os.Mkdir", "path-traversal", ArgSelector::At(0)),
+    ("os.MkdirAll", "path-traversal", ArgSelector::At(0)),
+    ("os.Rename", "path-traversal", ArgSelector::All),
+    ("io/ioutil.ReadFile", "path-traversal", ArgSelector::At(0)),
+    ("io/ioutil.WriteFile", "path-traversal", ArgSelector::At(0)),
+    ("io/ioutil.ReadDir", "path-traversal", ArgSelector::At(0)),
+    ("net/http.ServeFile", "path-traversal", ArgSelector::At(2)),
+    ("net/http.Get", "ssrf", ArgSelector::At(0)),
+    ("net/http.Head", "ssrf", ArgSelector::At(0)),
+    ("net/http.Post", "ssrf", ArgSelector::At(0)),
+    ("net/http.PostForm", "ssrf", ArgSelector::At(0)),
+    ("net/http.NewRequest", "ssrf", ArgSelector::At(1)),
+    ("net/http.NewRequestWithContext", "ssrf", ArgSelector::At(2)),
+    ("net.Dial", "ssrf", ArgSelector::At(1)),
+    ("net.DialTimeout", "ssrf", ArgSelector::At(1)),
+    ("net/http.Redirect", "open-redirect", ArgSelector::At(2)),
+    ("html/template.HTML", "xss", ArgSelector::At(0)),
+    ("html/template.HTMLAttr", "xss", ArgSelector::At(0)),
+    ("html/template.JS", "xss", ArgSelector::At(0)),
+    ("html/template.JSStr", "xss", ArgSelector::At(0)),
+    ("html/template.CSS", "xss", ArgSelector::At(0)),
+    ("html/template.URL", "xss", ArgSelector::At(0)),
+    ("html/template.Srcset", "xss", ArgSelector::At(0)),
 ];
 
 /// Method sinks matched by name on calls the call graph leaves
@@ -108,16 +89,16 @@ const PACKAGE_SINKS: &[(&str, &str, Checked)] = &[
 /// `pgx`'s stdlib adapter and most wrappers) and GORM's raw SQL. Only
 /// the query-text argument is checked — bound parameters are the safe
 /// path.
-const METHOD_SINKS: &[(&str, &str, Checked)] = &[
-    ("Query", "sql-injection", Checked::At(0)),
-    ("QueryRow", "sql-injection", Checked::At(0)),
-    ("Exec", "sql-injection", Checked::At(0)),
-    ("Prepare", "sql-injection", Checked::At(0)),
-    ("QueryContext", "sql-injection", Checked::At(1)),
-    ("QueryRowContext", "sql-injection", Checked::At(1)),
-    ("ExecContext", "sql-injection", Checked::At(1)),
-    ("PrepareContext", "sql-injection", Checked::At(1)),
-    ("Raw", "sql-injection", Checked::At(0)),
+const METHOD_SINKS: &[(&str, &str, ArgSelector)] = &[
+    ("Query", "sql-injection", ArgSelector::At(0)),
+    ("QueryRow", "sql-injection", ArgSelector::At(0)),
+    ("Exec", "sql-injection", ArgSelector::At(0)),
+    ("Prepare", "sql-injection", ArgSelector::At(0)),
+    ("QueryContext", "sql-injection", ArgSelector::At(1)),
+    ("QueryRowContext", "sql-injection", ArgSelector::At(1)),
+    ("ExecContext", "sql-injection", ArgSelector::At(1)),
+    ("PrepareContext", "sql-injection", ArgSelector::At(1)),
+    ("Raw", "sql-injection", ArgSelector::At(0)),
 ];
 
 /// Methods returning a prepared statement. A [`METHOD_SINKS`] call on a
@@ -723,6 +704,7 @@ impl<'a, 'tree> FunctionLowering<'a, 'tree> {
         }
         FunctionFlow {
             start_line: decl.start_position().row + 1,
+            takes_receiver: decl.kind() == "method_declaration",
             sources: self.sources,
             calls,
             returns,
@@ -755,6 +737,7 @@ impl<'a, 'tree> FunctionLowering<'a, 'tree> {
             callee_name: None,
             callee_label: label,
             receiver: BTreeSet::new(),
+            method_syntax: false,
             arguments,
             sanitizer: false,
             sink: None,
@@ -779,6 +762,7 @@ impl<'a, 'tree> FunctionLowering<'a, 'tree> {
                 flow.callee_name = Some(name);
             }
             Callee::Method { receiver, name } => {
+                flow.method_syntax = true;
                 flow.receiver = self.origins(receiver, &pinned);
                 let prepared = receiver.kind() == "identifier"
                     && node_str(receiver, self.file.source)
@@ -1198,19 +1182,6 @@ mod tests {
             "{flow:?}"
         );
         assert_eq!(flow.calls[0].line, 15);
-    }
-
-    #[rstest]
-    #[case(Checked::All, 2, vec![0, 1])]
-    #[case(Checked::At(1), 2, vec![1])]
-    #[case(Checked::At(2), 2, vec![])]
-    #[case(Checked::From(1), 3, vec![1, 2])]
-    fn checked_positions(
-        #[case] checked: Checked,
-        #[case] count: usize,
-        #[case] expected: Vec<usize>,
-    ) {
-        assert_eq!(checked.positions(count), expected);
     }
 
     #[rstest]

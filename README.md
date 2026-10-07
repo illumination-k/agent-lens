@@ -170,7 +170,7 @@ agent-lens analyze hidden-coupling . --min-support 5 --format md
 agent-lens analyze ownership . --since 180.days.ago --format md
 
 # Untrusted input reaching a dangerous call, across function boundaries
-# (Go): request values → shell / SQL / file paths / outbound requests
+# (Go, Rust): request values → shell / SQL / file paths / outbound requests
 agent-lens analyze taint . --format md
 agent-lens analyze taint . --source-type example.com/api/gen.CreateRequest
 
@@ -452,7 +452,7 @@ ordinary CLI contract: errors exit non-zero.
 | `co-change`       | File pairs git history says change together: support, per-direction confidence, and lift, with renames followed. Correlation only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `hidden-coupling` | The differential between history and the static graph: co-changing pairs with no declared dependency (undeclared contracts), and declared dependencies history never exercised — reported as separate buckets.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ownership`       | Files ranked by low code ownership × churn: top-author share, contributor count, and minor contributors (Bird et al.), with identities normalised through `.mailmap`, bots filtered and counted, and `Co-authored-by:` trailers credited.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `taint`           | Untrusted input reaching a dangerous call, with the whole call path: parameters typed as HTTP request handles (or `--source-type`) traced through per-function flow summaries joined over the call graph to command execution, SQL query text, file paths, outbound requests, redirects and `html/template` trusted-content conversions. Complements per-call-site scanners, which flag a sink whatever reaches it and lose the value at the first helper. Allowlist checks, numeric parsing and escaping sanitize; flow- and field-insensitive. Go only.                                                                                                                                                                                |
+| `taint`           | Untrusted input reaching a dangerous call, with the whole call path: parameters typed as HTTP request handles (or `--source-type`) traced through per-function flow summaries joined over the call graph to command execution, SQL query text, file paths, outbound requests, redirects and trusted-HTML conversions. Complements per-call-site scanners, which flag a sink whatever reaches it and lose the value at the first helper. Allowlist checks, numeric parsing and escaping sanitize; flow- and field-insensitive. Go (net/http, gin, echo, fiber) and Rust (axum, actix-web, rocket; `format!` captures followed).                                                                                                           |
 
 All analyzers default to JSON on stdout; `--format md` emits a compact
 Markdown summary tuned to drop straight into an LLM prompt.
@@ -508,7 +508,7 @@ Language coverage per analyzer:
   whose body is one unexpanded `assert_eq!` has no visible body and no
   outgoing edges, so it is skipped by `--min-body-nodes` rather than
   reported; the count of those is in the report.
-- `taint` reads Go only: its sink and source catalogues are Go APIs.
+- `taint` reads Go and Rust: its source and sink catalogues are those languages' web, process, file, network and SQL APIs.
 - `co-change`, `change-entropy`, and `ownership` are language-agnostic: they
   read `git log` and never parse a file, so `.toml`, `.md`, and CI config are
   covered too.

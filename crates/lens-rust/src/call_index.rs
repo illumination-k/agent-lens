@@ -535,7 +535,7 @@ impl CallVisitor {
 /// read half-way. The pattern-taking macros are skipped even when their
 /// pattern parses as an expression, since `Foo::Bar(_)` there is a
 /// variant pattern, not a call.
-fn macro_argument_exprs(mac: &Macro) -> Vec<Expr> {
+pub(crate) fn macro_argument_exprs(mac: &Macro) -> Vec<Expr> {
     let name = mac.path.segments.last().map(|s| s.ident.to_string());
     if name.as_deref().is_some_and(is_pattern_macro) {
         return Vec::new();
@@ -728,7 +728,7 @@ fn use_aliases_for(
 
 /// Collect `(bound name, path segments as written)` for every leaf of a
 /// `use` tree; a glob binds `*`.
-fn walk_use_tree(
+pub(crate) fn walk_use_tree(
     tree: &UseTree,
     prefix: &mut Vec<String>,
     leaves: &mut Vec<(String, Vec<String>)>,

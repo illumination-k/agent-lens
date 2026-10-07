@@ -591,7 +591,7 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 key: "source-type",
                 ty: "array<string>",
                 presence: "default: []",
-                desc: "Extra parameter types treated as untrusted input, as `import/path.Type` (`example.com/api/gen.CreateRequest`); a pointer to one counts too. Adds to the built-in HTTP request types (`net/http.Request`, gin, echo, fiber, fasthttp).",
+                desc: "Extra parameter types treated as untrusted input: `import/path.Type` for Go (`example.com/api/gen.CreateRequest`), the full path for Rust (`crate::api::CreateRequest`); a pointer or reference to one counts too. Adds to the built-in HTTP request types (Go: net/http, gin, echo, fiber, fasthttp; Rust: axum, actix-web and rocket extractors).",
             },
             Field {
                 key: "diff-only",
