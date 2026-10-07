@@ -984,7 +984,8 @@ fn target_base(expr: &Expr) -> Option<String> {
         Expr::Path(path) => single_ident(path),
         Expr::Field(field) => target_base(&field.base),
         Expr::Index(index) => target_base(&index.expr),
-        Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => target_base(&unary.expr),
+        // Only `*v` is a place; other unary operators cannot be written to.
+        Expr::Unary(unary) => target_base(&unary.expr),
         Expr::Paren(paren) => target_base(&paren.expr),
         _ => None,
     }
@@ -1387,7 +1388,7 @@ mod tests {
     #[case::slice_pattern("let [a, ..] = x;\n\tg(a)", vec![params(&[0])])]
     #[case::or_pattern("if let Ok(v) | Err(v) = x { g(v) }", vec![params(&[0])])]
     #[case::struct_pattern("let S { a, .. } = x;\n\tg(a)", vec![params(&[0])])]
-    #[case::qualified_paths_are_not_locals("g(x::CONST, <y>::z)", vec![BTreeSet::new(), BTreeSet::new()])]
+    #[case::qualified_paths_are_not_locals("g(x::CONST, <y>::z, ::x)", vec![BTreeSet::new(), BTreeSet::new(), BTreeSet::new()])]
     #[case::a_numeric_from_sanitizes("g(u32::from(x))", vec![BTreeSet::from([Origin::CallResult(0)])])]
     #[case::paren_eq_pins("if (x == \"a\") { g(x) }", vec![BTreeSet::new()])]
     #[case::deref_eq_pins("if *x == \"a\" { g(x) }", vec![BTreeSet::new()])]
