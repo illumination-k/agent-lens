@@ -346,13 +346,11 @@ impl FileContext<'_> {
     }
 }
 
-/// The path of a (possibly referenced or parenthesised) path type.
+/// The path of a (possibly referenced) path type.
 fn type_path(ty: &Type) -> Option<&syn::Path> {
     match ty {
-        Type::Path(path) if path.qself.is_none() => Some(&path.path),
+        Type::Path(path) => Some(&path.path),
         Type::Reference(reference) => type_path(&reference.elem),
-        Type::Paren(paren) => type_path(&paren.elem),
-        Type::Group(group) => type_path(&group.elem),
         _ => None,
     }
 }
@@ -583,7 +581,6 @@ impl<'a> Lowering<'a> {
             }
             Expr::Reference(reference) => self.expr(&reference.expr),
             Expr::Paren(paren) => self.expr(&paren.expr),
-            Expr::Group(group) => self.expr(&group.expr),
             Expr::Try(try_expr) => self.expr(&try_expr.expr),
             Expr::Await(await_expr) => self.expr(&await_expr.base),
             Expr::Field(field) => self.expr(&field.base),
@@ -598,9 +595,7 @@ impl<'a> Lowering<'a> {
             | Expr::Range(_) => self.aggregate(expr),
             Expr::Block(block) => self.block(&block.block),
             Expr::Unsafe(block) => self.block(&block.block),
-            Expr::Const(block) => self.block(&block.block),
             Expr::Async(block) => self.block(&block.block),
-            Expr::TryBlock(block) => self.block(&block.block),
             Expr::If(if_expr) => self.if_expr(if_expr),
             Expr::Let(let_expr) => {
                 let value = self.expr(&let_expr.expr);
@@ -896,7 +891,6 @@ impl<'a> Lowering<'a> {
     fn pinned_by(&self, condition: &Expr) -> Vec<String> {
         match condition {
             Expr::Paren(paren) => self.pinned_by(&paren.expr),
-            Expr::Group(group) => self.pinned_by(&group.expr),
             Expr::Binary(binary) => match binary.op {
                 BinOp::And(_) => {
                     let mut both = self.pinned_by(&binary.left);
@@ -963,13 +957,14 @@ impl<'a> Lowering<'a> {
     }
 }
 
-/// The path a call's callee names, through `&`, parens and groups.
+/// The path a call's callee names, through `&` and parens. A qualified-self
+/// path (`<S as T>::run`) is named by its last segment, as the call
+/// index names it.
 fn callee_path(expr: &Expr) -> Option<&syn::Path> {
     match expr {
-        Expr::Path(path) if path.qself.is_none() => Some(&path.path),
+        Expr::Path(path) => Some(&path.path),
         Expr::Reference(reference) => callee_path(&reference.expr),
         Expr::Paren(paren) => callee_path(&paren.expr),
-        Expr::Group(group) => callee_path(&group.expr),
         _ => None,
     }
 }
@@ -991,7 +986,6 @@ fn target_base(expr: &Expr) -> Option<String> {
         Expr::Index(index) => target_base(&index.expr),
         Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => target_base(&unary.expr),
         Expr::Paren(paren) => target_base(&paren.expr),
-        Expr::Group(group) => target_base(&group.expr),
         _ => None,
     }
 }
@@ -1013,7 +1007,6 @@ fn pin_subject(expr: &Expr) -> Option<String> {
         Expr::Reference(reference) => pin_subject(&reference.expr),
         Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => pin_subject(&unary.expr),
         Expr::Paren(paren) => pin_subject(&paren.expr),
-        Expr::Group(group) => pin_subject(&group.expr),
         _ => None,
     }
 }
@@ -1023,10 +1016,9 @@ fn pin_subject(expr: &Expr) -> Option<String> {
 fn expr_is_constant(expr: &Expr) -> bool {
     match expr {
         Expr::Lit(_) => true,
-        Expr::Path(path) => path.path.segments.len() > 1 || single_ident(path).is_none(),
+        Expr::Path(path) => single_ident(path).is_none(),
         Expr::Reference(reference) => expr_is_constant(&reference.expr),
         Expr::Paren(paren) => expr_is_constant(&paren.expr),
-        Expr::Group(group) => expr_is_constant(&group.expr),
         _ => false,
     }
 }
@@ -1062,7 +1054,6 @@ fn collect_pattern_names(pat: &Pat, out: &mut Vec<String>) {
         Pat::Reference(reference) => collect_pattern_names(&reference.pat, out),
         Pat::Paren(paren) => collect_pattern_names(&paren.pat, out),
         Pat::Type(pat_type) => collect_pattern_names(&pat_type.pat, out),
-        Pat::Guard(guard) => collect_pattern_names(&guard.pat, out),
         Pat::Tuple(tuple) => tuple
             .elems
             .iter()
@@ -1331,10 +1322,171 @@ mod tests {
         assert_eq!(flow.sources[0].label, "Query(p): Query<Params<u8>>");
     }
 
+    /// The single function in `source`, after an actix `HttpRequest`
+    /// import.
+    fn flow(source: &str) -> FunctionFlow {
+        let source = format!("use actix_web::HttpRequest;\n{source}\n");
+        let mut flows = extract_taint_flows(&source, &[]).unwrap();
+        assert_eq!(flows.len(), 1, "{source}");
+        flows.remove(0)
+    }
+
+    fn params(slots: &[usize]) -> BTreeSet<Origin> {
+        slots.iter().map(|&slot| Origin::Param(slot)).collect()
+    }
+
+    /// The origins of each argument of every call to `g`.
+    fn g_arguments(flow: &FunctionFlow) -> Vec<BTreeSet<Origin>> {
+        flow.calls
+            .iter()
+            .filter(|call| call.callee_name.as_deref() == Some("g"))
+            .flat_map(|call| call.arguments.clone())
+            .collect()
+    }
+
+    /// A local built by the body's first call, then written `extra`.
+    fn constructed_and(extra: &[Origin]) -> BTreeSet<Origin> {
+        let mut origins = BTreeSet::from([Origin::CallResult(0)]);
+        origins.extend(extra.iter().copied());
+        origins
+    }
+
+    #[rstest]
+    #[case::arithmetic_carries_both("g(x + &y)", vec![params(&[0, 1])])]
+    #[case::a_comparison_is_a_bool("g(x == y)", vec![BTreeSet::new()])]
+    #[case::not_is_a_bool("g(!x)", vec![BTreeSet::new()])]
+    #[case::deref_carries("g(*x)", vec![params(&[0])])]
+    #[case::numeric_cast_is_clean("g(x as u32)", vec![BTreeSet::new()])]
+    #[case::other_cast_carries("g(x as Name)", vec![params(&[0])])]
+    #[case::parens_carry("g((x))", vec![params(&[0])])]
+    #[case::try_carries("g(x?)", vec![params(&[0])])]
+    #[case::index_reads_the_base("g(x[0])", vec![params(&[0])])]
+    #[case::array_literal("g([x])", vec![params(&[0])])]
+    #[case::struct_literal("g(S { a: x, ..y })", vec![params(&[0, 1])])]
+    #[case::repeat_literal("g([x; 3])", vec![params(&[0])])]
+    #[case::range("g(x..y)", vec![params(&[0, 1])])]
+    #[case::unsafe_block_tail("g(unsafe { x })", vec![params(&[0])])]
+    #[case::async_block_tail("g(async { x })", vec![params(&[0])])]
+    #[case::compound_assignment("let mut s = String::new();\n\ts += &x;\n\tg(s)", vec![constructed_and(&[Origin::Param(0)])])]
+    #[case::assignment("let s;\n\ts = x;\n\tg(s)", vec![params(&[0])])]
+    #[case::if_let_binds("if let Some(v) = x { g(v) }", vec![params(&[0])])]
+    #[case::while_let_binds("while let Some(v) = x { g(v) }", vec![params(&[0])])]
+    #[case::calls_inside_loop("loop { g(x); }", vec![params(&[0])])]
+    #[case::calls_in_break_value("let v = loop { break g(x); };", vec![params(&[0])])]
+    #[case::local_field_write_taints("let mut s = S::default();\n\ts.a = x;\n\tg(s)", vec![constructed_and(&[Origin::Param(0)])])]
+    #[case::local_index_write_taints("let mut v = vec![];\n\tv[0] = x;\n\tg(v)", vec![params(&[0])])]
+    #[case::parenthesised_write("let mut s = S::default();\n\t(s) = x;\n\tg(s)", vec![constructed_and(&[Origin::Param(0)])])]
+    #[case::deref_write("let mut s = S::default();\n\tlet r = &mut s;\n\t*r = x;\n\tg(r)", vec![constructed_and(&[Origin::Param(0)])])]
+    #[case::handle_field_write_does_not_taint("y.a = x;\n\tg(y)", vec![params(&[1])])]
+    #[case::handle_reassignment_taints("y = x;\n\tg(y)", vec![params(&[0, 1])])]
+    #[case::local_receiver_is_written("let mut b = String::new();\n\tb.push_str(&x);\n\tg(b)", vec![constructed_and(&[Origin::CallInputs(1)])])]
+    #[case::handle_receiver_is_not_written("y.push_str(&x);\n\tg(y)", vec![params(&[1])])]
+    #[case::reference_pattern("let &v = x;\n\tg(v)", vec![params(&[0])])]
+    #[case::paren_pattern("let (v) = x;\n\tg(v)", vec![params(&[0])])]
+    #[case::tuple_pattern("let (a, _b) = x;\n\tg(a)", vec![params(&[0])])]
+    #[case::slice_pattern("let [a, ..] = x;\n\tg(a)", vec![params(&[0])])]
+    #[case::or_pattern("if let Ok(v) | Err(v) = x { g(v) }", vec![params(&[0])])]
+    #[case::struct_pattern("let S { a, .. } = x;\n\tg(a)", vec![params(&[0])])]
+    #[case::qualified_paths_are_not_locals("g(x::CONST, <y>::z)", vec![BTreeSet::new(), BTreeSet::new()])]
+    #[case::a_numeric_from_sanitizes("g(u32::from(x))", vec![BTreeSet::from([Origin::CallResult(0)])])]
+    #[case::paren_eq_pins("if (x == \"a\") { g(x) }", vec![BTreeSet::new()])]
+    #[case::deref_eq_pins("if *x == \"a\" { g(x) }", vec![BTreeSet::new()])]
+    #[case::negation_does_not_pin("if -x == 1 { g(x) }", vec![params(&[0])])]
+    #[case::conjunct_pins("if x == \"a\" && y.is_empty() { g(x) }", vec![BTreeSet::new()])]
+    #[case::same_var_disjunction_pins("if x == \"a\" || x == \"b\" { g(x) }", vec![BTreeSet::new()])]
+    #[case::mixed_disjunction_pins_nothing("if x == \"a\" || y == \"b\" { g(x) }", vec![params(&[0])])]
+    #[case::variable_comparison_pins_nothing("if x == y { g(x) }", vec![params(&[0])])]
+    #[case::uppercase_constant_pins("if x == MAX { g(x) }", vec![BTreeSet::new()])]
+    #[case::variant_constant_pins("if x == Mode::Fast { g(x) }", vec![BTreeSet::new()])]
+    #[case::reference_constant_pins("if x == &\"a\" { g(x) }", vec![BTreeSet::new()])]
+    #[case::paren_constant_pins("if x == (\"a\") { g(x) }", vec![BTreeSet::new()])]
+    #[case::match_paren_subject_pins("match (x) { \"a\" => g(x), _ => {} }", vec![BTreeSet::new()])]
+    #[case::match_through_trim_does_not_pin("match x.trim() { \"a\" => g(x), _ => {} }", vec![params(&[0])])]
+    #[case::match_through_to_string_does_not_pin("match x.to_string() { \"a\" => g(x), _ => {} }", vec![params(&[0])])]
+    #[case::match_reference_subject_pins("match &x { \"a\" => g(x), _ => {} }", vec![BTreeSet::new()])]
+    #[case::catch_all_arm_does_not_pin("match x.as_str() { \"a\" => {} _ => g(x) }", vec![params(&[0])])]
+    #[case::variant_arm_pins("match x { Mode::Fast => g(x), _ => {} }", vec![BTreeSet::new()])]
+    #[case::reference_arm_pins("match x { &\"a\" => g(x), _ => {} }", vec![BTreeSet::new()])]
+    #[case::paren_arm_pins("match x { (\"a\") => g(x), _ => {} }", vec![BTreeSet::new()])]
+    #[case::paren_callee("(g)(x)", vec![params(&[0])])]
+    #[case::reference_callee("(&g)(y)", vec![params(&[1])])]
+    fn lowering(#[case] body: &str, #[case] expected: Vec<BTreeSet<Origin>>) {
+        let flow = flow(&format!("fn f(x: String, y: String) {{\n\t{body}\n}}"));
+        assert_eq!(g_arguments(&flow), expected, "{body}");
+    }
+
+    #[test]
+    fn a_numeric_from_is_a_sanitizer_call() {
+        let flow = flow("fn f(x: String) { g(u32::from(x), ammonia::clean(&x), String::from(x)) }");
+        let sanitizers: Vec<bool> = flow.calls.iter().map(|call| call.sanitizer).collect();
+        assert_eq!(sanitizers, [true, true, false, false]);
+    }
+
+    #[rstest]
+    #[case::numeric_turbofish("x.parse::<u32>()", true)]
+    #[case::other_turbofish("x.parse::<Url>()", false)]
+    #[case::numeric_turbofish_on_another_method("x.get::<u8>()", false)]
+    #[case::clean_method("x.len()", true)]
+    #[case::plain_method("x.trim()", false)]
+    fn method_sanitizers(#[case] call: &str, #[case] sanitizer: bool) {
+        let flow = flow(&format!("fn f(x: String) {{ {call}; }}"));
+        assert_eq!(flow.calls[0].sanitizer, sanitizer);
+    }
+
+    #[test]
+    fn returns_count_the_tail_and_explicit_returns_but_not_closures_or_nested_fns() {
+        let flow = flow(
+            "fn f(x: String, y: String, z: String) -> String {\n\
+             \tlet c = || { return y; };\n\
+             \tfn inner(z: String) -> String { return z; }\n\
+             \tif x.is_empty() { return x; }\n\
+             \tg(c);\n\
+             \tString::new()\n}",
+        );
+        assert_eq!(
+            flow.returns,
+            BTreeSet::from([Origin::Param(0), Origin::CallResult(2)])
+        );
+    }
+
+    #[test]
+    fn nested_fns_and_impls_contribute_their_calls() {
+        let flow = flow(
+            "fn f() {\n\
+             \tfn inner() { g(1); }\n\
+             \tstruct S;\n\
+             \timpl S { fn m(&self) { g(2); } }\n\
+             \tg(3);\n}",
+        );
+        assert_eq!(g_arguments(&flow).len(), 3);
+    }
+
+    #[test]
+    fn each_source_gets_its_own_index() {
+        let flow = flow("fn h(a: HttpRequest, b: &HttpRequest) { g(b) }");
+        assert_eq!(flow.sources.len(), 2);
+        assert_eq!(g_arguments(&flow), [BTreeSet::from([Origin::Source(1)])]);
+    }
+
+    #[test]
+    fn long_receivers_are_shortened_in_labels() {
+        let flow = flow(
+            "fn f(x: String) { some_long_builder_name.with_a_long_method_chain().and_more(x).finish(); }",
+        );
+        let label = &flow.calls[2].callee_label;
+        assert!(label.ends_with("….finish"), "{label}");
+        assert_eq!(label.chars().count(), 40 + "….finish".chars().count());
+        assert_eq!(
+            flow.calls[0].callee_label,
+            "some_long_builder_name.with_a_long_method_chain"
+        );
+    }
+
     #[rstest]
     #[case("SELECT {name} FROM {table:?}", vec!["name", "table"])]
     #[case("{{literal}} {0} {} {x:>8}", vec!["x"])]
     #[case("{9lives}", vec![])]
+    #[case("{_private}", vec!["_private"])]
     fn format_captures(#[case] format: &str, #[case] expected: Vec<&str>) {
         assert_eq!(captured_names(format), expected);
     }
