@@ -33,6 +33,7 @@ Pick an analyzer by question:
     is one caller all this function has?  analyze narrowable --section single-use
     is one value all this param gets?     analyze narrowable --section parameters
     did I write this test twice?          analyze test-redundancy
+    can request input reach a sink?       analyze taint
     is one impl all this trait has?       analyze narrowable --section single-impl
     how many hops before real work?       analyze forwarding --section delegation
     does this type do too many things?    analyze cohesion
@@ -295,6 +296,22 @@ Examples:
     agent-lens analyze ownership . --minor-threshold 0.1
     agent-lens analyze ownership . --bot-pattern '*\\[bot\\]*' --bot-pattern 'ci *'
     agent-lens analyze ownership . --include-bots --format md
+";
+
+pub const TAINT: &str = "\
+Read `audit` first: `source_count` 0 means no parameter matched a request
+type — add the project's own entry types with `--source-type`. `hops` 0
+is a source and a sink in one function; longer paths are where per-call
+scanners go blind.
+
+Examples:
+
+    agent-lens analyze taint . --format md
+    agent-lens analyze taint ./cmd ./internal --top 10 --format md
+    agent-lens analyze taint . --source-type example.com/api/gen.CreateRequest
+    agent-lens analyze taint crates/server --source-type tonic::Request
+    agent-lens analyze taint . --diff-only --format md
+    agent-lens analyze taint . --diff-range main...HEAD
 ";
 
 pub const COMMUNITIES: &str = "\

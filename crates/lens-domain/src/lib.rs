@@ -116,6 +116,7 @@ pub mod search;
 pub mod signature_similarity;
 pub mod source_walk;
 pub mod syntax;
+pub mod taint;
 pub mod token_similarity;
 pub mod tree;
 pub mod tree_bound;
@@ -186,6 +187,10 @@ pub use syntax::{
     InterfaceMethodShape, InterfaceShape, LexicalResolutionStatus, OwnerKind, OwnerShape,
     ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact, TraitDeclShape,
     TraitImplShape, VisibilityShape, callee_names_local_binding,
+};
+pub use taint::{
+    ArgRef, ArgSelector, CallRef, FlowCall, FunctionFlow, Origin, SinkSpec, SourceRef,
+    TaintFinding, TaintSource, trace_taint,
 };
 pub use token_similarity::{
     TokenIdf, TokenProfile, lcs_similarity, lcs_similarity_upper_bound, token_similarity,

@@ -23,7 +23,7 @@ use crate::config::{CONFIG_FILE_NAME, ToolName};
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 24] = [
+const TOOL_ORDER: [ToolName; 25] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -39,6 +39,7 @@ const TOOL_ORDER: [ToolName; 24] = [
     ToolName::Footprint,
     ToolName::Layers,
     ToolName::Reach,
+    ToolName::Taint,
     ToolName::Narrowable,
     ToolName::TestRedundancy,
     ToolName::Forwarding,
@@ -82,7 +83,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, ownership, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, ownership, reach, risk, search, similarity, taint, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
     },
     Field {
         key: "format",
@@ -585,6 +586,32 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Cap each section's markdown listing to the top N rows.",
             },
         ],
+        ToolName::Taint => &[
+            Field {
+                key: "source-type",
+                ty: "array<string>",
+                presence: "default: []",
+                desc: "Extra parameter types treated as untrusted input: `import/path.Type` for Go (`example.com/api/gen.CreateRequest`), the full path for Rust (`crate::api::CreateRequest`); a pointer or reference to one counts too. Adds to the built-in HTTP request types (Go: net/http, gin, echo, fiber, fasthttp; Rust: axum, actix-web and rocket extractors).",
+            },
+            Field {
+                key: "diff-only",
+                ty: "bool",
+                presence: "default: false",
+                desc: "Keep only findings whose path runs through a function touched by the working-tree diff.",
+            },
+            Field {
+                key: "diff-range",
+                ty: "string",
+                presence: "optional",
+                desc: "Keep only findings whose path runs through a function touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
+            },
+            Field {
+                key: "top",
+                ty: "int",
+                presence: "optional",
+                desc: "Cap the markdown listing to the top N findings.",
+            },
+        ],
         ToolName::Narrowable => &[
             Field {
                 key: "section",
@@ -883,7 +910,7 @@ mod tests {
         ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions,
         ForwardingOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
         LayersOptions, NarrowableOptions, OwnershipOptions, Profile, ReachOptions, RiskOptions,
-        SearchOptions, SimilarityOptions, TestRedundancyOptions,
+        SearchOptions, SimilarityOptions, TaintOptions, TestRedundancyOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -910,6 +937,7 @@ mod tests {
         assert_tool_parity::<CoChangeOptions>(ToolName::CoChange);
         assert_tool_parity::<ChangeEntropyOptions>(ToolName::ChangeEntropy);
         assert_tool_parity::<OwnershipOptions>(ToolName::Ownership);
+        assert_tool_parity::<TaintOptions>(ToolName::Taint);
         assert_tool_parity::<CommunitiesOptions>(ToolName::Communities);
         // `hidden-coupling` scopes the same history window with the same
         // thresholds as `co-change`, so they share one options type —

@@ -9,7 +9,7 @@ use agent_lens::analyze::{
     ForwardingAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
     HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
     NarrowableAnalyzer, OutputFormat, OwnershipAnalyzer, ReachAnalyzer, RiskAnalyzer,
-    SearchAnalyzer, SimilarityAnalyzer, TestRedundancyAnalyzer,
+    SearchAnalyzer, SimilarityAnalyzer, TaintAnalyzer, TestRedundancyAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
@@ -20,7 +20,7 @@ use super::args::{
     AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
     AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzeOwnershipArgs, AnalyzePathArgs,
     AnalyzeReachArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
-    AnalyzeTestRedundancyArgs,
+    AnalyzeTaintArgs, AnalyzeTestRedundancyArgs,
 };
 use super::write_stdout_line;
 
@@ -163,6 +163,10 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.similarity.clone().unwrap_or_default(),
         }),
+        config::ToolName::Taint => AnalyzeCommand::Taint(AnalyzeTaintArgs {
+            common,
+            opts: profile.taint.clone().unwrap_or_default(),
+        }),
         config::ToolName::Search => AnalyzeCommand::Search(AnalyzeSearchArgs {
             common,
             opts: profile
@@ -243,6 +247,7 @@ impl_with_analyze_path_args!(
     OwnershipAnalyzer,
     ReachAnalyzer,
     RiskAnalyzer,
+    TaintAnalyzer,
     TestRedundancyAnalyzer,
 );
 
@@ -335,6 +340,7 @@ impl AnalyzeCommand {
                 Reach => ReachAnalyzer,
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,
+                Taint => TaintAnalyzer,
                 TestRedundancy => TestRedundancyAnalyzer,
             }
             from_options {

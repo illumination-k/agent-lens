@@ -57,6 +57,7 @@ pub mod single_use;
 mod source_files;
 mod span_references;
 mod static_file_graph;
+pub mod taint;
 pub mod test_only;
 pub mod test_redundancy;
 pub mod unreachable;
@@ -109,6 +110,7 @@ pub use similarity::{
 };
 pub use single_impl::SingleImplAnalyzer;
 pub use single_use::SingleUseAnalyzer;
+pub use taint::TaintAnalyzer;
 pub use test_only::TestOnlyAnalyzer;
 pub use test_redundancy::TestRedundancyAnalyzer;
 pub use unreachable::{Tier as UnreachableTier, UnreachableAnalyzer};

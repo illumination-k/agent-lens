@@ -218,6 +218,17 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
     ],
   },
   {
+    title: "Untrusted input",
+    blurb: "Where request data ends up, followed across function boundaries.",
+    analyzers: [
+      {
+        name: "taint",
+        summary:
+          "Request values traced to command execution, SQL query text, file paths, outbound requests, redirects and trusted-HTML conversions, with the whole call path — the flows a per-call-site scanner loses at the first helper (Go and Rust).",
+      },
+    ],
+  },
+  {
     title: "Change risk",
     blurb: "Where git history and code shape agree that an edit is expensive.",
     analyzers: [
@@ -314,7 +325,7 @@ export const FAQ: readonly FaqEntry[] = [
   {
     question: "Which languages does it analyze?",
     answer:
-      "Rust, TypeScript / JavaScript, Python, and Go. Every analyzer runs on all four; the reach sections test-only and unreachable and the narrowable sections single-impl and visibility need extracted export status and judge Rust and Go only. The git-history analyzers — co-change, change-entropy and ownership — read git log rather than parsing files, so they cover anything the repository tracks. Analysis is split into a language-neutral core and per-language adapters, so adding a language means writing one adapter crate rather than reimplementing the metrics.",
+      "Rust, TypeScript / JavaScript, Python, and Go. Every analyzer runs on all four; the reach sections test-only and unreachable and the narrowable sections single-impl and visibility need extracted export status and judge Rust and Go only, and taint reads Go and Rust. The git-history analyzers — co-change, change-entropy and ownership — read git log rather than parsing files, so they cover anything the repository tracks. Analysis is split into a language-neutral core and per-language adapters, so adding a language means writing one adapter crate rather than reimplementing the metrics.",
   },
   {
     question: "Do I have to use it through a coding agent?",

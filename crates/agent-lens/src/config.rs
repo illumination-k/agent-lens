@@ -77,6 +77,7 @@ pub use crate::analyze::reach::ReachOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
+pub use crate::analyze::taint::TaintOptions;
 pub use crate::analyze::test_redundancy::TestRedundancyOptions;
 
 /// File name searched for when discovering a project config.
@@ -180,6 +181,8 @@ pub struct Profile {
     #[serde(default)]
     pub reach: Option<ReachOptions>,
     #[serde(default)]
+    pub taint: Option<TaintOptions>,
+    #[serde(default)]
     pub graph_query: Option<GraphQueryOptions>,
     #[serde(default)]
     pub context_span: Option<ContextSpanOptions>,
@@ -278,6 +281,7 @@ impl Profile {
                 "change-entropy",
                 self.change_entropy.as_ref().map(|o| o.has_diff_conflict()),
             ),
+            ("taint", self.taint.as_ref().map(|o| o.has_diff_conflict())),
         ]
         .into_iter()
         .find(|(_, conflict)| conflict.unwrap_or(false))
@@ -367,6 +371,7 @@ pub enum ToolName {
     Risk,
     Search,
     Similarity,
+    Taint,
     TestRedundancy,
 }
 
@@ -407,7 +412,7 @@ impl TryFrom<String> for ToolName {
 
 impl ToolName {
     /// Every analyzer, in `as_str` order.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::ChangeEntropy,
         Self::CoChange,
         Self::Cohesion,
@@ -431,6 +436,7 @@ impl ToolName {
         Self::Risk,
         Self::Search,
         Self::Similarity,
+        Self::Taint,
         Self::TestRedundancy,
     ];
 
@@ -460,6 +466,7 @@ impl ToolName {
             Self::Risk => "risk",
             Self::Search => "search",
             Self::Similarity => "similarity",
+            Self::Taint => "taint",
             Self::TestRedundancy => "test-redundancy",
         }
     }
