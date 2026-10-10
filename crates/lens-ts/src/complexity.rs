@@ -799,6 +799,25 @@ function f(a: boolean, b: boolean, c: boolean, d: boolean): boolean {
 }",
         2
     )]
+    #[case::calls_that_only_look_like_recursion(
+        "class T {
+  walk(other: T): void {
+    other.walk(this);
+    this.run(other);
+    walker(other);
+  }
+}",
+        0
+    )]
+    #[case::nested_function_body_is_nested(
+        "function f(a: boolean) {
+  function inner() {
+    if (a) {}                             // +2
+  }
+  return inner;
+}",
+        2
+    )]
     #[case::labelled_break_counts_flat(
         "function f(xs: number[]): void {
   scan: while (true) {                    // +1
