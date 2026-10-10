@@ -271,9 +271,8 @@ impl<'a> ComplexityVisitor<'a> {
                     None => break,
                 }
             }
-            if inner.kind() == "binary_expression"
-                && logical_operator_text(inner, self.source).is_some()
-            {
+            // Only a `binary_expression` carries a bare `&&` / `||` token.
+            if logical_operator_text(inner, self.source).is_some() {
                 self.flatten_logical(inner, ops, operands);
             } else {
                 operands.push(child);
@@ -585,6 +584,35 @@ func (t T) Walk(n int) {
 	Walk(n)
 }",
         0
+    )]
+    #[case::calls_that_only_look_like_recursion(
+        "package p
+type T struct{}
+func (t T) Walk(u T) {
+	u.Walk(t)
+	t.Run(u)
+	pkg.Walk(u)
+}",
+        0
+    )]
+    #[case::free_function_calling_another_name_is_not_recursion(
+        "package p
+func fact(n int) int {
+	return other(n) + x.fact(n)
+}",
+        0
+    )]
+    #[case::unlabelled_jumps_are_free(
+        "package p
+func f(xs []int) {
+	for _, x := range xs {          // +1
+		if x > 0 {                  // +2
+			continue
+		}
+		break
+	}
+}",
+        3
     )]
     #[case::func_literal_body_is_nested(
         "package p

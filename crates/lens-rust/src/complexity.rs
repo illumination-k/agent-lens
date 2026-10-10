@@ -276,9 +276,13 @@ fn flatten_logical<'ast>(
         while let Expr::Paren(p) = inner {
             inner = &p.expr;
         }
-        match inner {
-            Expr::Binary(b) if logical_op(b.op).is_some() => flatten_logical(b, ops, operands),
-            _ => operands.push(expr),
+        let logical = match inner {
+            Expr::Binary(b) => logical_op(b.op).map(|_| b),
+            _ => None,
+        };
+        match logical {
+            Some(b) => flatten_logical(b, ops, operands),
+            None => operands.push(expr),
         }
     };
     side(&e.left, ops);
@@ -681,6 +685,45 @@ impl S {
     }
 }",
         2
+    )]
+    #[case::self_path_recursion(
+        r"
+struct S;
+impl S {
+    fn walk(n: u32) {
+        if n > 0 {                  // +1
+            Self::walk(n - 1);      // recursion +1
+        }
+    }
+}",
+        2
+    )]
+    #[case::calls_that_only_look_like_recursion(
+        r"
+struct S;
+impl S {
+    fn walk(&self, other: &S) {
+        Other::walk(other);
+        a::b::walk(other);
+        other.walk(other);
+        self.run(other);
+        walker();
+    }
+}",
+        0
+    )]
+    #[case::unlabelled_jumps_are_free(
+        r"
+fn f(xs: &[i32]) {
+    loop {                          // +1
+        for x in xs {               // +2
+            if *x > 0 { continue; } // +3
+            break;
+        }
+        break;
+    }
+}",
+        6
     )]
     #[case::closure_body_is_nested(
         r"

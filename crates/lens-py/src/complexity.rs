@@ -915,6 +915,16 @@ class T:
 ",
         2
     )]
+    #[case::calls_that_only_look_like_recursion(
+        "
+class T:
+    def walk(self, other):
+        other.walk(self)
+        self.run(other)
+        walker(other)
+",
+        0
+    )]
     #[case::nested_def_body_is_nested(
         "
 def f(a):
