@@ -230,7 +230,10 @@ LANGUAGES = {"ts": (".ts", setup_ts), "go": (".go", setup_go), "python": (".py",
 
 
 def hyperfine(commands: list[tuple[str, list]], prepare: str | None, cwd: Path, out: Path) -> dict:
-    cmd = ["hyperfine", "-N", "--warmup", "1", "--min-runs", "5", "--export-json", out, "--style", "basic"]
+    # ESLint and gocognit exit non-zero whenever they report a function, so a
+    # non-zero status is not a failure here; the scored-function counts taken
+    # afterwards are the check that every tool actually read the corpus.
+    cmd = ["hyperfine", "-N", "--ignore-failure", "--warmup", "1", "--min-runs", "5", "--export-json", out, "--style", "basic"]
     if prepare:
         cmd += ["--prepare", prepare]
     for name, argv in commands:
