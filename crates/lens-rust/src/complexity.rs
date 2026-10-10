@@ -46,12 +46,17 @@ pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>,
     let mut out = Vec::new();
     walk_fn_items(&file.items, WalkOptions::default(), &mut |site| {
         let name = qualify(site.owner, &site.sig.ident.to_string());
-        out.push(analyze_fn(name, site.sig, site.block));
+        out.push(analyze_fn(name, site.sig, site.block, site.is_test));
     });
     Ok(out)
 }
 
-fn analyze_fn(name: String, sig: &syn::Signature, block: &Block) -> FunctionComplexity {
+fn analyze_fn(
+    name: String,
+    sig: &syn::Signature,
+    block: &Block,
+    is_test: bool,
+) -> FunctionComplexity {
     let mut visitor = ComplexityVisitor::new();
     visitor.visit_block(block);
     let halstead = halstead_counts(block);
@@ -63,6 +68,7 @@ fn analyze_fn(name: String, sig: &syn::Signature, block: &Block) -> FunctionComp
         cognitive: visitor.counters.cognitive(),
         max_nesting: visitor.counters.max_nesting(),
         halstead,
+        is_test,
     }
 }
 
@@ -241,6 +247,27 @@ mod tests {
 
     fn extract(src: &str) -> Vec<FunctionComplexity> {
         extract_complexity_units(src).unwrap()
+    }
+
+    fn test_flags(units: &[FunctionComplexity]) -> Vec<(&str, bool)> {
+        units.iter().map(|f| (f.name.as_str(), f.is_test)).collect()
+    }
+
+    #[test]
+    fn test_functions_and_cfg_test_modules_are_flagged() {
+        let src = r#"
+fn prod() {}
+#[test]
+fn top_level_test() {}
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+}
+"#;
+        assert_eq!(
+            test_flags(&extract(src)),
+            [("prod", false), ("top_level_test", true), ("helper", true)]
+        );
     }
 
     fn one(src: &str) -> FunctionComplexity {

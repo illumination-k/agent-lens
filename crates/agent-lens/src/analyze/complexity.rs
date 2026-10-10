@@ -24,6 +24,7 @@ use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
+use super::similarity::FunctionSelection;
 use super::{
     AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, format_optional_f64, read_source,
 };
@@ -45,6 +46,7 @@ analyzer_options! {
 #[derive(Debug, Default, Clone)]
 pub struct ComplexityAnalyzer {
     filter: FilterConfig,
+    selection: FunctionSelection,
     top: Option<usize>,
     min_score: Option<u32>,
 }
@@ -71,6 +73,15 @@ impl ComplexityAnalyzer {
 
     delegate_filter_builders!(filter);
 
+    /// Keep or drop language-level test functions inside non-test
+    /// files (Rust `#[cfg(test)]` modules, Python `test_*`, …). The
+    /// path filter only sees whole files; this is the function-level
+    /// half of `--exclude-tests` / `--only-tests`.
+    pub fn with_function_selection(mut self, selection: FunctionSelection) -> Self {
+        self.selection = selection;
+        self
+    }
+
     /// Apply a whole [`ComplexityOptions`] group. The CLI flags and the
     /// `[profile.<name>.complexity]` table are the same type, so this is
     /// the only seam between parsed options and the analyzer.
@@ -89,9 +100,19 @@ impl ComplexityAnalyzer {
         format: OutputFormat,
     ) -> Result<String, AnalyzerError> {
         let roots = roots.into();
-        let scan = self
-            .filter
-            .collect_per_file(&roots, |sf| self.analyze_file(sf))?;
+        // `--only-tests` also keeps test functions inside non-test files,
+        // so the walk cannot drop those files up front: a unit is kept
+        // when its file or the function itself is a test — the rule
+        // similarity applies.
+        let filter = if self.selection == FunctionSelection::OnlyTests {
+            self.filter.clone().with_only_tests(false)
+        } else {
+            self.filter.clone()
+        };
+        let tests = filter.path_filter().compile(roots.base())?;
+        let scan = filter.collect_per_file(&roots, |sf| {
+            self.analyze_file(sf, tests.is_test_path(&sf.path))
+        })?;
         let report = build_report(&roots, scan.scanned_file_count, &scan.reports);
         render_report(&report, format, || {
             format_markdown(&report, self.top, self.min_score)
@@ -101,12 +122,17 @@ impl ComplexityAnalyzer {
     /// Analyze a single file. Returns `None` when the file has no
     /// functions (after filtering), so empty entries don't pollute the
     /// directory-mode report.
-    fn analyze_file(&self, file: &SourceFile) -> Result<Option<FileReport>, AnalyzerError> {
+    fn analyze_file(
+        &self,
+        file: &SourceFile,
+        path_is_test: bool,
+    ) -> Result<Option<FileReport>, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
         // Through the shared analysis index: under an active
         // `AnalysisIndexScope` this is the same fact a call-graph build
         // attaches as node weights, so a profile run parses once.
-        let functions = super::index::indexed_complexity_units(lang, &source)?;
+        let mut functions = super::index::indexed_complexity_units(lang, &source)?;
+        functions.retain(|f| self.selection.includes(path_is_test || f.is_test));
         let functions = self
             .filter
             .retain_changed_nonempty(functions, &file.path, |f| (f.start_line, f.end_line));
@@ -762,6 +788,64 @@ fn b(n: i32) -> i32 {
             md.contains("- nested: cog_sum=3, cog_max=2, cc_sum=5, functions=4"),
             "{md}"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::all(FunctionSelection::All, &["prod", "helper"], 4)]
+    #[case::exclude_tests(FunctionSelection::ExcludeTests, &["prod"], 2)]
+    #[case::only_tests(FunctionSelection::OnlyTests, &["helper"], 2)]
+    fn function_selection_filters_test_functions_out_of_rows_and_sums(
+        #[case] selection: FunctionSelection,
+        #[case] expected: &[&str],
+        #[case] cognitive_sum: u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            "fn prod(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\n\
+             #[cfg(test)]\n\
+             mod tests {\n    fn helper(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\n}\n",
+        );
+        let json = ComplexityAnalyzer::new()
+            .with_function_selection(selection)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let names: Vec<&str> = parsed["files"][0]["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, expected);
+        assert_eq!(parsed["summary"]["cognitive_sum"], cognitive_sum);
+    }
+
+    #[test]
+    fn only_tests_keeps_test_files_and_in_file_tests_but_not_production() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn prod() {}\n#[cfg(test)]\nmod tests {\n    fn helper() {}\n}\n",
+        );
+        write_file(dir.path(), "tests/it.rs", "fn it_works() {}\n");
+        let json = ComplexityAnalyzer::new()
+            .with_only_tests(true)
+            .with_function_selection(FunctionSelection::OnlyTests)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut names: Vec<&str> = parsed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f["functions"].as_array().unwrap())
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["helper", "it_works"]);
     }
 
     #[test]

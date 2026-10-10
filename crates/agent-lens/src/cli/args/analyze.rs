@@ -855,14 +855,14 @@ pub(in crate::cli) struct AnalyzeNarrowableArgs {
 #[derive(Debug, Clone, Args, Default)]
 pub(in crate::cli) struct AnalyzePathArgs {
     /// Analyze only files that look like tests (`tests/`, `*_test.*`,
-    /// `*.test.*`, `test_*`, etc.). For similarity reports, this also
-    /// keeps language-level test functions inside non-test files, such
-    /// as Rust `#[cfg(test)]` modules.
+    /// `*.test.*`, `test_*`, etc.). For complexity, similarity, and
+    /// search, this also keeps language-level test functions inside
+    /// non-test files, such as Rust `#[cfg(test)]` modules.
     #[arg(long, conflicts_with = "exclude_tests")]
     pub(in crate::cli) only_tests: bool,
-    /// Exclude files that look like tests. For similarity reports, this
-    /// also drops language-level test functions such as Rust
-    /// `#[cfg(test)]` modules.
+    /// Exclude files that look like tests. For complexity, similarity,
+    /// and search, this also drops language-level test functions such as
+    /// Rust `#[cfg(test)]` modules.
     #[arg(long, conflicts_with = "only_tests")]
     pub(in crate::cli) exclude_tests: bool,
     /// Exclude paths matching this glob. Repeatable. Bare patterns also

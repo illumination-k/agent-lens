@@ -90,6 +90,7 @@ fn analyze(
 ) -> FunctionComplexity {
     let mut visitor = ComplexityVisitor::new();
     body.visit(&mut visitor);
+    let is_test = crate::parser::is_test_item(&name);
     FunctionComplexity {
         name,
         start_line,
@@ -98,6 +99,7 @@ fn analyze(
         cognitive: visitor.counters.cognitive(),
         max_nesting: visitor.counters.max_nesting(),
         halstead: visitor.halstead.counts(),
+        is_test,
     }
 }
 
@@ -338,6 +340,26 @@ mod tests {
 
     fn extract(src: &str) -> Vec<FunctionComplexity> {
         extract_complexity_units(src, Dialect::Ts).unwrap()
+    }
+
+    fn test_flags(units: &[FunctionComplexity]) -> Vec<(&str, bool)> {
+        units.iter().map(|f| (f.name.as_str(), f.is_test)).collect()
+    }
+
+    #[test]
+    fn harness_callbacks_are_flagged_and_production_functions_are_not() {
+        let src = "function prod() {}\ndescribe(\"prod\", () => {\n  it(\"works\", () => { prod(); });\n});\n";
+        let units = extract(src);
+        let flags = test_flags(&units);
+        assert!(flags.contains(&("prod", false)), "{flags:?}");
+        assert!(
+            flags
+                .iter()
+                .filter(|(name, _)| *name != "prod")
+                .all(|&(_, t)| t),
+            "{flags:?}"
+        );
+        assert!(flags.len() > 1, "{flags:?}");
     }
 
     fn one(src: &str) -> FunctionComplexity {

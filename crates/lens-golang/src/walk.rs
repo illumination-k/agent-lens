@@ -21,6 +21,7 @@
 
 use tree_sitter::Node;
 
+use crate::attrs::name_looks_like_test_function;
 use crate::parser::{function_name_text, method_receiver_type};
 
 /// One function-shaped declaration found by [`walk_top_level_fns`].
@@ -38,6 +39,14 @@ pub(crate) struct FnSite<'tree, 'src> {
     pub owner: Option<String>,
     /// True for `method_declaration` nodes.
     pub is_method: bool,
+}
+
+impl FnSite<'_, '_> {
+    /// A free function named like a `go test` entry point (`TestX`,
+    /// `BenchmarkX`, …). Methods never are, whatever their name.
+    pub(crate) fn is_test(&self) -> bool {
+        self.owner.is_none() && name_looks_like_test_function(self.name)
+    }
 }
 
 /// Walk `root`'s named children and emit one [`FnSite`] per top-level

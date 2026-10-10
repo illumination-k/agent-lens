@@ -144,6 +144,7 @@ mod tests {
             cognitive,
             max_nesting: 0,
             halstead: Default::default(),
+            is_test: false,
         }
     }
 

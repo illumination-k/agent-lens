@@ -188,7 +188,10 @@ Conventions that hold across analyzers:
 - Analyzer commands share `PATH...`, `--format json|md`, `--only-tests`,
   `--exclude-tests`, and repeatable `--exclude GLOB`. Directory walks follow
   `.gitignore` and do not descend symlinked directories, so a linked build
-  output or virtualenv never joins the corpus.
+  output or virtualenv never joins the corpus. The test flags select whole
+  files; `complexity`, `similarity`, and `search` also apply them to test
+  functions inside non-test files (Rust `#[cfg(test)]` modules, Python
+  `test_*`).
 - `--top N` caps the Markdown ranking; JSON always carries the full result.
   `cycles` rejects it — a truncated cycle list reads as the whole list.
 - Every analyzer takes multiple `PATH`s except `coupling`, `context-span`, and
