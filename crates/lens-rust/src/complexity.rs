@@ -7,10 +7,11 @@
 //! * **Cyclomatic Complexity** — McCabe; starts at 1 and is incremented
 //!   for each branching construct (`if`, `else if`, `while`, `for`,
 //!   `loop`, each `match` arm beyond the first, `&&`/`||`, `?`).
-//! * **Cognitive Complexity** — Sonar-style; control structures add
-//!   `1 + nesting` so deeply-nested code scores higher than the same
-//!   number of flat branches. `&&`/`||` adds `1` per occurrence (the
-//!   exact "consecutive sequence" rule from Sonar is approximated).
+//! * **Cognitive Complexity** — SonarSource's rules: control structures
+//!   add `1 + nesting`; `else if`, `else`, labelled `break` / `continue`,
+//!   and each run of like `&&` / `||` operators add a flat `1`; direct
+//!   recursion adds `1` once. Closures and nested `fn`s raise the nesting
+//!   of their bodies.
 //! * **Max Nesting Depth** — the deepest control-flow nesting reached in
 //!   the function body.
 //! * **Halstead counts** — operators and operands are derived from the
@@ -18,9 +19,9 @@
 //!   treated as operators, identifiers as operands, literals as operands.
 //!
 //! Closures and items defined *inside* a function body are walked with
-//! the same visitor instance, so their branches contribute to the
-//! enclosing function's score. That matches how a reader actually
-//! experiences the code.
+//! the same visitor instance, one nesting level deeper, so their branches
+//! contribute to the enclosing function's score. That matches how a
+//! reader actually experiences the code, and Sonar's own rule.
 
 use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, HalsteadCounts, qualify};
 
@@ -30,7 +31,8 @@ use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    BinOp, Block, Expr, ExprBinary, ExprForLoop, ExprIf, ExprLoop, ExprMatch, ExprTry, ExprWhile,
+    BinOp, Block, Expr, ExprBinary, ExprBreak, ExprCall, ExprClosure, ExprContinue, ExprForLoop,
+    ExprIf, ExprLoop, ExprMatch, ExprMethodCall, ExprTry, ExprWhile, ItemFn,
 };
 
 /// Failures produced while extracting complexity units.
@@ -57,7 +59,7 @@ fn analyze_fn(
     block: &Block,
     is_test: bool,
 ) -> FunctionComplexity {
-    let mut visitor = ComplexityVisitor::new();
+    let mut visitor = ComplexityVisitor::new(sig.ident.to_string());
     visitor.visit_block(block);
     let halstead = halstead_counts(block);
     FunctionComplexity {
@@ -74,14 +76,50 @@ fn analyze_fn(
 
 /// Rust-specific half of the complexity walk: which `syn` node counts as
 /// a branch. The scoring itself lives in [`ComplexityCounters`].
-#[derive(Default)]
 struct ComplexityVisitor {
     counters: ComplexityCounters,
+    /// The function's own name, for spotting direct recursion
+    /// (`name(..)`, `Self::name(..)`, `self.name(..)`).
+    name: String,
 }
 
 impl ComplexityVisitor {
-    fn new() -> Self {
-        Self::default()
+    fn new(name: String) -> Self {
+        Self {
+            counters: ComplexityCounters::default(),
+            name,
+        }
+    }
+
+    /// Walk one `if`'s condition, body, and `else` chain. An `else if`
+    /// is a flat `+1` read at the same depth as the `if` it continues; a
+    /// plain `else` is `+1` with no McCabe path.
+    fn visit_if_chain(&mut self, e: &ExprIf) {
+        self.visit_expr(&e.cond);
+        self.visit_nested_block(&e.then_branch);
+        match e.else_branch.as_ref().map(|(_, expr)| &**expr) {
+            Some(Expr::If(next)) => {
+                self.counters.add_flat_branch();
+                self.visit_if_chain(next);
+            }
+            Some(other) => {
+                self.counters.add_cognitive(1);
+                self.counters.enter_nest();
+                self.visit_expr(other);
+                self.counters.exit_nest();
+            }
+            None => {}
+        }
+    }
+
+    fn visit_nested_block(&mut self, block: &Block) {
+        self.counters.enter_nest();
+        self.visit_block(block);
+        self.counters.exit_nest();
+    }
+
+    fn is_own_name(&self, ident: &syn::Ident) -> bool {
+        ident == self.name.as_str()
     }
 
     /// Score one loop: `+1` McCabe branch, `+(1 + nesting)` cognitive,
@@ -105,25 +143,7 @@ impl ComplexityVisitor {
 impl<'ast> Visit<'ast> for ComplexityVisitor {
     fn visit_expr_if(&mut self, e: &'ast ExprIf) {
         self.counters.add_branch();
-
-        // Condition contributes its own logical operators but no nesting.
-        self.visit_expr(&e.cond);
-
-        self.counters.enter_nest();
-        self.visit_block(&e.then_branch);
-        self.counters.exit_nest();
-
-        if let Some((_, else_expr)) = &e.else_branch {
-            // `else if` is rendered by Sonar as the chained if's own +1
-            // (no extra penalty for the bare `else`); a plain `else`
-            // counts as +1.
-            if !matches!(&**else_expr, Expr::If(_)) {
-                self.counters.add_cognitive(1);
-            }
-            self.counters.enter_nest();
-            self.visit_expr(else_expr);
-            self.counters.exit_nest();
-        }
+        self.visit_if_chain(e);
     }
 
     fn visit_expr_while(&mut self, e: &'ast ExprWhile) {
@@ -156,13 +176,70 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
     }
 
     fn visit_expr_binary(&mut self, e: &'ast ExprBinary) {
-        if matches!(e.op, BinOp::And(_) | BinOp::Or(_)) {
-            self.counters.add_flat_branch();
+        if logical_op(e.op).is_none() {
+            visit::visit_expr_binary(self, e);
+            return;
         }
-        // Default traversal would recurse into both sides; do it ourselves
-        // since we override the method.
-        self.visit_expr(&e.left);
-        self.visit_expr(&e.right);
+        // A whole `&&` / `||` chain is scored at its root: one cognitive
+        // point per run of like operators. Operands are walked afterwards
+        // and start chains of their own.
+        let mut ops = Vec::new();
+        let mut operands = Vec::new();
+        flatten_logical(e, &mut ops, &mut operands);
+        self.counters.add_logical_chain(&ops);
+        for operand in operands {
+            self.visit_expr(operand);
+        }
+    }
+
+    fn visit_expr_closure(&mut self, e: &'ast ExprClosure) {
+        // A closure is read inside its parent; Sonar nests its body.
+        self.counters.enter_nest();
+        visit::visit_expr_closure(self, e);
+        self.counters.exit_nest();
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+        self.counters.enter_nest();
+        visit::visit_item_fn(self, item);
+        self.counters.exit_nest();
+    }
+
+    fn visit_expr_break(&mut self, e: &'ast ExprBreak) {
+        // A labelled jump is a goto in disguise: `+1`, no nesting.
+        if e.label.is_some() {
+            self.counters.add_cognitive(1);
+        }
+        visit::visit_expr_break(self, e);
+    }
+
+    fn visit_expr_continue(&mut self, e: &'ast ExprContinue) {
+        if e.label.is_some() {
+            self.counters.add_cognitive(1);
+        }
+    }
+
+    fn visit_expr_call(&mut self, e: &'ast ExprCall) {
+        if let Expr::Path(path) = &*e.func {
+            let segments = &path.path.segments;
+            let own = match segments.len() {
+                1 => true,
+                2 => segments[0].ident == "Self",
+                _ => false,
+            };
+            if own && segments.last().is_some_and(|s| self.is_own_name(&s.ident)) {
+                self.counters.add_recursion();
+            }
+        }
+        visit::visit_expr_call(self, e);
+    }
+
+    fn visit_expr_method_call(&mut self, e: &'ast ExprMethodCall) {
+        let on_self = matches!(&*e.receiver, Expr::Path(p) if p.path.is_ident("self"));
+        if on_self && self.is_own_name(&e.method) {
+            self.counters.add_recursion();
+        }
+        visit::visit_expr_method_call(self, e);
     }
 
     fn visit_expr_try(&mut self, e: &'ast ExprTry) {
@@ -171,6 +248,44 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
         self.counters.add_cyclomatic(1);
         visit::visit_expr_try(self, e);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogicalOp {
+    And,
+    Or,
+}
+
+fn logical_op(op: BinOp) -> Option<LogicalOp> {
+    match op {
+        BinOp::And(_) => Some(LogicalOp::And),
+        BinOp::Or(_) => Some(LogicalOp::Or),
+        _ => None,
+    }
+}
+
+/// Collect a logical chain's operators in source order, looking through
+/// parentheses, and the operands that end it.
+fn flatten_logical<'ast>(
+    e: &'ast ExprBinary,
+    ops: &mut Vec<LogicalOp>,
+    operands: &mut Vec<&'ast Expr>,
+) {
+    let mut side = |expr: &'ast Expr, ops: &mut Vec<LogicalOp>| {
+        let mut inner = expr;
+        while let Expr::Paren(p) = inner {
+            inner = &p.expr;
+        }
+        match inner {
+            Expr::Binary(b) if logical_op(b.op).is_some() => flatten_logical(b, ops, operands),
+            _ => operands.push(expr),
+        }
+    };
+    side(&e.left, ops);
+    if let Some(op) = logical_op(e.op) {
+        ops.push(op);
+    }
+    side(&e.right, ops);
 }
 
 fn halstead_counts(block: &Block) -> HalsteadCounts {
@@ -362,7 +477,7 @@ fn f(n: i32) -> i32 {
 }
 "#,
         None,
-        Some(4),
+        Some(3),
         None
     )]
     #[case::while_loop(
@@ -473,6 +588,149 @@ fn f(n: i32) -> i32 {
         if let Some(expected) = max_nesting {
             assert_eq!(f.max_nesting, expected);
         }
+    }
+
+    /// SonarSource's Cognitive Complexity rules, case by case. The first
+    /// two are the white paper's own worked examples, ported to Rust.
+    #[rstest]
+    #[case::sum_of_primes(
+        r"
+fn sum_of_primes(max: u32) -> u32 {
+    let mut total = 0;
+    'out: for i in 1..=max {        // +1
+        for j in 2..i {             // +2
+            if i % j == 0 {         // +3
+                continue 'out;      // +1
+            }
+        }
+        total += i;
+    }
+    total
+}",
+        7
+    )]
+    #[case::match_counts_once(
+        r#"
+fn get_words(n: u32) -> &'static str {
+    match n {                       // +1
+        1 => "one",
+        2 => "a couple",
+        3 => "a few",
+        _ => "lots",
+    }
+}"#,
+        1
+    )]
+    #[case::else_if_is_flat_and_does_not_nest_deeper(
+        r"
+fn f(xs: &[bool], b: bool) {
+    for a in xs {                   // +1
+        if *a {                     // +2
+        } else if b {               // +1
+            if b {}                 // +3
+        } else {                    // +1
+        }
+    }
+}",
+        8
+    )]
+    #[case::like_operators_form_one_run(
+        r"
+fn f(a: bool, b: bool, c: bool) -> bool {
+    a && b && c                     // +1
+}",
+        1
+    )]
+    #[case::each_operator_switch_is_a_new_run(
+        r"
+fn f(a: bool, b: bool, c: bool, d: bool) -> bool {
+    a && b || c && d                // +3
+}",
+        3
+    )]
+    #[case::parentheses_do_not_break_a_run(
+        r"
+fn f(a: bool, b: bool, c: bool) -> bool {
+    a && (b && c)                   // +1
+}",
+        1
+    )]
+    #[case::negation_starts_a_new_run(
+        r"
+fn f(a: bool, b: bool, c: bool) -> bool {
+    a && !(b && c)                  // +1 +1
+}",
+        2
+    )]
+    #[case::direct_recursion_counts_once(
+        r"
+fn fact(n: u64) -> u64 {
+    if n == 0 { 1 } else { n * fact(n - 1) + fact(0) }   // +1 +1, recursion +1
+}",
+        3
+    )]
+    #[case::method_recursion_through_self(
+        r"
+struct S;
+impl S {
+    fn walk(&self, n: u32) {
+        if n > 0 {                  // +1
+            self.walk(n - 1);       // recursion +1
+            Self::walk(self, n - 1);
+        }
+    }
+}",
+        2
+    )]
+    #[case::closure_body_is_nested(
+        r"
+fn f(xs: &[i32]) -> usize {
+    xs.iter().filter(|x| if **x > 0 { true } else { false }).count()   // +2 +1
+}",
+        3
+    )]
+    #[case::nested_fn_body_is_nested(
+        r"
+fn f(n: i32) -> i32 {
+    fn inner(n: i32) -> i32 {
+        if n > 0 { 1 } else { 0 }   // +2 +1
+    }
+    inner(n)
+}",
+        3
+    )]
+    #[case::labelled_break_counts_flat(
+        r"
+fn f(xs: &[i32]) {
+    'scan: loop {                   // +1
+        for x in xs {               // +2
+            if *x > 0 {             // +3
+                break 'scan;        // +1
+            }
+        }
+        break;
+    }
+}",
+        7
+    )]
+    #[case::question_mark_is_free(
+        r"
+fn f(s: &str) -> Result<i32, std::num::ParseIntError> {
+    let n = s.parse::<i32>()?;
+    Ok(n)
+}",
+        0
+    )]
+    fn cognitive_follows_the_sonar_rules(#[case] src: &str, #[case] cognitive: u32) {
+        let units = extract(src);
+        let f = units.last().expect("one unit");
+        assert_eq!(f.cognitive, cognitive, "{}", f.name);
+    }
+
+    #[test]
+    fn logical_chain_keeps_one_mccabe_path_per_operator() {
+        let f = one("fn f(a: bool, b: bool, c: bool, d: bool) -> bool { a && b || c && d }");
+        assert_eq!(f.cyclomatic, 4);
     }
 
     #[test]

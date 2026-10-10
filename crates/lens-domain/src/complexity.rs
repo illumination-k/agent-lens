@@ -158,6 +158,9 @@ pub struct ComplexityCounters {
     cognitive: u32,
     nesting: u32,
     max_nesting: u32,
+    /// Set once the body calls its own function; Sonar charges `+1` per
+    /// function in a recursion cycle, not per call site.
+    recursive: bool,
 }
 
 impl ComplexityCounters {
@@ -177,11 +180,43 @@ impl ComplexityCounters {
     }
 
     /// Charge one branch that is *not* nesting-weighted: `+1` McCabe,
-    /// `+1` cognitive. Sonar scores boolean operators (`&&`, `||`, `and`,
-    /// `or`) this way — they add a path without adding structure.
+    /// `+1` cognitive. Sonar scores `else if` / `elif` this way — a new
+    /// path, but read at the same depth as the `if` it continues.
     pub fn add_flat_branch(&mut self) {
         self.cyclomatic_branches += 1;
         self.cognitive += 1;
+    }
+
+    /// Charge one flattened chain of binary logical operators, given in
+    /// source order: `+1` McCabe per operator, `+1` cognitive per run of
+    /// like operators (Sonar), so `a && b && c` costs `1` and
+    /// `a && b || c` costs `2`. Adapters flatten through parentheses and
+    /// stop at anything else — a negation or a call starts a new chain.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use lens_domain::ComplexityCounters;
+    ///
+    /// let mut counters = ComplexityCounters::default();
+    /// counters.add_logical_chain(&["&&", "&&", "||", "&&"]);
+    /// assert_eq!(counters.cyclomatic(), 5);
+    /// assert_eq!(counters.cognitive(), 3);
+    /// ```
+    pub fn add_logical_chain<T: PartialEq>(&mut self, ops: &[T]) {
+        let len = u32::try_from(ops.len()).unwrap_or(u32::MAX);
+        let changes = ops.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        let changes = u32::try_from(changes).unwrap_or(u32::MAX);
+        self.cyclomatic_branches = self.cyclomatic_branches.saturating_add(len);
+        if len > 0 {
+            self.cognitive = self.cognitive.saturating_add(1 + changes);
+        }
+    }
+
+    /// Record that the body calls its own function. Charged once,
+    /// however many call sites recurse.
+    pub fn add_recursion(&mut self) {
+        self.recursive = true;
     }
 
     /// Charge McCabe paths with no cognitive cost, e.g. Rust's `?`: an
@@ -248,7 +283,7 @@ impl ComplexityCounters {
 
     /// Sonar-style Cognitive Complexity accumulated so far.
     pub fn cognitive(&self) -> u32 {
-        self.cognitive
+        self.cognitive + u32::from(self.recursive)
     }
 
     /// Deepest nesting level reached.
@@ -313,6 +348,45 @@ impl FunctionComplexity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::empty(&[], 1, 0)]
+    #[case::single(&["&&"], 2, 1)]
+    #[case::one_run(&["&&", "&&", "&&"], 4, 1)]
+    #[case::two_runs(&["&&", "||"], 3, 2)]
+    #[case::alternating(&["&&", "||", "&&"], 4, 3)]
+    #[case::run_then_switch(&["||", "||", "&&", "&&"], 5, 2)]
+    fn logical_chain_charges_each_operator_and_each_run(
+        #[case] ops: &[&str],
+        #[case] cyclomatic: u32,
+        #[case] cognitive: u32,
+    ) {
+        let mut counters = ComplexityCounters::default();
+        counters.enter_nest();
+        counters.add_logical_chain(ops);
+        assert_eq!(
+            (counters.cyclomatic(), counters.cognitive()),
+            (cyclomatic, cognitive)
+        );
+    }
+
+    #[test]
+    fn recursion_is_charged_once_and_only_to_cognitive() {
+        let mut counters = ComplexityCounters::default();
+        counters.add_recursion();
+        counters.add_recursion();
+        assert_eq!((counters.cyclomatic(), counters.cognitive()), (1, 1));
+    }
+
+    #[test]
+    fn flat_branch_ignores_nesting() {
+        let mut counters = ComplexityCounters::default();
+        counters.enter_nest();
+        counters.enter_nest();
+        counters.add_flat_branch();
+        assert_eq!((counters.cyclomatic(), counters.cognitive()), (2, 1));
+    }
 
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
@@ -529,6 +603,26 @@ mod tests {
     /// sequence always describes a real traversal.
     fn arb_nesting_walk() -> impl Strategy<Value = Vec<bool>> {
         proptest::collection::vec(any::<bool>(), 0..64)
+    }
+
+    proptest! {
+        /// A logical chain costs one McCabe path per operator and one
+        /// cognitive point per maximal run of like operators — counted
+        /// here the other way round, by splitting the chain into runs.
+        #[test]
+        fn logical_chain_charges_one_point_per_run(
+            ops in proptest::collection::vec(any::<bool>(), 0..24),
+            depth in 0u32..4,
+        ) {
+            let mut counters = ComplexityCounters::default();
+            for _ in 0..depth {
+                counters.enter_nest();
+            }
+            counters.add_logical_chain(&ops);
+            let runs = ops.chunk_by(|a, b| a == b).count();
+            prop_assert_eq!(counters.cognitive() as usize, runs);
+            prop_assert_eq!(counters.cyclomatic() as usize, 1 + ops.len());
+        }
     }
 
     proptest! {

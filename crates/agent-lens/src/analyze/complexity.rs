@@ -735,8 +735,8 @@ fn b(n: i32) -> i32 {
             "nested/b.rs",
             "fn b(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\nfn c() {}\n",
         );
-        // The closure is reported on its own and folded into `outer`;
-        // the sums count its branch once.
+        // The closure is reported on its own (cog 1) and folded into
+        // `outer` one level deeper (cog 2); the sums count it once.
         write_file(
             dir.path(),
             "nested/c.ts",
@@ -748,7 +748,7 @@ fn b(n: i32) -> i32 {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let summary = &parsed["summary"];
-        assert_eq!(summary["cognitive_sum"], 3);
+        assert_eq!(summary["cognitive_sum"], 4);
         assert_eq!(summary["cyclomatic_sum"], 6);
         let rows = |key: &str| -> Vec<(String, u64)> {
             summary[key]
@@ -767,25 +767,25 @@ fn b(n: i32) -> i32 {
             rows("file_rollups"),
             [
                 ("nested/b.rs".to_owned(), 2),
-                ("nested/c.ts".to_owned(), 1),
+                ("nested/c.ts".to_owned(), 2),
                 ("a.rs".to_owned(), 0),
             ]
         );
         assert_eq!(
             rows("directory_rollups"),
-            [("nested".to_owned(), 3), (".".to_owned(), 0)]
+            [("nested".to_owned(), 4), (".".to_owned(), 0)]
         );
 
         let md = ComplexityAnalyzer::new()
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert!(
-            md.contains("cognitive: median=1, p95=2, max=2, sum=3"),
+            md.contains("cognitive: median=1, p95=2, max=2, sum=4"),
             "{md}"
         );
         assert!(md.contains("## Top 5 files by cognitive sum"), "{md}");
         assert!(
-            md.contains("- nested: cog_sum=3, cog_max=2, cc_sum=5, functions=4"),
+            md.contains("- nested: cog_sum=4, cog_max=2, cc_sum=5, functions=4"),
             "{md}"
         );
     }
