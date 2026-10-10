@@ -9,14 +9,14 @@ workspace = true
 
 [dependencies]
 lens-domain = { path = "../lens-domain", version = "0.9.0" }
-oxc_allocator = "0.150"
-oxc_ast = "0.150"
-oxc_ast_visit = "0.150"
-oxc_parser = "0.150"
+oxc_allocator = "0.152"
+oxc_ast = "0.152"
+oxc_ast_visit = "0.152"
+oxc_parser = "0.152"
 oxc_resolver = "11"
-oxc_semantic = "0.150"
-oxc_span = "0.150"
-oxc_syntax = "0.150"
+oxc_semantic = "0.152"
+oxc_span = "0.152"
+oxc_syntax = "0.152"
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
