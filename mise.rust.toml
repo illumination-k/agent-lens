@@ -1,6 +1,8 @@
 [tools]
 rust = { version = "1.97.1", profile = "default", components = "rustfmt,clippy,llvm-tools-preview" }
 "aqua:cargo-bins/cargo-binstall" = "1.18.1"
+# Command-level timing for `bench-external` (scripts/bench-external/run.py).
+"aqua:sharkdp/hyperfine" = "1.20.0"
 
 [tools."cargo:cargo-nextest"]
 version = "0.9.132"
@@ -180,7 +182,14 @@ run = [
 
 [tasks."ci:rust"]
 description = "Run Rust lint and test tasks"
-depends = ["lint:rust", "test:rust", "test:rust:doc", "test:callgraph-accuracy", "test:similarity-accuracy"]
+depends = [
+  "lint:rust",
+  "test:rust",
+  "test:rust:doc",
+  "test:callgraph-accuracy",
+  "test:similarity-accuracy",
+  "test:bench-external",
+]
 
 # Call-graph accuracy benchmark (issue #579, docs/callgraph-accuracy.md):
 # precision/recall of `function-graph` per ResolutionMethod against a Go
@@ -231,6 +240,37 @@ set -eu
 cargo build --release --locked -p agent-lens
 python3 scripts/similarity-accuracy/run.py --methods "${usage_methods:-tsed,token,lcs,pdg}" ${usage_suite:-}
 '''
+
+# Speed of `analyze complexity` against other cognitive-complexity tools
+# (docs/bench-external.md): ESLint + eslint-plugin-sonarjs for TypeScript,
+# gocognit for Go, complexipy for Python, each on two pinned corpora, timed
+# with hyperfine.
+#
+# Outside `ci` and `bench` like `callgraph-accuracy`: it downloads npm, Go and
+# PyPI packages (network, minutes) and its output is a report to read, not a
+# gate. The harness's unit tests are `test:bench-external`, which `ci:rust`
+# runs.
+[tasks.bench-external]
+description = "Time analyze complexity against ESLint+sonarjs (TS), gocognit (Go) and complexipy (Python)"
+usage = '''
+arg "[language]..." help="ts, go and/or python (default: all)" var=#true
+'''
+tools = { go = "1.26.8", uv = "0.11.5", node = "25.9.0" }
+run = '''
+set -eu
+cargo build --release --locked -p agent-lens
+python3 scripts/bench-external/run.py ${usage_language:-}
+'''
+
+[tasks."test:bench-external"]
+description = "Unit-test the external benchmark harness (scripts/bench-external)"
+# Standard library only; uv supplies the interpreter because ci_rust.yml sets
+# MISE_ENV=rust.
+tools = { uv = "0.11.5" }
+run = [
+  "uvx ruff@0.14.0 check scripts/bench-external",
+  "uv run --no-project --python 3.12 python -m unittest discover -s scripts/bench-external",
+]
 
 # Dogfooding: run the freshly built binary over this repository's own
 # sources, driving the profiles in `agent-lens.toml`.
