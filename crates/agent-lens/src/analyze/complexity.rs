@@ -8,13 +8,18 @@
 //! likewise ranks across every file. Output is JSON by default; the
 //! markdown mode emits a compact summary tuned for LLM context windows
 //! rather than for humans, in line with the project's "agent-friendly lint"
-//! ethos.
+//! ethos. The summary also rolls the figures up per file and per directory
+//! (see [`rollup`]), so complexity split across many small functions still
+//! shows where it concentrates.
+
+mod rollup;
 
 use std::fmt::Write as _;
 
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
+use self::rollup::Rollup;
 use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
@@ -160,10 +165,18 @@ struct Summary {
     cognitive_median: u32,
     max_nesting_max: u32,
     loc_total: usize,
+    /// Corpus totals over the outermost units (see [`rollup`]): unlike
+    /// the maxima they do not fall when a function is split into helpers.
+    cognitive_sum: u32,
+    cyclomatic_sum: u32,
     /// Lowest MI seen across the corpus, or `null` when no function has
     /// a defined MI (empty input or all-undefined Halstead).
     #[serde(skip_serializing_if = "Option::is_none")]
     maintainability_index_min: Option<f64>,
+    /// Every file and every directory (files directly inside it), heaviest
+    /// cognitive sum first.
+    file_rollups: Vec<Rollup>,
+    directory_rollups: Vec<Rollup>,
 }
 
 impl Summary {
@@ -179,7 +192,11 @@ impl Summary {
                 cognitive_median: 0,
                 max_nesting_max: 0,
                 loc_total: 0,
+                cognitive_sum: 0,
+                cyclomatic_sum: 0,
                 maintainability_index_min: None,
+                file_rollups: Vec::new(),
+                directory_rollups: Vec::new(),
             };
         }
         let all = || files.iter().flat_map(|f| f.functions.iter());
@@ -192,6 +209,8 @@ impl Summary {
         let mi_min = all()
             .filter_map(FunctionComplexity::maintainability_index)
             .fold(None::<f64>, |acc, x| Some(acc.map_or(x, |a| a.min(x))));
+        let file_rollups = rollup::by_file(files);
+        let directory_rollups = rollup::by_directory(&file_rollups);
 
         Self {
             cyclomatic_max: percentile(&cc, 100),
@@ -202,7 +221,11 @@ impl Summary {
             cognitive_median: percentile(&cog, 50),
             max_nesting_max: nesting_max,
             loc_total,
+            cognitive_sum: file_rollups.iter().map(|r| r.cognitive_sum).sum(),
+            cyclomatic_sum: file_rollups.iter().map(|r| r.cyclomatic_sum).sum(),
             maintainability_index_min: mi_min,
+            file_rollups,
+            directory_rollups,
         }
     }
 }
@@ -269,6 +292,11 @@ fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<u3
         render_summary(&mut out, summary);
     }
     render_top_functions(&mut out, report.files(), top, min_score);
+    if let Some(summary) = report.summary() {
+        let limit = top.unwrap_or(DEFAULT_TOP);
+        render_rollups(&mut out, "files", &summary.file_rollups, limit);
+        render_rollups(&mut out, "directories", &summary.directory_rollups, limit);
+    }
     out
 }
 
@@ -279,17 +307,19 @@ fn render_summary(out: &mut String, s: &Summary) {
     let _ = writeln!(
         out,
         "\n## Summary\n\
-         - cyclomatic: median={}, p95={}, max={}\n\
-         - cognitive: median={}, p95={}, max={}\n\
+         - cyclomatic: median={}, p95={}, max={}, sum={}\n\
+         - cognitive: median={}, p95={}, max={}, sum={}\n\
          - max_nesting: {}\n\
          - loc_total: {}\n\
          - maintainability_index_min: {}",
         s.cyclomatic_median,
         s.cyclomatic_p95,
         s.cyclomatic_max,
+        s.cyclomatic_sum,
         s.cognitive_median,
         s.cognitive_p95,
         s.cognitive_max,
+        s.cognitive_sum,
         s.max_nesting_max,
         s.loc_total,
         format_optional_f64(s.maintainability_index_min, 1),
@@ -364,6 +394,22 @@ fn render_top_functions(
             f.max_nesting,
             f.loc,
             format_optional_f64(f.maintainability_index, 0),
+        );
+    }
+}
+
+/// Top-N rollup rows. Skipped when there is only one row: a lone file or
+/// directory restates the summary.
+fn render_rollups(out: &mut String, label: &str, rows: &[Rollup], limit: usize) {
+    if rows.len() < 2 {
+        return;
+    }
+    let _ = writeln!(out, "\n## Top {limit} {label} by cognitive sum");
+    for r in rows.iter().take(limit) {
+        let _ = writeln!(
+            out,
+            "- {}: cog_sum={}, cog_max={}, cc_sum={}, functions={}",
+            r.path, r.cognitive_sum, r.cognitive_max, r.cyclomatic_sum, r.function_count,
         );
     }
 }
@@ -652,6 +698,80 @@ fn b(n: i32) -> i32 {
         // Top-N row carries the file path so cross-file ranking is
         // unambiguous.
         assert!(md.contains("nested/b.rs:`b`"));
+    }
+
+    #[test]
+    fn directory_mode_rolls_up_per_file_and_per_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", "fn a() {}\n");
+        write_file(
+            dir.path(),
+            "nested/b.rs",
+            "fn b(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\nfn c() {}\n",
+        );
+        // The closure is reported on its own and folded into `outer`;
+        // the sums count its branch once.
+        write_file(
+            dir.path(),
+            "nested/c.ts",
+            "function outer(xs: number[]) {\n  return xs.map((x) => { if (x) { return 1; } return 0; });\n}\n",
+        );
+
+        let json = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let summary = &parsed["summary"];
+        assert_eq!(summary["cognitive_sum"], 3);
+        assert_eq!(summary["cyclomatic_sum"], 6);
+        let rows = |key: &str| -> Vec<(String, u64)> {
+            summary[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r["path"].as_str().unwrap().to_owned(),
+                        r["cognitive_sum"].as_u64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            rows("file_rollups"),
+            [
+                ("nested/b.rs".to_owned(), 2),
+                ("nested/c.ts".to_owned(), 1),
+                ("a.rs".to_owned(), 0),
+            ]
+        );
+        assert_eq!(
+            rows("directory_rollups"),
+            [("nested".to_owned(), 3), (".".to_owned(), 0)]
+        );
+
+        let md = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("cognitive: median=1, p95=2, max=2, sum=3"),
+            "{md}"
+        );
+        assert!(md.contains("## Top 5 files by cognitive sum"), "{md}");
+        assert!(
+            md.contains("- nested: cog_sum=3, cog_max=2, cc_sum=5, functions=4"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn single_file_report_skips_rollup_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", "fn a() {}\n");
+        let md = ComplexityAnalyzer::new()
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(!md.contains("by cognitive sum"), "{md}");
     }
 
     #[test]

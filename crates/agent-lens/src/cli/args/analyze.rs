@@ -49,7 +49,10 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// either — several paths are walked into one report. In directory
     /// mode the analyzer walks recursively (respecting `.gitignore` like
     /// ripgrep), groups findings per file, and aggregates the top-level
-    /// summary across the whole corpus. The parser is chosen from each
+    /// summary across the whole corpus. The summary also carries
+    /// cognitive / cyclomatic sums per file and per directory: unlike the
+    /// maxima, they do not drop when a function is split into helpers.
+    /// The parser is chosen from each
     /// file extension (Rust, TypeScript/JavaScript, Python, or Go).
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.

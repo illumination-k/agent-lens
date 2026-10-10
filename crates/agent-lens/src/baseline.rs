@@ -166,6 +166,7 @@ fn complexity_metrics(report: &Value) -> Metrics {
         "cyclomatic_max",
         "cognitive_max",
         "cognitive_p95",
+        "cognitive_sum",
         "max_nesting_max",
         "loc_total",
         "maintainability_index_min",
@@ -419,6 +420,7 @@ mod tests {
                 "cognitive_max": 24,
                 "cognitive_p95": 9,
                 "cognitive_median": 1,
+                "cognitive_sum": 140,
                 "max_nesting_max": 5,
                 "loc_total": 812,
                 "maintainability_index_min": 41.5,
@@ -429,6 +431,7 @@ mod tests {
         assert_eq!(metric(&metrics, "file_count"), Some(4.0));
         assert_eq!(metric(&metrics, "function_count"), Some(31.0));
         assert_eq!(metric(&metrics, "cognitive_max"), Some(24.0));
+        assert_eq!(metric(&metrics, "cognitive_sum"), Some(140.0));
         assert_eq!(metric(&metrics, "loc_total"), Some(812.0));
         assert_eq!(metric(&metrics, "maintainability_index_min"), Some(41.5));
         // Percentiles that are not part of the baseline set stay out of
