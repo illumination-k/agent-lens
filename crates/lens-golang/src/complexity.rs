@@ -6,17 +6,19 @@
 //! * **Cyclomatic Complexity** — McCabe; starts at 1 and is incremented
 //!   for each branching construct (`if`, `for`, each switch/select case
 //!   beyond the first, and `&&` / `||`).
-//! * **Cognitive Complexity** — Sonar-style; control structures add
-//!   `1 + nesting`, so deeply nested code scores higher than the same
-//!   number of flat branches.
+//! * **Cognitive Complexity** — SonarSource's rules: control structures
+//!   add `1 + nesting`; `else if`, `else`, labelled `break` / `continue`,
+//!   `goto`, and each run of like `&&` / `||` operators add a flat `1`;
+//!   direct recursion adds `1` once. Function literals raise the nesting
+//!   of their bodies.
 //! * **Max Nesting Depth** — the deepest control-flow nesting reached in
 //!   the function body.
 //! * **Halstead counts** — identifiers and literals are operands;
 //!   keywords, operators, and punctuation are operators.
 //!
 //! Function literals inside a function body contribute to the enclosing
-//! function's score, matching how the similarity parser treats Go
-//! closures as part of their parent function.
+//! function's score one nesting level deeper, matching how the similarity
+//! parser treats Go closures as part of their parent function.
 
 use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, qualify};
 use tree_sitter::Node;
@@ -44,7 +46,7 @@ pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>,
 }
 
 fn analyze_function(site: &FnSite<'_, '_>, source: &[u8]) -> FunctionComplexity {
-    let mut visitor = ComplexityVisitor::new(source);
+    let mut visitor = ComplexityVisitor::new(source, own_call_shape(site, source));
     visitor.visit_node(site.body);
     FunctionComplexity {
         name: qualify(site.owner.as_deref(), site.name),
@@ -65,14 +67,65 @@ struct ComplexityVisitor<'a> {
     source: &'a [u8],
     counters: ComplexityCounters,
     halstead: HalsteadAcc,
+    own_call: OwnCall<'a>,
+}
+
+/// How a call back into the function being scored is spelled: `Name(..)`
+/// for a free function, `recv.Name(..)` for a method. A method calling a
+/// bare `Name(..)` reaches the package function, not itself.
+enum OwnCall<'a> {
+    Free(&'a str),
+    Method { receiver: &'a str, name: &'a str },
+    Unknown,
+}
+
+fn own_call_shape<'a>(site: &FnSite<'_, 'a>, source: &'a [u8]) -> OwnCall<'a> {
+    if !site.is_method {
+        return OwnCall::Free(site.name);
+    }
+    let receiver = site
+        .node
+        .child_by_field_name("receiver")
+        .and_then(|list| list.named_child(0))
+        .and_then(|param| param.child_by_field_name("name"))
+        .and_then(|name| node_str(name, source));
+    match receiver {
+        Some(receiver) => OwnCall::Method {
+            receiver,
+            name: site.name,
+        },
+        None => OwnCall::Unknown,
+    }
 }
 
 impl<'a> ComplexityVisitor<'a> {
-    fn new(source: &'a [u8]) -> Self {
+    fn new(source: &'a [u8], own_call: OwnCall<'a>) -> Self {
         Self {
             source,
             counters: ComplexityCounters::default(),
             halstead: HalsteadAcc::default(),
+            own_call,
+        }
+    }
+
+    fn text(&self, node: Option<Node<'_>>) -> Option<&'a str> {
+        node.and_then(|n| node_str(n, self.source))
+    }
+
+    fn is_own_call(&self, call: Node<'_>) -> bool {
+        let Some(function) = call.child_by_field_name("function") else {
+            return false;
+        };
+        match self.own_call {
+            OwnCall::Free(name) => {
+                function.kind() == "identifier" && self.text(Some(function)) == Some(name)
+            }
+            OwnCall::Method { receiver, name } => {
+                function.kind() == "selector_expression"
+                    && self.text(function.child_by_field_name("operand")) == Some(receiver)
+                    && self.text(function.child_by_field_name("field")) == Some(name)
+            }
+            OwnCall::Unknown => false,
         }
     }
 
@@ -94,6 +147,28 @@ impl<'a> ComplexityVisitor<'a> {
             }
             "select_statement" => self.visit_case_control(node, "select"),
             "binary_expression" => self.visit_binary_expression(node),
+            // A closure is read inside its parent; Sonar nests its body.
+            "func_literal" => {
+                self.counters.enter_nest();
+                self.record_named_node(node);
+                self.visit_children(node);
+                self.counters.exit_nest();
+            }
+            "break_statement" | "continue_statement" | "goto_statement" => {
+                // A labelled jump (and every `goto`) is `+1`, no nesting.
+                if node.kind() == "goto_statement" || has_label(node) {
+                    self.counters.add_cognitive(1);
+                }
+                self.record_named_node(node);
+                self.visit_children(node);
+            }
+            "call_expression" => {
+                if self.is_own_call(node) {
+                    self.counters.add_recursion();
+                }
+                self.record_named_node(node);
+                self.visit_children(node);
+            }
             _ => {
                 self.record_named_node(node);
                 self.visit_children(node);
@@ -104,11 +179,24 @@ impl<'a> ComplexityVisitor<'a> {
     fn visit_if(&mut self, node: Node<'_>) {
         self.add_branch();
         self.halstead.op("if");
+        self.visit_if_chain(node);
+    }
+
+    /// Walk one `if`'s header, body, and `else` chain. An `else if` is a
+    /// flat `+1` read at the same depth as the `if` it continues; a plain
+    /// `else` block is `+1` with no McCabe path.
+    fn visit_if_chain(&mut self, node: Node<'_>) {
         let mut saw_else = false;
         for_each_child(node, |child| {
             if child.kind() == "else" {
                 saw_else = true;
                 self.visit_node(child);
+                return;
+            }
+            if saw_else && child.kind() == "if_statement" {
+                self.counters.add_flat_branch();
+                self.halstead.op("if");
+                self.visit_if_chain(child);
                 return;
             }
 
@@ -141,11 +229,55 @@ impl<'a> ComplexityVisitor<'a> {
     }
 
     fn visit_binary_expression(&mut self, node: Node<'_>) {
-        if logical_operator_text(node, self.source).is_some() {
-            self.counters.add_flat_branch();
+        if logical_operator_text(node, self.source).is_none() {
+            self.record_named_node(node);
+            self.visit_children(node);
+            return;
         }
-        self.record_named_node(node);
-        self.visit_children(node);
+        // A whole chain is scored at its root: one cognitive point per run
+        // of like operators. Operands are walked afterwards and start
+        // chains of their own.
+        let mut ops = Vec::new();
+        let mut operands = Vec::new();
+        self.flatten_logical(node, &mut ops, &mut operands);
+        self.counters.add_logical_chain(&ops);
+        for operand in operands {
+            self.visit_node(operand);
+        }
+    }
+
+    /// Collect a logical chain's operators in source order, looking
+    /// through parentheses, and the operands that end it.
+    fn flatten_logical<'t>(
+        &mut self,
+        node: Node<'t>,
+        ops: &mut Vec<&'a str>,
+        operands: &mut Vec<Node<'t>>,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if !child.is_named() {
+                self.record_operator_token(child);
+                if let Some(op) = node_str(child, self.source).filter(|t| matches!(*t, "&&" | "||"))
+                {
+                    ops.push(op);
+                }
+                continue;
+            }
+            let mut inner = child;
+            while inner.kind() == "parenthesized_expression" {
+                match inner.named_child(0) {
+                    Some(next) => inner = next,
+                    None => break,
+                }
+            }
+            // Only a `binary_expression` carries a bare `&&` / `||` token.
+            if logical_operator_text(inner, self.source).is_some() {
+                self.flatten_logical(inner, ops, operands);
+            } else {
+                operands.push(child);
+            }
+        }
     }
 
     fn visit_control_children(&mut self, node: Node<'_>, nest_blocks: bool) {
@@ -209,6 +341,12 @@ fn for_each_child(node: Node<'_>, mut f: impl FnMut(Node<'_>)) {
     for child in node.children(&mut cursor) {
         f(child);
     }
+}
+
+fn has_label(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| child.kind() == "label_name")
 }
 
 fn count_decision_case_nodes(node: Node<'_>) -> usize {
@@ -353,6 +491,161 @@ mod tests {
             units.len()
         );
         units.remove(0)
+    }
+
+    /// SonarSource's Cognitive Complexity rules, case by case. The first
+    /// two are the white paper's own worked examples, ported to Go.
+    #[rstest]
+    #[case::sum_of_primes(
+        "package p
+func sumOfPrimes(max int) int {
+	total := 0
+OUT:
+	for i := 1; i <= max; i++ {     // +1
+		for j := 2; j < i; j++ {    // +2
+			if i%j == 0 {           // +3
+				continue OUT        // +1
+			}
+		}
+		total += i
+	}
+	return total
+}",
+        7
+    )]
+    #[case::switch_counts_once(
+        "package p
+func getWords(n int) string {
+	switch n {                      // +1
+	case 1:
+		return \"one\"
+	case 2:
+		return \"a couple\"
+	default:
+		return \"lots\"
+	}
+}",
+        1
+    )]
+    #[case::else_if_is_flat_and_does_not_nest_deeper(
+        "package p
+func f(xs []bool, b bool) {
+	for _, a := range xs {          // +1
+		if a {                      // +2
+		} else if b {               // +1
+			if b {                  // +3
+			}
+		} else {                    // +1
+		}
+	}
+}",
+        8
+    )]
+    #[case::like_operators_form_one_run(
+        "package p\nfunc f(a, b, c bool) bool { return a && b && c }",
+        1
+    )]
+    #[case::each_operator_switch_is_a_new_run(
+        "package p\nfunc f(a, b, c, d bool) bool { return a && b || c && d }",
+        3
+    )]
+    #[case::parentheses_do_not_break_a_run(
+        "package p\nfunc f(a, b, c bool) bool { return a && (b && c) }",
+        1
+    )]
+    #[case::negation_starts_a_new_run(
+        "package p\nfunc f(a, b, c bool) bool { return a && !(b && c) }",
+        2
+    )]
+    #[case::direct_recursion_counts_once(
+        "package p
+func fact(n int) int {
+	if n == 0 {                     // +1
+		return 1
+	}
+	return n * fact(n-1) + fact(0)  // recursion +1
+}",
+        2
+    )]
+    #[case::method_recursion_through_receiver(
+        "package p
+type T struct{}
+func (t T) Walk(n int) {
+	if n > 0 {                      // +1
+		t.Walk(n - 1)               // recursion +1
+	}
+}",
+        2
+    )]
+    #[case::method_calling_bare_name_is_not_recursion(
+        "package p
+type T struct{}
+func (t T) Walk(n int) {
+	Walk(n)
+}",
+        0
+    )]
+    #[case::calls_that_only_look_like_recursion(
+        "package p
+type T struct{}
+func (t T) Walk(u T) {
+	u.Walk(t)
+	t.Run(u)
+	pkg.Walk(u)
+}",
+        0
+    )]
+    #[case::free_function_calling_another_name_is_not_recursion(
+        "package p
+func fact(n int) int {
+	return other(n) + x.fact(n)
+}",
+        0
+    )]
+    #[case::unlabelled_jumps_are_free(
+        "package p
+func f(xs []int) {
+	for _, x := range xs {          // +1
+		if x > 0 {                  // +2
+			continue
+		}
+		break
+	}
+}",
+        3
+    )]
+    #[case::func_literal_body_is_nested(
+        "package p
+func f(a bool) func() int {
+	return func() int {
+		if a {                      // +2
+			return 1
+		}
+		return 0
+	}
+}",
+        2
+    )]
+    #[case::goto_counts_flat(
+        "package p
+func f(n int) {
+L:
+	if n > 0 {                      // +1
+		n--
+		goto L                      // +1
+	}
+}",
+        2
+    )]
+    fn cognitive_follows_the_sonar_rules(#[case] src: &str, #[case] cognitive: u32) {
+        let f = one(src);
+        assert_eq!(f.cognitive, cognitive, "{}", f.name);
+    }
+
+    #[test]
+    fn logical_chain_keeps_one_mccabe_path_per_operator() {
+        let f = one("package p\nfunc f(a, b, c, d bool) bool { return a && b || c && d }");
+        assert_eq!(f.cyclomatic, 4);
     }
 
     #[rstest]

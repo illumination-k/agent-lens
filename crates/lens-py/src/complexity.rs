@@ -8,9 +8,11 @@
 //!   for each branching construct (`if`, `elif`, `while`, `for`, each
 //!   `except` clause, each `match` arm beyond the first, every chained
 //!   `and` / `or` step, the ternary `x if cond else y`, and assertions).
-//! * **Cognitive Complexity** — Sonar-style; control structures add
-//!   `1 + nesting` so deeply-nested code scores higher than the same
-//!   number of flat branches. `and` / `or` add `1` per occurrence.
+//! * **Cognitive Complexity** — SonarSource's rules: control structures
+//!   add `1 + nesting`; `elif`, `else`, and each run of like `and` / `or`
+//!   operators add a flat `1`; direct recursion adds `1` once. `try`,
+//!   `finally`, and `with` neither cost nor nest; nested `def`s and
+//!   lambdas raise the nesting of their bodies.
 //! * **Max Nesting Depth** — the deepest control-flow nesting reached in
 //!   the function body.
 //! * **Halstead counts** — operators (keywords like `if`, `for`, `def`,
@@ -18,8 +20,8 @@
 //!   operators) and operands (identifiers and literals).
 //!
 //! Nested functions and classes inside a function body contribute to
-//! the enclosing function's score (matches how a reader experiences the
-//! code) but are not surfaced as separate units. This mirrors how the
+//! the enclosing function's score one nesting level deeper (matches how
+//! a reader experiences the code) but are not surfaced as separate units. This mirrors how the
 //! similarity extractor treats `def` bodies as atomic.
 
 use lens_domain::{ComplexityCounters, FunctionComplexity, HalsteadAcc, LineIndex, qualify};
@@ -61,7 +63,7 @@ fn analyze(
     is_test: bool,
     lines: &LineIndex,
 ) -> FunctionComplexity {
-    let mut visitor = ComplexityVisitor::new();
+    let mut visitor = ComplexityVisitor::new(func.name.as_str());
     for stmt in &func.body {
         visitor.visit_stmt(stmt);
     }
@@ -83,15 +85,32 @@ fn analyze(
 /// Python-specific half of the complexity walk: which ruff node counts as
 /// a branch and which Halstead label it carries. The scoring rules live in
 /// [`ComplexityCounters`] / [`HalsteadAcc`].
-#[derive(Default)]
 struct ComplexityVisitor {
     counters: ComplexityCounters,
     halstead: HalsteadAcc,
+    /// The function's own name, for spotting direct recursion (`name(..)`,
+    /// `self.name(..)`, `cls.name(..)`).
+    name: String,
 }
 
 impl ComplexityVisitor {
-    fn new() -> Self {
-        Self::default()
+    fn new(name: &str) -> Self {
+        Self {
+            counters: ComplexityCounters::default(),
+            halstead: HalsteadAcc::default(),
+            name: name.to_owned(),
+        }
+    }
+
+    fn is_own_call(&self, func: &Expr) -> bool {
+        match func {
+            Expr::Name(n) => n.id.as_str() == self.name,
+            Expr::Attribute(a) => {
+                a.attr.as_str() == self.name
+                    && matches!(&*a.value, Expr::Name(n) if matches!(n.id.as_str(), "self" | "cls"))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -105,6 +124,13 @@ impl<'a> Visitor<'a> for ComplexityVisitor {
             Stmt::Try(s) => self.visit_try(s),
             Stmt::With(s) => self.visit_with(s),
             Stmt::Assert(s) => self.visit_assert(s),
+            // A nested `def` is read inside its parent; Sonar nests it.
+            Stmt::FunctionDef(_) => {
+                self.record_stmt_halstead(stmt);
+                self.counters.enter_nest();
+                walk_stmt(self, stmt);
+                self.counters.exit_nest();
+            }
             _ => {
                 self.record_stmt_halstead(stmt);
                 walk_stmt(self, stmt);
@@ -119,6 +145,12 @@ impl<'a> Visitor<'a> for ComplexityVisitor {
             Expr::Compare(c) => self.visit_compare(c),
             Expr::UnaryOp(u) => self.visit_unary(u),
             Expr::Call(c) => self.visit_call(c),
+            Expr::Lambda(_) => {
+                self.record_expr_halstead(expr);
+                self.counters.enter_nest();
+                walk_expr(self, expr);
+                self.counters.exit_nest();
+            }
             _ => {
                 self.record_expr_halstead(expr);
                 walk_expr(self, expr);
@@ -188,10 +220,10 @@ impl ComplexityVisitor {
         self.counters.exit_nest();
         for clause in &stmt.elif_else_clauses {
             match &clause.test {
-                // `elif` is its own branch in McCabe and a +1 in cognitive
-                // (no extra penalty for the bare `else`).
+                // `elif` is its own branch in McCabe and a flat +1 in
+                // cognitive: it is read at the same depth as the `if`.
                 Some(test) => {
-                    self.counters.add_branch();
+                    self.counters.add_flat_branch();
                     self.halstead.op("elif");
                     self.visit_expr(test);
                     self.counters.enter_nest();
@@ -266,12 +298,12 @@ impl ComplexityVisitor {
     }
 
     fn visit_try(&mut self, stmt: &StmtTry) {
+        // Sonar: `try` and `finally` neither cost nor nest; only each
+        // `except` is a branch.
         self.halstead.op("try");
-        self.counters.enter_nest();
         for s in &stmt.body {
             self.visit_stmt(s);
         }
-        self.counters.exit_nest();
         for handler in &stmt.handlers {
             // Each `except` clause is one extra control-flow branch.
             self.counters.add_branch();
@@ -316,11 +348,11 @@ impl ComplexityVisitor {
                 self.visit_expr(vars);
             }
         }
-        self.counters.enter_nest();
+        // A context manager is not control flow to Sonar: no cost, no
+        // nesting.
         for s in &stmt.body {
             self.visit_stmt(s);
         }
-        self.counters.exit_nest();
     }
 
     fn visit_assert(&mut self, stmt: &StmtAssert) {
@@ -335,20 +367,37 @@ impl ComplexityVisitor {
     }
 
     fn visit_bool_op(&mut self, expr: &ExprBoolOp) {
-        // `a and b and c` is one BoolOp node with three values; each
-        // step beyond the first short-circuits, so charge `len-1`
-        // branches for McCabe and `len-1` cognitive bumps.
-        let extra = u32::try_from(expr.values.len()).unwrap_or(u32::MAX);
-        let extra = extra.saturating_sub(1);
-        self.counters.add_cyclomatic(extra);
-        self.counters.add_cognitive(extra);
-        let label = match expr.op {
+        // A whole chain is scored at its root: `len-1` McCabe steps per
+        // `BoolOp` node, one cognitive point per run of like operators
+        // across the nested nodes. Operands are walked afterwards and
+        // start chains of their own.
+        let mut ops = Vec::new();
+        let mut operands = Vec::new();
+        self.flatten_bool_op(expr, &mut ops, &mut operands);
+        self.counters.add_logical_chain(&ops);
+        for operand in operands {
+            self.visit_expr(operand);
+        }
+    }
+
+    fn flatten_bool_op<'e>(
+        &mut self,
+        expr: &'e ExprBoolOp,
+        ops: &mut Vec<BoolOp>,
+        operands: &mut Vec<&'e Expr>,
+    ) {
+        self.halstead.op(match expr.op {
             BoolOp::And => "and",
             BoolOp::Or => "or",
-        };
-        self.halstead.op(label);
-        for v in &expr.values {
-            self.visit_expr(v);
+        });
+        for (i, value) in expr.values.iter().enumerate() {
+            if i > 0 {
+                ops.push(expr.op);
+            }
+            match value {
+                Expr::BoolOp(inner) => self.flatten_bool_op(inner, ops, operands),
+                _ => operands.push(value),
+            }
         }
     }
 
@@ -390,6 +439,9 @@ impl ComplexityVisitor {
         // The call itself is an operator; the callee may still
         // contribute operand counts (the function's name).
         self.halstead.op("call");
+        if self.is_own_call(&call.func) {
+            self.counters.add_recursion();
+        }
         self.visit_expr(&call.func);
         for arg in &call.arguments.args {
             self.visit_expr(arg);
@@ -585,7 +637,7 @@ def f(x, y):
             return -1
 ",
         4,
-        5,
+        4,
         2
     )]
     #[case::except_inside_if(
@@ -791,18 +843,125 @@ def real():
         assert!(f.halstead.total_operators >= 2);
     }
 
+    /// SonarSource's Cognitive Complexity rules, case by case. The first
+    /// is the white paper's `try` / `catch` worked example, ported.
+    #[rstest]
+    #[case::try_does_not_nest_but_except_does(
+        "
+def f(a, b):
+    try:
+        if a:                       # +1
+            for i in range(10):     # +2
+                while b:            # +3
+                    pass
+    except ValueError:              # +1
+        if b:                       # +2
+            pass
+    finally:
+        if a:                       # +1
+            pass
+",
+        10
+    )]
+    #[case::match_counts_once(
+        "
+def get_words(n):
+    match n:                        # +1
+        case 1:
+            return 'one'
+        case 2:
+            return 'a couple'
+        case _:
+            return 'lots'
+",
+        1
+    )]
+    #[case::elif_is_flat_and_does_not_nest_deeper(
+        "
+def f(xs, b):
+    for a in xs:                    # +1
+        if a:                       # +2
+            pass
+        elif b:                     # +1
+            if b:                   # +3
+                pass
+        else:                       # +1
+            pass
+",
+        8
+    )]
+    #[case::like_operators_form_one_run("def f(a, b, c):\n    return a and b and c\n", 1)]
+    #[case::each_operator_switch_is_a_new_run(
+        "def f(a, b, c, d):\n    return a and b or c and d\n",
+        3
+    )]
+    #[case::parentheses_do_not_break_a_run("def f(a, b, c):\n    return a and (b and c)\n", 1)]
+    #[case::negation_starts_a_new_run("def f(a, b, c):\n    return a and not (b and c)\n", 2)]
+    #[case::direct_recursion_counts_once(
+        "
+def fact(n):
+    if n == 0:                      # +1
+        return 1
+    return n * fact(n - 1) + fact(0)    # recursion +1
+",
+        2
+    )]
+    #[case::method_recursion_through_self(
+        "
+class T:
+    def walk(self, n):
+        if n > 0:                   # +1
+            self.walk(n - 1)        # recursion +1
+",
+        2
+    )]
+    #[case::calls_that_only_look_like_recursion(
+        "
+class T:
+    def walk(self, other):
+        other.walk(self)
+        self.run(other)
+        walker(other)
+",
+        0
+    )]
+    #[case::nested_def_body_is_nested(
+        "
+def f(a):
+    def inner():
+        if a:                       # +2
+            pass
+    return inner
+",
+        2
+    )]
+    #[case::lambda_body_is_nested("def f(a):\n    return lambda: 1 if a else 2\n", 2)]
+    fn cognitive_follows_the_sonar_rules(#[case] src: &str, #[case] cognitive: u32) {
+        let f = one(src);
+        assert_eq!(f.cognitive, cognitive, "{}", f.name);
+    }
+
     #[test]
-    fn with_statement_increments_max_nesting_and_walks_body() {
-        // `visit_with` enters a nesting level and walks the body.
-        // Replacing it with a no-op would leave `max_nesting` at 0
-        // and drop the body's identifiers from Halstead operands.
+    fn logical_chain_keeps_one_mccabe_path_per_operator() {
+        let f = one("def f(a, b, c, d):\n    return a and b or c and d\n");
+        assert_eq!(f.cyclomatic, 4);
+    }
+
+    #[test]
+    fn with_statement_walks_body_without_nesting() {
+        // Sonar does not treat a context manager as control flow: the
+        // `if` inside costs `1`, not `2`. Replacing `visit_with` with a
+        // no-op would drop the `if` and the body's identifiers from
+        // Halstead operands.
         let f = one("
-def f(ctx):
+def f(ctx, z):
     with ctx:
         x = 1
         y = 2
+        if z:
+            pass
 ");
-        assert_eq!(f.max_nesting, 1);
+        assert_eq!((f.cognitive, f.max_nesting), (1, 1));
         // The body assignments contribute `x`, `y`, `1`, `2` as
         // operands; if `visit_with` is replaced with `()` the body
         // is never walked, so none of those land in the operand
