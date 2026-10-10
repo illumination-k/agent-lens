@@ -226,7 +226,6 @@ impl_with_analyze_path_args!(
     CoChangeAnalyzer,
     CohesionAnalyzer,
     CommunitiesAnalyzer,
-    ComplexityAnalyzer,
     CouplingAnalyzer,
     CyclesAnalyzer,
     FunctionGraphAnalyzer,
@@ -246,13 +245,17 @@ impl_with_analyze_path_args!(
     TestRedundancyAnalyzer,
 );
 
-// Similarity and search both need the same `(only_tests,
+// Complexity, similarity, and search all need the same `(only_tests,
 // exclude_tests)` args at two granularities: the path-level filter
 // (skip whole files) plus a function-level [`FunctionSelection`] (drop
 // `#[test]` fns inside non-test files). Wire both from the same args
-// here so neither analyzer has to read the bools back out of the path
+// here so no analyzer has to read the bools back out of the path
 // filter.
-impl_with_analyze_path_args!(with_function_selection: SearchAnalyzer, SimilarityAnalyzer);
+impl_with_analyze_path_args!(
+    with_function_selection: ComplexityAnalyzer,
+    SearchAnalyzer,
+    SimilarityAnalyzer,
+);
 
 /// Dispatch an [`AnalyzeCommand`] variant onto its analyzer.
 ///
@@ -424,6 +427,28 @@ mod tests {
             1,
             "ExcludeTests drops the test fn"
         );
+    }
+
+    #[rstest]
+    #[case::all(AnalyzePathArgs::default(), 2)]
+    #[case::only_tests(AnalyzePathArgs { only_tests: true, ..AnalyzePathArgs::default() }, 1)]
+    #[case::exclude_tests(AnalyzePathArgs { exclude_tests: true, ..AnalyzePathArgs::default() }, 1)]
+    fn complexity_with_analyze_path_args_threads_function_selection(
+        #[case] args: AnalyzePathArgs,
+        #[case] expected: u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(
+            dir.path(),
+            "lib.rs",
+            "fn production() {}\n#[cfg(test)]\nmod tests {\n    fn alpha() {}\n}\n",
+        );
+        let json = ComplexityAnalyzer::new()
+            .with_analyze_path_args(args)
+            .analyze(&file, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["function_count"], expected, "{parsed}");
     }
 
     #[test]

@@ -54,6 +54,7 @@ fn analyze_function(site: &FnSite<'_, '_>, source: &[u8]) -> FunctionComplexity 
         cognitive: visitor.counters.cognitive(),
         max_nesting: visitor.counters.max_nesting(),
         halstead: visitor.halstead.counts(),
+        is_test: site.is_test(),
     }
 }
 
@@ -328,6 +329,19 @@ mod tests {
 
     fn extract(src: &str) -> Vec<FunctionComplexity> {
         extract_complexity_units(src).unwrap()
+    }
+
+    fn test_flags(units: &[FunctionComplexity]) -> Vec<(&str, bool)> {
+        units.iter().map(|f| (f.name.as_str(), f.is_test)).collect()
+    }
+
+    #[test]
+    fn go_test_entry_points_are_flagged_but_methods_never_are() {
+        let src = "package p\nfunc Prod() {}\nfunc TestProd(t *testing.T) {}\ntype S struct{}\nfunc (S) TestLike() {}\n";
+        assert_eq!(
+            test_flags(&extract(src)),
+            [("Prod", false), ("TestProd", true), ("S::TestLike", false)]
+        );
     }
 
     fn one(src: &str) -> FunctionComplexity {

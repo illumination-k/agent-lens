@@ -277,6 +277,11 @@ pub struct FunctionComplexity {
     pub max_nesting: u32,
     /// Halstead operator/operand counts. Used to derive Volume and MI.
     pub halstead: HalsteadCounts,
+    /// Whether the adapter classified this unit as test code from
+    /// source-level syntax or naming (Rust `#[test]` / `#[cfg(test)]`,
+    /// Python `test_*`, …), by the same rule its function extraction
+    /// uses. File-level test classification is the consumer's.
+    pub is_test: bool,
 }
 
 impl FunctionComplexity {
@@ -328,6 +333,7 @@ mod tests {
             cognitive: cog,
             max_nesting: nest,
             halstead,
+            is_test: false,
         }
     }
 

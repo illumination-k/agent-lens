@@ -17,7 +17,6 @@
 use lens_domain::{StatementSeq, StatementUnit};
 use tree_sitter::Node;
 
-use crate::attrs::name_looks_like_test_function;
 use crate::parser::{GoParseError, parse_tree, statement_tree};
 use crate::walk::walk_top_level_fns;
 
@@ -34,7 +33,7 @@ pub fn extract_statement_seqs(source: &str) -> Result<Vec<StatementSeq>, GoParse
     let mut out = Vec::new();
     walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
         let owner = site.owner.as_deref();
-        let is_test = owner.is_none() && name_looks_like_test_function(site.name);
+        let is_test = site.is_test();
         let function_name = lens_domain::qualify(owner, site.name);
         collect_lists(site.body, bytes, &function_name, is_test, &mut out);
     });

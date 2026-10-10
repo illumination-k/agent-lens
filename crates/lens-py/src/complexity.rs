@@ -50,12 +50,17 @@ pub fn extract_complexity_units(source: &str) -> Result<Vec<FunctionComplexity>,
     // nothing but stubs; the walk drops both before they reach the table.
     walk_module_fns(&module.body, &mut |site| {
         let name = qualify(site.owner, site.func.name.as_str());
-        out.push(analyze(&name, site.func, &lines));
+        out.push(analyze(&name, site.func, site.is_test, &lines));
     });
     Ok(out)
 }
 
-fn analyze(name: &str, func: &StmtFunctionDef, lines: &LineIndex) -> FunctionComplexity {
+fn analyze(
+    name: &str,
+    func: &StmtFunctionDef,
+    is_test: bool,
+    lines: &LineIndex,
+) -> FunctionComplexity {
     let mut visitor = ComplexityVisitor::new();
     for stmt in &func.body {
         visitor.visit_stmt(stmt);
@@ -71,6 +76,7 @@ fn analyze(name: &str, func: &StmtFunctionDef, lines: &LineIndex) -> FunctionCom
         cognitive: visitor.counters.cognitive(),
         max_nesting: visitor.counters.max_nesting(),
         halstead: visitor.halstead.counts(),
+        is_test,
     }
 }
 
@@ -429,6 +435,23 @@ mod tests {
 
     fn extract(src: &str) -> Vec<FunctionComplexity> {
         extract_complexity_units(src).unwrap()
+    }
+
+    fn test_flags(units: &[FunctionComplexity]) -> Vec<(&str, bool)> {
+        units.iter().map(|f| (f.name.as_str(), f.is_test)).collect()
+    }
+
+    #[test]
+    fn test_functions_and_test_class_methods_are_flagged() {
+        let src = "def prod():\n    return 1\n\ndef test_prod():\n    prod()\n\nclass TestProd:\n    def check(self):\n        prod()\n";
+        assert_eq!(
+            test_flags(&extract(src)),
+            [
+                ("prod", false),
+                ("test_prod", true),
+                ("TestProd::check", true)
+            ]
+        );
     }
 
     fn one(src: &str) -> FunctionComplexity {

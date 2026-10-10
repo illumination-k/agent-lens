@@ -20,7 +20,6 @@ use lens_domain::{
 };
 use tree_sitter::{Node, Parser};
 
-use crate::attrs::name_looks_like_test_function;
 use crate::node_text::{node_str, node_text_or_empty};
 use crate::walk::{FnSite, walk_top_level_fns};
 
@@ -104,7 +103,7 @@ pub(crate) fn parse_tree(source: &str) -> Result<tree_sitter::Tree, GoParseError
 /// Lower one walked declaration into a [`FunctionDef`].
 fn function_def_from(site: &FnSite<'_, '_>, source: &[u8]) -> FunctionDef {
     let owner = site.owner.as_deref();
-    let is_test = owner.is_none() && name_looks_like_test_function(site.name);
+    let is_test = site.is_test();
     let node = site.node;
     FunctionDef {
         name: qualify_name(owner, site.name),
