@@ -210,7 +210,9 @@ def setup_python(work: Path) -> tuple[list[tuple[str, Path]], dict]:
     def scored(root: Path) -> int:
         shutil.rmtree(cache, ignore_errors=True)
         out = work / f"{root.name}.complexipy.json"
-        subprocess.run([str(a) for a in command(root, out)], check=True, capture_output=True)
+        out.unlink(missing_ok=True)
+        # Exits 1 when any function is over its default limit of 15.
+        subprocess.run([str(a) for a in command(root, out)], capture_output=True)
         return count_complexipy(json.loads(out.read_text()))
 
     return corpora, {
