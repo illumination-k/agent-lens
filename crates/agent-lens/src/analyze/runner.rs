@@ -17,7 +17,7 @@ use serde::ser::{SerializeStruct, Serializer};
 use super::call_graph::{CallGraph, CallGraphBuilder};
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, SourceFile,
-    changed_line_ranges, collect_source_files, overlaps_any, skip_parse_error_if_walked,
+    changed_line_ranges, collect_source_files, overlaps_any, scan_files_par,
 };
 
 /// Filter knobs every per-file analyzer shares: a diff gate plus the
@@ -93,27 +93,22 @@ impl FilterConfig {
     /// than the misleading "0 file(s)".
     ///
     /// A walked file that fails to parse is warned about and skipped
-    /// rather than failing the run ([`skip_parse_error_if_walked`]), so
+    /// rather than failing the run ([`scan_files_par`]), so
     /// one file using syntax newer than the bundled grammars cannot
     /// disable the whole report.
-    pub fn collect_per_file<R>(
+    pub fn collect_per_file<R: Send>(
         &self,
         roots: &AnalyzeRoots,
-        mut analyze_one: impl FnMut(&SourceFile) -> Result<Option<R>, AnalyzerError>,
+        analyze_one: impl Fn(&SourceFile) -> Result<Option<R>, AnalyzerError> + Sync,
     ) -> Result<PerFileScan<R>, AnalyzerError> {
-        let mut reports = Vec::new();
-        let mut scanned_file_count = 0;
-        for source_file in self.collect_source_files(roots)? {
-            scanned_file_count += 1;
-            if let Some(Some(report)) =
-                skip_parse_error_if_walked(&source_file, analyze_one(&source_file))?
-            {
-                reports.push(report);
-            }
-        }
+        let sources = self.collect_source_files(roots)?;
+        let reports = scan_files_par(&sources, analyze_one)?
+            .into_iter()
+            .flatten()
+            .collect();
         Ok(PerFileScan {
             reports,
-            scanned_file_count,
+            scanned_file_count: sources.len(),
         })
     }
 
@@ -407,6 +402,41 @@ mod tests {
             .unwrap();
         assert_eq!(scan.reports, vec!["keep.rs".to_owned()]);
         assert_eq!(scan.scanned_file_count, 2);
+    }
+
+    /// The walk fans out across rayon workers; reports must still come
+    /// back in walk order, and the first failing file in that order is
+    /// the error reported, as in a sequential walk.
+    #[test]
+    fn collect_per_file_keeps_walk_order_and_reports_the_first_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..64).map(|i| format!("f{i:02}.rs")).collect();
+        for name in &names {
+            write_file(dir.path(), name, "fn a() {}\n");
+        }
+        let roots = AnalyzeRoots::from(dir.path());
+        let cfg = FilterConfig::default();
+
+        let scan = cfg
+            .collect_per_file(&roots, |sf| Ok(Some(sf.display_path.clone())))
+            .unwrap();
+        assert_eq!(scan.reports, names);
+
+        let err = cfg
+            .collect_per_file::<()>(&roots, |sf| {
+                if sf.display_path.as_str() >= "f40.rs" {
+                    Err(AnalyzerError::UnsupportedExtension {
+                        path: sf.path.clone(),
+                    })
+                } else {
+                    Ok(None)
+                }
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&err, AnalyzerError::UnsupportedExtension { path } if path.ends_with("f40.rs")),
+            "{err:?}"
+        );
     }
 
     #[test]

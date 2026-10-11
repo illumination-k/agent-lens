@@ -42,38 +42,38 @@ sits outside `ci`; the harness's unit tests (`test:bench-external`) run under
 ## Results
 
 Measured 2026-10-10 on a 4-vCPU Intel Xeon @ 2.80 GHz cloud container, with
-agent-lens built from `main` at 0.9.0. `vs agent-lens` is the reference tool's
-mean over agent-lens's: above `1×` the reference tool is slower.
+agent-lens built from `main` after 0.9.0 (per-file walk parallelised).
+`vs agent-lens` is the reference tool's mean over agent-lens's: above `1×` the
+reference tool is slower.
 
 | Language | Corpus  | Files |   Lines | Tool           |           Mean ± σ | vs agent-lens | Functions > 0 |
 | -------- | ------- | ----: | ------: | -------------- | -----------------: | ------------: | ------------: |
-| ts       | zod     |   108 |  28,273 | agent-lens     |   36.1 ms ± 7.2 ms |          1.0× |           494 |
-| ts       | zod     |   108 |  28,273 | eslint+sonarjs |  4,670 ms ± 136 ms |        129.4× |           494 |
-| ts       | effect  |   360 | 233,725 | agent-lens     |   139 ms ± 13.8 ms |          1.0× |         2,207 |
-| ts       | effect  |   360 | 233,725 | eslint+sonarjs | 21,680 ms ± 957 ms |        155.6× |         2,453 |
-| go       | cobra   |    19 |   6,564 | agent-lens     |   51.0 ms ± 9.3 ms |          1.0× |           148 |
-| go       | cobra   |    19 |   6,564 | gocognit       |   18.8 ms ± 3.8 ms |          0.4× |           148 |
-| go       | x/tools |   565 | 150,773 | agent-lens     | 1,329 ms ± 30.1 ms |          1.0× |         2,731 |
-| go       | x/tools |   565 | 150,773 | gocognit       |   362 ms ± 35.3 ms |          0.3× |         2,732 |
-| python   | rich    |    78 |  26,607 | agent-lens     |   37.1 ms ± 6.1 ms |          1.0× |           415 |
-| python   | rich    |    78 |  26,607 | complexipy     |   71.4 ms ± 5.7 ms |          1.9× |           413 |
-| python   | Django  |   879 | 155,128 | agent-lens     |   259 ms ± 12.0 ms |          1.0× |         4,718 |
-| python   | Django  |   879 | 155,128 | complexipy     |   371 ms ± 29.8 ms |          1.4× |         4,854 |
+| ts       | zod     |   108 |  28,273 | agent-lens     |   22.3 ms ± 2.5 ms |          1.0× |           494 |
+| ts       | zod     |   108 |  28,273 | eslint+sonarjs |  4,699 ms ± 149 ms |        210.3× |           494 |
+| ts       | effect  |   360 | 233,725 | agent-lens     |   58.9 ms ± 4.1 ms |          1.0× |         2,207 |
+| ts       | effect  |   360 | 233,725 | eslint+sonarjs | 20,528 ms ± 521 ms |        348.3× |         2,453 |
+| go       | cobra   |    19 |   6,564 | agent-lens     |   29.3 ms ± 4.6 ms |          1.0× |           148 |
+| go       | cobra   |    19 |   6,564 | gocognit       |   19.4 ms ± 3.7 ms |          0.7× |           148 |
+| go       | x/tools |   565 | 150,773 | agent-lens     |   472 ms ± 18.0 ms |          1.0× |         2,731 |
+| go       | x/tools |   565 | 150,773 | gocognit       |   386 ms ± 27.6 ms |          0.8× |         2,732 |
+| python   | rich    |    78 |  26,607 | agent-lens     |   20.5 ms ± 2.6 ms |          1.0× |           415 |
+| python   | rich    |    78 |  26,607 | complexipy     |   73.7 ms ± 8.7 ms |          3.6× |           413 |
+| python   | Django  |   879 | 155,128 | agent-lens     |   140 ms ± 16.5 ms |          1.0× |         4,718 |
+| python   | Django  |   879 | 155,128 | complexipy     |   383 ms ± 29.5 ms |          2.7× |         4,854 |
 
 ## Reading the results
 
-- **TypeScript: ~130–160× faster than ESLint + sonarjs.** oxc parses fast, and
+- **TypeScript: ~210–350× faster than ESLint + sonarjs.** oxc parses fast, and
   agent-lens pays none of ESLint's start-up and plugin-dispatch cost. ESLint's
   numbers include Node start-up (a few hundred milliseconds of each run).
-- **Python: 1.4–1.9× faster than complexipy**, which is itself native (Rust),
+- **Python: 2.7–3.6× faster than complexipy**, which is itself native (Rust),
   while doing the extra metrics.
-- **Go: 2.7–3.7× slower than gocognit.** gocognit is a thin walk over Go's
-  own `go/parser`; agent-lens parses with tree-sitter and walks every token
-  for Halstead counts. The run is also single-threaded: `analyze complexity`
-  reads and scores files one after another (`collect_per_file`), so 565 files
-  cost the sum of their parses. Parallelising the per-file walk and cutting
-  the per-token allocations in the Halstead tally are the two levers; both
-  apply to every language, Go just has the least headroom to hide them.
+- **Go: 1.2–1.5× slower than gocognit.** gocognit is a thin walk over Go's
+  own `go/parser`. A callgrind profile of agent-lens on x/tools puts ~77% of
+  its instructions in the tree-sitter-go parse and ~17% in the scoring walk,
+  so the parser is the floor; agent-lens closes most of the gap by parsing
+  and scoring files on every core (`collect_per_file` fans out over rayon),
+  which gocognit does not.
 
 The `functions > 0` counts agree to within a few percent, so every tool read
 the same code; the gaps that remain follow from what each tool scores:

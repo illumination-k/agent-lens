@@ -141,8 +141,15 @@ impl HalsteadAcc {
     }
 }
 
+/// Looks the label up before inserting, so only its first occurrence
+/// allocates: labels repeat on almost every token, and `entry` would
+/// copy one into a `String` each time.
 fn bump(map: &mut HashMap<String, usize>, label: &str) {
-    *map.entry(label.to_owned()).or_insert(0) += 1;
+    if let Some(count) = map.get_mut(label) {
+        *count += 1;
+    } else {
+        map.insert(label.to_owned(), 1);
+    }
 }
 
 /// Cyclomatic / cognitive / nesting tallies for one function body.
