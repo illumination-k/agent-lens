@@ -544,6 +544,7 @@ mod tests {
             method: crate::analyze::SimilarityMethod::Token,
             idf: true,
             doc_overlap: true,
+            embedding_model: Some("/models/code".into()),
         };
         let via_options = SimilarityAnalyzer::new().with_options(opts);
         let via_builders = SimilarityAnalyzer::new()
@@ -557,6 +558,7 @@ mod tests {
             .with_doc_overlap(true)
             .with_paired_by(None)
             .with_drift_floor(0.4)
+            .with_embedding_model(Some("/models/code".into()))
             .with_top(Some(3));
         assert_eq!(format!("{via_options:?}"), format!("{via_builders:?}"));
         assert_ne!(

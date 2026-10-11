@@ -271,6 +271,17 @@ pub enum AnalyzerError {
         "--paired-by is incompatible with --target blocks: a statement window has no name to key siblings on; drop --paired-by to cluster blocks by similarity"
     )]
     BlockTargetPairedBy,
+    #[error(
+        "--paired-by is incompatible with --target files: a file has no sibling name to key on; drop --paired-by to cluster files by similarity"
+    )]
+    FileTargetPairedBy,
+    #[error(
+        "--method {method} is not supported with --target files: it is quadratic in a whole file's token count; use --method token or embedding"
+    )]
+    FileTargetMethod { method: &'static str },
+    /// The embedding scorer could not load its model or run inference.
+    #[error("embedding: {0}")]
+    Embedding(String),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
     #[error("invalid graph query: {message}")]

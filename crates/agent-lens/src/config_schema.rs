@@ -133,7 +133,7 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             Field {
                 key: "min-lines",
                 ty: "int",
-                presence: "default: 5 (functions) / 3 (types)",
+                presence: "default: 5 (functions, blocks) / 3 (types) / 20 (files)",
                 desc: "Ignore units shorter than this many lines. Omitting it applies the target-specific default, not \"no floor\".",
             },
             Field {
@@ -144,9 +144,9 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             },
             Field {
                 key: "method",
-                ty: "\"tsed\", \"token\", \"lcs\" or \"pdg\"",
+                ty: "\"tsed\", \"token\", \"lcs\", \"pdg\" or \"embedding\"",
                 presence: "optional",
-                desc: "Body-scoring algorithm: tsed (tree-edit distance, default), token (k-gram overlap), lcs (longest common token subsequence; order-aware, tolerant of a large inserted gap) or pdg (dependence-graph kernel; invariant to statement order and local names).",
+                desc: "Body-scoring algorithm: tsed (tree-edit distance, default), token (k-gram overlap), lcs (longest common token subsequence; order-aware, tolerant of a large inserted gap), pdg (dependence-graph kernel; invariant to statement order and local names) or embedding (cosine of ONNX code-embedding vectors; needs the `embedding` cargo feature and embedding-model).",
             },
             Field {
                 key: "idf",
@@ -156,9 +156,15 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
             },
             Field {
                 key: "target",
-                ty: "\"functions\" or \"types\"",
+                ty: "\"functions\", \"types\", \"blocks\" or \"files\"",
                 presence: "optional",
-                desc: "Comparison unit: functions (default) or type definitions (struct/class/interface/enum/alias member shapes). With types, paired-by only accepts the qualified/name key.",
+                desc: "Comparison unit: functions (default), type definitions (struct/class/interface/enum/alias member shapes), statement blocks inside functions, or whole files (scored with token unless method = \"embedding\"). With types, paired-by only accepts the qualified/name key; blocks and files reject paired-by.",
+            },
+            Field {
+                key: "embedding-model",
+                ty: "string (path)",
+                presence: "optional",
+                desc: "Model directory for method = \"embedding\": model.onnx plus its tokenizer.json. Falls back to the AGENT_LENS_EMBEDDING_MODEL environment variable.",
             },
             Field {
                 key: "doc-overlap",

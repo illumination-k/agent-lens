@@ -21,14 +21,22 @@ lens-golang = { path = "../lens-golang", version = "0.9.0" }
 lens-py = { path = "../lens-py", version = "0.9.0" }
 lens-rust = { path = "../lens-rust", version = "0.9.0" }
 lens-ts = { path = "../lens-ts", version = "0.9.0" }
+# `--method embedding` (opt-in): ONNX Runtime inference plus the Hugging
+# Face tokenizer. Off by default so the default build stays a single
+# self-contained binary with no native runtime to fetch.
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-24"] }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[features]
+embedding = ["dep:ort", "dep:tokenizers"]
 
 [dev-dependencies]
 criterion = { workspace = true }

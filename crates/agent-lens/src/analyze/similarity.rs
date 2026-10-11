@@ -27,6 +27,7 @@ use super::{AnalyzeRoots, AnalyzerError, DiffScope, LineRange, OutputFormat, cha
 mod candidates;
 mod corpus;
 mod doc;
+mod embedding;
 mod extract;
 mod paired;
 mod pdg;
@@ -83,6 +84,11 @@ pub const DEFAULT_TYPE_MIN_LINES: usize = 3;
 /// URL-assembly preamble — clears five lines; `--min-lines` is there for
 /// a deliberate hunt below it.
 pub const DEFAULT_BLOCK_MIN_LINES: usize = 5;
+
+/// Default minimum line count for `--target files`. A file shorter than
+/// this is a re-export shim or a constant table; matching two of them
+/// says nothing about duplicated logic.
+pub const DEFAULT_FILE_MIN_LINES: usize = 20;
 
 /// Default floor for `--paired-by`. A name-matched pair scoring below
 /// this shares a name and essentially nothing else, which in practice
@@ -179,6 +185,12 @@ pub enum SimilarityMethod {
     /// distance scores low on; a body with the same statements wired
     /// differently scores lower than TSED would give it.
     Pdg,
+    /// Cosine similarity of code-embedding vectors from an ONNX model
+    /// (`--embedding-model`). Reads the source text rather than the
+    /// tree, so it can pair bodies that do the same thing through
+    /// different syntax, but it cannot say why two units matched.
+    /// Needs the `embedding` cargo feature and a model directory.
+    Embedding,
 }
 
 impl SimilarityMethod {
@@ -188,6 +200,7 @@ impl SimilarityMethod {
             Self::Token => "token",
             Self::Lcs => "lcs",
             Self::Pdg => "pdg",
+            Self::Embedding => "embedding",
         }
     }
 
@@ -223,6 +236,14 @@ pub enum SimilarityTarget {
     /// functions differ, so they never cluster; the repeated fragment
     /// does.
     Blocks,
+    /// Whole source files. Each file becomes one unit whose tree is the
+    /// forest of every function body and type definition it declares,
+    /// so two modules that were forked from one another cluster even
+    /// when every function in them drifted a little — below the
+    /// per-function threshold, but still the same file. Tree-edit
+    /// distance is intractable at this size, so the default `tsed`
+    /// method scores with `token` here; `lcs` and `pdg` are rejected.
+    Files,
 }
 
 impl SimilarityTarget {
@@ -231,6 +252,7 @@ impl SimilarityTarget {
             Self::Functions => "functions",
             Self::Types => "types",
             Self::Blocks => "blocks",
+            Self::Files => "files",
         }
     }
 
@@ -240,6 +262,7 @@ impl SimilarityTarget {
             Self::Functions => "function",
             Self::Types => "type",
             Self::Blocks => "block",
+            Self::Files => "file",
         }
     }
 
@@ -256,7 +279,7 @@ impl SimilarityTarget {
                 body: BODY_SIMILARITY_WEIGHT,
                 signature: SIGNATURE_SIMILARITY_WEIGHT,
             },
-            Self::Blocks => ScoreWeights {
+            Self::Blocks | Self::Files => ScoreWeights {
                 body: 1.0,
                 signature: 0.0,
             },
@@ -375,6 +398,12 @@ pub struct SimilarityOptions {
     /// flag.
     #[arg(long)]
     pub doc_overlap: bool,
+    /// Model directory for `--method embedding`: an ONNX sentence
+    /// encoder as `model.onnx` plus its Hugging Face `tokenizer.json`.
+    /// Falls back to the `AGENT_LENS_EMBEDDING_MODEL` environment
+    /// variable.
+    #[arg(long, value_name = "DIR")]
+    pub embedding_model: Option<PathBuf>,
 }
 
 impl Default for SimilarityOptions {
@@ -392,6 +421,7 @@ impl Default for SimilarityOptions {
             method: SimilarityMethod::Tsed,
             idf: false,
             doc_overlap: false,
+            embedding_model: None,
         }
     }
 }
@@ -432,6 +462,7 @@ pub struct SimilarityAnalyzer {
     doc_overlap: bool,
     paired_by: Option<PairKey>,
     drift_floor: f64,
+    embedding_model: Option<PathBuf>,
 }
 
 /// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
@@ -463,6 +494,7 @@ impl SimilarityAnalyzer {
             doc_overlap: false,
             paired_by: None,
             drift_floor: DEFAULT_DRIFT_FLOOR,
+            embedding_model: None,
         }
     }
 
@@ -492,6 +524,7 @@ impl SimilarityAnalyzer {
             .with_doc_overlap(opts.doc_overlap)
             .with_paired_by(opts.paired_by)
             .with_drift_floor(opts.drift_floor)
+            .with_embedding_model(opts.embedding_model)
             .with_top(opts.top)
     }
 
@@ -558,6 +591,13 @@ impl SimilarityAnalyzer {
     }
 
     with_setter! {
+        /// Model directory for [`SimilarityMethod::Embedding`]. `None`
+        /// falls back to the `AGENT_LENS_EMBEDDING_MODEL` environment
+        /// variable.
+        fn with_embedding_model, embedding_model: Option<PathBuf>
+    }
+
+    with_setter! {
         /// Drop name-matched pairs scoring below this from the
         /// `--paired-by` report. Defaults to [`DEFAULT_DRIFT_FLOOR`];
         /// `0.0` reports every match. Ignored outside paired mode.
@@ -596,6 +636,17 @@ impl SimilarityAnalyzer {
             .unwrap_or(self.threshold)
     }
 
+    /// Body-scoring method this run actually uses. `--target files`
+    /// cannot afford tree-edit distance over a whole file's forest, so
+    /// the `tsed` default reads as `token` there.
+    fn effective_method(&self) -> SimilarityMethod {
+        if self.target == SimilarityTarget::Files && self.method == SimilarityMethod::Tsed {
+            SimilarityMethod::Token
+        } else {
+            self.method
+        }
+    }
+
     /// Effective `--min-lines` cut: the explicit override when given,
     /// otherwise the target's default.
     fn resolved_min_lines(&self) -> usize {
@@ -603,6 +654,7 @@ impl SimilarityAnalyzer {
             SimilarityTarget::Functions => DEFAULT_MIN_LINES,
             SimilarityTarget::Types => DEFAULT_TYPE_MIN_LINES,
             SimilarityTarget::Blocks => DEFAULT_BLOCK_MIN_LINES,
+            SimilarityTarget::Files => DEFAULT_FILE_MIN_LINES,
         })
     }
 
@@ -617,6 +669,7 @@ impl SimilarityAnalyzer {
     /// any repo worth running this on.
     fn allow_lsh(&self) -> bool {
         self.target != SimilarityTarget::Types
+            && self.effective_method() != SimilarityMethod::Embedding
     }
 
     /// Reject score cuts no score can reach, before any file is read.
@@ -659,6 +712,16 @@ impl SimilarityAnalyzer {
         if self.target == SimilarityTarget::Blocks && self.paired_by.is_some() {
             return Err(AnalyzerError::BlockTargetPairedBy);
         }
+        if self.target == SimilarityTarget::Files && self.paired_by.is_some() {
+            return Err(AnalyzerError::FileTargetPairedBy);
+        }
+        if self.target == SimilarityTarget::Files
+            && matches!(self.method, SimilarityMethod::Lcs | SimilarityMethod::Pdg)
+        {
+            return Err(AnalyzerError::FileTargetMethod {
+                method: self.method.as_str(),
+            });
+        }
         let started = Instant::now();
         let corpus = collect_corpus(
             &roots,
@@ -674,7 +737,7 @@ impl SimilarityAnalyzer {
         let clusters = self.find_clusters(&corpus)?;
         let report = Report::new(
             &roots,
-            self.method.as_str(),
+            self.effective_method().as_str(),
             self.target.as_str(),
             self.cluster_threshold(),
             self.resolved_min_lines(),
@@ -728,7 +791,7 @@ impl SimilarityAnalyzer {
         let index_pairs: Vec<(usize, usize)> = matched.iter().map(|c| (c.i, c.j)).collect();
         // Threshold 0 keeps every scored pair: in this mode the cut
         // labels drift instead of filtering the report.
-        let mut score_stats = self.score_pairs(corpus, &profiles, &index_pairs, 0.0);
+        let mut score_stats = self.score_pairs(corpus, &profiles, &index_pairs, 0.0)?;
         annotate_doc_overlap(corpus, &mut score_stats.pairs);
 
         let key_by_pair: HashMap<(usize, usize), usize> = matched
@@ -828,7 +891,7 @@ impl SimilarityAnalyzer {
             &profiles,
             candidate_threshold,
             &self.tsed_options(),
-            self.method,
+            self.effective_method(),
             self.allow_lsh(),
         );
         if self.target == SimilarityTarget::Blocks {
@@ -846,9 +909,14 @@ impl SimilarityAnalyzer {
         )?;
 
         let score_started = Instant::now();
-        let mut score_stats = self.score_pairs(corpus, &profiles, &pairs_to_score, threshold);
+        let mut score_stats = self.score_pairs(corpus, &profiles, &pairs_to_score, threshold)?;
         score_stats.diff_filtered_count = diff_prefiltered_count;
-        log_score_stats(&candidates, &score_stats, score_started, self.method);
+        log_score_stats(
+            &candidates,
+            &score_stats,
+            score_started,
+            self.effective_method(),
+        );
         annotate_doc_overlap(corpus, &mut score_stats.pairs);
 
         let cluster_started = Instant::now();
@@ -941,7 +1009,7 @@ impl SimilarityAnalyzer {
     /// tree profiles; the other methods need neither, so they skip the
     /// work and get an empty slice.
     fn tree_profiles(&self, corpus: &[OwnedUnit], min_lines: usize) -> Vec<TreeProfile> {
-        if self.method.uses_tree_filters() {
+        if self.effective_method().uses_tree_filters() {
             build_tree_profiles(
                 corpus,
                 min_lines,
@@ -964,11 +1032,11 @@ impl SimilarityAnalyzer {
         profiles: &[TreeProfile],
         pairs: &[(usize, usize)],
         threshold: f64,
-    ) -> ScoreStats {
+    ) -> Result<ScoreStats, AnalyzerError> {
         let weights = self.target.weights();
         let opts = self.tsed_options();
         let compare_values = opts.apted.compare_values;
-        match self.method {
+        Ok(match self.effective_method() {
             SimilarityMethod::Tsed => {
                 score_candidate_pairs(corpus, profiles, pairs, threshold, &opts, weights)
             }
@@ -1003,7 +1071,17 @@ impl SimilarityAnalyzer {
                     ))
                 })
             }
-        }
+            SimilarityMethod::Embedding => {
+                let model_dir = embedding::resolve_model_dir(self.embedding_model.as_deref())?;
+                let mut wanted: Vec<usize> = pairs.iter().flat_map(|&(i, j)| [i, j]).collect();
+                wanted.sort_unstable();
+                wanted.dedup();
+                let vectors = embedding::embed_units(corpus, &wanted, &model_dir)?;
+                score_profile_pairs(corpus, pairs, threshold, weights, |i, j| {
+                    Some(embedding::cosine(vectors.get(&i)?, vectors.get(&j)?))
+                })
+            }
+        })
     }
 
     /// Run the corpus → candidate → score pipeline and stop there,
@@ -1049,7 +1127,7 @@ impl SimilarityAnalyzer {
             min_lines,
             candidates.strategy.as_str(),
         )?;
-        let scored = self.score_pairs(&corpus, &profiles, &candidates.pairs, threshold);
+        let scored = self.score_pairs(&corpus, &profiles, &candidates.pairs, threshold)?;
         let value_profiles = value_profiles_for(&corpus, &scored.pairs);
         let pairs = scored
             .pairs
@@ -4657,5 +4735,112 @@ impl Counter {
             matches!(err, AnalyzerError::SimilarityScopeTooBroad { .. }),
             "unexpected error variant: {err}"
         );
+    }
+
+    fn module_source(op: &str, extra: &str) -> String {
+        format!(
+            "pub fn load(path: &str) -> Vec<String> {{\n    let text = std::fs::read_to_string(path).unwrap_or_default();\n    let mut out = Vec::new();\n    for line in text.lines() {{\n        if line.starts_with('#') {{\n            continue;\n        }}\n        out.push(line.trim().to_owned());\n    }}\n    out\n}}\n\npub fn total(values: &[i64]) -> i64 {{\n    let mut acc = 0;\n    for v in values {{\n        acc = acc {op} v;\n    }}\n    acc\n}}\n\npub struct Entry {{\n    pub key: String,\n    pub value: i64,\n{extra}}}\n"
+        )
+    }
+
+    /// Two modules forked from one another cluster as files even though
+    /// no single function in them is large enough to report, and an
+    /// unrelated module stays out.
+    #[test]
+    fn files_target_clusters_forked_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", &module_source("+", ""));
+        write_file(
+            dir.path(),
+            "b.rs",
+            &module_source("-", "    pub weight: f64,\n"),
+        );
+        write_file(
+            dir.path(),
+            "c.rs",
+            "pub fn render(name: &str) -> String {\n    match name.len() {\n        0 => String::new(),\n        n if n > 10 => format!(\"{}...\", &name[..10]),\n        _ => name.to_uppercase(),\n    }\n}\n",
+        );
+
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Files)
+            .with_min_lines_opt(Some(1))
+            .with_threshold(0.7)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["method"], "token", "got {parsed}");
+        assert_eq!(parsed["unit_count"], 3, "got {parsed}");
+        assert_eq!(parsed["cluster_count"], 1, "got {parsed}");
+        let files: Vec<&str> = parsed["clusters"][0]["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["file"].as_str().unwrap())
+            .collect();
+        assert_eq!(files, ["a.rs", "b.rs"], "got {parsed}");
+    }
+
+    /// The file default floor drops short files before pairing.
+    #[test]
+    fn files_target_default_min_lines_drops_short_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = "pub fn add(a: i64, b: i64) -> i64 {\n    let sum = a + b;\n    sum\n}\n";
+        write_file(dir.path(), "a.rs", short);
+        write_file(dir.path(), "b.rs", short);
+        let json = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Files)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["min_lines"], DEFAULT_FILE_MIN_LINES, "got {parsed}");
+        assert_eq!(parsed["cluster_count"], 0, "got {parsed}");
+    }
+
+    #[rstest]
+    #[case::lcs(SimilarityMethod::Lcs)]
+    #[case::pdg(SimilarityMethod::Pdg)]
+    fn files_target_rejects_quadratic_methods(#[case] method: SimilarityMethod) {
+        let dir = tempfile::tempdir().unwrap();
+        let err = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Files)
+            .with_method(method)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap_err();
+        assert!(
+            matches!(err, AnalyzerError::FileTargetMethod { .. }),
+            "unexpected error variant: {err}"
+        );
+    }
+
+    #[test]
+    fn files_target_rejects_paired_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Files)
+            .with_paired_by(Some(PairKey::Qualified))
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap_err();
+        assert!(
+            matches!(err, AnalyzerError::FileTargetPairedBy),
+            "unexpected error variant: {err}"
+        );
+    }
+
+    /// Without the cargo feature the method fails loudly instead of
+    /// reporting an empty, clean-looking result.
+    #[cfg(not(feature = "embedding"))]
+    #[test]
+    fn embedding_method_without_feature_names_the_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", &module_source("+", ""));
+        write_file(dir.path(), "b.rs", &module_source("+", ""));
+        let err = SimilarityAnalyzer::new()
+            .with_target(SimilarityTarget::Files)
+            .with_method(SimilarityMethod::Embedding)
+            .with_min_lines_opt(Some(1))
+            .with_embedding_model(Some(dir.path().to_path_buf()))
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap_err();
+        assert!(err.to_string().contains("`embedding` feature"), "got {err}");
     }
 }

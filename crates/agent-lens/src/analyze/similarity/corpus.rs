@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use lens_domain::{BlockWindowOptions, FunctionShape, SignatureShape, TreeNode, block_windows};
+use lens_domain::{
+    BlockWindowOptions, BodyShape, FunctionShape, SignatureShape, SourceSpan, SyntaxFact, TreeNode,
+    block_windows,
+};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -210,6 +213,9 @@ fn collect_file(
             })
             .collect()
         }
+        SimilarityTarget::Files => file_unit(file, lang, &source, selection, path_is_test)?
+            .into_iter()
+            .collect(),
     };
     debug!(
         target: PROFILE_TARGET,
@@ -221,4 +227,70 @@ fn collect_file(
         "similarity source parsed"
     );
     Ok(out)
+}
+
+/// Lower a whole file to one unit: a synthetic `File` root over every
+/// function body and type definition tree the file declares, spanning
+/// the file's every line.
+///
+/// Built from the same extractors the other targets use, so the tree
+/// carries the adapters' normalized labels rather than raw source and a
+/// file pair scores on structure, not on formatting. A file the
+/// extractors find nothing in drops out: an empty forest would match
+/// every other empty forest at 1.0.
+fn file_unit(
+    file: &SourceFile,
+    lang: SourceLang,
+    source: &str,
+    selection: FunctionSelection,
+    path_is_test: bool,
+) -> Result<Option<OwnedUnit>, AnalyzerError> {
+    if !selection.includes(path_is_test) {
+        return Ok(None);
+    }
+    let mut children: Vec<TreeNode> = extract_functions(lang, source)?
+        .into_iter()
+        .filter(|def| selection.includes(def.is_test || path_is_test))
+        .map(|def| def.body_tree().clone())
+        .collect();
+    children.extend(
+        extract_types(lang, source)?
+            .into_iter()
+            .filter(|type_shape| !type_shape.is_shapeless())
+            .map(|type_shape| type_shape.into_function_shape().body.tree),
+    );
+    if children.is_empty() {
+        return Ok(None);
+    }
+    let name = file.path.file_name().map_or_else(
+        || file.display_path.clone(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let shape = FunctionShape {
+        display_name: name,
+        qualified_name: SyntaxFact::Unknown,
+        module_path: SyntaxFact::Unknown,
+        owner: SyntaxFact::Known(None),
+        visibility: SyntaxFact::Unknown,
+        signature: SyntaxFact::Unknown,
+        doc: None,
+        attributes: SyntaxFact::Unknown,
+        body: BodyShape {
+            tree: TreeNode::with_children("File", "", children),
+        },
+        span: SourceSpan {
+            start_line: 1,
+            end_line: source.lines().count().max(1),
+        },
+        is_test: path_is_test,
+    };
+    Ok(Some(OwnedUnit {
+        file: file.path.clone(),
+        rel_path: file.display_path.clone(),
+        is_test: path_is_test,
+        kind: None,
+        implements: None,
+        lang,
+        shape,
+    }))
 }
