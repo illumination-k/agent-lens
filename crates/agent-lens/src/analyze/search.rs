@@ -50,7 +50,6 @@ use lens_domain::search::{
     Bm25Options, FuzzyOptions, IndexOptions, SearchDocument, SearchField, SearchHit, SearchIndex,
     TermScore, tokenize,
 };
-use rayon::prelude::*;
 use serde::Serialize;
 
 use super::call_graph::{CallGraphBuilder, delegate_call_graph_builders};
@@ -58,7 +57,7 @@ use super::runner::render_report;
 use super::similarity::FunctionSelection;
 use super::{
     AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, collect_source_files, read_source,
-    skip_parse_error_if_walked,
+    scan_files_par,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -383,18 +382,11 @@ impl SearchAnalyzer {
     fn collect_corpus(&self, roots: &AnalyzeRoots) -> Result<Corpus, AnalyzerError> {
         let filter = self.builder.collection_filter().compile(roots.base())?;
         let files = collect_source_files(roots, &filter)?;
-        let per_file: Vec<Vec<Entry>> = files
-            .par_iter()
-            .map(|file| {
-                // A walked file that fails to parse drops out of the
-                // corpus with a warning instead of failing the run.
-                skip_parse_error_if_walked(
-                    file,
-                    self.collect_file(file, filter.is_test_path(&file.path)),
-                )
-                .map(Option::unwrap_or_default)
-            })
-            .collect::<Result<_, _>>()?;
+        // A walked file that fails to parse drops out of the corpus with
+        // a warning instead of failing the run.
+        let per_file = scan_files_par(&files, |file| {
+            self.collect_file(file, filter.is_test_path(&file.path))
+        })?;
 
         let mut documents = Vec::new();
         let mut records = Vec::new();

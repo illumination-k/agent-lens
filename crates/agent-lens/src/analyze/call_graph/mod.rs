@@ -23,13 +23,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
 use lens_rust::CallIndexOptions;
-use rayon::prelude::*;
 
 use super::cargo_meta::CrateNameCache;
 use super::index::{AnalysisIndex, SourceKey};
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, LineRange, SourceFile, SourceLang,
-    changed_line_ranges, collect_source_files, read_source, skip_parse_error_if_walked,
+    changed_line_ranges, collect_source_files, read_source, scan_files_par,
 };
 use model::{
     CallGraphEdge, CallGraphNode, DelegationFacts, EdgeWeights, GraphLanguage,
@@ -305,13 +304,8 @@ impl CallGraphBuilder {
             .filter(|source_file| graphed_language(&source_file.path))
             .collect();
         // Scanning parses every file, so it fans out across rayon
-        // workers. The active analysis index lives in a thread local
-        // the workers cannot see, so it is captured here and
-        // re-installed around each task; results come back in input
-        // order (indexed parallel collect) and errors are reduced in
-        // that same order, so the graph — and the error a bad file
-        // produces — match the sequential walk's exactly.
-        let index = AnalysisIndex::active();
+        // workers; `scan_files_par` keeps input order, so the graph — and
+        // the error a bad file produces — match a sequential walk's.
         let crate_cache = Mutex::new(CrateNameCache::new());
         // One resolver for the whole scan: it caches every manifest and
         // tsconfig it reads, and TS/JS imports resolve through it.
@@ -324,33 +318,18 @@ impl CallGraphBuilder {
                 )
             })
             .then(|| lens_ts::ModuleResolver::new(roots.base()));
-        let files = sources
-            .par_iter()
-            .map(|source_file| {
-                super::index::with_installed(index.as_ref(), || {
-                    let path_is_test = filter.is_test_path(&source_file.path);
-                    // A walked file that fails to parse is dropped from
-                    // the graph with a warning instead of failing the
-                    // build, so one file of too-new syntax cannot take
-                    // down every call-graph analyzer.
-                    skip_parse_error_if_walked(
-                        source_file,
-                        self.scan_file(
-                            roots.base(),
-                            source_file,
-                            path_is_test,
-                            &crate_cache,
-                            ts_resolver.as_ref(),
-                        ),
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+        // A walked file that fails to parse is dropped from the graph
+        // with a warning instead of failing the build, so one file of
+        // too-new syntax cannot take down every call-graph analyzer.
+        let files = scan_files_par(&sources, |source_file| {
+            self.scan_file(
+                roots.base(),
+                source_file,
+                filter.is_test_path(&source_file.path),
+                &crate_cache,
+                ts_resolver.as_ref(),
+            )
+        })?;
         Ok(CallGraph::build(files, self.argument_facts))
     }
 

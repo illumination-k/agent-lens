@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 
+use super::index::{AnalysisIndex, with_installed};
 use super::{AnalyzeRoots, AnalyzerError, CompiledPathFilter, SourceLang};
 
 #[derive(Debug)]
@@ -104,6 +106,35 @@ pub(crate) fn skip_parse_error_if_walked<T>(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Run `scan` on every file across rayon workers and return the results
+/// in `files` order, dropping walked files that failed to parse
+/// ([`skip_parse_error_if_walked`]).
+///
+/// The active analysis index lives in a thread local the workers cannot
+/// see, so it is captured on the calling thread and re-installed around
+/// each task. Errors are reduced in input order after the parallel
+/// collect, so the error a bad file produces is the one a sequential walk
+/// would hit first, not whichever worker failed first.
+pub(crate) fn scan_files_par<T: Send>(
+    files: &[SourceFile],
+    scan: impl Fn(&SourceFile) -> Result<T, AnalyzerError> + Sync,
+) -> Result<Vec<T>, AnalyzerError> {
+    let index = AnalysisIndex::active();
+    let results: Vec<_> = files
+        .par_iter()
+        .map(|file| {
+            with_installed(index.as_ref(), || {
+                skip_parse_error_if_walked(file, scan(file))
+            })
+        })
+        .collect();
+    let mut out = Vec::with_capacity(results.len());
+    for result in results {
+        out.extend(result?);
+    }
+    Ok(out)
 }
 
 pub fn read_source(path: &Path) -> Result<(SourceLang, String), AnalyzerError> {

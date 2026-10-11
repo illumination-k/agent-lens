@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use lens_domain::{BlockWindowOptions, FunctionShape, SignatureShape, TreeNode, block_windows};
-use rayon::prelude::*;
 use tracing::debug;
 
 use super::FunctionSelection;
@@ -11,7 +10,7 @@ use super::SimilarityTarget;
 use super::extract::{extract_functions, extract_statement_seqs, extract_types};
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, SourceFile, SourceLang, collect_source_files,
-    read_source, skip_parse_error_if_walked,
+    read_source, scan_files_par,
 };
 
 /// A single comparison unit plus the file it originated from. The corpus
@@ -109,19 +108,12 @@ pub(super) fn collect_corpus(
     let started = Instant::now();
     let files = collect_source_files(roots, &filter)?;
 
-    let parsed: Vec<Vec<OwnedUnit>> = files
-        .par_iter()
-        .map(|source_file| {
-            let path_is_test = filter.is_test_path(&source_file.path);
-            // A walked file that fails to parse drops out of the corpus
-            // with a warning instead of failing the run.
-            skip_parse_error_if_walked(
-                source_file,
-                collect_file(source_file, selection, path_is_test, target, min_lines),
-            )
-            .map(Option::unwrap_or_default)
-        })
-        .collect::<Result<_, _>>()?;
+    // A walked file that fails to parse drops out of the corpus with a
+    // warning instead of failing the run.
+    let parsed = scan_files_par(&files, |source_file| {
+        let path_is_test = filter.is_test_path(&source_file.path);
+        collect_file(source_file, selection, path_is_test, target, min_lines)
+    })?;
 
     let out: Vec<_> = parsed.into_iter().flatten().collect();
     let file_count = files.len();
