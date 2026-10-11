@@ -11,9 +11,9 @@
 /// silently divergent copies.
 macro_rules! impl_from_churn_error {
     ($dst:ty) => {
-        impl From<$crate::analyze::churn::ChurnError> for $dst {
-            fn from(error: $crate::analyze::churn::ChurnError) -> Self {
-                use $crate::analyze::churn::ChurnError as Inner;
+        impl From<$crate::analyze::history::churn::ChurnError> for $dst {
+            fn from(error: $crate::analyze::history::churn::ChurnError) -> Self {
+                use $crate::analyze::history::churn::ChurnError as Inner;
                 match error {
                     Inner::Io { path, source } => Self::Io { path, source },
                     Inner::Git { stderr } => Self::Git { stderr },

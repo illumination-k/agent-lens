@@ -64,9 +64,9 @@ use tracing::warn;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
-use super::format::format_optional_f64;
-use super::options::analyzer_options;
-use super::{
+use crate::analyze::format::format_optional_f64;
+use crate::analyze::options::analyzer_options;
+use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, DiffScope, OutputFormat, PathFilterError, parse_diff_range,
 };
 

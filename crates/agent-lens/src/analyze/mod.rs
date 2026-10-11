@@ -9,9 +9,6 @@
 
 pub(crate) mod call_graph;
 mod cargo_meta;
-pub mod change_entropy;
-mod churn;
-pub mod co_change;
 pub mod cohesion;
 pub mod communities;
 pub mod complexity;
@@ -22,7 +19,6 @@ mod crate_root;
 pub mod cycles;
 pub mod delegation;
 mod diff;
-mod error_from;
 mod export_lang;
 pub mod footprint;
 mod format;
@@ -30,7 +26,7 @@ pub mod forwarding;
 pub(crate) mod function_delta;
 pub mod function_graph;
 pub mod graph_query;
-pub mod hidden_coupling;
+pub mod history;
 pub mod hotspot;
 pub mod hubs;
 pub mod impact;
@@ -41,7 +37,6 @@ mod module_graph;
 pub(crate) mod module_label;
 pub mod narrowable;
 mod options;
-pub mod ownership;
 pub mod parameters;
 mod path_filter;
 mod raw_references;
@@ -56,7 +51,6 @@ pub mod single_impl;
 pub mod single_use;
 mod source_files;
 mod span_references;
-mod static_file_graph;
 pub mod test_only;
 pub mod test_redundancy;
 pub mod unreachable;
@@ -68,8 +62,6 @@ use std::path::{Path, PathBuf};
 
 use lens_domain::LanguageParser;
 
-pub use change_entropy::{ChangeEntropyAnalyzer, ChangeEntropyError, Period};
-pub use co_change::{CoChangeAnalyzer, CoChangeError};
 pub use cohesion::CohesionAnalyzer;
 pub use communities::{CommunitiesAnalyzer, Granularity};
 pub use complexity::ComplexityAnalyzer;
@@ -85,14 +77,16 @@ pub use graph_query::{
     DEFAULT_GRAPH_QUERY_DEPTH, DEFAULT_GRAPH_QUERY_LIMIT, GraphDirection, GraphQueryAnalyzer,
     GraphQueryKind,
 };
-pub use hidden_coupling::{HiddenCouplingAnalyzer, HiddenCouplingError};
+pub use history::change_entropy::{ChangeEntropyAnalyzer, ChangeEntropyError, Period};
+pub use history::co_change::{CoChangeAnalyzer, CoChangeError};
+pub use history::hidden_coupling::{HiddenCouplingAnalyzer, HiddenCouplingError};
+pub use history::ownership::{OwnershipAnalyzer, OwnershipError};
 pub use hotspot::{HotspotAnalyzer, HotspotError};
 pub use hubs::HubsAnalyzer;
 pub use impact::{DEFAULT_IMPACT_DEPTH, ImpactAnalyzer};
 pub use index::{AnalysisIndex, AnalysisIndexScope};
 pub use layers::LayersAnalyzer;
 pub use narrowable::{NarrowableAnalyzer, NarrowableSection};
-pub use ownership::{OwnershipAnalyzer, OwnershipError};
 pub use parameters::ParametersAnalyzer;
 pub use reach::{ReachAnalyzer, ReachSection};
 pub use risk::{RiskAnalyzer, RiskError};

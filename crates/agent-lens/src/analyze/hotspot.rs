@@ -26,8 +26,8 @@ use lens_domain::{FileComplexity, FunctionComplexity, HotspotEntry, compute_hots
 use serde::Serialize;
 use tracing::warn;
 
-use super::churn::ChurnScope;
-use super::error_from::impl_from_churn_error;
+use super::history::churn::ChurnScope;
+use super::history::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, CompiledPathFilter, OutputFormat,

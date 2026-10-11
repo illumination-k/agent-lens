@@ -1,8 +1,8 @@
 //! `analyze hidden-coupling` — the static-dependency × co-change
 //! differential.
 //!
-//! Two analyzers here already answer half of it. [`super::coupling`],
-//! [`super::layers`] and the call graph say what the code declares
+//! Two analyzers here already answer half of it. [`crate::analyze::coupling`],
+//! [`crate::analyze::layers`] and the call graph say what the code declares
 //! *should* be coupled; [`super::co_change`] says what the repository
 //! actually experienced. Neither number is new on its own. The
 //! **difference** between them is, and it is the one signal no
@@ -52,18 +52,18 @@ use lens_domain::{
 use serde::Serialize;
 use tracing::warn;
 
-use super::call_graph::model::{ModuleResolutionSummary, Resolution};
-use super::call_graph::{CallGraph, CallGraphBuilder};
 use super::churn::{ChurnScope, ReportablePaths};
 use super::co_change::{CoChangeOptions, PairView};
 use super::error_from::impl_from_churn_error;
-use super::format::render_module_confidence;
-use super::runner::render_report;
 use super::static_file_graph::{
     Direction, ModuleGraphCoverage, StaticFileGraph, StaticFileGraphBuilder, StaticRelation,
     StaticVerdict, add_module_graphs,
 };
-use super::{
+use crate::analyze::call_graph::model::{ModuleResolutionSummary, Resolution};
+use crate::analyze::call_graph::{CallGraph, CallGraphBuilder};
+use crate::analyze::format::render_module_confidence;
+use crate::analyze::runner::render_report;
+use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, CompiledPathFilter, OutputFormat,
     PathFilterError, collect_source_files,
 };

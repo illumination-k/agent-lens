@@ -176,8 +176,6 @@ pub(crate) use analyzer_options;
 #[cfg(test)]
 mod tests {
     use crate::analyze::DiffScope;
-    use crate::analyze::change_entropy::{ChangeEntropyAnalyzer, ChangeEntropyOptions, Period};
-    use crate::analyze::co_change::{CoChangeAnalyzer, CoChangeOptions};
     use crate::analyze::cohesion::{CohesionAnalyzer, CohesionOptions};
     use crate::analyze::communities::{CommunitiesAnalyzer, CommunitiesOptions, Granularity};
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
@@ -188,12 +186,16 @@ mod tests {
     use crate::analyze::graph_query::{
         GraphDirection, GraphQueryAnalyzer, GraphQueryKind, GraphQueryOptions,
     };
-    use crate::analyze::hidden_coupling::HiddenCouplingAnalyzer;
+    use crate::analyze::history::change_entropy::{
+        ChangeEntropyAnalyzer, ChangeEntropyOptions, Period,
+    };
+    use crate::analyze::history::co_change::{CoChangeAnalyzer, CoChangeOptions};
+    use crate::analyze::history::hidden_coupling::HiddenCouplingAnalyzer;
+    use crate::analyze::history::ownership::{OwnershipAnalyzer, OwnershipOptions};
     use crate::analyze::hotspot::{HotspotAnalyzer, HotspotOptions};
     use crate::analyze::hubs::{HubsAnalyzer, HubsOptions};
     use crate::analyze::impact::{ImpactAnalyzer, ImpactOptions};
     use crate::analyze::layers::{LayersAnalyzer, LayersOptions};
-    use crate::analyze::ownership::{OwnershipAnalyzer, OwnershipOptions};
     use crate::analyze::parameters::{ParametersAnalyzer, ParametersOptions};
     use crate::analyze::risk::{RiskAnalyzer, RiskOptions};
     use crate::analyze::similarity::{SimilarityAnalyzer, SimilarityOptions};

@@ -59,7 +59,7 @@ use tracing::warn;
 
 use super::churn::{AuthoredCommitRaw, ChurnScope, Contact, ReportablePaths};
 use super::error_from::impl_from_churn_error;
-use super::{AnalyzePathFilter, AnalyzeRoots, OutputFormat, PathFilterError};
+use crate::analyze::{AnalyzePathFilter, AnalyzeRoots, OutputFormat, PathFilterError};
 
 /// Report schema version, bumped when a consumer would have to change.
 const SCHEMA_VERSION: u32 = 1;
