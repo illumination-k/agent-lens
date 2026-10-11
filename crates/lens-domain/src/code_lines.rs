@@ -88,6 +88,10 @@ struct StrKind {
     raw_hashes: Option<usize>,
     /// Go backtick strings take no escapes.
     escapes: bool,
+    /// Whether the literal may run past the end of its line. A Python,
+    /// TypeScript or Go `'` / `"` string cannot, so an unterminated one
+    /// ends with its line instead of swallowing the file.
+    multiline: bool,
 }
 
 struct Scanner {
@@ -113,6 +117,11 @@ impl Scanner {
                     next
                 }
             };
+        }
+        if let State::Str(kind) = self.state
+            && !kind.multiline
+        {
+            self.state = State::Code;
         }
         has_code
     }
@@ -142,11 +151,12 @@ impl Scanner {
     /// after its opening delimiter, or `None` when no string starts here.
     fn open_string(&mut self, chars: &[char], i: usize) -> Option<usize> {
         let c = chars[i];
-        let plain = |quote| StrKind {
+        let plain = |quote, multiline| StrKind {
             quote,
             triple: false,
             raw_hashes: None,
             escapes: true,
+            multiline,
         };
         let (kind, width) = match (self.syntax, c) {
             (CommentSyntax::Rust, 'r') => rust_raw_string(chars, i)?,
@@ -157,16 +167,22 @@ impl Scanner {
                 if !is_char {
                     return None;
                 }
-                (plain('\''), 1)
+                (plain('\'', false), 1)
             }
-            (CommentSyntax::Rust, '"') => (plain('"'), 1),
-            (CommentSyntax::CLike, '"' | '\'') => (plain(c), 1),
+            (CommentSyntax::Rust, '"') => (plain('"', true), 1),
+            (CommentSyntax::CLike, '"' | '\'') => (plain(c, false), 1),
             // TS templates take escapes and Go raw strings do not; only a
             // Go raw string ending in `\` tells the two apart.
-            (CommentSyntax::CLike, '`') => (plain('`'), 1),
+            (CommentSyntax::CLike, '`') => (plain('`', true), 1),
             (CommentSyntax::Python, '"' | '\'') => {
                 let triple = chars.get(i + 1) == Some(&c) && chars.get(i + 2) == Some(&c);
-                (StrKind { triple, ..plain(c) }, if triple { 3 } else { 1 })
+                (
+                    StrKind {
+                        triple,
+                        ..plain(c, triple)
+                    },
+                    if triple { 3 } else { 1 },
+                )
             }
             _ => return None,
         };
@@ -234,6 +250,7 @@ fn rust_raw_string(chars: &[char], i: usize) -> Option<(StrKind, usize)> {
         triple: false,
         raw_hashes: Some(hashes),
         escapes: false,
+        multiline: true,
     };
     Some((kind, hashes + 2))
 }
@@ -313,11 +330,24 @@ mod tests {
         "const s = \"/*\";\nconst t = '/*';\nx := 1\n",
         vec![]
     )]
-    #[case::python_triple_quote_is_not_three_strings(
+    #[case::python_triple_quote_spans_lines(
         CommentSyntax::Python,
-        "s = \"\"\"a\"b\n# inside\n\"\"\"\n",
+        "s = \"\"\"a\n# inside\n\"\"\"\n",
         vec![]
     )]
+    #[case::python_empty_string_is_not_a_triple_quote(CommentSyntax::Python, "s = \"\"\n# c\n", vec![2])]
+    #[case::python_one_char_string_is_not_a_triple_quote(
+        CommentSyntax::Python,
+        "s = \"a\"\n# c\n",
+        vec![2]
+    )]
+    #[case::python_empty_strings_around_code(CommentSyntax::Python, "s = \"\"a\"\"\n# c\n", vec![2])]
+    #[case::unterminated_c_like_string_ends_with_its_line(
+        CommentSyntax::CLike,
+        "x := \"a\n// c\n",
+        vec![2]
+    )]
+    #[case::escaped_double_quote_char_literal(CommentSyntax::Rust, "let q = '\\\"';\n// c\n", vec![2])]
     #[case::python_hash_and_triple_quotes(
         CommentSyntax::Python,
         "x = 1  # trailing\n# note\ns = \"\"\"\n# inside\n\"\"\"\ny = '#'\n",
