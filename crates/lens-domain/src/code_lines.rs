@@ -161,15 +161,9 @@ impl Scanner {
             }
             (CommentSyntax::Rust, '"') => (plain('"'), 1),
             (CommentSyntax::CLike, '"' | '\'') => (plain(c), 1),
-            (CommentSyntax::CLike, '`') => (
-                StrKind {
-                    // TS templates take escapes, Go raw strings do not;
-                    // `\` before a backtick only matters to the former.
-                    escapes: true,
-                    ..plain('`')
-                },
-                1,
-            ),
+            // TS templates take escapes and Go raw strings do not; only a
+            // Go raw string ending in `\` tells the two apart.
+            (CommentSyntax::CLike, '`') => (plain('`'), 1),
             (CommentSyntax::Python, '"' | '\'') => {
                 let triple = chars.get(i + 1) == Some(&c) && chars.get(i + 2) == Some(&c);
                 (StrKind { triple, ..plain(c) }, if triple { 3 } else { 1 })
@@ -289,6 +283,40 @@ mod tests {
         CommentSyntax::CLike,
         "/* a /* b */\nx := 1\n",
         vec![1]
+    )]
+    #[case::raw_string_takes_no_escapes(
+        CommentSyntax::Rust,
+        "let s = r\"\\\";\n// c\n",
+        vec![2]
+    )]
+    #[case::raw_string_closes_only_with_its_hashes(
+        CommentSyntax::Rust,
+        "let s = r#\"x\"\n\"#;\n// c\n",
+        vec![3]
+    )]
+    #[case::byte_raw_string_prefix(CommentSyntax::Rust, "let s = br\"\\\";\n// c\n", vec![2])]
+    #[case::r_ending_an_identifier_is_not_a_raw_prefix(
+        CommentSyntax::Rust,
+        "let s = xr\"\\\";\n// c\n",
+        vec![]
+    )]
+    #[case::escaped_quote_char_literal(CommentSyntax::Rust, "let q = '\\'';\n// c\n", vec![2])]
+    #[case::escaped_backslash_closes_the_string(
+        CommentSyntax::Rust,
+        "let s = \"\\\\\";\n// c\n",
+        vec![2]
+    )]
+    #[case::code_after_a_block_comment(CommentSyntax::Rust, "/* a */ x\n", vec![])]
+    #[case::nested_open_right_before_a_close(CommentSyntax::Rust, "/* /**/*/x\n", vec![])]
+    #[case::c_like_strings_hide_comment_openers(
+        CommentSyntax::CLike,
+        "const s = \"/*\";\nconst t = '/*';\nx := 1\n",
+        vec![]
+    )]
+    #[case::python_triple_quote_is_not_three_strings(
+        CommentSyntax::Python,
+        "s = \"\"\"a\"b\n# inside\n\"\"\"\n",
+        vec![]
     )]
     #[case::python_hash_and_triple_quotes(
         CommentSyntax::Python,
