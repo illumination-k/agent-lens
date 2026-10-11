@@ -335,6 +335,11 @@ mod tests {
         "s = \"\"\"a\n# inside\n\"\"\"\n",
         vec![]
     )]
+    #[case::lone_quote_does_not_close_a_triple_quote(
+        CommentSyntax::Python,
+        "s = \"\"\"a\"b\n# inside\n\"\"\"\n",
+        vec![]
+    )]
     #[case::python_empty_string_is_not_a_triple_quote(CommentSyntax::Python, "s = \"\"\n# c\n", vec![2])]
     #[case::python_one_char_string_is_not_a_triple_quote(
         CommentSyntax::Python,
