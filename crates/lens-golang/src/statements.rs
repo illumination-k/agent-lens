@@ -17,7 +17,7 @@
 use lens_domain::{StatementSeq, StatementUnit};
 use tree_sitter::Node;
 
-use crate::parser::{GoParseError, parse_tree, statement_tree};
+use crate::parser::{COMMENT, GoParseError, parse_tree, statement_tree};
 use crate::walk::walk_top_level_fns;
 
 /// Node kind holding a run of statements. Every Go statement sequence
@@ -51,14 +51,18 @@ fn collect_lists(
 ) {
     let mut cursor = node.walk();
     let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
-    if node.kind() == STATEMENT_LIST && !children.is_empty() {
+    // A comment is a named child of the list but not a statement: as one,
+    // a run of comment lines would mint a window of its own.
+    let statements: Vec<StatementUnit> = children
+        .iter()
+        .filter(|child| child.kind() != COMMENT)
+        .map(|child| statement_unit(*child, source))
+        .collect();
+    if node.kind() == STATEMENT_LIST && !statements.is_empty() {
         out.push(StatementSeq {
             function_name: function_name.to_owned(),
             is_test,
-            statements: children
-                .iter()
-                .map(|child| statement_unit(*child, source))
-                .collect(),
+            statements,
         });
     }
     for child in children {
@@ -108,6 +112,24 @@ mod tests {
                 ("handler", vec![(6, 6), (7, 7)]),
             ],
         );
+    }
+
+    /// tree-sitter-go keeps comments as named children of a
+    /// `statement_list`; they are neither statements nor tree nodes, or a
+    /// run of comment lines would mint a window that matches every other.
+    #[test]
+    fn comments_are_neither_statements_nor_tree_nodes() {
+        let src = "package p\n\nfunc f(x int) int {\n\t// lead\n\t// more\n\ta := x // trailing\n\tif a > 0 {\n\t\t/* inner */\n\t\treturn a\n\t}\n\treturn 0\n}\n";
+
+        let seqs = seqs(src);
+        assert_eq!(
+            shape(&seqs),
+            vec![("f", vec![(6, 6), (7, 10), (11, 11)]), ("f", vec![(9, 9)])],
+        );
+        fn has_comment(tree: &lens_domain::TreeNode) -> bool {
+            tree.label == COMMENT || tree.children.iter().any(has_comment)
+        }
+        assert!(!seqs[0].statements.iter().any(|st| has_comment(&st.tree)));
     }
 
     /// Switch and select cases hang their statements off a

@@ -97,6 +97,7 @@ pub mod apted;
 pub mod block_shape;
 pub mod change_entropy;
 pub mod cochange;
+pub mod code_lines;
 pub mod cohesion;
 pub mod communities;
 pub mod complexity;
@@ -141,6 +142,7 @@ pub use cochange::{
     DEFAULT_MAX_COMMIT_FILES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SUPPORT, PairSupport,
     compute_cochange, rank_cochange_pairs, tally_cochange,
 };
+pub use code_lines::{CommentSyntax, NonCodeLines};
 pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };

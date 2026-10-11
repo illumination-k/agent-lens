@@ -295,7 +295,7 @@ fn adjacent_comments<'a>(node: Node<'_>, source: &'a [u8]) -> Vec<&'a str> {
     let mut expected_row = node.start_position().row;
     let mut prev = node.prev_sibling();
     while let Some(sibling) = prev {
-        if sibling.kind() != "comment" || sibling.end_position().row + 1 != expected_row {
+        if sibling.kind() != COMMENT || sibling.end_position().row + 1 != expected_row {
             break;
         }
         let Some(text) = node_str(sibling, source) else {
@@ -423,6 +423,9 @@ pub(crate) fn function_body_tree(body: Node<'_>, source: &[u8]) -> TreeNode {
 /// `similarity --target blocks`, which compares runs of statements
 /// rather than whole bodies; routing both through [`build_tree`] is what
 /// keeps a window covering a whole body identical to that body's tree.
+/// Node kind of a `//` or `/* */` comment.
+pub(crate) const COMMENT: &str = "comment";
+
 pub(crate) fn statement_tree(node: Node<'_>, source: &[u8]) -> TreeNode {
     build_tree(node, source, /* is_root = */ false)
 }
@@ -466,8 +469,12 @@ fn build_tree(node: Node<'_>, source: &[u8], is_root: bool) -> TreeNode {
     let value = node_value(node, source);
     let mut children = Vec::new();
     let mut cursor = node.walk();
+    // tree-sitter-go keeps comments as named nodes wherever they sit.
+    // They are not code, and no other adapter's tree carries them.
     for child in node.named_children(&mut cursor) {
-        children.push(build_tree(child, source, /* is_root = */ false));
+        if child.kind() != COMMENT {
+            children.push(build_tree(child, source, /* is_root = */ false));
+        }
     }
     TreeNode::with_children(label, value, children)
 }

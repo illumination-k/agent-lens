@@ -20,6 +20,7 @@
 
 use std::collections::HashSet;
 
+use crate::code_lines::NonCodeLines;
 use crate::syntax::{BodyShape, FunctionShape, SourceSpan, SyntaxFact};
 use crate::tree::TreeNode;
 
@@ -168,12 +169,19 @@ impl BlockShape {
 /// contiguous run of up to `opts.max_statements` statements that spans at
 /// least `opts.min_lines` source lines.
 ///
+/// `non_code` is the file's blank and comment-only lines: the density
+/// floor counts only the lines a window's tree could represent.
+///
 /// Call this once per file: windows are de-duplicated by source span, so
 /// the single-statement list of a nested block cannot report the same
 /// span twice (once as the outer list's statement, once as the inner
 /// list's whole content). Outer lists win, which keeps the window whose
 /// tree carries the full nested statement.
-pub fn block_windows(seqs: &[StatementSeq], opts: BlockWindowOptions) -> Vec<BlockShape> {
+pub fn block_windows(
+    seqs: &[StatementSeq],
+    opts: BlockWindowOptions,
+    non_code: &NonCodeLines,
+) -> Vec<BlockShape> {
     let mut seen: HashSet<(usize, usize)> = HashSet::new();
     let mut out = Vec::new();
     for seq in seqs {
@@ -183,7 +191,7 @@ pub fn block_windows(seqs: &[StatementSeq], opts: BlockWindowOptions) -> Vec<Blo
                 .len()
                 .min(start.saturating_add(opts.max_statements));
             for end in start..limit {
-                let Some(window) = window_shape(seq, start, end, opts) else {
+                let Some(window) = window_shape(seq, start, end, opts, non_code) else {
                     continue;
                 };
                 if seen.insert((window.span.start_line, window.span.end_line)) {
@@ -202,6 +210,7 @@ fn window_shape(
     start: usize,
     end: usize,
     opts: BlockWindowOptions,
+    non_code: &NonCodeLines,
 ) -> Option<BlockShape> {
     let first = seq.statements.get(start)?;
     let last = seq.statements.get(end)?;
@@ -217,7 +226,8 @@ fn window_shape(
         .map(|stmt| stmt.tree.clone())
         .collect();
     let tree = TreeNode::with_children(BLOCK_ROOT_LABEL, "", children);
-    if !window_carries_enough_tree(tree.subtree_size(), span.line_count(), opts) {
+    let code_lines = span.line_count() - non_code.count_within(span.start_line, span.end_line);
+    if !window_carries_enough_tree(tree.subtree_size(), code_lines, opts) {
         return None;
     }
     Some(BlockShape {
@@ -235,8 +245,8 @@ fn window_shape(
 /// Two cuts, both guarding the same failure: a window whose tree says
 /// less than its source does matches every other such window at 1.0.
 /// [`BlockWindowOptions::min_nodes`] is the absolute floor;
-/// [`BlockWindowOptions::min_nodes_per_line`] scales it with the span so
-/// a long window cannot clear it on a handful of nodes.
+/// [`BlockWindowOptions::min_nodes_per_line`] scales it with the window's
+/// code lines so a long window cannot clear it on a handful of nodes.
 fn window_carries_enough_tree(nodes: usize, line_count: usize, opts: BlockWindowOptions) -> bool {
     nodes >= opts.min_nodes && nodes as f64 >= opts.min_nodes_per_line * line_count as f64
 }
@@ -285,6 +295,7 @@ mod tests {
                 min_nodes: 0,
                 min_nodes_per_line: 0.0,
             },
+            &NonCodeLines::default(),
         );
 
         assert_eq!(
@@ -308,6 +319,7 @@ mod tests {
                 min_nodes: 0,
                 min_nodes_per_line: 0.0,
             },
+            &NonCodeLines::default(),
         );
 
         // `[1..=2]` spans two lines and is cut; every surviving window
@@ -340,6 +352,7 @@ mod tests {
                 min_nodes: 0,
                 min_nodes_per_line: 0.0,
             },
+            &NonCodeLines::default(),
         );
 
         assert_eq!(spans(&windows), vec![(1, 4)]);
@@ -360,6 +373,7 @@ mod tests {
                 min_nodes_per_line: 0.0,
                 ..BlockWindowOptions::default()
             },
+            &NonCodeLines::default(),
         );
         assert_eq!(windows.len(), expected);
     }
@@ -399,8 +413,11 @@ mod tests {
             min_nodes_per_line: 0.0,
         };
 
-        assert!(block_windows(&[leafy], opts).is_empty());
-        assert_eq!(block_windows(&[real], opts).len(), 1);
+        assert!(block_windows(&[leafy], opts, &NonCodeLines::default()).is_empty());
+        assert_eq!(
+            block_windows(&[real], opts, &NonCodeLines::default()).len(),
+            1
+        );
     }
 
     /// The node floor is absolute, so a long window clears it on a
@@ -439,6 +456,7 @@ mod tests {
                 min_nodes: MIN_WINDOW_TREE_NODES,
                 min_nodes_per_line: MIN_WINDOW_NODES_PER_LINE,
             },
+            &NonCodeLines::default(),
         );
 
         assert_eq!(
@@ -452,6 +470,34 @@ mod tests {
                 .count(),
             expected,
         );
+    }
+
+    /// Comments never reach the tree, so a well-commented window must
+    /// not be charged for them: the same twelve-node statement over ten
+    /// lines fails the density floor until five of those lines are known
+    /// to be comments.
+    #[rstest]
+    #[case::all_lines_counted(NonCodeLines::default(), 0)]
+    #[case::comment_lines_excluded(
+        NonCodeLines::scan(&"x\n// c\n".repeat(5), crate::CommentSyntax::Rust),
+        1
+    )]
+    fn density_floor_counts_only_code_lines(
+        #[case] non_code: NonCodeLines,
+        #[case] expected: usize,
+    ) {
+        let children = (0..11).map(|_| TreeNode::leaf("Arg")).collect();
+        let commented = seq(vec![StatementUnit {
+            start_line: 1,
+            end_line: 10,
+            tree: TreeNode::with_children("Call", "", children),
+        }]);
+        let opts = BlockWindowOptions {
+            min_lines: 1,
+            ..BlockWindowOptions::default()
+        };
+
+        assert_eq!(block_windows(&[commented], opts, &non_code).len(), expected);
     }
 
     /// The density floor is a second cut, not a replacement: a window
@@ -470,7 +516,14 @@ mod tests {
             ),
         }]);
 
-        assert!(block_windows(&[dense_but_tiny], BlockWindowOptions::default()).is_empty());
+        assert!(
+            block_windows(
+                &[dense_but_tiny],
+                BlockWindowOptions::default(),
+                &NonCodeLines::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -484,6 +537,7 @@ mod tests {
                 min_nodes: 0,
                 min_nodes_per_line: 0.0,
             },
+            &NonCodeLines::default(),
         );
 
         assert_eq!(windows.len(), 1);
@@ -513,6 +567,7 @@ mod tests {
                 min_nodes_per_line: 0.0,
                 ..BlockWindowOptions::default()
             },
+            &NonCodeLines::default(),
         );
         let shape = windows
             .into_iter()
@@ -565,7 +620,7 @@ mod tests {
                     max_statements,
                     min_nodes: 0,
                     min_nodes_per_line: 0.0,
-                },
+                }, &NonCodeLines::default(),
             );
             let starts: HashSet<usize> = s.statements.iter().map(|st| st.start_line).collect();
             let ends: HashSet<usize> = s.statements.iter().map(|st| st.end_line).collect();
@@ -592,7 +647,7 @@ mod tests {
                     max_statements,
                     min_nodes: 0,
                     min_nodes_per_line: 0.0,
-                },
+                }, &NonCodeLines::default(),
             );
             prop_assert!(windows.len() <= s.statements.len() * max_statements);
         }

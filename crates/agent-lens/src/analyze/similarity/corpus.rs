@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use lens_domain::{BlockWindowOptions, FunctionShape, SignatureShape, TreeNode, block_windows};
+use lens_domain::{
+    BlockWindowOptions, CommentSyntax, FunctionShape, NonCodeLines, SignatureShape, TreeNode,
+    block_windows,
+};
 use tracing::debug;
 
 use super::FunctionSelection;
@@ -189,6 +192,7 @@ fn collect_file(
                     min_lines,
                     ..BlockWindowOptions::default()
                 },
+                &NonCodeLines::scan(&source, comment_syntax(lang)),
             )
             .into_iter()
             .map(|window| OwnedUnit {
@@ -213,4 +217,13 @@ fn collect_file(
         "similarity source parsed"
     );
     Ok(out)
+}
+
+/// The comment syntax [`NonCodeLines::scan`] reads `lang` with.
+fn comment_syntax(lang: SourceLang) -> CommentSyntax {
+    match lang {
+        SourceLang::Rust => CommentSyntax::Rust,
+        SourceLang::TypeScript(_) | SourceLang::Go => CommentSyntax::CLike,
+        SourceLang::Python => CommentSyntax::Python,
+    }
 }
