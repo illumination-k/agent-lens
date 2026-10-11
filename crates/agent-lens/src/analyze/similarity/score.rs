@@ -10,6 +10,12 @@ use rayon::prelude::*;
 
 use super::candidates::TreeProfile;
 use super::corpus::OwnedUnit;
+use super::options::SimilarityTarget;
+
+/// How much of a function/type score comes from the body, and how much
+/// from the signature. Blocks have no signature; see [`SimilarityTarget::weights`].
+pub(super) const BODY_SIMILARITY_WEIGHT: f64 = 0.8;
+pub(super) const SIGNATURE_SIMILARITY_WEIGHT: f64 = 0.2;
 
 /// Relative weight of the body and signature components in a pair's
 /// combined score. Always sums to 1.
@@ -17,6 +23,28 @@ use super::corpus::OwnedUnit;
 pub(super) struct ScoreWeights {
     pub(super) body: f64,
     pub(super) signature: f64,
+}
+
+impl SimilarityTarget {
+    /// How the body and signature scores are blended for this target.
+    ///
+    /// A block has no signature to compare, and treating "no signature
+    /// on either side" as a perfect match would floor every block pair
+    /// at [`SIGNATURE_SIMILARITY_WEIGHT`] and make `--threshold` mean
+    /// something different from what it means everywhere else. Blocks
+    /// therefore score on the body alone.
+    pub(super) fn weights(self) -> ScoreWeights {
+        match self {
+            Self::Functions | Self::Types => ScoreWeights {
+                body: BODY_SIMILARITY_WEIGHT,
+                signature: SIGNATURE_SIMILARITY_WEIGHT,
+            },
+            Self::Blocks => ScoreWeights {
+                body: 1.0,
+                signature: 0.0,
+            },
+        }
+    }
 }
 
 impl ScoreWeights {

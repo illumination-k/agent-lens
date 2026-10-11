@@ -19,8 +19,8 @@ use agent_lens::baseline::{
 use tracing::{info, warn};
 
 use super::args::{BaselineCommand, BaselineCompareArgs, BaselineCreateArgs};
+use super::output::write_stdout_line;
 use super::profile::ResolvedProfile;
-use super::write_stdout_line;
 
 pub(super) fn run_baseline(cmd: BaselineCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match cmd {

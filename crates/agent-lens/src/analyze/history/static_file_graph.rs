@@ -9,9 +9,9 @@
 //! Nothing here extracts anything. Both inputs already exist and are
 //! only re-keyed:
 //!
-//! * the [`CallGraph`](crate::analyze::call_graph::CallGraph)'s **resolved** call
+//! * the [`CallGraph`]'s **resolved** call
 //!   edges, rolled up from `caller → callee` to `file → file`, and
-//! * the [`ModuleGraph`](crate::analyze::module_graph::ModuleGraph)'s `use` /
+//! * the [`ModuleGraph`]'s `use` /
 //!   `import` edges, rolled up from module to the file each module was
 //!   read from.
 //!
@@ -24,7 +24,7 @@
 //! "no static path" verdict is reported as the upper bound it is.
 //!
 //! Every path is keyed repo-root-relative, the space
-//! [`ChurnScope`](super::churn::ChurnScope) puts git's paths in, so a
+//! [`ChurnScope`] puts git's paths in, so a
 //! static verdict joins against a co-change row by key lookup.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};

@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use super::analyze::build_analyze_command;
 use super::args::{ProfileSelectorArgs, RunArgs};
-use super::write_stdout_line;
+use super::output::write_stdout_line;
 
 /// A named profile, ready to run: the profile itself plus its target
 /// paths already resolved against the config's directory.

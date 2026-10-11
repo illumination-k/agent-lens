@@ -22,6 +22,7 @@ mod args;
 mod baseline;
 mod examples;
 mod hooks;
+mod output;
 mod profile;
 mod setup;
 
@@ -36,6 +37,7 @@ use hooks::{
     run_cwd_changed, run_post_tool_use, run_pre_tool_use, run_session_start, run_stop,
     run_subagent_stop,
 };
+use output::{write_stdout_json, write_stdout_line};
 use profile::run_profile;
 use setup::{run_codex_hook_setup, run_hook_setup};
 
@@ -184,24 +186,6 @@ fn run_skills_install(args: SkillsInstallArgs) -> Result<(), Box<dyn std::error:
     };
 
     write_stdout_json(&plan.summary(wrote))
-}
-
-fn write_stdout_line(report: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    stdout.write_all(report.as_bytes())?;
-    if !report.ends_with('\n') {
-        stdout.write_all(b"\n")?;
-    }
-    Ok(())
-}
-
-fn write_stdout_json<T: serde::Serialize>(value: &T) -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    serde_json::to_writer(&mut stdout, value)?;
-    stdout.write_all(b"\n")?;
-    Ok(())
 }
 
 #[cfg(test)]

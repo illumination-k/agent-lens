@@ -18,7 +18,14 @@ use std::path::Path;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
-use super::FileReport;
+/// Per-file slice of the report. Owns the display path so directory mode
+/// can attach a path relative to the walk root without storing the original
+/// `PathBuf`.
+#[derive(Debug)]
+pub(super) struct FileReport {
+    pub file: String,
+    pub functions: Vec<FunctionComplexity>,
+}
 
 /// Aggregate figures for one file or one directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -17,7 +17,7 @@ use agent_lens::hooks::setup_engine::{
 use tracing::info;
 
 use super::args::{CodexSetupArgs, SetupArgs};
-use super::write_stdout_json;
+use super::output::write_stdout_json;
 
 pub(super) fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;

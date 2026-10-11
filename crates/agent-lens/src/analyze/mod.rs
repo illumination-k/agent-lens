@@ -98,8 +98,8 @@ pub use similarity::{
     DEFAULT_DRIFT_FLOOR as DEFAULT_SIMILARITY_DRIFT_FLOOR,
     DEFAULT_MIN_LINES as DEFAULT_SIMILARITY_MIN_LINES,
     DEFAULT_THRESHOLD as DEFAULT_SIMILARITY_THRESHOLD,
-    DEFAULT_TYPE_MIN_LINES as DEFAULT_SIMILARITY_TYPE_MIN_LINES, FunctionSelection, PairKey,
-    SimilarityAnalyzer, SimilarityMethod, SimilarityTarget,
+    DEFAULT_TYPE_MIN_LINES as DEFAULT_SIMILARITY_TYPE_MIN_LINES, PairKey, SimilarityAnalyzer,
+    SimilarityMethod, SimilarityTarget,
 };
 pub use single_impl::SingleImplAnalyzer;
 pub use single_use::SingleUseAnalyzer;
@@ -119,7 +119,7 @@ pub use diff::{
 pub(crate) use format::format_optional_f64;
 pub use path_filter::{AnalyzePathFilter, CompiledPathFilter, PathFilterError};
 pub use roots::AnalyzeRoots;
-pub use source_files::read_source;
+pub use source_files::{FunctionSelection, read_source};
 pub(crate) use source_files::{SourceFile, collect_source_files, scan_files_par};
 
 /// Output format shared across analyzers.
