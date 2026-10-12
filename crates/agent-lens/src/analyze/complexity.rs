@@ -19,12 +19,12 @@ use std::fmt::Write as _;
 use lens_domain::FunctionComplexity;
 use serde::Serialize;
 
-use self::rollup::Rollup;
+use self::rollup::{FileReport, Rollup};
+use super::FunctionSelection;
 use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
 };
-use super::similarity::FunctionSelection;
 use super::{
     AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, format_optional_f64, read_source,
 };
@@ -141,15 +141,6 @@ impl ComplexityAnalyzer {
             functions,
         }))
     }
-}
-
-/// Per-file slice of the report. Owns the display path so directory mode
-/// can attach a path relative to the walk root without storing the original
-/// `PathBuf`.
-#[derive(Debug)]
-struct FileReport {
-    file: String,
-    functions: Vec<FunctionComplexity>,
 }
 
 /// Names complexity's two report fields for the shared per-file report.

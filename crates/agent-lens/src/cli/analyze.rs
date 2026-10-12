@@ -22,7 +22,7 @@ use super::args::{
     AnalyzeReachArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
     AnalyzeTestRedundancyArgs,
 };
-use super::write_stdout_line;
+use super::output::write_stdout_line;
 
 pub(super) fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error::Error>> {
     // Even a single tool repeats work against itself: a diff-gated run

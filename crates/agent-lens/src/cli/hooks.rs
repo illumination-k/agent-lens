@@ -55,7 +55,7 @@ use super::args::{
     CodexPostToolUseCommand, CodexPreToolUseCommand, CodexSessionStartCommand, CwdChangedCommand,
     PostToolUseCommand, PreToolUseCommand, SessionStartCommand, StopCommand,
 };
-use super::write_stdout_json;
+use super::output::write_stdout_json;
 
 pub(super) fn run_session_start(
     cmd: SessionStartCommand,

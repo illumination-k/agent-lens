@@ -9,9 +9,9 @@
 //! Nothing here extracts anything. Both inputs already exist and are
 //! only re-keyed:
 //!
-//! * the [`CallGraph`](super::call_graph::CallGraph)'s **resolved** call
+//! * the [`CallGraph`]'s **resolved** call
 //!   edges, rolled up from `caller → callee` to `file → file`, and
-//! * the [`ModuleGraph`](super::module_graph::ModuleGraph)'s `use` /
+//! * the [`ModuleGraph`]'s `use` /
 //!   `import` edges, rolled up from module to the file each module was
 //!   read from.
 //!
@@ -24,7 +24,7 @@
 //! "no static path" verdict is reported as the upper bound it is.
 //!
 //! Every path is keyed repo-root-relative, the space
-//! [`ChurnScope`](super::churn::ChurnScope) puts git's paths in, so a
+//! [`ChurnScope`] puts git's paths in, so a
 //! static verdict joins against a co-change row by key lookup.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -33,12 +33,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tracing::debug;
 
-use super::call_graph::CallGraph;
-use super::call_graph::model::Resolution;
-use super::cargo_meta::CrateNameCache;
 use super::churn::ChurnScope;
-use super::module_graph::{GraphPolicy, ModuleGraph, build_graph};
-use super::path_filter::AnalyzePathFilter;
+use crate::analyze::call_graph::CallGraph;
+use crate::analyze::call_graph::model::Resolution;
+use crate::analyze::cargo_meta::CrateNameCache;
+use crate::analyze::module_graph::{GraphPolicy, ModuleGraph, build_graph};
+use crate::analyze::path_filter::AnalyzePathFilter;
 
 /// Which of the two projections put an edge in the graph.
 ///

@@ -52,9 +52,9 @@ use lens_domain::search::{
 };
 use serde::Serialize;
 
+use super::FunctionSelection;
 use super::call_graph::{CallGraphBuilder, delegate_call_graph_builders};
 use super::runner::render_report;
-use super::similarity::FunctionSelection;
 use super::{
     AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, collect_source_files, read_source,
     scan_files_par,

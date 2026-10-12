@@ -12,37 +12,8 @@ use std::collections::HashMap;
 
 use lens_domain::identifier_tokens;
 
-use super::OwnedUnit;
-
-/// How two functions are decided to be siblings — i.e. parallel
-/// implementations that ought to stay in sync.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PairKey {
-    /// Owner-qualified name, normalized: `Summary::from` and
-    /// `JsSummary::from` share the key `summary::from` because case and
-    /// separator conventions are folded away and binding affixes
-    /// (`Js`, `Py`, `Wasm`, `Napi`, `Node`, `Ts`) are stripped from the
-    /// owner. The tight key: few, mostly meaningful matches.
-    #[default]
-    #[value(alias = "name")]
-    #[serde(alias = "name")]
-    Qualified,
-    /// The method segment alone, normalized: every `::from` in the tree
-    /// keys as `from`. The loose key — it finds siblings whose owning
-    /// types were renamed past recognition, at the cost of grouping
-    /// unrelated functions that merely share a common method name.
-    Method,
-}
-
-impl PairKey {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Qualified => "qualified",
-            Self::Method => "method",
-        }
-    }
-}
+use super::corpus::OwnedUnit;
+use super::options::PairKey;
 
 /// Language-binding affixes stripped from an owner segment before it
 /// becomes part of a [`PairKey::Qualified`] key. These are the prefixes

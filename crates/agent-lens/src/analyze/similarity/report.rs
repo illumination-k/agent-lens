@@ -4,7 +4,9 @@ use std::fmt::Write as _;
 use lens_domain::SimilarCluster;
 use serde::Serialize;
 
-use super::{OwnedUnit, SimilarityComponents, SimilarityTarget, sorted_pair_key};
+use super::corpus::OwnedUnit;
+use super::options::SimilarityTarget;
+use super::score::{SimilarityComponents, sorted_pair_key};
 use crate::analyze::AnalyzeRoots;
 
 /// Longest representative snippet rendered for a block cluster. Long

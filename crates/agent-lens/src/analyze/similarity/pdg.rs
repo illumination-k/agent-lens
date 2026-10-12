@@ -13,7 +13,7 @@
 
 use lens_domain::{DependenceVocabulary, PdgFeatures, PdgOptions, build_pdg};
 
-use super::OwnedUnit;
+use super::corpus::OwnedUnit;
 use crate::analyze::SourceLang;
 
 /// Kernel features of one unit's dependence graph, precomputed once so

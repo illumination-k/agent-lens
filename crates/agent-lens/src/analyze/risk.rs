@@ -50,9 +50,9 @@ use serde::Serialize;
 
 use super::call_graph::model::{CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::churn::ChurnScope;
-use super::error_from::impl_from_churn_error;
 use super::format::render_module_confidence;
+use super::history::churn::ChurnScope;
+use super::history::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};

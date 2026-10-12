@@ -6,6 +6,41 @@ use rayon::prelude::*;
 use super::index::{AnalysisIndex, with_installed};
 use super::{AnalyzeRoots, AnalyzerError, CompiledPathFilter, SourceLang};
 
+/// Which functions an analyzer admits by their own test-ness, on top of
+/// the path-level test filter that decides which files are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FunctionSelection {
+    #[default]
+    All,
+    ExcludeTests,
+    OnlyTests,
+}
+
+impl FunctionSelection {
+    /// Build a selection from the same `(only_tests, exclude_tests)`
+    /// CLI args that drive the path-level filter. The CLI is the
+    /// canonical caller — passing both flags from one place lets path
+    /// and function-level test filtering stay in lock-step without the
+    /// analyzer having to read them back from the path filter.
+    pub fn from_args(only_tests: bool, exclude_tests: bool) -> Self {
+        if only_tests {
+            Self::OnlyTests
+        } else if exclude_tests {
+            Self::ExcludeTests
+        } else {
+            Self::All
+        }
+    }
+
+    pub(crate) fn includes(self, is_test: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::ExcludeTests => !is_test,
+            Self::OnlyTests => is_test,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SourceFile {
     pub path: PathBuf,

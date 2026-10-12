@@ -30,7 +30,7 @@ use std::process::{Command, Output};
 use lens_domain::{CommitChanges, CommitFiles, FileChange, FileChurn};
 use tracing::debug;
 
-use super::{AnalyzeRoots, CompiledPathFilter, DiffScope};
+use crate::analyze::{AnalyzeRoots, CompiledPathFilter, DiffScope};
 
 /// Failures raised while asking git for churn.
 ///
@@ -149,7 +149,7 @@ impl ChurnScope {
     pub(crate) fn collect(&self, since: Option<&str>) -> Result<Vec<FileChurn>, ChurnError> {
         // `hotspot` and `risk` read the same `git log`; under an active
         // analysis index a profile run walks history once.
-        match super::index::AnalysisIndex::active() {
+        match crate::analyze::index::AnalysisIndex::active() {
             Some(index) => index
                 .churn(
                     (
@@ -487,7 +487,7 @@ impl ChurnScope {
     }
 
     /// Repo-root-relative key for a *base*-relative display path — the
-    /// path space [`super::SourceFile::display_path`] and therefore every
+    /// path space [`crate::analyze::SourceFile::display_path`] and therefore every
     /// call-graph node id lives in.
     ///
     /// This is the join fix: prefixing with the display base's own offset

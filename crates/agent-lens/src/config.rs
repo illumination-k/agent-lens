@@ -48,6 +48,14 @@ use serde::Deserialize;
 
 use crate::analyze::OutputFormat;
 
+pub use crate::analyze::cohesion::CohesionOptions;
+pub use crate::analyze::communities::CommunitiesOptions;
+pub use crate::analyze::complexity::ComplexityOptions;
+pub use crate::analyze::context_span::ContextSpanOptions;
+pub use crate::analyze::coupling::CouplingOptions;
+pub use crate::analyze::footprint::FootprintOptions;
+pub use crate::analyze::forwarding::ForwardingOptions;
+pub use crate::analyze::graph_query::GraphQueryOptions;
 /// Per-tool option tables.
 ///
 /// Each analyzer owns its own, next to the builder that consumes it (see
@@ -57,22 +65,14 @@ use crate::analyze::OutputFormat;
 /// them — the keys here cannot drift from the flags they mirror because
 /// they are the flags. They are re-exported so the config surface still
 /// reads as one module.
-pub use crate::analyze::change_entropy::ChangeEntropyOptions;
-pub use crate::analyze::co_change::CoChangeOptions;
-pub use crate::analyze::cohesion::CohesionOptions;
-pub use crate::analyze::communities::CommunitiesOptions;
-pub use crate::analyze::complexity::ComplexityOptions;
-pub use crate::analyze::context_span::ContextSpanOptions;
-pub use crate::analyze::coupling::CouplingOptions;
-pub use crate::analyze::footprint::FootprintOptions;
-pub use crate::analyze::forwarding::ForwardingOptions;
-pub use crate::analyze::graph_query::GraphQueryOptions;
+pub use crate::analyze::history::change_entropy::ChangeEntropyOptions;
+pub use crate::analyze::history::co_change::CoChangeOptions;
+pub use crate::analyze::history::ownership::OwnershipOptions;
 pub use crate::analyze::hotspot::HotspotOptions;
 pub use crate::analyze::hubs::HubsOptions;
 pub use crate::analyze::impact::ImpactOptions;
 pub use crate::analyze::layers::LayersOptions;
 pub use crate::analyze::narrowable::NarrowableOptions;
-pub use crate::analyze::ownership::OwnershipOptions;
 pub use crate::analyze::reach::ReachOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;

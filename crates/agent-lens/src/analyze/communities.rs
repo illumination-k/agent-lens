@@ -17,7 +17,7 @@
 //! * **misfiled members** — a file whose community is dominated by a
 //!   different declared module, kept only when it has more edge weight
 //!   to that module than to the one it is filed under. That is the
-//!   concrete move candidate: "`analyze/churn.rs` is filed under
+//!   concrete move candidate: "`analyze/hotspot.rs` is filed under
 //!   `analyze` but its dependency neighbourhood is elsewhere".
 //! * **spanning communities** — a cluster spread over several declared
 //!   modules with none of them owning a majority: a feature that never
@@ -303,7 +303,7 @@ fn graph_input(
 /// package), so the fold is a no-op there.
 ///
 /// **A file member is a container when another file member names it as
-/// its parent.** `crate::analyze` holds `crate::analyze::churn`, so it is
+/// its parent.** `crate::analyze` holds `crate::analyze::hotspot`, so it is
 /// the module those files are declared in — and it is declared in
 /// itself, because `analyze/mod.rs` *is* the `analyze` module. A file
 /// that holds nothing is declared in its parent.

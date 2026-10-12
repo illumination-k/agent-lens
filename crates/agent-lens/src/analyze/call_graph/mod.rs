@@ -330,6 +330,9 @@ impl CallGraphBuilder {
                 ts_resolver.as_ref(),
             )
         })?;
+        let files = attach_macro_generated_methods(files, |f, path_is_test| {
+            self.includes_function(f, path_is_test)
+        });
         Ok(CallGraph::build(files, self.argument_facts))
     }
 
@@ -413,6 +416,9 @@ impl CallGraphBuilder {
             .then(|| extract_interfaces(lang, &source, &module))
             .transpose()?
             .unwrap_or_default();
+        let macro_facts = matches!(lang, SourceLang::Rust)
+            .then(|| extract_macro_facts(lang, &source, &module))
+            .transpose()?;
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -425,6 +431,7 @@ impl CallGraphBuilder {
             complexity,
             wrappers,
             interfaces,
+            macro_facts,
         })
     }
 
@@ -586,6 +593,86 @@ fn extract_call_shapes_uncached(
     }
 }
 
+/// `macro_rules!` templates and `impl`-item macro invocations for one
+/// Rust file.
+fn extract_macro_facts(
+    lang: SourceLang,
+    source: &str,
+    module: &str,
+) -> Result<Arc<lens_rust::MacroFacts>, AnalyzerError> {
+    let extract = || lens_rust::extract_macro_facts_with_module(source, module).map_err(parse_err);
+    match AnalysisIndex::active() {
+        Some(index) => index.macro_facts(SourceKey::new(lang, source), module, extract),
+        None => extract().map(Arc::new),
+    }
+}
+
+/// Give every file the methods its `impl` blocks gain through a macro
+/// invocation, so a call to one lands on its own node instead of being
+/// handed by name to a same-named method of another type.
+///
+/// The names come from the invocation's own `fn <name>` tokens and from
+/// every workspace `macro_rules!` of the invoked name whose transcriber
+/// writes `fn <name>` out (see [`lens_rust::ImplMacroCall`]). Templates
+/// are joined by macro name alone, since the graph does not resolve macro
+/// paths; two macros sharing a name contribute the union of their
+/// methods. A generated name that the file already defines for the same
+/// owner is skipped.
+fn attach_macro_generated_methods(
+    mut files: Vec<FileGraphInput>,
+    includes: impl Fn(&FunctionShape, bool) -> bool,
+) -> Vec<FileGraphInput> {
+    let mut templates: HashMap<&str, Vec<String>> = HashMap::new();
+    for facts in files.iter().filter_map(|file| file.macro_facts.as_deref()) {
+        for template in &facts.templates {
+            templates
+                .entry(template.name.as_str())
+                .or_default()
+                .extend(template.generated_fns.iter().cloned());
+        }
+    }
+    let generated: Vec<Vec<FunctionShape>> = files
+        .iter()
+        .map(|file| {
+            let Some(facts) = file.macro_facts.as_deref() else {
+                return Vec::new();
+            };
+            let defined: HashSet<&str> = file
+                .functions
+                .iter()
+                .filter_map(|f| f.qualified_name.known_value().map(String::as_str))
+                .collect();
+            facts
+                .impl_calls
+                .iter()
+                .flat_map(|call| {
+                    let template_fns = templates
+                        .get(call.macro_name.as_str())
+                        .map_or(&[][..], Vec::as_slice);
+                    call.generated_function_shapes(template_fns)
+                })
+                .filter(|shape| {
+                    shape
+                        .qualified_name
+                        .known_value()
+                        .is_none_or(|name| !defined.contains(name.as_str()))
+                })
+                .collect()
+        })
+        .collect();
+    for (file, shapes) in files.iter_mut().zip(generated) {
+        if shapes.is_empty() {
+            continue;
+        }
+        file.included
+            .extend(shapes.iter().map(|f| includes(f, file.path_is_test)));
+        let mut functions = file.functions.as_ref().clone();
+        functions.extend(shapes);
+        file.functions = Arc::new(functions);
+    }
+    files
+}
+
 /// Interface method sets for one (Go) file. Only collected when the
 /// builder was asked for interface facts.
 fn extract_interfaces(
@@ -633,6 +720,9 @@ pub(crate) struct FileGraphInput {
     /// Interface declarations in this file. Empty unless interface
     /// facts were requested (and the language extracts them).
     pub(crate) interfaces: Arc<Vec<InterfaceShape>>,
+    /// `macro_rules!` templates and `impl`-item macro invocations (Rust
+    /// only), joined across files by [`attach_macro_generated_methods`].
+    pub(crate) macro_facts: Option<Arc<lens_rust::MacroFacts>>,
 }
 
 impl SourceLang {
@@ -1310,6 +1400,86 @@ mod tests {
             target.is_some_and(|t| t.ends_with(&expected_suffix)),
             "{context}: expected a target ending in {expected_suffix}, got {target:?}"
         );
+    }
+
+    /// A method an `impl` gains through a macro is a node of its own,
+    /// whether the invocation spells the name (`with_setter!`) or the
+    /// macro's transcriber does, in another file
+    /// (`delegate_filter!`). Without it a call has nowhere to land but
+    /// the one same-named method `syn` can see — `Other::with_method`,
+    /// in another module — which fabricates a cross-module edge.
+    #[test]
+    fn macro_generated_methods_become_nodes_and_take_their_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "mod setters;\nmod analyzer;\nmod other;\n",
+        );
+        write_file(
+            dir.path(),
+            "src/setters.rs",
+            "macro_rules! delegate_filter {\n\
+             \x20   ($f:ident) => {\n\
+             \x20       pub fn with_only_tests(mut self, on: bool) -> Self { self.$f = on; self }\n\
+             \x20   };\n\
+             }\n\
+             pub(crate) use delegate_filter;\n",
+        );
+        write_file(
+            dir.path(),
+            "src/analyzer.rs",
+            "pub struct Analyzer { flag: bool, method: u8 }\n\
+             macro_rules! with_setter {\n\
+             \x20   (fn $name:ident, $field:ident: $ty:ty) => {\n\
+             \x20       pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }\n\
+             \x20   };\n\
+             }\n\
+             impl Analyzer {\n\
+             \x20   with_setter! { fn with_method, method: u8 }\n\
+             \x20   crate::setters::delegate_filter!(flag);\n\
+             \x20   pub fn configure(self) -> Self { self.with_method(1) }\n\
+             \x20   pub fn tests_only(self) -> Self { self.with_only_tests(true) }\n\
+             }\n\
+             pub fn chain(a: Analyzer) -> Analyzer { a.with_method(2) }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/other.rs",
+            "pub struct Other { method: u8 }\n\
+             impl Other { pub fn with_method(mut self, m: u8) -> Self { self.method = m; self } }\n",
+        );
+
+        let graph = CallGraphBuilder::new()
+            .build(&AnalyzeRoots::from(dir.path()))
+            .unwrap();
+
+        let generated: Vec<&str> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.file == "src/analyzer.rs" && n.impl_owner.as_deref() == Some("Analyzer"))
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(generated.contains(&"with_method"), "{generated:?}");
+        assert!(generated.contains(&"with_only_tests"), "{generated:?}");
+
+        let (resolution, target) = call_outcome(&graph, "configure", "with_method");
+        assert_eq!(resolution, Resolution::Resolved);
+        assert!(
+            target.is_some_and(|t| t.contains("Analyzer::with_method")),
+            "{target:?}"
+        );
+        let (resolution, target) = call_outcome(&graph, "tests_only", "with_only_tests");
+        assert_eq!(resolution, Resolution::Resolved);
+        assert!(
+            target.is_some_and(|t| t.contains("Analyzer::with_only_tests")),
+            "{target:?}"
+        );
+
+        // A receiver of unknown type now has two candidates instead of
+        // one wrong one.
+        let (resolution, target) = call_outcome(&graph, "chain", "with_method");
+        assert_eq!((resolution, target), (Resolution::Ambiguous, None));
     }
 
     /// End-to-end substrate check: build the graph from source, take

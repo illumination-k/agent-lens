@@ -8,7 +8,8 @@ use lens_domain::{
 };
 use rayon::prelude::*;
 
-use super::{OwnedUnit, SimilarityMethod};
+use super::corpus::OwnedUnit;
+use super::options::SimilarityMethod;
 
 #[derive(Debug)]
 pub(super) struct TreeProfile {

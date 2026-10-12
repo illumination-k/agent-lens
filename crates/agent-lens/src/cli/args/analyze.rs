@@ -2,8 +2,6 @@
 
 use std::path::PathBuf;
 
-use agent_lens::analyze::change_entropy::ChangeEntropyOptions;
-use agent_lens::analyze::co_change::CoChangeOptions;
 use agent_lens::analyze::cohesion::CohesionOptions;
 use agent_lens::analyze::communities::CommunitiesOptions;
 use agent_lens::analyze::complexity::ComplexityOptions;
@@ -12,12 +10,14 @@ use agent_lens::analyze::coupling::CouplingOptions;
 use agent_lens::analyze::footprint::FootprintOptions;
 use agent_lens::analyze::forwarding::ForwardingOptions;
 use agent_lens::analyze::graph_query::GraphQueryOptions;
+use agent_lens::analyze::history::change_entropy::ChangeEntropyOptions;
+use agent_lens::analyze::history::co_change::CoChangeOptions;
+use agent_lens::analyze::history::ownership::OwnershipOptions;
 use agent_lens::analyze::hotspot::HotspotOptions;
 use agent_lens::analyze::hubs::HubsOptions;
 use agent_lens::analyze::impact::ImpactOptions;
 use agent_lens::analyze::layers::LayersOptions;
 use agent_lens::analyze::narrowable::NarrowableOptions;
-use agent_lens::analyze::ownership::OwnershipOptions;
 use agent_lens::analyze::reach::ReachOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;

@@ -7,14 +7,16 @@ use lens_domain::{
 };
 use tracing::debug;
 
-use super::FunctionSelection;
-use super::PROFILE_TARGET;
-use super::SimilarityTarget;
 use super::extract::{extract_functions, extract_statement_seqs, extract_types};
+use super::options::SimilarityTarget;
+use crate::analyze::FunctionSelection;
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, SourceFile, SourceLang, collect_source_files,
     read_source, scan_files_par,
 };
+
+/// `tracing` target for the per-stage similarity timings.
+pub(super) const PROFILE_TARGET: &str = "agent_lens::similarity_profile";
 
 /// A single comparison unit plus the file it originated from. The corpus
 /// that drives pairwise similarity is a flat `Vec<OwnedUnit>` so

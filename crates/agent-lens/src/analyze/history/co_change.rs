@@ -45,7 +45,9 @@ use tracing::warn;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
-use super::{AnalyzePathFilter, AnalyzeRoots, CompiledPathFilter, OutputFormat, PathFilterError};
+use crate::analyze::{
+    AnalyzePathFilter, AnalyzeRoots, CompiledPathFilter, OutputFormat, PathFilterError,
+};
 
 /// What the numbers do and do not license, stated in the output because
 /// the gap between "these change together" and "these depend on each
