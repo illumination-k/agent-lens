@@ -100,19 +100,6 @@ pub struct SimilarityAnalyzer {
     drift_floor: f64,
 }
 
-/// Generate `pub fn $name(mut self, $field: $ty) -> Self { self.$field = $field; self }`,
-/// forwarding any `///` docs through `$attr`. Used to keep the family of
-/// `SimilarityAnalyzer::with_*` setters from drifting out of shape.
-macro_rules! with_setter {
-    ($(#[$attr:meta])* fn $name:ident, $field:ident: $ty:ty) => {
-        $(#[$attr])*
-        pub fn $name(mut self, $field: $ty) -> Self {
-            self.$field = $field;
-            self
-        }
-    };
-}
-
 impl SimilarityAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -132,10 +119,11 @@ impl SimilarityAnalyzer {
         }
     }
 
-    with_setter! {
-        /// Override the similarity threshold. Callers passing a non-default
-        /// value via `--threshold` go through here.
-        fn with_threshold, threshold: f64
+    /// Override the similarity threshold. Callers passing a non-default
+    /// value via `--threshold` go through here.
+    pub fn with_threshold(mut self, threshold: f64) -> Self {
+        self.threshold = threshold;
+        self
     }
 
     delegate_filter_builders!(filter);
@@ -161,13 +149,14 @@ impl SimilarityAnalyzer {
             .with_top(opts.top)
     }
 
-    with_setter! {
-        /// Function-level test filter. Path-level test filtering is set
-        /// independently via `with_only_tests` / `with_exclude_tests`;
-        /// the CLI keeps both in sync by deriving this value from the
-        /// same `(only_tests, exclude_tests)` args via
-        /// [`FunctionSelection::from_args`].
-        fn with_function_selection, selection: FunctionSelection
+    /// Function-level test filter. Path-level test filtering is set
+    /// independently via `with_only_tests` / `with_exclude_tests`;
+    /// the CLI keeps both in sync by deriving this value from the
+    /// same `(only_tests, exclude_tests)` args via
+    /// [`FunctionSelection::from_args`].
+    pub fn with_function_selection(mut self, selection: FunctionSelection) -> Self {
+        self.selection = selection;
+        self
     }
 
     /// Skip units shorter than this many source lines. `similarity-ts`
@@ -180,54 +169,61 @@ impl SimilarityAnalyzer {
         self
     }
 
-    with_setter! {
-        /// Cap the markdown report to the top-N clusters. JSON output
-        /// always carries the full list.
-        fn with_top, top: Option<usize>
+    /// Cap the markdown report to the top-N clusters. JSON output
+    /// always carries the full list.
+    pub fn with_top(mut self, top: Option<usize>) -> Self {
+        self.top = top;
+        self
     }
 
-    with_setter! {
-        /// Pick the body-scoring algorithm. Defaults to
-        /// [`SimilarityMethod::Tsed`]; [`SimilarityMethod::Token`] swaps
-        /// in the cheaper token k-gram score.
-        fn with_method, method: SimilarityMethod
+    /// Pick the body-scoring algorithm. Defaults to
+    /// [`SimilarityMethod::Tsed`]; [`SimilarityMethod::Token`] swaps
+    /// in the cheaper token k-gram score.
+    pub fn with_method(mut self, method: SimilarityMethod) -> Self {
+        self.method = method;
+        self
     }
 
-    with_setter! {
-        /// Weight token k-grams by corpus inverse document frequency
-        /// under [`SimilarityMethod::Token`].
-        fn with_idf, idf: bool
+    /// Weight token k-grams by corpus inverse document frequency
+    /// under [`SimilarityMethod::Token`].
+    pub fn with_idf(mut self, idf: bool) -> Self {
+        self.idf = idf;
+        self
     }
 
-    with_setter! {
-        /// Pick the comparison unit. Defaults to
-        /// [`SimilarityTarget::Functions`]; [`SimilarityTarget::Types`]
-        /// compares type definitions (struct/class/interface/enum/alias
-        /// member shapes) instead.
-        fn with_target, target: SimilarityTarget
+    /// Pick the comparison unit. Defaults to
+    /// [`SimilarityTarget::Functions`]; [`SimilarityTarget::Types`]
+    /// compares type definitions (struct/class/interface/enum/alias
+    /// member shapes) instead.
+    pub fn with_target(mut self, target: SimilarityTarget) -> Self {
+        self.target = target;
+        self
     }
 
-    with_setter! {
-        /// Surface the doc-comment overlap in the markdown report. It is
-        /// a diagnostic component that never feeds `similarity`, and the
-        /// JSON report always carries it per pair, so this only controls
-        /// whether markdown rolls it up per cluster.
-        fn with_doc_overlap, doc_overlap: bool
+    /// Surface the doc-comment overlap in the markdown report. It is
+    /// a diagnostic component that never feeds `similarity`, and the
+    /// JSON report always carries it per pair, so this only controls
+    /// whether markdown rolls it up per cluster.
+    pub fn with_doc_overlap(mut self, doc_overlap: bool) -> Self {
+        self.doc_overlap = doc_overlap;
+        self
     }
 
-    with_setter! {
-        /// Switch to name-anchored pairing: match functions by the given
-        /// [`PairKey`] first, score second, and report every matched pair
-        /// regardless of threshold. `None` (the default) keeps the
-        /// threshold-clustering report.
-        fn with_paired_by, paired_by: Option<PairKey>
+    /// Switch to name-anchored pairing: match functions by the given
+    /// [`PairKey`] first, score second, and report every matched pair
+    /// regardless of threshold. `None` (the default) keeps the
+    /// threshold-clustering report.
+    pub fn with_paired_by(mut self, paired_by: Option<PairKey>) -> Self {
+        self.paired_by = paired_by;
+        self
     }
 
-    with_setter! {
-        /// Drop name-matched pairs scoring below this from the
-        /// `--paired-by` report. Defaults to [`DEFAULT_DRIFT_FLOOR`];
-        /// `0.0` reports every match. Ignored outside paired mode.
-        fn with_drift_floor, drift_floor: f64
+    /// Drop name-matched pairs scoring below this from the
+    /// `--paired-by` report. Defaults to [`DEFAULT_DRIFT_FLOOR`];
+    /// `0.0` reports every match. Ignored outside paired mode.
+    pub fn with_drift_floor(mut self, drift_floor: f64) -> Self {
+        self.drift_floor = drift_floor;
+        self
     }
 
     /// Enable multi-threshold sweep mode. Pairs are scored and clustered
