@@ -274,6 +274,26 @@ macro_rules! builders {
         );
     }
 
+    /// Only `$( … )` repetitions are entered. Another group — the
+    /// arguments of a nested macro call here — is not item level of
+    /// this transcriber, so a `fn` inside it names nothing this macro
+    /// is known to write.
+    #[test]
+    fn template_skips_fn_inside_a_non_repetition_group() {
+        let src = r#"
+macro_rules! outer {
+    () => {
+        pub fn kept(self) -> Self { self }
+        inner!(fn hidden);
+    };
+}
+"#;
+        assert_eq!(
+            facts(src).templates[0].generated_fns,
+            vec!["kept".to_owned()]
+        );
+    }
+
     #[test]
     fn template_skips_fragment_names() {
         let src = r#"
