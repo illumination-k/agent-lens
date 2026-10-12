@@ -1937,6 +1937,7 @@ mod tests {
                 complexity: Arc::new(Vec::new()),
                 wrappers: None,
                 interfaces: Arc::new(Vec::new()),
+                macro_facts: None,
             }],
             true,
         );

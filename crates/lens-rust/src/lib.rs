@@ -16,6 +16,7 @@ mod common;
 mod complexity;
 mod coupling;
 mod dependence;
+mod macro_items;
 mod method_names;
 mod parser;
 #[cfg(test)]
@@ -35,6 +36,7 @@ pub use complexity::{ComplexityError, extract_complexity_units};
 pub use coupling::{CrateModule, build_module_tree, extract_edges};
 pub use dependence::RustVocabulary;
 pub use lens_domain::{CouplingError, WrapperFinding};
+pub use macro_items::{ImplMacroCall, MacroFacts, MacroTemplate, extract_macro_facts_with_module};
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
 pub use parser::{
     RustFunctionDef, RustParseError, RustParser, extract_function_shapes_with_module,

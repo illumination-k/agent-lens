@@ -73,6 +73,7 @@ pub struct AnalysisIndex {
     complexity_units: Table<SourceKey, Vec<FunctionComplexity>>,
     wrapper_findings: Table<SourceKey, Vec<WrapperFinding>>,
     interface_shapes: Table<(SourceKey, String), Vec<InterfaceShape>>,
+    macro_facts: Table<(SourceKey, String), lens_rust::MacroFacts>,
     /// Enclosing working-tree root per directory (`None`: outside any
     /// repository), so the batch diff resolves each directory once.
     repo_roots: Table<PathBuf, Option<PathBuf>>,
@@ -153,6 +154,15 @@ impl AnalysisIndex {
         compute: impl FnOnce() -> Result<Vec<InterfaceShape>, E>,
     ) -> Result<Arc<Vec<InterfaceShape>>, E> {
         self.memoize(&self.interface_shapes, (key, module.to_owned()), compute)
+    }
+
+    pub(crate) fn macro_facts<E>(
+        &self,
+        key: SourceKey,
+        module: &str,
+        compute: impl FnOnce() -> Result<lens_rust::MacroFacts, E>,
+    ) -> Result<Arc<lens_rust::MacroFacts>, E> {
+        self.memoize(&self.macro_facts, (key, module.to_owned()), compute)
     }
 
     pub(crate) fn repo_root(
@@ -484,8 +494,8 @@ mod tests {
             .unwrap();
         let (hits, misses) = scope.index().stats();
         assert_eq!(
-            hits, 3,
-            "function shapes, call shapes, and complexity come from the index"
+            hits, 4,
+            "function shapes, call shapes, complexity, and macro facts come from the index"
         );
         assert_eq!(
             misses - misses_before,
