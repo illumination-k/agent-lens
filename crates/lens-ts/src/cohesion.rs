@@ -41,7 +41,7 @@ use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 
-use crate::parser::{Dialect, TsParseError};
+use crate::parser::{Dialect, TsParseError, collect_binding_names};
 use crate::walk::FnBody;
 
 /// Failures produced while extracting cohesion units.
@@ -221,20 +221,12 @@ struct ThisRefVisitor {
     in_callee: bool,
 }
 
-impl<'a> Visit<'a> for ThisRefVisitor {
-    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        let prev = self.in_callee;
-        self.in_callee = true;
-        self.visit_expression(&it.callee);
-        self.in_callee = prev;
-        for arg in &it.arguments {
-            self.visit_argument(arg);
-        }
-    }
-
-    fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'a>) {
-        if matches!(&it.object, Expression::ThisExpression(_)) {
-            let name = it.property.name.to_string();
+impl<'a> ThisRefVisitor {
+    /// A `this.<name>` access records `name` as a call or a field; any
+    /// other object is walked with the callee flag cleared.
+    fn visit_member(&mut self, object: &Expression<'a>, name: impl FnOnce() -> String) {
+        if matches!(object, Expression::ThisExpression(_)) {
+            let name = name();
             if self.in_callee {
                 self.calls.push(name);
             } else {
@@ -247,24 +239,28 @@ impl<'a> Visit<'a> for ThisRefVisitor {
         }
         let prev = self.in_callee;
         self.in_callee = false;
-        self.visit_expression(&it.object);
+        self.visit_expression(object);
         self.in_callee = prev;
+    }
+}
+
+impl<'a> Visit<'a> for ThisRefVisitor {
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        let prev = self.in_callee;
+        self.in_callee = true;
+        self.visit_expression(&it.callee);
+        self.in_callee = prev;
+        for arg in &it.arguments {
+            self.visit_argument(arg);
+        }
+    }
+
+    fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'a>) {
+        self.visit_member(&it.object, || it.property.name.to_string());
     }
 
     fn visit_private_field_expression(&mut self, it: &PrivateFieldExpression<'a>) {
-        if matches!(&it.object, Expression::ThisExpression(_)) {
-            let name = format!("#{}", it.field.name);
-            if self.in_callee {
-                self.calls.push(name);
-            } else {
-                self.fields.push(name);
-            }
-            return;
-        }
-        let prev = self.in_callee;
-        self.in_callee = false;
-        self.visit_expression(&it.object);
-        self.in_callee = prev;
+        self.visit_member(&it.object, || format!("#{}", it.field.name));
     }
 }
 
@@ -468,37 +464,7 @@ fn push_var_field(decl: &VariableDeclarator, out: &mut HashSet<String>) {
     ) {
         return;
     }
-    collect_binding_pattern_names(&decl.id, out);
-}
-
-/// Pull every plain identifier out of a destructuring pattern. Object,
-/// array and rest patterns are unwound; computed / literal property
-/// keys are skipped because they don't introduce new bindings.
-fn collect_binding_pattern_names(pat: &BindingPattern, out: &mut HashSet<String>) {
-    match pat {
-        BindingPattern::BindingIdentifier(id) => {
-            out.insert(id.name.to_string());
-        }
-        BindingPattern::ObjectPattern(o) => {
-            for prop in &o.properties {
-                collect_binding_pattern_names(&prop.value, out);
-            }
-            if let Some(rest) = &o.rest {
-                collect_binding_pattern_names(&rest.argument, out);
-            }
-        }
-        BindingPattern::ArrayPattern(a) => {
-            for elem in a.elements.iter().flatten() {
-                collect_binding_pattern_names(elem, out);
-            }
-            if let Some(rest) = &a.rest {
-                collect_binding_pattern_names(&rest.argument, out);
-            }
-        }
-        BindingPattern::AssignmentPattern(a) => {
-            collect_binding_pattern_names(&a.left, out);
-        }
-    }
+    collect_binding_names(&decl.id, out);
 }
 
 fn module_function_cohesion(
@@ -535,10 +501,10 @@ fn module_function_cohesion(
 fn collect_local_names(params: &FormalParameters, body: FnBody<'_>) -> HashSet<String> {
     let mut locals = HashSet::new();
     for item in &params.items {
-        collect_binding_pattern_names(&item.pattern, &mut locals);
+        collect_binding_names(&item.pattern, &mut locals);
     }
     if let Some(rest) = &params.rest {
-        collect_binding_pattern_names(&rest.rest.argument, &mut locals);
+        collect_binding_names(&rest.rest.argument, &mut locals);
     }
     let mut walker = LocalNameWalker {
         locals: &mut locals,
@@ -608,7 +574,7 @@ impl LocalNameWalker<'_> {
         self.walk_statement_list(&stmt.block.body);
         if let Some(handler) = &stmt.handler {
             if let Some(param) = &handler.param {
-                collect_binding_pattern_names(&param.pattern, self.locals);
+                collect_binding_names(&param.pattern, self.locals);
             }
             self.walk_statement_list(&handler.body.body);
         }
@@ -625,7 +591,7 @@ impl LocalNameWalker<'_> {
 
     fn collect_var_declaration(&mut self, decl: &VariableDeclaration) {
         for declarator in &decl.declarations {
-            collect_binding_pattern_names(&declarator.id, self.locals);
+            collect_binding_names(&declarator.id, self.locals);
         }
     }
 

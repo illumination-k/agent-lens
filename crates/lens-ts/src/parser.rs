@@ -322,11 +322,12 @@ fn bare_name(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
 }
 
-/// Collect the binding identifiers introduced by a parameter pattern,
-/// unwinding object / array destructuring and defaults.
-fn collect_binding_names(pat: &BindingPattern, out: &mut Vec<String>) {
+/// Collect the binding identifiers a pattern introduces, unwinding
+/// object / array destructuring, rest elements and defaults. Computed /
+/// literal property keys are skipped: they bind nothing.
+pub(crate) fn collect_binding_names(pat: &BindingPattern, out: &mut impl Extend<String>) {
     match pat {
-        BindingPattern::BindingIdentifier(id) => out.push(id.name.to_string()),
+        BindingPattern::BindingIdentifier(id) => out.extend([id.name.to_string()]),
         BindingPattern::ObjectPattern(o) => {
             for prop in &o.properties {
                 collect_binding_names(&prop.value, out);
