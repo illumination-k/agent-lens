@@ -1009,6 +1009,19 @@ mod tests {
         assert!(out.contains("+1 more file(s) not shown"), "got {out}");
     }
 
+    /// `with_since_opt` sets the window from `Some` and leaves an
+    /// earlier `with_since` alone on `None`.
+    #[rstest]
+    #[case::set_by_option(OwnershipAnalyzer::new().with_since_opt(Some("2099-01-01".to_owned())))]
+    #[case::kept_on_none(OwnershipAnalyzer::new().with_since("2099-01-01").with_since_opt(None))]
+    fn a_future_window_matches_no_commits(#[case] analyzer: OwnershipAnalyzer) {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        commit_as(dir.path(), "Ann <ann@example.com>", "a", &["a.rs"]);
+        let out = analyzer.analyze(dir.path(), OutputFormat::Md).unwrap();
+        assert!(out.contains("_No commits matched._"), "got {out}");
+    }
+
     #[rstest]
     #[case::negative(-0.1)]
     #[case::above_one(1.5)]

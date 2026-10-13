@@ -1040,6 +1040,23 @@ function shadowed(): number {
         assert_eq!(u.components.len(), 2);
     }
 
+    /// Bindings inside every `try` clause, and the `catch` parameter,
+    /// shadow the module field just as a top-level local does.
+    #[rstest]
+    #[case::try_block("try { const counter = 99; return counter; } catch { return 0; }")]
+    #[case::catch_param("try { throw 1; } catch (counter) { return counter; }")]
+    #[case::catch_body("try { throw 1; } catch { const counter = 1; return counter; }")]
+    #[case::finally_body("try { } finally { const counter = 2; return counter; }")]
+    fn module_try_bindings_shadow_module_field(#[case] body: &str) {
+        let src = format!(
+            "let counter = 0;\n\
+             function readsModule(): number {{ return counter; }}\n\
+             function shadowed(): number {{ {body} }}\n"
+        );
+        let u = module_unit(&src);
+        assert_eq!(u.components.len(), 2);
+    }
+
     #[test]
     fn module_param_shadows_module_field() {
         // A parameter with the same name as a module field shadows it
