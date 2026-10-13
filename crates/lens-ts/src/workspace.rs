@@ -287,28 +287,36 @@ fn pnpm_packages(yaml: &str) -> Vec<String> {
         if content.trim().is_empty() {
             continue;
         }
-        let indented = content.starts_with([' ', '\t']);
-        if !indented {
-            in_packages = false;
-            if let Some(rest) = content.strip_prefix("packages:") {
-                let rest = rest.trim();
-                if let Some(flow) = rest.strip_prefix('[') {
-                    let flow = flow.trim_end_matches(']');
-                    out.extend(flow.split(',').map(unquote).filter(|p| !p.is_empty()));
-                } else {
-                    in_packages = true;
-                }
+        if content.starts_with([' ', '\t']) {
+            if in_packages {
+                out.extend(block_item(content));
             }
             continue;
         }
-        if in_packages && let Some(item) = content.trim().strip_prefix('-') {
-            let item = unquote(item);
-            if !item.is_empty() {
-                out.push(item);
-            }
+        in_packages = false;
+        let Some(rest) = content.strip_prefix("packages:") else {
+            continue;
+        };
+        match rest.trim().strip_prefix('[') {
+            Some(flow) => out.extend(flow_items(flow)),
+            None => in_packages = true,
         }
     }
     out
+}
+
+/// The entry of one indented block-sequence line (`  - "apps/*"`).
+fn block_item(content: &str) -> Option<String> {
+    let item = unquote(content.trim().strip_prefix('-')?);
+    (!item.is_empty()).then_some(item)
+}
+
+/// The entries of a flow sequence body (`apps/*, packages/*]`).
+fn flow_items(flow: &str) -> impl Iterator<Item = String> + '_ {
+    flow.trim_end_matches(']')
+        .split(',')
+        .map(unquote)
+        .filter(|p| !p.is_empty())
 }
 
 fn strip_yaml_comment(line: &str) -> &str {

@@ -9,6 +9,8 @@
 //! [`crate::coupling`]) risks stack overflow on deep call
 //! chains.
 
+use std::ops::ControlFlow;
+
 const UNVISITED: usize = usize::MAX;
 
 /// Strongly-connected-component condensation of a directed graph.
@@ -188,68 +190,25 @@ pub struct WeightedEdge {
 /// lowest vertex index — and advisory: a cheapest edge by weight can
 /// still be load-bearing in the design.
 pub fn greedy_feedback_arcs(node_count: usize, edges: &[WeightedEdge]) -> Vec<usize> {
-    let n = node_count;
-    let mut out_edges: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
-    let mut in_edges: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
-    let mut out_weight = vec![0isize; n];
-    let mut in_weight = vec![0isize; n];
-    for edge in edges {
-        if edge.from == edge.to {
-            continue;
-        }
-        out_edges[edge.from].push((edge.to, edge.weight));
-        in_edges[edge.to].push((edge.from, edge.weight));
-        out_weight[edge.from] += edge.weight as isize;
-        in_weight[edge.to] += edge.weight as isize;
-    }
-
-    let mut removed = vec![false; n];
-    let mut remaining = n;
+    let mut graph = PeelingGraph::new(node_count, edges);
     let mut front: Vec<usize> = Vec::new();
     let mut back: Vec<usize> = Vec::new();
-    let remove = |v: usize,
-                  removed: &mut Vec<bool>,
-                  out_weight: &mut Vec<isize>,
-                  in_weight: &mut Vec<isize>| {
-        removed[v] = true;
-        for &(to, w) in &out_edges[v] {
-            if !removed[to] {
-                in_weight[to] -= w as isize;
-            }
-        }
-        for &(from, w) in &in_edges[v] {
-            if !removed[from] {
-                out_weight[from] -= w as isize;
-            }
-        }
-    };
-
-    while remaining > 0 {
-        while let Some(v) = (0..n).find(|&v| !removed[v] && out_weight[v] == 0) {
-            remove(v, &mut removed, &mut out_weight, &mut in_weight);
-            remaining -= 1;
+    while graph.remaining > 0 {
+        while let Some(v) = graph.find_live(|g, v| g.out_weight[v] == 0) {
+            graph.remove(v);
             back.push(v);
         }
-        while let Some(v) = (0..n).find(|&v| !removed[v] && in_weight[v] == 0) {
-            remove(v, &mut removed, &mut out_weight, &mut in_weight);
-            remaining -= 1;
+        while let Some(v) = graph.find_live(|g, v| g.in_weight[v] == 0) {
+            graph.remove(v);
             front.push(v);
         }
-        if remaining > 0 {
-            // max_by_key keeps the last max on ties, so Reverse(v)
-            // makes the lowest vertex index win deterministically.
-            if let Some(v) = (0..n)
-                .filter(|&v| !removed[v])
-                .max_by_key(|&v| (out_weight[v] - in_weight[v], std::cmp::Reverse(v)))
-            {
-                remove(v, &mut removed, &mut out_weight, &mut in_weight);
-                remaining -= 1;
-                front.push(v);
-            }
+        if let Some(v) = graph.largest_delta() {
+            graph.remove(v);
+            front.push(v);
         }
     }
 
-    let mut position = vec![0usize; n];
+    let mut position = vec![0usize; node_count];
     for (pos, &v) in front.iter().chain(back.iter().rev()).enumerate() {
         position[v] = pos;
     }
@@ -259,6 +218,66 @@ pub fn greedy_feedback_arcs(node_count: usize, edges: &[WeightedEdge]) -> Vec<us
         .filter(|(_, e)| e.from != e.to && position[e.from] > position[e.to])
         .map(|(idx, _)| idx)
         .collect()
+}
+
+/// Weighted graph state peeled vertex by vertex in [`greedy_feedback_arcs`].
+struct PeelingGraph {
+    out_edges: Vec<Vec<(usize, usize)>>,
+    in_edges: Vec<Vec<(usize, usize)>>,
+    /// Out- and in-weight counted over edges to still-live vertices only.
+    out_weight: Vec<isize>,
+    in_weight: Vec<isize>,
+    removed: Vec<bool>,
+    remaining: usize,
+}
+
+impl PeelingGraph {
+    fn new(n: usize, edges: &[WeightedEdge]) -> Self {
+        let mut graph = Self {
+            out_edges: vec![Vec::new(); n],
+            in_edges: vec![Vec::new(); n],
+            out_weight: vec![0; n],
+            in_weight: vec![0; n],
+            removed: vec![false; n],
+            remaining: n,
+        };
+        for edge in edges.iter().filter(|e| e.from != e.to) {
+            graph.out_edges[edge.from].push((edge.to, edge.weight));
+            graph.in_edges[edge.to].push((edge.from, edge.weight));
+            graph.out_weight[edge.from] += edge.weight as isize;
+            graph.in_weight[edge.to] += edge.weight as isize;
+        }
+        graph
+    }
+
+    /// Lowest-index live vertex satisfying `pred`.
+    fn find_live(&self, pred: impl Fn(&Self, usize) -> bool) -> Option<usize> {
+        (0..self.removed.len()).find(|&v| !self.removed[v] && pred(self, v))
+    }
+
+    /// Live vertex with the largest `out_weight - in_weight`.
+    fn largest_delta(&self) -> Option<usize> {
+        // max_by_key keeps the last max on ties, so Reverse(v)
+        // makes the lowest vertex index win deterministically.
+        (0..self.removed.len())
+            .filter(|&v| !self.removed[v])
+            .max_by_key(|&v| (self.out_weight[v] - self.in_weight[v], std::cmp::Reverse(v)))
+    }
+
+    fn remove(&mut self, v: usize) {
+        self.removed[v] = true;
+        self.remaining -= 1;
+        for &(to, w) in &self.out_edges[v] {
+            if !self.removed[to] {
+                self.in_weight[to] -= w as isize;
+            }
+        }
+        for &(from, w) in &self.in_edges[v] {
+            if !self.removed[from] {
+                self.out_weight[from] -= w as isize;
+            }
+        }
+    }
 }
 
 /// One node reached by a breadth-first traversal.
@@ -345,31 +364,51 @@ pub fn shortest_path(
         if max_depth.is_some_and(|cap| depth >= cap) {
             return None;
         }
-        let mut next: Vec<usize> = Vec::new();
-        for &v in &level {
-            for &w in &adjacency[v] {
-                if parent[w] != UNVISITED {
-                    continue;
-                }
-                parent[w] = v;
-                if w == to {
-                    let mut chain = vec![to];
-                    let mut cursor = to;
-                    while cursor != from {
-                        cursor = parent[cursor];
-                        chain.push(cursor);
-                    }
-                    chain.reverse();
-                    return Some(chain);
-                }
-                next.push(w);
-            }
-        }
-        next.sort_unstable();
-        level = next;
+        level = match expand_toward(adjacency, &level, &mut parent, to) {
+            ControlFlow::Break(()) => return Some(trace_parents(&parent, from, to)),
+            ControlFlow::Continue(next) => next,
+        };
         depth += 1;
     }
     None
+}
+
+/// Claims every unvisited neighbor of `level` in `parent` and returns
+/// them sorted as the next level, or breaks as soon as `to` is claimed.
+fn expand_toward(
+    adjacency: &[Vec<usize>],
+    level: &[usize],
+    parent: &mut [usize],
+    to: usize,
+) -> ControlFlow<(), Vec<usize>> {
+    let mut next: Vec<usize> = Vec::new();
+    for &v in level {
+        for &w in &adjacency[v] {
+            if parent[w] != UNVISITED {
+                continue;
+            }
+            parent[w] = v;
+            if w == to {
+                return ControlFlow::Break(());
+            }
+            next.push(w);
+        }
+    }
+    next.sort_unstable();
+    ControlFlow::Continue(next)
+}
+
+/// Walks `parent` links back from `to` to `from` and returns the chain
+/// in forward order, both endpoints included.
+fn trace_parents(parent: &[usize], from: usize, to: usize) -> Vec<usize> {
+    let mut chain = vec![to];
+    let mut cursor = to;
+    while cursor != from {
+        cursor = parent[cursor];
+        chain.push(cursor);
+    }
+    chain.reverse();
+    chain
 }
 
 /// Weighted PageRank with a fixed iteration count.
@@ -451,9 +490,38 @@ pub fn transitive_caller_counts(
         return None;
     }
 
+    let ancestors = ancestor_bitsets(&condensation.edges);
+    let words = component_count.div_ceil(BITS);
+    let sizes: Vec<usize> = condensation.components.iter().map(Vec::len).collect();
+    let per_component: Vec<usize> = (0..component_count)
+        .map(|component| {
+            let base = component * words;
+            let callers_above = weighted_bit_sum(&ancestors[base..base + words], &sizes);
+            // Cycle members call each other, so they count — but a node
+            // is never its own caller.
+            callers_above + sizes[component] - 1
+        })
+        .collect();
+
+    Some(
+        condensation
+            .component_of
+            .iter()
+            .map(|&component| per_component[component])
+            .collect(),
+    )
+}
+
+/// Ancestor bitsets over a reverse-topologically ordered condensed DAG:
+/// `components.div_ceil(usize::BITS)` words per component, row-major,
+/// with bit `a` of row `c` set when component `a` transitively calls `c`.
+fn ancestor_bitsets(edges: &[Vec<usize>]) -> Vec<usize> {
+    const BITS: usize = usize::BITS as usize;
+
+    let component_count = edges.len();
     // `edges[c]` lists what `c` calls; ancestry needs the other direction.
     let mut callers: Vec<Vec<usize>> = vec![Vec::new(); component_count];
-    for (from, callees) in condensation.edges.iter().enumerate() {
+    for (from, callees) in edges.iter().enumerate() {
         for &to in callees {
             callers[to].push(from);
         }
@@ -478,41 +546,31 @@ pub fn transitive_caller_counts(
             below[base + caller / BITS] |= 1 << (caller % BITS);
         }
     }
+    ancestors
+}
 
-    let sizes: Vec<usize> = condensation.components.iter().map(Vec::len).collect();
-    let per_component: Vec<usize> = (0..component_count)
-        .map(|component| {
-            let base = component * words;
-            let mut callers_above = 0usize;
-            for (word_idx, &word) in ancestors[base..base + words].iter().enumerate() {
-                if word == 0 {
-                    continue;
-                }
-                // Scanning every bit position rather than clearing the
-                // lowest set bit (`bits &= bits - 1`): the clearing form
-                // is a loop whose termination depends on the very
-                // arithmetic being tested, so a mutant there hangs
-                // instead of failing. Whole-zero words are the common
-                // case and skip out above.
-                for bit in 0..BITS {
-                    if word & (1 << bit) != 0 {
-                        callers_above += sizes[word_idx * BITS + bit];
-                    }
-                }
+/// Sum of `weights[i]` over every bit `i` set in the `bitset` words.
+fn weighted_bit_sum(bitset: &[usize], weights: &[usize]) -> usize {
+    const BITS: usize = usize::BITS as usize;
+
+    let mut sum = 0usize;
+    for (word_idx, &word) in bitset.iter().enumerate() {
+        if word == 0 {
+            continue;
+        }
+        // Scanning every bit position rather than clearing the
+        // lowest set bit (`bits &= bits - 1`): the clearing form
+        // is a loop whose termination depends on the very
+        // arithmetic being tested, so a mutant there hangs
+        // instead of failing. Whole-zero words are the common
+        // case and skip out above.
+        for bit in 0..BITS {
+            if word & (1 << bit) != 0 {
+                sum += weights[word_idx * BITS + bit];
             }
-            // Cycle members call each other, so they count — but a node
-            // is never its own caller.
-            callers_above + sizes[component] - 1
-        })
-        .collect();
-
-    Some(
-        condensation
-            .component_of
-            .iter()
-            .map(|&component| per_component[component])
-            .collect(),
-    )
+        }
+    }
+    sum
 }
 
 /// PageRank damping factor (standard value). Shared so every analyzer

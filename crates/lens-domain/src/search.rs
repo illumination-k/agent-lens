@@ -298,6 +298,27 @@ pub struct SearchIndex {
     trigrams: HashMap<String, Vec<u32>>,
 }
 
+/// Per-field token counts of `document`, and per-field term frequencies
+/// keyed by the term id `intern` assigns each token.
+fn count_document_terms(
+    document: &SearchDocument,
+    mut intern: impl FnMut(String) -> usize,
+) -> ([u32; FIELD_COUNT], HashMap<usize, [u32; FIELD_COUNT]>) {
+    let mut lengths = [0u32; FIELD_COUNT];
+    let mut document_terms: HashMap<usize, [u32; FIELD_COUNT]> = HashMap::new();
+    for field in SearchField::ALL {
+        let slot = field.slot();
+        for token in tokenize(document.field(field)) {
+            lengths[slot] = lengths[slot].saturating_add(1);
+            let field_tf = document_terms
+                .entry(intern(token))
+                .or_insert([0; FIELD_COUNT]);
+            field_tf[slot] = field_tf[slot].saturating_add(1);
+        }
+    }
+    (lengths, document_terms)
+}
+
 impl SearchIndex {
     /// Index `documents`, which the caller keeps: hits refer back to
     /// them by position.
@@ -309,21 +330,13 @@ impl SearchIndex {
         let mut total_field_length = [0u64; FIELD_COUNT];
 
         for (document_index, document) in documents.iter().enumerate() {
-            let mut lengths = [0u32; FIELD_COUNT];
-            let mut document_terms: HashMap<usize, [u32; FIELD_COUNT]> = HashMap::new();
-            for field in SearchField::ALL {
-                let slot = field.slot();
-                for token in tokenize(document.field(field)) {
-                    lengths[slot] = lengths[slot].saturating_add(1);
-                    let term_id = *term_ids.entry(token.clone()).or_insert_with(|| {
-                        terms.push(token);
-                        postings.push(Vec::new());
-                        terms.len() - 1
-                    });
-                    let field_tf = document_terms.entry(term_id).or_insert([0; FIELD_COUNT]);
-                    field_tf[slot] = field_tf[slot].saturating_add(1);
-                }
-            }
+            let (lengths, document_terms) = count_document_terms(document, |token| {
+                *term_ids.entry(token.clone()).or_insert_with(|| {
+                    terms.push(token);
+                    postings.push(Vec::new());
+                    terms.len() - 1
+                })
+            });
             // Documents are visited in order and each (term, document)
             // pair is appended once, so every posting list comes out
             // ascending by document without a sort.
@@ -340,14 +353,13 @@ impl SearchIndex {
         }
 
         let document_count = documents.len();
-        let mut avg_field_length = [0.0; FIELD_COUNT];
-        for (avg, total) in avg_field_length.iter_mut().zip(total_field_length) {
-            *avg = if document_count == 0 {
+        let avg_field_length = total_field_length.map(|total| {
+            if document_count == 0 {
                 0.0
             } else {
                 total as f64 / document_count as f64
-            };
-        }
+            }
+        });
 
         let trigram_counts = terms.iter().map(|t| trigram_set(t).len() as u32).collect();
         let trigrams = if options.fuzzy.is_some() {
