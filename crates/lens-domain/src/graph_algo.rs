@@ -193,19 +193,18 @@ pub fn greedy_feedback_arcs(node_count: usize, edges: &[WeightedEdge]) -> Vec<us
     let mut graph = PeelingGraph::new(node_count, edges);
     let mut front: Vec<usize> = Vec::new();
     let mut back: Vec<usize> = Vec::new();
-    while graph.remaining > 0 {
-        while let Some(v) = graph.find_live(|g, v| g.out_weight[v] == 0) {
-            graph.remove(v);
-            back.push(v);
-        }
-        while let Some(v) = graph.find_live(|g, v| g.in_weight[v] == 0) {
-            graph.remove(v);
-            front.push(v);
-        }
-        if let Some(v) = graph.largest_delta() {
-            graph.remove(v);
-            front.push(v);
-        }
+    // Every round removes at least one vertex until none is live, so
+    // `node_count` rounds always suffice. Bounding the loops by count
+    // rather than by the peeling state keeps a slip in that state a
+    // wrong answer instead of a hang.
+    for _ in 0..node_count {
+        graph.drain(|g, v| g.out_weight[v] == 0, &mut back);
+        graph.drain(|g, v| g.in_weight[v] == 0, &mut front);
+        let Some(v) = graph.largest_delta() else {
+            break;
+        };
+        graph.remove(v);
+        front.push(v);
     }
 
     let mut position = vec![0usize; node_count];
@@ -228,7 +227,6 @@ struct PeelingGraph {
     out_weight: Vec<isize>,
     in_weight: Vec<isize>,
     removed: Vec<bool>,
-    remaining: usize,
 }
 
 impl PeelingGraph {
@@ -239,7 +237,6 @@ impl PeelingGraph {
             out_weight: vec![0; n],
             in_weight: vec![0; n],
             removed: vec![false; n],
-            remaining: n,
         };
         for edge in edges.iter().filter(|e| e.from != e.to) {
             graph.out_edges[edge.from].push((edge.to, edge.weight));
@@ -255,6 +252,18 @@ impl PeelingGraph {
         (0..self.removed.len()).find(|&v| !self.removed[v] && pred(self, v))
     }
 
+    /// Repeatedly removes the lowest-index live vertex satisfying
+    /// `pred`, appending each to `order`, until none is left.
+    fn drain(&mut self, pred: impl Fn(&Self, usize) -> bool, order: &mut Vec<usize>) {
+        for _ in 0..self.removed.len() {
+            let Some(v) = self.find_live(&pred) else {
+                return;
+            };
+            self.remove(v);
+            order.push(v);
+        }
+    }
+
     /// Live vertex with the largest `out_weight - in_weight`.
     fn largest_delta(&self) -> Option<usize> {
         // max_by_key keeps the last max on ties, so Reverse(v)
@@ -266,7 +275,6 @@ impl PeelingGraph {
 
     fn remove(&mut self, v: usize) {
         self.removed[v] = true;
-        self.remaining -= 1;
         for &(to, w) in &self.out_edges[v] {
             if !self.removed[to] {
                 self.in_weight[to] -= w as isize;
