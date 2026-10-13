@@ -65,14 +65,9 @@ pub fn extract_cohesion_units(
     dialect: Dialect,
 ) -> Result<Vec<CohesionUnit>, CohesionError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(CohesionError::Parse(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        )));
-    }
+    let ret = dialect
+        .parse_clean(&alloc, source)
+        .map_err(CohesionError::Parse)?;
     let line_index = LineIndex::new(source);
     let mut out = Vec::new();
     collect_scope(&ret.program.body, MODULE_UNIT_NAME, &line_index, &mut out);

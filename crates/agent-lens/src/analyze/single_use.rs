@@ -59,7 +59,7 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::render_module_confidence;
+use super::format::{end_row_with_caveats, render_module_confidence};
 use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
 use super::options::analyzer_options;
 use super::raw_references::{RawTarget, identifiers_by_line};
@@ -937,11 +937,7 @@ fn render_entries(out: &mut String, entries: &[&CandidateEntry], limit: usize) {
         if entry.raw_reference_count > 0 {
             let _ = write!(out, ", raw refs={}", entry.raw_reference_count);
         }
-        if !entry.caveats.is_empty() {
-            let caveats: Vec<&str> = entry.caveats.iter().map(|c| c.as_str()).collect();
-            let _ = write!(out, " — {}", caveats.join("; "));
-        }
-        out.push('\n');
+        end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
 }
 

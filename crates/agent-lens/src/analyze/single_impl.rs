@@ -54,6 +54,7 @@ use lens_domain::{SyntaxFact, TraitDeclShape, TraitImplShape, VisibilityShape};
 
 use super::call_graph::model::{GraphLanguage, NodeVisibility};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
+use super::format::end_row_with_caveats;
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::span_references::{AllowedSpan, FileSpans, SpanReferenceIndex};
@@ -811,11 +812,7 @@ fn render_entries(out: &mut String, entries: &[&AbstractionEntry], limit: usize)
         if entry.impl_reference_count > 0 {
             let _ = write!(out, " (impl-shaped {})", entry.impl_reference_count);
         }
-        if !entry.caveats.is_empty() {
-            let caveats: Vec<&str> = entry.caveats.iter().map(|c| c.as_str()).collect();
-            let _ = write!(out, " — {}", caveats.join("; "));
-        }
-        out.push('\n');
+        end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
 }
 

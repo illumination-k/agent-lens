@@ -149,9 +149,7 @@ impl RiskAnalyzer {
     /// [`Self::with_since`] for callers threading an optional CLI flag:
     /// `None` leaves the window unchanged.
     pub fn with_since_opt(mut self, since: Option<String>) -> Self {
-        if let Some(s) = since {
-            self.since = Some(s);
-        }
+        self.since = since.or(self.since);
         self
     }
 

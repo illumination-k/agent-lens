@@ -209,15 +209,24 @@ impl ComplexityVisitor {
 }
 
 impl ComplexityVisitor {
+    fn visit_block(&mut self, body: &[Stmt]) {
+        for s in body {
+            self.visit_stmt(s);
+        }
+    }
+
+    /// Walks `body` one nesting level deeper.
+    fn visit_nested_block(&mut self, body: &[Stmt]) {
+        self.counters.enter_nest();
+        self.visit_block(body);
+        self.counters.exit_nest();
+    }
+
     fn visit_if(&mut self, stmt: &StmtIf) {
         self.counters.add_branch();
         self.halstead.op("if");
         self.visit_expr(&stmt.test);
-        self.counters.enter_nest();
-        for s in &stmt.body {
-            self.visit_stmt(s);
-        }
-        self.counters.exit_nest();
+        self.visit_nested_block(&stmt.body);
         for clause in &stmt.elif_else_clauses {
             match &clause.test {
                 // `elif` is its own branch in McCabe and a flat +1 in
@@ -226,20 +235,12 @@ impl ComplexityVisitor {
                     self.counters.add_flat_branch();
                     self.halstead.op("elif");
                     self.visit_expr(test);
-                    self.counters.enter_nest();
-                    for s in &clause.body {
-                        self.visit_stmt(s);
-                    }
-                    self.counters.exit_nest();
+                    self.visit_nested_block(&clause.body);
                 }
                 None => {
                     self.counters.add_cognitive(1);
                     self.halstead.op("else");
-                    self.counters.enter_nest();
-                    for s in &clause.body {
-                        self.visit_stmt(s);
-                    }
-                    self.counters.exit_nest();
+                    self.visit_nested_block(&clause.body);
                 }
             }
         }
@@ -249,17 +250,11 @@ impl ComplexityVisitor {
         self.counters.add_branch();
         self.halstead.op("while");
         self.visit_expr(&stmt.test);
-        self.counters.enter_nest();
-        for s in &stmt.body {
-            self.visit_stmt(s);
-        }
-        self.counters.exit_nest();
+        self.visit_nested_block(&stmt.body);
         // `else:` after a while/for runs when the loop completes without
         // break — it doesn't add a structural branch in cognitive
         // complexity, but we still walk it for Halstead operands.
-        for s in &stmt.orelse {
-            self.visit_stmt(s);
-        }
+        self.visit_block(&stmt.orelse);
     }
 
     fn visit_for(&mut self, stmt: &StmtFor) {
@@ -267,14 +262,8 @@ impl ComplexityVisitor {
         self.halstead.op("for");
         self.visit_expr(&stmt.target);
         self.visit_expr(&stmt.iter);
-        self.counters.enter_nest();
-        for s in &stmt.body {
-            self.visit_stmt(s);
-        }
-        self.counters.exit_nest();
-        for s in &stmt.orelse {
-            self.visit_stmt(s);
-        }
+        self.visit_nested_block(&stmt.body);
+        self.visit_block(&stmt.orelse);
     }
 
     fn visit_match(&mut self, stmt: &StmtMatch) {
@@ -290,9 +279,7 @@ impl ComplexityVisitor {
                 self.counters.add_cyclomatic(1);
                 self.visit_expr(guard);
             }
-            for s in &case.body {
-                self.visit_stmt(s);
-            }
+            self.visit_block(&case.body);
         }
         self.counters.exit_nest();
     }
@@ -301,9 +288,7 @@ impl ComplexityVisitor {
         // Sonar: `try` and `finally` neither cost nor nest; only each
         // `except` is a branch.
         self.halstead.op("try");
-        for s in &stmt.body {
-            self.visit_stmt(s);
-        }
+        self.visit_block(&stmt.body);
         for handler in &stmt.handlers {
             // Each `except` clause is one extra control-flow branch.
             self.counters.add_branch();
@@ -312,15 +297,9 @@ impl ComplexityVisitor {
             if let Some(t) = &h.type_ {
                 self.visit_expr(t);
             }
-            self.counters.enter_nest();
-            for s in &h.body {
-                self.visit_stmt(s);
-            }
-            self.counters.exit_nest();
+            self.visit_nested_block(&h.body);
         }
-        for s in &stmt.orelse {
-            self.visit_stmt(s);
-        }
+        self.visit_block(&stmt.orelse);
         // The `!`-deletion mutant here would only flip whether the
         // "finally" Halstead operator gets registered and whether the
         // finally body gets walked for label collection. The
@@ -350,9 +329,7 @@ impl ComplexityVisitor {
         }
         // A context manager is not control flow to Sonar: no cost, no
         // nesting.
-        for s in &stmt.body {
-            self.visit_stmt(s);
-        }
+        self.visit_block(&stmt.body);
     }
 
     fn visit_assert(&mut self, stmt: &StmtAssert) {
