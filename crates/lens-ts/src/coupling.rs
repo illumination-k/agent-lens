@@ -137,14 +137,7 @@ impl ImportLink {
 
 fn parse_links(source: &str, dialect: Dialect) -> Result<Vec<ImportLink>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        ));
-    }
+    let ret = dialect.parse_clean(&alloc, source)?;
 
     let mut out = Vec::new();
     for stmt in &ret.program.body {

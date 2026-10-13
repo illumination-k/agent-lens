@@ -50,7 +50,6 @@ use lens_domain::{
     tally_cochange,
 };
 use serde::Serialize;
-use tracing::warn;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::co_change::{CoChangeOptions, PairView};
@@ -61,7 +60,7 @@ use super::static_file_graph::{
 };
 use crate::analyze::call_graph::model::{ModuleResolutionSummary, Resolution};
 use crate::analyze::call_graph::{CallGraph, CallGraphBuilder};
-use crate::analyze::format::render_module_confidence;
+use crate::analyze::format::{render_module_confidence, render_overflow};
 use crate::analyze::runner::render_report;
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, CompiledPathFilter, OutputFormat,
@@ -168,9 +167,7 @@ impl HiddenCouplingAnalyzer {
     /// [`Self::with_since`] for callers threading an optional CLI flag:
     /// `None` leaves the window unchanged.
     pub fn with_since_opt(mut self, since: Option<String>) -> Self {
-        if let Some(s) = since {
-            self.since = Some(s);
-        }
+        self.since = since.or(self.since);
         self
     }
 
@@ -244,15 +241,12 @@ impl HiddenCouplingAnalyzer {
         // differential are keyed in that space.
         let filter = self.path_filter.compile(scope.repo_root())?;
 
-        let shallow = scope.is_shallow();
-        if shallow {
-            warn!(
-                "shallow clone: `git log` sees a truncated history, so every co-change count is \
-                 a lower bound. Pairs whose evidence predates the graft look like declared \
-                 dependencies that never move, which is exactly the suspect bucket's failure \
-                 mode. Fetch the full history (`git fetch --unshallow`) first."
-            );
-        }
+        let shallow = scope.warn_if_shallow(
+            "every co-change count is \
+             a lower bound. Pairs whose evidence predates the graft look like declared \
+             dependencies that never move, which is exactly the suspect bucket's failure \
+             mode. Fetch the full history (`git fetch --unshallow`) first.",
+        );
 
         let mut commits = scope.collect_commits(self.since.as_deref())?;
         // The same gate `co-change` applies, through the same shared
@@ -797,19 +791,6 @@ fn render_section<R>(
         let _ = writeln!(out, "| {} |", cells(row));
     }
     render_overflow(out, rows.len(), top, section.unit);
-}
-
-/// Close a capped table, naming what was left out. Nothing is written
-/// when nothing was capped: "+0 more" reads as truncation that never
-/// happened.
-fn render_overflow(out: &mut String, total: usize, shown: usize, unit: &str) {
-    let overflow = total.saturating_sub(shown);
-    if overflow > 0 {
-        let _ = writeln!(
-            out,
-            "\n+{overflow} more {unit} not shown (raise `--top`; JSON carries every row)."
-        );
-    }
 }
 
 fn render_hidden(out: &mut String, report: &Report, top: usize) {

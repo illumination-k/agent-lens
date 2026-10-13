@@ -26,14 +26,7 @@ use crate::walk::method_key_name;
 /// Extract every `interface` / `type` alias / `enum` in `source`.
 pub fn extract_type_defs(source: &str, dialect: Dialect) -> Result<Vec<TypeShape>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        ));
-    }
+    let ret = dialect.parse_clean(&alloc, source)?;
     let ctx = ExtractContext {
         source,
         line_index: LineIndex::new(source),

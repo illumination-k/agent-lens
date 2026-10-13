@@ -35,14 +35,7 @@ const TRIVIAL_NULLARY_ADAPTERS: &[&str] = &[
 /// forwarding call.
 pub fn find_wrappers(source: &str, dialect: Dialect) -> Result<Vec<WrapperFinding>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        ));
-    }
+    let ret = dialect.parse_clean(&alloc, source)?;
     let line_index = LineIndex::new(source);
     let mut visitor = WrapperCollector { out: Vec::new() };
     walk_program(&ret.program, &line_index, &mut visitor);

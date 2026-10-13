@@ -31,14 +31,7 @@ pub fn extract_statement_seqs(
     dialect: Dialect,
 ) -> Result<Vec<StatementSeq>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        ));
-    }
+    let ret = dialect.parse_clean(&alloc, source)?;
     let line_index = LineIndex::new(source);
     let mut collector = SeqCollector {
         line_index: &line_index,

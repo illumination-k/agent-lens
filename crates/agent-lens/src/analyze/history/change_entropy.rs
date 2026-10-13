@@ -60,11 +60,10 @@ use lens_domain::{
     FilePeriodContribution, PeriodEntropy, Scatter, compute_change_entropy, module_of,
 };
 use serde::Serialize;
-use tracing::warn;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
-use crate::analyze::format::format_optional_f64;
+use crate::analyze::format::{format_optional_f64, render_overflow};
 use crate::analyze::options::analyzer_options;
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, DiffScope, OutputFormat, PathFilterError, parse_diff_range,
@@ -260,9 +259,7 @@ impl ChangeEntropyAnalyzer {
     /// Like [`Self::with_since`] but accepts an `Option`, leaving the
     /// window unchanged when `None` is passed.
     pub fn with_since_opt(mut self, since: Option<String>) -> Self {
-        if let Some(s) = since {
-            self.since = Some(s);
-        }
+        self.since = since.or(self.since);
         self
     }
 
@@ -326,15 +323,12 @@ impl ChangeEntropyAnalyzer {
         let filter = self.path_filter.compile(scope.repo_root())?;
         let mut reportable = ReportablePaths::new(&filter, scope.repo_root());
 
-        let shallow = scope.is_shallow();
-        if shallow {
-            warn!(
-                "shallow clone: `git log` sees a truncated history, so periods before the graft \
-                 are missing and the reference distribution a --diff-only verdict compares \
-                 against is drawn from whatever survived. Fetch the full history \
-                 (`git fetch --unshallow`) for a usable report."
-            );
-        }
+        let shallow = scope.warn_if_shallow(
+            "periods before the graft \
+             are missing and the reference distribution a --diff-only verdict compares \
+             against is drawn from whatever survived. Fetch the full history \
+             (`git fetch --unshallow`) for a usable report.",
+        );
 
         let mut commits = scope.collect_commit_changes(self.since.as_deref())?;
         for commit in &mut commits {
@@ -764,13 +758,7 @@ fn format_history(view: &HistoryView<'_>, top: Option<usize>) -> String {
             file.path, file.history_complexity, file.commits, file.changed_lines, file.periods,
         );
     }
-    let overflow = view.files.len().saturating_sub(limit);
-    if overflow > 0 {
-        let _ = writeln!(
-            &mut out,
-            "\n+{overflow} more file(s) not shown (raise `--top`; JSON carries every row)."
-        );
-    }
+    render_overflow(&mut out, view.files.len(), limit, "file(s)");
 
     let _ = writeln!(
         &mut out,
@@ -795,14 +783,12 @@ fn format_history(view: &HistoryView<'_>, top: Option<usize>) -> String {
             period.changed_lines,
         );
     }
-    let overflow = view.periods.len().saturating_sub(limit);
-    if overflow > 0 {
-        let _ = writeln!(
-            &mut out,
-            "\n+{overflow} more {}(s) not shown (raise `--top`; JSON carries every row).",
-            view.scope.period.as_str(),
-        );
-    }
+    render_overflow(
+        &mut out,
+        view.periods.len(),
+        limit,
+        &format!("{}(s)", view.scope.period.as_str()),
+    );
     out
 }
 
@@ -863,13 +849,7 @@ fn format_verdict(view: &VerdictView<'_>, top: Option<usize>) -> String {
             file.path, file.changed_lines, file.share,
         );
     }
-    let overflow = pending.files.len().saturating_sub(limit);
-    if overflow > 0 {
-        let _ = writeln!(
-            &mut out,
-            "\n+{overflow} more file(s) not shown (raise `--top`; JSON carries every row)."
-        );
-    }
+    render_overflow(&mut out, pending.files.len(), limit, "file(s)");
     out
 }
 

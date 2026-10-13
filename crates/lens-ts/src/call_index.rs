@@ -37,14 +37,7 @@ pub fn extract_function_shapes_with_module(
     module: &str,
 ) -> Result<Vec<FunctionShape>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        ));
-    }
+    let ret = dialect.parse_clean(&alloc, source)?;
 
     let line_index = LineIndex::new(source);
     let mut collector = FunctionShapeCollector {
@@ -97,14 +90,7 @@ fn extract_call_shapes(
     context: Option<&ImportContext<'_>>,
 ) -> Result<Vec<CallShape>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        ));
-    }
+    let ret = dialect.parse_clean(&alloc, source)?;
 
     let line_index = LineIndex::new(source);
     // Reference binding only: no AST node table, no syntax re-check.

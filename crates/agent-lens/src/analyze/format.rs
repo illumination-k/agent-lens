@@ -18,6 +18,16 @@ pub(crate) fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
     }
 }
 
+/// Close a report row: ` — caveat; caveat` when there are any, then
+/// the newline.
+pub(crate) fn end_row_with_caveats<'c>(out: &mut String, caveats: impl Iterator<Item = &'c str>) {
+    let caveats: Vec<&str> = caveats.collect();
+    if !caveats.is_empty() {
+        let _ = write!(out, " — {}", caveats.join("; "));
+    }
+    out.push('\n');
+}
+
 /// Backticked items up to `cap`, the remainder rolled into a count.
 ///
 /// Every analyzer that inlines a name list into a report row needs the
@@ -205,12 +215,18 @@ pub(crate) fn render_module_sections<G: ModuleSection>(
             let _ = writeln!(out, "- +{overflow} more (JSON output carries every row)");
         }
     }
-    let module_overflow = groups.len() - shown;
-    if module_overflow > 0 {
+    render_overflow(out, groups.len(), shown, "module(s)");
+}
+
+/// Close a capped table, naming what was left out. Nothing is written
+/// when nothing was capped: "+0 more" reads as truncation that never
+/// happened.
+pub(crate) fn render_overflow(out: &mut String, total: usize, shown: usize, unit: &str) {
+    let overflow = total.saturating_sub(shown);
+    if overflow > 0 {
         let _ = writeln!(
             out,
-            "\n+{module_overflow} more module(s) not shown (raise `--top`; JSON carries every \
-             row)."
+            "\n+{overflow} more {unit} not shown (raise `--top`; JSON carries every row)."
         );
     }
 }

@@ -47,6 +47,7 @@ use super::module_graph::{GraphPolicy, ModuleFile, ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
 use super::options::analyzer_options;
 use super::{AnalyzePathFilter, OutputFormat, SourceLang, module_graph, relative_display_path};
+use crate::analyze::format::render_overflow;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContextSpanAnalyzerError {
@@ -442,13 +443,7 @@ fn render_modules_table(out: &mut String, modules: &[ModuleSpanView], top: Optio
             m.path, m.direct, m.transitive, m.files, preview,
         );
     }
-    let overflow = sorted.len().saturating_sub(limit);
-    if overflow > 0 {
-        let _ = writeln!(
-            out,
-            "\n+{overflow} more module(s) not shown (raise `--top`; JSON carries every row).",
-        );
-    }
+    render_overflow(out, sorted.len(), limit, "module(s)");
 }
 
 fn reachable_preview(reachable: &[String]) -> String {

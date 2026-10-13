@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use lens_domain::{CommitChanges, CommitFiles, FileChange, FileChurn};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::analyze::{AnalyzeRoots, CompiledPathFilter, DiffScope};
 
@@ -377,6 +377,16 @@ impl ChurnScope {
                 lines: entry.lines,
             })
             .collect())
+    }
+
+    /// [`Self::is_shallow`], warning when it is that the truncated log
+    /// means `consequence` for the report being built.
+    pub(crate) fn warn_if_shallow(&self, consequence: &str) -> bool {
+        let shallow = self.is_shallow();
+        if shallow {
+            warn!("shallow clone: `git log` sees a truncated history, so {consequence}");
+        }
+        shallow
     }
 
     /// Whether the working tree is a shallow clone, in which case any

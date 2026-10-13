@@ -55,10 +55,10 @@ use lens_domain::{
     AuthoredCommit, DEFAULT_MINOR_THRESHOLD, FileOwnership, OwnershipThresholds, compute_ownership,
 };
 use serde::Serialize;
-use tracing::warn;
 
 use super::churn::{AuthoredCommitRaw, ChurnScope, Contact, ReportablePaths};
 use super::error_from::impl_from_churn_error;
+use crate::analyze::format::render_overflow;
 use crate::analyze::{AnalyzePathFilter, AnalyzeRoots, OutputFormat, PathFilterError};
 
 /// Report schema version, bumped when a consumer would have to change.
@@ -219,9 +219,7 @@ impl OwnershipAnalyzer {
     /// Like [`Self::with_since`] but accepts an `Option`, leaving the
     /// window unchanged when `None` is passed.
     pub fn with_since_opt(mut self, since: Option<String>) -> Self {
-        if let Some(s) = since {
-            self.since = Some(s);
-        }
+        self.since = since.or(self.since);
         self
     }
 
@@ -279,14 +277,11 @@ impl OwnershipAnalyzer {
         let filter = self.path_filter.compile(scope.repo_root())?;
         let mut reportable = ReportablePaths::new(&filter, scope.repo_root());
 
-        let shallow = scope.is_shallow();
-        if shallow {
-            warn!(
-                "shallow clone: `git log` sees a truncated history, so authors before the graft \
-                 are missing from every share. Fetch the full history (`git fetch --unshallow`) \
-                 for a usable report."
-            );
-        }
+        let shallow = scope.warn_if_shallow(
+            "authors before the graft \
+             are missing from every share. Fetch the full history (`git fetch --unshallow`) \
+             for a usable report.",
+        );
 
         let mut raw = scope.collect_authored_commits(self.since.as_deref())?;
         for commit in &mut raw {
@@ -744,13 +739,7 @@ fn format_md(view: &ReportView<'_>, top: Option<usize>) -> String {
             file.minor_ratio,
         );
     }
-    let overflow = contested.len().saturating_sub(limit);
-    if overflow > 0 {
-        let _ = writeln!(
-            &mut out,
-            "\n+{overflow} more file(s) not shown (raise `--top`; JSON carries every row)."
-        );
-    }
+    render_overflow(&mut out, contested.len(), limit, "file(s)");
     let solo = view.files.len() - contested.len();
     if solo > 0 {
         let _ = writeln!(
@@ -1018,6 +1007,19 @@ mod tests {
             .analyze(dir.path(), OutputFormat::Md)
             .unwrap();
         assert!(out.contains("+1 more file(s) not shown"), "got {out}");
+    }
+
+    /// `with_since_opt` sets the window from `Some` and leaves an
+    /// earlier `with_since` alone on `None`.
+    #[rstest]
+    #[case::set_by_option(OwnershipAnalyzer::new().with_since_opt(Some("2099-01-01".to_owned())))]
+    #[case::kept_on_none(OwnershipAnalyzer::new().with_since("2099-01-01").with_since_opt(None))]
+    fn a_future_window_matches_no_commits(#[case] analyzer: OwnershipAnalyzer) {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        commit_as(dir.path(), "Ann <ann@example.com>", "a", &["a.rs"]);
+        let out = analyzer.analyze(dir.path(), OutputFormat::Md).unwrap();
+        assert!(out.contains("_No commits matched._"), "got {out}");
     }
 
     #[rstest]

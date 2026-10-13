@@ -55,7 +55,7 @@ use super::call_graph::model::{
     GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::render_module_confidence;
+use super::format::{render_module_confidence, render_overflow};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, DiffScope, LineRange, OutputFormat, overlaps_any};
@@ -1001,13 +1001,7 @@ fn render_chains(out: &mut String, chains: &[Chain], limit: usize) {
             let _ = writeln!(out, "  - +{overflow} more hop(s) (JSON carries every hop)");
         }
     }
-    let overflow = chains.len() - shown;
-    if overflow > 0 {
-        let _ = writeln!(
-            out,
-            "\n+{overflow} more chain(s) not shown (raise `--top`; JSON carries every row)."
-        );
-    }
+    render_overflow(out, chains.len(), shown, "chain(s)");
 }
 
 fn render_hop(hop: &Hop) -> String {
@@ -1044,13 +1038,7 @@ fn render_modules(out: &mut String, modules: &[ModuleRollup], limit: usize) {
     for module in modules.iter().take(limit) {
         let _ = writeln!(out, "- {}", render_module(module));
     }
-    let overflow = modules.len() - shown;
-    if overflow > 0 {
-        let _ = writeln!(
-            out,
-            "\n+{overflow} more module(s) not shown (raise `--top`; JSON carries every row)."
-        );
-    }
+    render_overflow(out, modules.len(), shown, "module(s)");
 }
 
 fn render_module(module: &ModuleRollup) -> String {

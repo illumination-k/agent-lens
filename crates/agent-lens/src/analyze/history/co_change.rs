@@ -41,10 +41,10 @@ use lens_domain::{
     DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SUPPORT, compute_cochange,
 };
 use serde::Serialize;
-use tracing::warn;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
+use crate::analyze::format::render_overflow;
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, CompiledPathFilter, OutputFormat, PathFilterError,
 };
@@ -182,9 +182,7 @@ impl CoChangeAnalyzer {
     /// Like [`Self::with_since`] but accepts an `Option`, leaving the
     /// window unchanged when `None` is passed.
     pub fn with_since_opt(mut self, since: Option<String>) -> Self {
-        if let Some(s) = since {
-            self.since = Some(s);
-        }
+        self.since = since.or(self.since);
         self
     }
 
@@ -241,14 +239,11 @@ impl CoChangeAnalyzer {
         let scope = ChurnScope::resolve(&roots)?;
         let filter = self.path_filter.compile(scope.repo_root())?;
 
-        let shallow = scope.is_shallow();
-        if shallow {
-            warn!(
-                "shallow clone: `git log` sees a truncated history, so co-change support counts \
-                 are lower bounds and pairs whose evidence predates the graft are missing \
-                 entirely. Fetch the full history (`git fetch --unshallow`) for a usable report."
-            );
-        }
+        let shallow = scope.warn_if_shallow(
+            "co-change support counts \
+             are lower bounds and pairs whose evidence predates the graft are missing \
+             entirely. Fetch the full history (`git fetch --unshallow`) for a usable report.",
+        );
 
         let mut commits = scope.collect_commits(self.since.as_deref())?;
         retain_reportable_paths(&mut commits, &filter, scope.repo_root());
@@ -450,13 +445,7 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
             p.last_cochange_commits_ago,
         );
     }
-    let overflow = view.pairs.len().saturating_sub(limit);
-    if overflow > 0 {
-        let _ = writeln!(
-            &mut out,
-            "\n+{overflow} more pair(s) not shown (raise `--top`; JSON carries every row)."
-        );
-    }
+    render_overflow(&mut out, view.pairs.len(), limit, "pair(s)");
     out
 }
 

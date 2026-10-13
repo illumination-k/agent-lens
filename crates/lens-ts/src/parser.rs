@@ -139,6 +139,24 @@ impl Dialect {
             .with_options(options)
             .parse()
     }
+
+    /// [`Dialect::parse`], rejecting a source the parser reported any
+    /// diagnostic for.
+    pub(crate) fn parse_clean<'a>(
+        self,
+        alloc: &'a Allocator,
+        source: &'a str,
+    ) -> Result<ParserReturn<'a>, TsParseError> {
+        let ret = self.parse(alloc, source);
+        if !ret.diagnostics.is_empty() {
+            return Err(TsParseError::from_diagnostics(
+                ret.diagnostics
+                    .iter()
+                    .map(|e| e.message.as_ref().to_owned()),
+            ));
+        }
+        Ok(ret)
+    }
 }
 
 /// TypeScript / JavaScript parser.
@@ -205,15 +223,10 @@ impl LanguageParser for TypeScriptParser {
 
     fn parse(&mut self, source: &str) -> Result<TreeNode, LanguageParseError> {
         let alloc = Allocator::default();
-        let ret = self.dialect.parse(&alloc, source);
-        if !ret.diagnostics.is_empty() {
-            let err = TsParseError::from_diagnostics(
-                ret.diagnostics
-                    .iter()
-                    .map(|e| e.message.as_ref().to_owned()),
-            );
-            return Err(LanguageParseError::new(self.language(), err));
-        }
+        let ret = self
+            .dialect
+            .parse_clean(&alloc, source)
+            .map_err(|err| LanguageParseError::new(self.language(), err))?;
         let mut root = TreeNode::new("Program", "");
         for stmt in &ret.program.body {
             root.push_child(statement_tree(stmt));
@@ -229,14 +242,7 @@ impl LanguageParser for TypeScriptParser {
 
 fn extract_with(source: &str, dialect: Dialect) -> Result<Vec<FunctionDef>, TsParseError> {
     let alloc = Allocator::default();
-    let ret = dialect.parse(&alloc, source);
-    if !ret.diagnostics.is_empty() {
-        return Err(TsParseError::from_diagnostics(
-            ret.diagnostics
-                .iter()
-                .map(|e| e.message.as_ref().to_owned()),
-        ));
-    }
+    let ret = dialect.parse_clean(&alloc, source)?;
     let line_index = LineIndex::new(source);
     let mut visitor = FunctionDefCollector {
         out: Vec::new(),
@@ -316,11 +322,12 @@ fn bare_name(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, last)| last)
 }
 
-/// Collect the binding identifiers introduced by a parameter pattern,
-/// unwinding object / array destructuring and defaults.
-fn collect_binding_names(pat: &BindingPattern, out: &mut Vec<String>) {
+/// Collect the binding identifiers a pattern introduces, unwinding
+/// object / array destructuring, rest elements and defaults. Computed /
+/// literal property keys are skipped: they bind nothing.
+pub(crate) fn collect_binding_names(pat: &BindingPattern, out: &mut impl Extend<String>) {
     match pat {
-        BindingPattern::BindingIdentifier(id) => out.push(id.name.to_string()),
+        BindingPattern::BindingIdentifier(id) => out.extend([id.name.to_string()]),
         BindingPattern::ObjectPattern(o) => {
             for prop in &o.properties {
                 collect_binding_names(&prop.value, out);
