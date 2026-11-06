@@ -8,8 +8,9 @@
 //! per-language conventions the answer depends on.
 //!
 //! [`InterfaceIndex`] is the second thing they share: a Go method whose
-//! name and arity match an interface declared in the analyzed tree can
-//! be called through that interface, and no static edge records it. Both
+//! name and arity match an interface declared in the analyzed tree — or
+//! a well-known standard-library one such as `fmt.Stringer` — can be
+//! called through that interface, and no static edge records it. Both
 //! analyzers have to stop trusting "no caller" for such a method, so the
 //! matching rule lives here rather than in either of them.
 
@@ -78,9 +79,62 @@ impl ExportLang {
     }
 }
 
-/// Method sets of the interfaces declared in the analyzed tree, keyed
-/// for the structural question every Go method gets asked: could its
-/// calls dispatch through an interface?
+/// Standard-library interfaces a Go method satisfies by name and
+/// parameter count alone, as (method, parameter count, interface).
+///
+/// These are declared outside any analyzed tree, so [`InterfaceIndex`]
+/// cannot learn them from the source, yet they are exactly the methods
+/// that are exported so packages the analyzer never sees can call them —
+/// `fmt` through `%v` / `%#v`, `encoding/*` through reflection, `io`
+/// and `net/http` through interface values. A method matching one is
+/// treated like a method matching an in-tree interface. The match is
+/// structural and can be coincidental (`Close`, `Len`), the same
+/// over-approximation the in-tree rule accepts.
+const STDLIB_INTERFACE_METHODS: &[(&str, usize, &str)] = &[
+    ("As", 1, "errors.As"),
+    ("Close", 0, "io.Closer"),
+    ("Error", 0, "error"),
+    ("Format", 2, "fmt.Formatter"),
+    ("GoString", 0, "fmt.GoStringer"),
+    ("Is", 1, "errors.Is"),
+    ("Len", 0, "sort.Interface"),
+    ("Less", 2, "sort.Interface"),
+    ("LogValue", 0, "log/slog.LogValuer"),
+    ("MarshalBinary", 0, "encoding.BinaryMarshaler"),
+    ("MarshalJSON", 0, "encoding/json.Marshaler"),
+    ("MarshalText", 0, "encoding.TextMarshaler"),
+    ("MarshalXML", 2, "encoding/xml.Marshaler"),
+    ("Pop", 0, "container/heap.Interface"),
+    ("Push", 1, "container/heap.Interface"),
+    ("Read", 1, "io.Reader"),
+    ("ReadAt", 2, "io.ReaderAt"),
+    ("ReadByte", 0, "io.ByteReader"),
+    ("ReadFrom", 1, "io.ReaderFrom"),
+    ("ReadRune", 0, "io.RuneReader"),
+    ("Scan", 1, "database/sql.Scanner"),
+    ("Scan", 2, "fmt.Scanner"),
+    ("Seek", 2, "io.Seeker"),
+    ("ServeHTTP", 2, "net/http.Handler"),
+    ("Set", 1, "flag.Value"),
+    ("String", 0, "fmt.Stringer"),
+    ("Swap", 2, "sort.Interface"),
+    ("UnmarshalBinary", 1, "encoding.BinaryUnmarshaler"),
+    ("UnmarshalJSON", 1, "encoding/json.Unmarshaler"),
+    ("UnmarshalText", 1, "encoding.TextUnmarshaler"),
+    ("UnmarshalXML", 2, "encoding/xml.Unmarshaler"),
+    ("Unwrap", 0, "errors.Unwrap"),
+    ("Value", 0, "database/sql/driver.Valuer"),
+    ("Write", 1, "io.Writer"),
+    ("WriteAt", 2, "io.WriterAt"),
+    ("WriteByte", 1, "io.ByteWriter"),
+    ("WriteString", 1, "io.StringWriter"),
+    ("WriteTo", 1, "io.WriterTo"),
+];
+
+/// Method sets of the interfaces declared in the analyzed tree, plus
+/// the well-known standard-library ones in [`STDLIB_INTERFACE_METHODS`],
+/// keyed for the structural question every Go method gets asked: could
+/// its calls dispatch through an interface?
 pub(crate) struct InterfaceIndex {
     /// Method name → parameter count → interfaces declaring such a
     /// method, by qualified name, sorted.
@@ -90,6 +144,14 @@ pub(crate) struct InterfaceIndex {
 impl InterfaceIndex {
     pub(crate) fn new(interfaces: &[InterfaceShape]) -> Self {
         let mut by_method: BTreeMap<String, BTreeMap<usize, BTreeSet<String>>> = BTreeMap::new();
+        for &(method, param_count, interface) in STDLIB_INTERFACE_METHODS {
+            by_method
+                .entry(method.to_owned())
+                .or_default()
+                .entry(param_count)
+                .or_default()
+                .insert(interface.to_owned());
+        }
         for interface in interfaces {
             let Some(name) = interface.qualified_name.known_value() else {
                 continue;

@@ -34,8 +34,8 @@
 //! - A Rust trait `impl` method, or a trait's own default body: the call
 //!   site names the trait, and receiver-typed dispatch is invisible to a
 //!   syntax-only resolver.
-//! - A Go method matching an interface declared in the analyzed tree by
-//!   name and parameter count — the same annotation `analyze visibility`
+//! - A Go method matching an interface declared in the analyzed tree, or
+//!   a well-known standard-library one, by name and parameter count — the same annotation `analyze visibility`
 //!   makes, for the same reason.
 //! - Any annotation not on the language's inert list (`#[no_mangle]`,
 //!   `#[tokio::main]`, `//go:linkname`, a cgo `//export`): the
@@ -382,8 +382,9 @@ struct Finding {
     /// a cluster that only calls itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     island: Option<usize>,
-    /// Interfaces declared in the analyzed tree whose method set names
-    /// this method — same name, same parameter count.
+    /// Interfaces declared in the analyzed tree, or well-known
+    /// standard-library ones, whose method set names this method — same
+    /// name, same parameter count.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     may_satisfy_interfaces: Vec<String>,
 }
@@ -413,7 +414,8 @@ enum Demotion {
     /// A Rust trait `impl` method or trait default body: callers name
     /// the trait.
     TraitMethod,
-    /// A Go method matching an interface declared in the analyzed tree.
+    /// A Go method matching an interface declared in the analyzed tree,
+    /// or a well-known standard-library one.
     InterfaceMethod,
     /// It carries an annotation that is not on the language's inert
     /// list.
