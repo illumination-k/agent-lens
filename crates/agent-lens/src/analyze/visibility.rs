@@ -28,12 +28,19 @@
 //!   around interfaces, a concrete method's callers name the interface,
 //!   never the method, so every exported implementation looks uncalled.
 //!   Exported Go methods matching a method of an interface declared in
-//!   the analyzed tree — same name, same parameter count — are therefore
-//!   annotated (`may satisfy interface …`) and ranked after unannotated
-//!   rows in their bucket. The match is structural, so a coincidental
+//!   the analyzed tree, or of a well-known standard-library interface
+//!   (`fmt.Stringer`, `error`, `encoding/json.Marshaler`, …) — same
+//!   name, same parameter count — are therefore annotated (`may satisfy
+//!   interface …`) and ranked after unannotated rows in their bucket.
+//!   A called one is not suggested for unexport: that would still
+//!   compile while silently dropping the satisfaction. The match is structural, so a coincidental
 //!   name+arity match annotates too; that over-approximation is the
 //!   right direction here, since a false annotation hides one row while
 //!   the unannotated report drowned in false "no resolved caller" rows.
+//! - A Go `_test.go` file declaring an external test package (`package
+//!   foo_test`) shares its directory, and so its graph module, with
+//!   `foo`, but compiles as a separate package. Its package clause is
+//!   read back off disk, and a function it calls keeps its export.
 //! - Callers outside the analyzed path do not exist for this analyzer.
 //!   Pointed at a single library crate, its whole intended API surface
 //!   looks crate-internal, which is why the crate count is reported and
@@ -108,9 +115,17 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
      kind that name the function from outside the proposed scope are counted per row. Callers \
      outside the analyzed path do not exist here, and only `pub use` re-exports written in a crate \
      root are recognised as intended API, so a surface published another way can still appear. \
-     Exported Go methods matching a method of an interface declared in the analyzed tree (same \
-     name and parameter count) are annotated rather than trusted: their callers can dispatch \
-     through the interface, which no static edge records, so a missing caller is expected there.";
+     Exported Go methods matching a method of an interface declared in the analyzed tree or of a \
+     well-known standard-library interface (same name and parameter count) are annotated rather \
+     than trusted: their callers can dispatch through the interface, which no static edge \
+     records, so a missing caller is expected there, and unexporting one would silently drop the \
+     satisfaction.";
+
+/// The suggestion on a called row that may satisfy an interface: the
+/// visible callers would permit unexporting, but doing so would drop the
+/// satisfaction without a compile error at any of them.
+const INTERFACE_SUGGESTION: &str =
+    "verify: unexporting compiles but drops the interface satisfaction";
 
 analyzer_options! {
     /// Options of the `visibility` section of `analyze narrowable`; the `narrowable` options
@@ -262,9 +277,10 @@ struct Finding {
     /// Distinct resolved callers.
     caller_count: usize,
     /// Of `caller_count`, how many are test functions. Narrowing stays
-    /// valid for Rust tests (they compile inside the crate); a Go
-    /// `_test.go` file declaring an external `package x_test` needs the
-    /// export, and the package clause is not in the graph.
+    /// valid for Rust tests (they compile inside the crate) and for Go
+    /// tests in the package itself. A Go caller in an external `package
+    /// x_test` needs the export, so a function it calls is never a
+    /// finding.
     test_caller_count: usize,
     /// Distinct modules the resolved callers live in, sorted.
     caller_modules: Vec<String>,
@@ -281,7 +297,8 @@ struct Finding {
     /// name to match or was written as a path the resolver checked
     /// against this function and ruled out.
     ubiquitous_name_calls_outside_scope: usize,
-    /// Interfaces declared in the analyzed tree whose method set names
+    /// Interfaces declared in the analyzed tree, or well-known
+    /// standard-library ones, whose method set names
     /// this method — same name, same parameter count. Calls to it can
     /// dispatch through any of them, which no static edge records, so
     /// a missing caller is expected rather than evidence; the row
@@ -297,6 +314,17 @@ impl Finding {
     /// this function — the rows to verify before narrowing.
     fn possible_external_caller(&self) -> bool {
         self.ambiguous_calls_outside_scope > 0 || self.ubiquitous_name_calls_outside_scope > 0
+    }
+
+    /// Record the interfaces this method may satisfy. A called one is no
+    /// longer suggested for unexport: that still compiles against the
+    /// visible callers but silently drops the satisfaction.
+    fn annotate_interfaces(&mut self, interfaces: Vec<String>) {
+        self.may_satisfy_interfaces = interfaces;
+        if self.may_dispatch_via_interface() && self.caller_scope != CallerScope::NoResolvedCallers
+        {
+            self.suggested_visibility = INTERFACE_SUGGESTION.to_owned();
+        }
     }
 
     /// Whether calls may reach this method through interface dispatch
@@ -359,14 +387,17 @@ impl Report {
 
         let callers = graph.resolved_callers();
         let interface_index = InterfaceIndex::new(&graph.interfaces);
+        let external_tests = external_test_callers(roots.base(), graph);
         let mut findings: Vec<(usize, Finding)> = Vec::new();
         for &(idx, lang) in &audited {
-            if let Some(mut finding) = classify(graph, idx, lang, callers.get(&idx)) {
-                finding.may_satisfy_interfaces = interface_index.matching(&graph.nodes[idx], lang);
+            if let Some(mut finding) =
+                classify(graph, idx, lang, callers.get(&idx), &external_tests)
+            {
+                finding.annotate_interfaces(interface_index.matching(&graph.nodes[idx], lang));
                 findings.push((idx, finding));
             }
         }
-        annotate_outside_calls(graph, &mut findings);
+        annotate_outside_calls(graph, &external_tests, &mut findings);
 
         let modules = module_groups(graph, findings);
         let summary = summarize(&modules, audited.len());
@@ -546,20 +577,56 @@ fn normalize_use_path(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// Go functions declared in an external test package (`package
+/// foo_test`). The graph files them under the directory's package, but
+/// they compile as a separate package that reaches only exported names,
+/// so a call from one is as external as a call from another directory.
+///
+/// The package clause is not in the graph, so it is read back off disk
+/// for each `_test.go` file. A file that cannot be read is treated as
+/// in-package — the pre-existing behaviour — rather than failing the
+/// run.
+type ExternalTestCallers = BTreeSet<usize>;
+
+fn external_test_callers(root: &Path, graph: &CallGraph) -> ExternalTestCallers {
+    let mut by_file: HashMap<&str, bool> = HashMap::new();
+    graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.file.ends_with("_test.go"))
+        .filter(|(_, node)| {
+            *by_file.entry(node.file.as_str()).or_insert_with(|| {
+                std::fs::read_to_string(root.join(&node.file))
+                    .is_ok_and(|source| lens_golang::is_external_test_package(&source))
+            })
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
 /// Fold the caller modules into the narrowest scope containing all of
 /// them, and turn that into a finding when it is narrower than the
 /// declaration. Returns `None` for a function whose callers already need
-/// the visibility it has.
+/// the visibility it has — including a Go function called from an
+/// external test package, which needs the export to compile.
 fn classify(
     graph: &CallGraph,
     idx: usize,
     lang: ExportLang,
     callers: Option<&BTreeSet<usize>>,
+    external_tests: &ExternalTestCallers,
 ) -> Option<Finding> {
     let node = &graph.nodes[idx];
     let callers: Vec<usize> = callers
         .map(|c| c.iter().copied().collect())
         .unwrap_or_default();
+    if callers
+        .iter()
+        .any(|&caller| external_tests.contains(&caller))
+    {
+        return None;
+    }
     let caller_modules: BTreeSet<&str> = callers
         .iter()
         .map(|&caller| graph.nodes[caller].module.as_str())
@@ -662,7 +729,11 @@ fn suggest(lang: ExportLang, scope: CallerScope, module: &str, scope_module: &st
 /// candidate set, and receiver calls the resolver declined to attribute
 /// (see [`gated_by_name`]). Both are reasons to check a row before
 /// narrowing it, and neither drops it.
-fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) {
+fn annotate_outside_calls(
+    graph: &CallGraph,
+    external_tests: &ExternalTestCallers,
+    findings: &mut [(usize, Finding)],
+) {
     if findings.is_empty() {
         return;
     }
@@ -676,7 +747,7 @@ fn annotate_outside_calls(graph: &CallGraph, findings: &mut [(usize, Finding)]) 
         ) {
             continue;
         }
-        let caller_module = caller_module(graph, &index_by_id, edge);
+        let caller_module = caller_module(graph, &index_by_id, external_tests, edge);
         for slot in slots.reached_by(graph, findings, &index_by_id, edge) {
             let (idx, finding) = &mut findings[slot];
             if !called_from_inside(&graph.nodes[*idx], finding, caller_module) {
@@ -741,16 +812,19 @@ impl<'g> FindingSlots<'g> {
 }
 
 /// The module of the function enclosing `edge`'s call site. A call site
-/// with no enclosing function has no module to place it in, so it counts
-/// as outside every scope.
+/// with no enclosing function has no module to place it in, and one in a
+/// Go external test package sits in no module the graph names, so both
+/// count as outside every scope.
 fn caller_module<'g>(
     graph: &'g CallGraph,
     index_by_id: &HashMap<&str, usize>,
+    external_tests: &ExternalTestCallers,
     edge: &CallGraphEdge,
 ) -> Option<&'g str> {
     edge.from
         .as_deref()
         .and_then(|from| index_by_id.get(from))
+        .filter(|&from_idx| !external_tests.contains(from_idx))
         .map(|&from_idx| graph.nodes[from_idx].module.as_str())
 }
 
@@ -1013,10 +1087,10 @@ fn render_counts(out: &mut String, summary: &Summary) {
     if summary.interface_satisfying_count > 0 {
         let _ = writeln!(
             out,
-            "{} match a method of an interface declared in the analyzed tree by name and \
-             parameter count: their calls can dispatch through the interface, so a missing caller \
-             is expected there. Those rows are annotated and listed after the others in their \
-             bucket.",
+            "{} match a method of an interface declared in the analyzed tree or of a well-known \
+             standard-library interface by name and parameter count: their calls can dispatch \
+             through the interface, so a missing caller is expected there. Those rows are \
+             annotated and listed after the others in their bucket.",
             summary.interface_satisfying_count,
         );
     }
@@ -2288,5 +2362,93 @@ mod tests {
         #[case] expected: bool,
     ) {
         assert_eq!(in_scope(module, scope, covers_descendants), expected);
+    }
+
+    /// Issue #638: a `package foo_test` file shares `foo`'s directory, and
+    /// so its graph module, but compiles as a separate package that sees
+    /// only exported names. A function it calls keeps its export; a test
+    /// in the package itself is an ordinary same-module caller.
+    #[rstest]
+    #[case::external_test_package("package a_test", "a.", "import \"example.com/m/a\"\n", false)]
+    #[case::internal_test_package("package a", "", "", true)]
+    fn go_callers_in_an_external_test_package_keep_the_export(
+        #[case] clause: &str,
+        #[case] qualifier: &str,
+        #[case] import: &str,
+        #[case] reported: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module example.com/m\n\ngo 1.22\n");
+        write_file(
+            dir.path(),
+            "a/a.go",
+            "package a\n\nfunc Helper() int { return 1 }\n\nfunc Use() int { return Helper() }\n",
+        );
+        write_file(
+            dir.path(),
+            "a/a_test.go",
+            &format!(
+                "// Copyright header.\n\n{clause}\n\nimport \"testing\"\n{import}\n\
+                 func TestHelper(t *testing.T) {{ _ = {qualifier}Helper() }}\n"
+            ),
+        );
+
+        let report = analyze_json(dir.path());
+        let names: Vec<String> = suggestions(&report).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names.iter().any(|name| name == "a::Helper"),
+            reported,
+            "{clause}: {report}",
+        );
+    }
+
+    /// Issue #639: a method matching a well-known standard-library
+    /// interface is annotated like an in-tree match, and a called one is
+    /// not suggested for unexport — that would compile and silently drop
+    /// the satisfaction (`GoString` redacting `%#v`).
+    #[test]
+    fn go_methods_matching_a_stdlib_interface_are_not_suggested_for_unexport() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "a/a.go",
+            "package a\n\n\
+             type Token struct{ v string }\n\n\
+             func (t Token) GoString() string { return \"a.Token{REDACTED}\" }\n\n\
+             func (t Token) Plain() string { return t.v }\n\n\
+             func Use() string { return Token{}.GoString() + Token{}.Plain() }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let finding = |name: &str| {
+            report["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["findings"].as_array().unwrap())
+                .find(|f| f["qualified_name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name}: {report}"))
+        };
+        let go_string = finding("a::Token::GoString");
+        assert_eq!(go_string["caller_scope"], "same_module", "got: {go_string}");
+        assert_eq!(
+            go_string["may_satisfy_interfaces"],
+            serde_json::json!(["fmt.GoStringer"]),
+            "got: {go_string}",
+        );
+        assert_eq!(
+            go_string["suggested_visibility"], INTERFACE_SUGGESTION,
+            "got: {go_string}",
+        );
+        let plain = finding("a::Token::Plain");
+        assert_eq!(
+            plain["suggested_visibility"], "unexport: lowercase the initial letter",
+            "a method matching no interface keeps the plain suggestion: {plain}",
+        );
+        assert!(
+            analyze_md(dir.path()).contains("may satisfy interface `fmt.GoStringer`"),
+            "the markdown names the stdlib interface",
+        );
     }
 }
