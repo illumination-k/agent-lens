@@ -1,92 +1,23 @@
 # Agent guide
 
-`AGENTS.md` is a symlink to this file, so Claude Code, Codex, and any other
-`AGENTS.md` consumer read the same guidance.
+`AGENTS.md` symlinks here. Pre-alpha: no backwards-compatibility guarantee.
 
-This library is pre-alpha and under active development. The API is not stable and may change without a major version bump, so backwards compatibility is not guaranteed at this stage.
+`agent-lens` is a single-binary Rust CLI giving coding agents a lens on codebase shape: hook handlers, on-demand analyzers, a profile runner over `agent-lens.toml`, baselines, and bundled skills. `agent-lens help --md` and `agent-lens config schema` are generated from code and are the source of truth.
 
-## Purpose
+## Output rules
 
-`agent-lens` is a single-binary Rust CLI that gives coding agents such as Claude Code and Codex a **lens for seeing codebases more deeply**.
+- stdout is for protocol data and analyzer results only; logs go to stderr via `tracing`.
+- Analyzer output is LLM context: dense and structured, no colors, emoji, or decorative prose.
 
-Unlike ordinary linting, its output is tuned to be useful when placed in an LLM context: keep the signal dense, avoid decorative output, and prefer structured data that an agent can reason over.
+## Workflow
 
-The project bundles three related surfaces:
-
-- Hook handlers that integrate with coding-agent workflows and surface focused context at useful moments.
-- On-demand analyzers that report codebase shape: duplication (functions, type definitions, and statement blocks), wrappers, delegation chains, cohesion, complexity, coupling, module communities versus declared boundaries, context span, hotspots, change risk, call-graph structure (hubs, cycles, queries, impact, layers), reachability (untested, test-only, unreachable), and declarations wider than their uses (single-use, single-impl, parameters, visibility).
-- A profile runner (`agent-lens run <profile>`) and metric snapshots (`agent-lens baseline create <profile>`) over an `agent-lens.toml`, plus `agent-lens skills install` for the bundled Claude Code skills.
-
-`agent-lens help --md` prints the whole command surface as one Markdown document and `agent-lens config schema` prints the `agent-lens.toml` reference. Both are generated from the code, so read them rather than trusting a doc when the two disagree.
-
-## Development Process
-
-Run `mise install` first to install the toolchain and project tools.
-
-At the end of a session, run `mise run ci` and make sure it passes. Use the narrower tasks while iterating:
-
-```bash
-mise run fmt      # Format (cargo fmt, dprint, shfmt, oxfmt)
-mise run lint     # Lint and policy checks
-mise run test     # Tests (nextest, doctests, vitest)
-mise run ci       # Full required verification; covers everything CI gates on
-mise run bench    # Criterion benchmarks; not part of ci
-mise run bench-compare [ref]  # Benchmarks on ref vs working tree; fails on a regression (CI runs it on PRs)
-mise run mutants  # Mutation tests; slow and not part of normal ci
-mise run mutants:minimize <package>  # Redundant tests of a package via mutrim; slow, needs mutrim on PATH
-mise run selftest # Run agent-lens over its own sources; not part of ci
-mise run release <X.Y.Z>  # Version-bump PR -> wait for checks -> squash merge -> push the v tag; rerun to resume
-```
-
-## Dogfooding
-
-`agent-lens.toml` declares one profile per view of this repository (`self`,
-`self-reach`, `self-tests`, `lenses`, `web`, `changes`, `history`, `baseline`),
-and `mise run selftest` builds the binary and drives every one of them. Run a
-single profile with `mise run selftest <profile>`.
-
-After changing an analyzer, run the profiles it appears in and read the diff
-against the previous run — not the report in isolation. Unit tests cover
-analyzer output on fixtures; this is what catches an analyzer that still returns
-`Ok` while saying something absurd about code the maintainers know by heart.
-Findings the tool reports about its own sources are real findings: fix them or
-say why they are acceptable.
-
-Before committing, `mise run selftest changes` runs every diff-only tool over
-the working tree. An empty report means the pending edit introduced no
-duplicate, no forwarding-only wrapper, and no complexity spike.
-
-Also run mutation testing against the current diff whenever practical. `mise run
-mutants:rust:diff [base]` (base defaults to `main`) is the diff-scoped form and is
-what CI runs on a PR; `mise run mutants` is the full-workspace run. It is acceptable
-for this to be diff-scoped rather than a full mutation run, but do not skip it
-silently when the change touches Rust logic.
-
-When adding or changing tests, use [`rstest`](https://docs.rs/rstest) as much as practical, especially for parameterized cases and fixture-style setup.
-
-When regression risk is high, especially around core logic, introduce property-based tests.
-
-When a change touches code that has benchmarks, report whether benchmark regression was checked and what the result was. `mise run bench-compare [ref]` (ref defaults to `main`) benchmarks the ref and the working tree back to back and fails when a benchmark slowed down past the threshold; `bench.yml` runs the same task on every PR. To iterate on one benchmark, save a baseline on the unchanged code and compare against it:
-
-```bash
-git stash && mise run bench:rust --save-baseline base && git stash pop
-mise run bench:rust --baseline base
-```
-
-A performance fix should come with a benchmark that reproduces the slow shape (as `similarity_blocks_go_idiom_*` does for #562), so the gate catches it coming back. Corpus writers shared across bench targets live in `crates/agent-lens/benches/support/`.
-
-Keep stdout reserved for protocol data and analyzer results. Send logs and diagnostics to stderr through `tracing`.
-
-Treat analyzer output as agent-facing context, not human-facing decoration. Do not add colors, animations, emoji, or verbose prose to analyzer output unless there is a concrete agent-useful reason.
+- `mise install` first; `mise tasks` lists everything. `mise run ci` must pass before you finish.
+- After changing an analyzer, run `mise run selftest <profile>` for the profiles it appears in and diff against the previous run. Findings on our own sources are real: fix them or justify them.
+- Before committing, `mise run selftest changes` should be empty.
+- When Rust logic changes, run `mise run mutants:rust:diff [base]`; don't skip it silently.
+- Tests: prefer `rstest`; add property-based tests where regression risk is high.
+- When touching benchmarked code, run `mise run bench-compare [ref]` and report the result. Performance fixes ship with a benchmark reproducing the slow shape (shared corpus writers: `crates/agent-lens/benches/support/`).
 
 ## Documentation
 
-`agent-lens help --md` and `agent-lens config schema` are the reference: they are generated from the code, so per-analyzer options and `agent-lens.toml` keys are deliberately **not** restated in the README — do not add such tables back.
-
-A change to the CLI surface is still not done until `README.md` matches it. The parts that can drift:
-
-- the analyzer list and one-line descriptions ("Command surface" and "What's in the box"),
-- the language-support claims under "Languages", when an adapter gains or loses a capability,
-- the worked examples in "Quick start", when a flag they use changes.
-
-Diff those against `agent-lens help --md` rather than against memory. The README is a narrative over the generated docs, so it is the side that gets corrected.
+A CLI change isn't done until `README.md` matches `agent-lens help --md`: the analyzer lists ("Command surface", "What's in the box"), "Languages" capability claims, and "Quick start" examples. Don't restate per-analyzer options or config keys in the README.
