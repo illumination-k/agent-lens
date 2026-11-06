@@ -114,14 +114,14 @@ mod tests {
                 TreeNode::with_children(
                     "Let",
                     "",
-                    vec![TreeNode::new("PatIdent", "a"), TreeNode::leaf("Path(x)")],
+                    vec![TreeNode::new("PatIdent", "a"), TreeNode::new("Path", "x")],
                 ),
                 TreeNode::with_children(
                     "Let",
                     "",
-                    vec![TreeNode::new("PatIdent", "b"), TreeNode::leaf("Path(a)")],
+                    vec![TreeNode::new("PatIdent", "b"), TreeNode::new("Path", "a")],
                 ),
-                TreeNode::leaf("Path(b)"),
+                TreeNode::new("Path", "b"),
             ],
         )
     )]
@@ -245,7 +245,7 @@ mod tests {
             vec![TreeNode::with_children(
                 "Let",
                 "",
-                vec![TreeNode::new("PatIdent", "a"), TreeNode::leaf("Path(x)")],
+                vec![TreeNode::new("PatIdent", "a"), TreeNode::new("Path", "x")],
             )],
         );
         let with_param =

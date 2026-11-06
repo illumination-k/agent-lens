@@ -3,14 +3,15 @@
 //! list. Consumed by `lens_domain::build_pdg` for
 //! `similarity --method pdg`.
 //!
-//! The lowering keeps names in labels rather than values (`Path(x)`,
-//! `CallPath(f)`), so a read is recognised by label shape: a
-//! single-segment, lowercase-initial `Path(...)`. Multi-segment paths
-//! are items, uppercase-initial ones are unit variants and constants;
-//! neither is a local. Bindings are the pattern positions of `let`,
+//! The lowering gives a local-looking path (one segment, not
+//! uppercase-initial) the label `Path` with the name as its value, and
+//! keeps every other path's name in the label (`Path(None)`,
+//! `Path(std::mem::take)`): multi-segment paths are items,
+//! uppercase-initial ones are unit variants and constants, and neither
+//! is a local. So a read is a `Path` node with a value. Bindings are the pattern positions of `let`,
 //! `for`, `if let` / `while let`, and match arms, plus `=` and the
 //! compound-assignment operators on a bare path. Closure parameters
-//! need no rule: a pattern is never a `Path(...)` read, and a closure
+//! need no rule: a pattern is never a `Path` read, and a closure
 //! body's reads are attributed to the enclosing statement, outer name
 //! or not.
 //!
@@ -18,7 +19,9 @@
 //! only inside `println!` / `format!` / `vec!` arguments is invisible
 //! here, as it is to every other comparison over the tree.
 
-use lens_domain::{DependenceRole, DependenceVocabulary, TreeNode, starts_uppercase};
+use lens_domain::{DependenceRole, DependenceVocabulary, TreeNode};
+
+use crate::parser::is_local_name;
 
 /// Rust's dependence vocabulary.
 #[derive(Debug, Clone, Copy, Default)]
@@ -34,7 +37,7 @@ impl DependenceVocabulary for RustVocabulary {
         if label == "Block" {
             return DependenceRole::StatementList;
         }
-        if let Some(name) = local_path_name(label) {
+        if let Some(name) = local_path_name(node) {
             return DependenceRole::Reference(name);
         }
         match label {
@@ -43,11 +46,7 @@ impl DependenceVocabulary for RustVocabulary {
                 names: node.children.first().map(pattern_names).unwrap_or_default(),
                 targets: vec![0],
             },
-            "Assign" => match node
-                .children
-                .first()
-                .and_then(|left| local_path_name(&left.label))
-            {
+            "Assign" => match node.children.first().and_then(local_path_name) {
                 Some(name) => DependenceRole::Binding {
                     names: vec![name],
                     targets: vec![0],
@@ -70,10 +69,9 @@ impl DependenceVocabulary for RustVocabulary {
     }
 }
 
-/// The local a `Path(name)` label reads, if it reads one.
-fn local_path_name(label: &str) -> Option<&str> {
-    let name = label.strip_prefix("Path(")?.strip_suffix(')')?;
-    (!name.contains("::") && !starts_uppercase(name)).then_some(name)
+/// The local a `Path` node reads, if it reads one.
+fn local_path_name(node: &TreeNode) -> Option<&str> {
+    (node.label == "Path" && is_local_name(&node.value)).then_some(node.value.as_str())
 }
 
 /// The names a pattern subtree binds: every `PatIdent` /
@@ -100,7 +98,7 @@ fn compound_assignment_target(node: &TreeNode) -> Option<&str> {
     if !COMPOUND_ASSIGNMENT_OPERATORS.contains(&op) {
         return None;
     }
-    local_path_name(&node.children.first()?.label)
+    local_path_name(node.children.first()?)
 }
 
 #[cfg(test)]
@@ -220,16 +218,20 @@ mod tests {
     }
 
     #[rstest]
-    #[case::local("Path(value)", Some("value"))]
-    #[case::qualified("Path(std::mem::take)", None)]
-    #[case::variant("Path(None)", None)]
-    #[case::call_label("CallPath(value)", None)]
-    #[case::other("Let", None)]
+    #[case::local("Path", "value", Some("value"))]
+    #[case::qualified("Path", "std::mem::take", None)]
+    #[case::variant("Path", "None", None)]
+    #[case::empty("Path", "", None)]
+    #[case::variant_label("Path(None)", "", None)]
+    #[case::call_label("CallPath", "value", None)]
+    #[case::other("Let", "", None)]
     fn local_path_name_reads_single_segment_lowercase_paths(
         #[case] label: &str,
+        #[case] value: &str,
         #[case] expected: Option<&str>,
     ) {
-        assert_eq!(local_path_name(label), expected);
+        let node = TreeNode::new(label, value);
+        assert_eq!(local_path_name(&node), expected);
     }
 
     #[test]
