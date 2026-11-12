@@ -1487,6 +1487,8 @@ mod tests {
         assert_eq!(held[0]["unique_reach"]["function_count"], 1);
         assert_eq!(held[0]["unique_reach"]["functions"][0], "crate::only_here");
         assert_eq!(report["summary"]["reach_guarded_count"], 1);
+        // Held by evidence, so not also counted as unchecked.
+        assert_eq!(report["summary"]["unguarded_count"], 0);
     }
 
     /// A Rust body that is one unexpanded `assert_eq!` is a two-node
