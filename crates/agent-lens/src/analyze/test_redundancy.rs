@@ -1313,6 +1313,67 @@ mod tests {
         assert_eq!(report["groups"][0]["members"][0]["unguarded"], false);
     }
 
+    /// One blind test is enough: the pair's other half resolving its
+    /// target does not tell the guard what the blind one exercises.
+    /// `read` comes through a re-export the resolver does not follow, so
+    /// the name alone is left, and two modules define it.
+    #[test]
+    fn one_blind_test_unguards_the_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "pub mod a {{ pub fn read(a: u32, b: u32) -> u32 {{ a + b }} }}\n\
+                 pub mod b {{ pub fn read(a: u32, b: u32) -> u32 {{ a * b }} }}\n\
+                 pub mod facade {{ pub use crate::a::read; }}\n\
+                 pub fn shared(a: u32, b: u32) -> u32 {{ a + b }}\n\
+                 #[cfg(test)]\nmod tests {{\nuse super::shared;\nuse crate::facade::*;\n\
+                 #[test]\nfn resolved() {{\n{}}}\n\
+                 #[test]\nfn blind() {{\n{}}}\n\
+                 }}\n",
+                test_body("shared", 1),
+                test_body("read", 2),
+            ),
+        );
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+
+        assert_eq!(report["summary"]["group_count"], 1);
+        assert_eq!(report["summary"]["foldable_count"], 0);
+        assert_eq!(report["summary"]["unguarded_count"], 1);
+        assert_eq!(report["groups"][0]["members"][0]["unguarded"], true);
+    }
+
+    /// An empty reach with nothing ambiguous behind it is a fact, not a
+    /// blind spot: tests that call only into `std` have no production
+    /// target for the guard to miss, so they fold as before.
+    #[test]
+    fn tests_without_ambiguous_calls_are_not_unguarded() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "pub fn unrelated() -> u32 {{ 1 }}\n\
+                 #[cfg(test)]\nmod tests {{\n\
+                 #[test]\nfn one() {{\n{}}}\n\
+                 #[test]\nfn two() {{\n{}}}\n\
+                 }}\n",
+                test_body("u32::max", 1),
+                test_body("u32::max", 2),
+            ),
+        );
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+
+        assert_eq!(report["summary"]["foldable_count"], 1);
+        assert_eq!(report["summary"]["unguarded_count"], 0);
+        assert_eq!(report["groups"][0]["members"][0]["unguarded"], false);
+        let md = analyze_md(dir.path(), TestRedundancyAnalyzer::new());
+        assert!(!md.contains("unguarded (ambiguous calls only)"), "{md}");
+    }
+
     /// A test that resolves its target is not blind, whatever ambiguous
     /// call sites it also has: the guard had something to rule on.
     #[test]
