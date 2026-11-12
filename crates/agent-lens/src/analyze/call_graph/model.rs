@@ -232,7 +232,7 @@ pub(crate) enum ResolutionMethod {
     /// that declaration is a graph node. No name matching involved.
     Binding,
     /// Matched a lexical candidate path (absolute, `self::`/`super::`,
-    /// `Self::`, imports/aliases) against a qualified name.
+    /// `Self::`, imports/aliases, glob imports) against a qualified name.
     Lexical,
     /// `self.method()` resolved to `Owner::method` in the caller's
     /// module.
@@ -240,7 +240,7 @@ pub(crate) enum ResolutionMethod {
     /// Fallback match on the last path segment of the callee name.
     LastSegment,
     /// Last-segment candidates narrowed by a multi-segment callee path
-    /// suffix (e.g. `Foo::new` through a glob import).
+    /// suffix (e.g. `Foo::new` on a type no import in scope names).
     PathSuffix,
     /// Last-segment candidates narrowed to the caller's crate.
     CrateNarrowed,
