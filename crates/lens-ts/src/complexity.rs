@@ -1024,6 +1024,19 @@ function f(): void {
         );
     }
 
+    /// A string literal is an operand: the declared name alone is one,
+    /// the name plus its literal is two.
+    #[test]
+    fn halstead_counts_a_string_literal_as_an_operand() {
+        let f = one(r#"
+function f(): void {
+    const a = "x";
+}
+"#);
+        assert_eq!(f.halstead.total_operands, 2);
+        assert_eq!(f.halstead.distinct_operands, 2);
+    }
+
     #[test]
     fn halstead_total_operand_count_grows_per_occurrence() {
         // Three identifiers and three literals → operands appear repeatedly.

@@ -447,6 +447,15 @@ mod tests {
         assert_eq!(declarator.value, expected);
     }
 
+    /// A string literal keeps its text as the node's value, so two calls
+    /// differing only in a string argument are not the same tree.
+    #[test]
+    fn a_string_literal_carries_its_text() {
+        let tree = first_statement_tree(r#"log("hello");"#);
+
+        assert!(values(&tree).contains(&"hello"), "{tree:?}");
+    }
+
     /// Two records of the same arity lower to the same shape, so without
     /// the keys a returned object is pure filler: `{ a, b, c }` and
     /// `{ x, y, z }` would be indistinguishable trees.
