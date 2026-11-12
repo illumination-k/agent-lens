@@ -1930,6 +1930,7 @@ mod tests {
                 wrappers: None,
                 interfaces: Arc::new(Vec::new()),
                 macro_facts: None,
+                value_references: Arc::new(Vec::new()),
             }],
             true,
         );

@@ -186,6 +186,23 @@ pub(crate) struct CallSiteFacts {
     pub(crate) arguments: Vec<ArgumentShape>,
 }
 
+/// One place a function is named by path without being called: passed
+/// as a value (`.map(fusion::key)`) or imported (`use fusion::key;`).
+///
+/// Exactly one of `to` and `candidates` is populated: `to` when the
+/// path resolved to one node, `candidates` when the resolver could not
+/// decide between several.
+#[derive(Debug, Clone)]
+pub(crate) struct ValueReference {
+    /// Node id of the function the reference is written in. `None` at
+    /// module scope, where a `use` declaration sits.
+    pub(crate) from: Option<String>,
+    /// Lexical module the reference is written in.
+    pub(crate) module: String,
+    pub(crate) to: Option<String>,
+    pub(crate) candidates: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct EdgeWeights {
     pub(crate) call_count: usize,
@@ -215,7 +232,7 @@ pub(crate) enum ResolutionMethod {
     /// that declaration is a graph node. No name matching involved.
     Binding,
     /// Matched a lexical candidate path (absolute, `self::`/`super::`,
-    /// `Self::`, imports/aliases) against a qualified name.
+    /// `Self::`, imports/aliases, glob imports) against a qualified name.
     Lexical,
     /// `self.method()` resolved to `Owner::method` in the caller's
     /// module.
@@ -223,7 +240,7 @@ pub(crate) enum ResolutionMethod {
     /// Fallback match on the last path segment of the callee name.
     LastSegment,
     /// Last-segment candidates narrowed by a multi-segment callee path
-    /// suffix (e.g. `Foo::new` through a glob import).
+    /// suffix (e.g. `Foo::new` on a type no import in scope names).
     PathSuffix,
     /// Last-segment candidates narrowed to the caller's crate.
     CrateNarrowed,

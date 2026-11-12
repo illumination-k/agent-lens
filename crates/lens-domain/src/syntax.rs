@@ -481,6 +481,11 @@ pub enum LexicalResolutionStatus {
     Ambiguous,
 }
 
+/// The [`ImportShape::local_alias`] of a glob import (`use m::*;`): it
+/// binds no single name, and its [`ImportShape::imported_module`] is the
+/// module whose items it brings into scope.
+pub const GLOB_IMPORT_ALIAS: &str = "*";
+
 /// Neutral representation of an import/export fact visible in a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportShape {

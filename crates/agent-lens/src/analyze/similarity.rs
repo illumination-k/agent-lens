@@ -1872,7 +1872,8 @@ impl fmt::Display for Beta {
         for entry in &self.items {
             sum += entry;
         }
-        write!(f, "beta {sum}")
+        let label = "beta";
+        write!(f, "{label} {sum}")
     }
 }
 "#;
@@ -2192,7 +2193,7 @@ fn gamma(xs: &[i32]) -> i32 {
 fn delta(ys: &[i64]) -> i64 {
     let mut sum = 0;
     for y in ys {
-        if *y > 1 {
+        if *y >= 1 {
             sum += y;
         }
     }

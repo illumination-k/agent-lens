@@ -46,7 +46,7 @@ pub use dependence::GoVocabulary;
 pub use interfaces::{extract_interface_decls_with_module, extract_interface_shapes_with_module};
 pub use lens_domain::CouplingError;
 pub use method_names::{BUILTIN_FUNCTION_NAMES, INERT_ATTRIBUTE_NAMES, UBIQUITOUS_METHOD_NAMES};
-pub use module_path::package_segments;
+pub use module_path::{is_external_test_package, package_clause_name, package_segments};
 pub use parser::{GoParseError, GoParser};
 pub use statements::extract_statement_seqs;
 pub use type_defs::extract_type_defs;

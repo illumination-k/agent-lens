@@ -3,7 +3,7 @@
 use lens_domain::{
     BodyShape, FunctionDef, FunctionShape, FunctionSignature, LanguageParseError, LanguageParser,
     OwnerKind, OwnerShape, ReceiverShape, SignatureShape, SourceSpan, SyntaxFact, TreeNode,
-    VisibilityShape, identifier_tokens, qualify as qualify_name, qualify_module,
+    VisibilityShape, identifier_tokens, qualify as qualify_name, qualify_module, starts_uppercase,
 };
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -711,7 +711,7 @@ fn expr_tree(expr: &syn::Expr) -> TreeNode {
                 .collect(),
         ),
         syn::Expr::Paren(paren) => expr_tree(&paren.expr),
-        syn::Expr::Path(path) => TreeNode::leaf(format!("Path({})", path_to_string(&path.path))),
+        syn::Expr::Path(path) => path_expr_tree(&path.path),
         syn::Expr::Range(range) => TreeNode::with_children(
             "Range",
             "",
@@ -757,6 +757,27 @@ fn expr_tree(expr: &syn::Expr) -> TreeNode {
         syn::Expr::Yield(yield_expr) => optional_expr("Yield", yield_expr.expr.as_deref()),
         _ => TreeNode::leaf(expr_fallback_label(expr)),
     }
+}
+
+/// A path in expression position. A local's name rides in the value,
+/// like a [`syn::Pat::Ident`] binding's, so renaming a local changes no
+/// label and only value-aware comparison (`--target blocks`) sees it.
+/// Every other path — a qualified item, a constant, a unit variant —
+/// keeps its name in the label: which item is referenced is part of
+/// the shape, not a naming choice local to the function.
+fn path_expr_tree(path: &syn::Path) -> TreeNode {
+    let name = path_to_string(path);
+    if is_local_name(&name) {
+        TreeNode::new("Path", name)
+    } else {
+        TreeNode::leaf(format!("Path({name})"))
+    }
+}
+
+/// Whether a path reads like a local binding: one segment, not
+/// uppercase-initial. `self` counts — it is the receiver binding.
+pub(crate) fn is_local_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains("::") && !starts_uppercase(name)
 }
 
 fn call_tree(call: &syn::ExprCall) -> TreeNode {
@@ -1167,8 +1188,20 @@ mod tests {
         assert_eq!(by_name("crate::S::direct").function.implements, None);
     }
 
+    /// Whether `tree` holds a node spelled `label`: the bare label, or
+    /// `Label(value)` for a node that carries its name in the value.
     fn has_label(tree: &TreeNode, label: &str) -> bool {
-        tree.label == label || tree.children.iter().any(|child| has_label(child, label))
+        node_matches(tree, label) || tree.children.iter().any(|child| has_label(child, label))
+    }
+
+    fn node_matches(node: &TreeNode, spelled: &str) -> bool {
+        node.label == spelled
+            || (!node.value.is_empty()
+                && spelled
+                    .strip_prefix(node.label.as_str())
+                    .and_then(|rest| rest.strip_prefix('('))
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    == Some(node.value.as_str()))
     }
 
     fn count_label(tree: &TreeNode, label: &str) -> usize {
@@ -1599,6 +1632,63 @@ extern crate alloc;
             );
         }
         assert_eq!(count_label(&tree, "Function"), 4);
+    }
+
+    /// A local's name rides in the value; any other path keeps its
+    /// name in the label, since which item is referenced is shape.
+    #[rstest]
+    #[case::local("value", "Path", "value")]
+    #[case::self_receiver("self", "Path", "self")]
+    #[case::underscore_local("_unused", "Path", "_unused")]
+    #[case::unit_variant("None", "Path(None)", "")]
+    #[case::constant("LIMIT", "Path(LIMIT)", "")]
+    #[case::qualified("std::mem::take", "Path(std::mem::take)", "")]
+    #[case::associated("Self::new", "Path(Self::new)", "")]
+    fn path_expression_keeps_only_local_names_out_of_the_label(
+        #[case] src: &str,
+        #[case] label: &str,
+        #[case] value: &str,
+    ) {
+        let expr: syn::Expr = syn::parse_str(src).unwrap();
+        let tree = expr_tree(&expr);
+        assert_eq!((tree.label.as_str(), tree.value.as_str()), (label, value));
+    }
+
+    /// Issue #608: renaming a function's locals leaves its body's labels
+    /// alone, so every value-blind scorer sees the same shape.
+    #[test]
+    fn renamed_locals_leave_the_body_labels_unchanged() {
+        let funcs = parse_functions(
+            r#"
+fn original(scores: &[f64]) -> usize {
+    let mut best = 0;
+    for index in 0..scores.len() {
+        if scores[index] > scores[best] {
+            best = index;
+        }
+    }
+    best
+}
+
+fn renamed(xs: &[f64]) -> usize {
+    let mut b = 0;
+    for i in 0..xs.len() {
+        if xs[i] > xs[b] {
+            b = i;
+        }
+    }
+    b
+}
+"#,
+        );
+        let ignoring_values = |tree: &TreeNode| lens_domain::TokenProfile::from_tree(tree, false);
+        let with_values = |tree: &TreeNode| lens_domain::TokenProfile::from_tree(tree, true);
+        let (a, b) = (funcs[0].body_tree(), funcs[1].body_tree());
+        assert_eq!(
+            lens_domain::token_similarity(&ignoring_values(a), &ignoring_values(b)),
+            1.0
+        );
+        assert!(lens_domain::token_similarity(&with_values(a), &with_values(b)) < 1.0);
     }
 
     #[test]

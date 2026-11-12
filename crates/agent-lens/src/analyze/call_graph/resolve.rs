@@ -32,7 +32,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lens_domain::{CallShape, CalleeBinding, ReceiverExprKind, SyntaxFact, qualify_module};
+use lens_domain::{
+    CallShape, CalleeBinding, GLOB_IMPORT_ALIAS, ReceiverExprKind, SyntaxFact, qualify_module,
+};
 
 use super::model::{CallGraphNode, GraphLanguage, Resolution, ResolutionMethod, name_last_segment};
 
@@ -269,7 +271,36 @@ impl Resolver {
         {
             return resolve_ids(ids, ResolutionMethod::Lexical);
         }
+        // `use super::*;` then `read(x)`: the glob says which module the
+        // name comes from, which the name fallback below cannot — with a
+        // sibling module defining its own `read`, it sees two candidates.
+        // After the lexical candidates because an item or an explicit
+        // import in scope shadows a glob.
+        let globbed = self.glob_imported_ids(site, language);
+        if !globbed.is_empty() {
+            return resolve_ids(&globbed, ResolutionMethod::Lexical);
+        }
         self.resolve_by_name(site, callee_name, language)
+    }
+
+    /// Nodes the callee path names under a module glob-imported at the
+    /// call site. More than one glob can supply the name only where the
+    /// source itself is ambiguous, so every match is kept.
+    ///
+    /// A bare name never reaches a method, as in the name fallback:
+    /// `use self::Kind::*;` brings in an enum's variants, not the
+    /// associated functions of its `impl`.
+    fn glob_imported_ids(&self, site: &CallShape, language: GraphLanguage) -> Vec<String> {
+        let mut ids: Vec<String> = glob_candidates(site)
+            .iter()
+            .filter_map(|candidate| self.qualified.get(candidate))
+            .flatten()
+            .cloned()
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let qualified_path = site.callee_path().is_some_and(|path| path.contains("::"));
+        self.with_owner_shape(&ids, false, language, qualified_path)
     }
 
     /// Last-segment fallback for a plain call that no lexical candidate
@@ -715,6 +746,33 @@ fn relative_path_candidates(
     candidates
 }
 
+/// The callee path qualified under each module glob-imported at the
+/// call site. A path that starts with a keyword is already anchored and
+/// goes through no glob.
+fn glob_candidates(site: &CallShape) -> Vec<String> {
+    let Some(path) = site
+        .callee_path()
+        .or_else(|| site.callee_name().map(ToOwned::to_owned))
+    else {
+        return Vec::new();
+    };
+    let head = path.split("::").next().unwrap_or_default();
+    if matches!(head, "crate" | "self" | "super" | "Self") {
+        return Vec::new();
+    }
+    site.visible_imports
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.local_alias,
+                SyntaxFact::Known(Some(alias)) if alias == GLOB_IMPORT_ALIAS
+            )
+        })
+        .filter_map(|entry| entry.imported_module.known_value())
+        .map(|module| qualify_module(module, &path))
+        .collect()
+}
+
 fn alias_target<'a>(site: &'a CallShape, alias: &str) -> Option<&'a str> {
     site.visible_imports
         .iter()
@@ -869,6 +927,101 @@ mod tests {
         #[case] expected: Option<&str>,
     ) {
         assert_eq!(import_expanded_path(&site(path), path).as_deref(), expected);
+    }
+
+    fn glob_site(path: &str, globs: &[&str]) -> CallShape {
+        CallShape {
+            visible_imports: globs
+                .iter()
+                .map(|module| ImportShape {
+                    local_alias: SyntaxFact::Known(Some(GLOB_IMPORT_ALIAS.to_owned())),
+                    imported_module: SyntaxFact::Known((*module).to_owned()),
+                    exported_symbol: SyntaxFact::Unknown,
+                })
+                .collect(),
+            ..site(path)
+        }
+    }
+
+    #[rstest]
+    #[case::bare_name("read", &["crate::a"], &["crate::a::read"])]
+    #[case::type_path("Reader::new", &["crate::a"], &["crate::a::Reader::new"])]
+    #[case::two_globs("read", &["crate::a", "crate::b"], &["crate::a::read", "crate::b::read"])]
+    #[case::no_glob("read", &[], &[])]
+    #[case::crate_anchored("crate::read", &["crate::a"], &[])]
+    #[case::self_anchored("self::read", &["crate::a"], &[])]
+    #[case::super_anchored("super::read", &["crate::a"], &[])]
+    #[case::self_type("Self::read", &["crate::a"], &[])]
+    fn glob_candidates_qualify_the_path_under_each_globbed_module(
+        #[case] path: &str,
+        #[case] globs: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        assert_eq!(glob_candidates(&glob_site(path, globs)), expected);
+    }
+
+    /// Two modules define `read`; the name alone is ambiguous, the glob
+    /// in scope is not. Regression for #659.
+    #[rstest]
+    #[case::one_glob("read", &["crate::a"], Some("crate::a::read"), Some(ResolutionMethod::Lexical))]
+    #[case::the_other_glob("read", &["crate::b"], Some("crate::b::read"), Some(ResolutionMethod::Lexical))]
+    #[case::glob_without_the_name_is_skipped(
+        "read",
+        &["crate::empty", "crate::b"],
+        Some("crate::b::read"),
+        Some(ResolutionMethod::Lexical)
+    )]
+    #[case::type_path("Reader::new", &["crate::b"], Some("crate::b::Reader::new"), Some(ResolutionMethod::Lexical))]
+    #[case::both_globs("read", &["crate::a", "crate::b"], None, Some(ResolutionMethod::Lexical))]
+    #[case::no_glob("read", &[], None, Some(ResolutionMethod::LastSegment))]
+    #[case::no_glob_has_the_name("read", &["crate::empty"], None, Some(ResolutionMethod::LastSegment))]
+    fn glob_imports_resolve_a_name_two_modules_define(
+        #[case] path: &str,
+        #[case] globs: &[&str],
+        #[case] expected: Option<&str>,
+        #[case] method: Option<ResolutionMethod>,
+    ) {
+        let nodes = vec![
+            node("crate::a::read"),
+            node("crate::b::read"),
+            node("crate::a::Reader::new"),
+            node("crate::b::Reader::new"),
+        ];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&glob_site(path, globs), GraphLanguage::Rust);
+
+        let expected_id = expected.map(|name| format!("src/lib.rs:{name}:1"));
+        assert_eq!(call.to, expected_id, "{path}");
+        assert_eq!(call.method, method, "{path}");
+        if expected.is_none() {
+            assert_eq!(call.resolution, Resolution::Ambiguous);
+            assert_eq!(call.candidates.len(), 2);
+        }
+    }
+
+    /// `use self::Kind::*;` on an enum: a bare `read()` is not the
+    /// associated function `Kind::read`, so the glob supplies nothing
+    /// and the call stays with the name fallback's verdict.
+    #[test]
+    fn a_bare_name_does_not_reach_a_method_through_a_glob() {
+        let nodes = vec![node("crate::m::Kind::read")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&glob_site("read", &["crate::m::Kind"]), GraphLanguage::Rust);
+
+        assert_eq!(call.resolution, Resolution::Unresolved);
+    }
+
+    /// An item of the caller's own module shadows a glob import.
+    #[test]
+    fn an_item_in_the_callers_module_shadows_a_glob() {
+        let nodes = vec![node("crate::m::read"), node("crate::a::read")];
+        let resolver = Resolver::new(&nodes);
+
+        let call = resolver.resolve(&glob_site("read", &["crate::a"]), GraphLanguage::Rust);
+
+        assert_eq!(call.to.as_deref(), Some("src/lib.rs:crate::m::read:1"));
     }
 
     fn receiver_site(name: &str) -> CallShape {
