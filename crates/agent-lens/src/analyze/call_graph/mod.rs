@@ -33,7 +33,7 @@ use super::{
 use model::{
     CallGraphEdge, CallGraphNode, DelegationFacts, EdgeWeights, GraphLanguage,
     ModuleResolutionSummary, NodeVisibility, NodeWeights, Resolution, ResolutionCallCounts,
-    node_id, node_local_name,
+    ValueReference, node_id, node_local_name,
 };
 use resolve::{CallerIndex, Resolver};
 
@@ -52,12 +52,21 @@ pub(crate) struct CallGraph {
     /// [`CallGraphBuilder::with_interface_facts`]; only the Go adapter
     /// extracts them today.
     pub(crate) interfaces: Vec<InterfaceShape>,
+    /// Places a function is named by path without being called — passed
+    /// as a value or imported with `use` — that resolved to a node or to
+    /// a candidate set. Empty unless the graph was built with
+    /// [`CallGraphBuilder::with_value_reference_facts`]; only the Rust
+    /// adapter extracts them today. They are deliberately not edges:
+    /// naming a function is evidence that it must be visible from
+    /// there, not that control flows into it.
+    pub(crate) value_references: Vec<ValueReference>,
 }
 
 impl CallGraph {
     pub(crate) fn build(files: Vec<FileGraphInput>, argument_facts: bool) -> Self {
         let mut nodes = build_nodes(&files);
         let (mut edges, module_summary) = build_edges(&files, &nodes, argument_facts);
+        let value_references = build_value_references(&files, &nodes);
         apply_static_degrees(&mut nodes, &edges);
         edges.sort_by(|a, b| {
             a.from
@@ -73,6 +82,7 @@ impl CallGraph {
             nodes,
             edges,
             module_summary,
+            value_references,
             interfaces: collect_interfaces(files),
         }
     }
@@ -179,6 +189,7 @@ pub(crate) struct CallGraphBuilder {
     delegation_facts: bool,
     interface_facts: bool,
     argument_facts: bool,
+    value_reference_facts: bool,
     path_filter: AnalyzePathFilter,
 }
 
@@ -190,6 +201,7 @@ impl CallGraphBuilder {
             delegation_facts: false,
             interface_facts: false,
             argument_facts: false,
+            value_reference_facts: false,
             path_filter: AnalyzePathFilter::new(),
         }
     }
@@ -218,6 +230,15 @@ impl CallGraphBuilder {
     /// the parameters analyzer reads them.
     pub(crate) fn with_argument_facts(mut self, argument_facts: bool) -> Self {
         self.argument_facts = argument_facts;
+        self
+    }
+
+    /// Collect [`CallGraph::value_references`] from the scanned files.
+    /// Off by default for the same reason as interface facts: the
+    /// extraction is one more parse per (Rust) file, and only the
+    /// visibility analyzer reads the result.
+    pub(crate) fn with_value_reference_facts(mut self, value_reference_facts: bool) -> Self {
+        self.value_reference_facts = value_reference_facts;
         self
     }
 
@@ -419,6 +440,10 @@ impl CallGraphBuilder {
         let macro_facts = matches!(lang, SourceLang::Rust)
             .then(|| extract_macro_facts(lang, &source, &module))
             .transpose()?;
+        let value_references = (self.value_reference_facts && matches!(lang, SourceLang::Rust))
+            .then(|| extract_value_references(lang, &source, &module, !self.exclude_tests))
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -432,6 +457,7 @@ impl CallGraphBuilder {
             wrappers,
             interfaces,
             macro_facts,
+            value_references,
         })
     }
 
@@ -695,6 +721,46 @@ fn extract_interfaces_uncached(
     lens_golang::extract_interface_shapes_with_module(source, module).map_err(parse_err)
 }
 
+/// Value references for one (Rust) file. Only collected when the
+/// builder was asked for value-reference facts.
+fn extract_value_references(
+    lang: SourceLang,
+    source: &str,
+    module: &str,
+    include_cfg_test_blocks: bool,
+) -> Result<Arc<Vec<CallShape>>, AnalyzerError> {
+    let extract = || {
+        lens_rust::extract_value_reference_shapes_with_module(
+            source,
+            CallIndexOptions {
+                include_cfg_test_blocks,
+            },
+            module,
+        )
+        .map_err(parse_err)
+    };
+    match AnalysisIndex::active() {
+        Some(index) => index.memoize_typed(
+            ValueReferenceKey {
+                source: SourceKey::new(lang, source),
+                module: module.to_owned(),
+                include_cfg_test_blocks,
+            },
+            extract,
+        ),
+        None => extract().map(Arc::new),
+    }
+}
+
+/// Index key of one file's value references; its own type so the typed
+/// table it names is shared with no other fact.
+#[derive(PartialEq, Eq, Hash)]
+struct ValueReferenceKey {
+    source: SourceKey,
+    module: String,
+    include_cfg_test_blocks: bool,
+}
+
 /// Everything the graph needs from one scanned source file.
 ///
 /// The fact lists sit behind `Arc`s because they may be shared with the
@@ -723,6 +789,10 @@ pub(crate) struct FileGraphInput {
     /// `macro_rules!` templates and `impl`-item macro invocations (Rust
     /// only), joined across files by [`attach_macro_generated_methods`].
     pub(crate) macro_facts: Option<Arc<lens_rust::MacroFacts>>,
+    /// Paths naming an item without calling it, shaped as calls. Empty
+    /// unless value-reference facts were requested (and the language
+    /// extracts them).
+    pub(crate) value_references: Arc<Vec<CallShape>>,
 }
 
 impl SourceLang {
@@ -1034,6 +1104,52 @@ fn build_edges(
         })
         .collect();
     (edges, module_summary)
+}
+
+/// Resolve every file's value references with the resolver the edges
+/// use, keeping the ones that name a node or a candidate set. A
+/// reference written inside a function the build's test filter left out
+/// is dropped with it, as that function's calls are.
+fn build_value_references(
+    files: &[FileGraphInput],
+    nodes: &[CallGraphNode],
+) -> Vec<ValueReference> {
+    if files.iter().all(|file| file.value_references.is_empty()) {
+        return Vec::new();
+    }
+    let resolver = Resolver::new(nodes);
+    let caller_index = CallerIndex::new(nodes);
+    files
+        .iter()
+        .flat_map(|file| file.value_references.iter().map(move |site| (file, site)))
+        .filter_map(|(file, site)| resolve_value_reference(&resolver, &caller_index, file, site))
+        .collect()
+}
+
+fn resolve_value_reference(
+    resolver: &Resolver,
+    caller_index: &CallerIndex,
+    file: &FileGraphInput,
+    site: &CallShape,
+) -> Option<ValueReference> {
+    let from = match site.caller_qualified_name() {
+        Some(caller) => Some(caller_index.resolve_in_file(&file.file, caller, site.line)?),
+        None => None,
+    };
+    let resolved = resolver.resolve(site, file.language);
+    matches!(
+        resolved.resolution,
+        Resolution::Resolved | Resolution::Ambiguous
+    )
+    .then(|| ValueReference {
+        from,
+        module: site
+            .caller_module()
+            .unwrap_or(file.module.as_str())
+            .to_owned(),
+        to: resolved.to,
+        candidates: resolved.candidates,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

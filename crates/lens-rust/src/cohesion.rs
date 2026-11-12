@@ -487,11 +487,16 @@ impl<'ast> Visit<'ast> for ModuleRefVisitor<'_> {
     }
 
     fn visit_expr_path(&mut self, ep: &'ast ExprPath) {
-        if let Some(name) = single_segment_path(ep)
-            && !self.locals.contains(&name)
-            && self.module_fields.contains(&name)
-        {
+        let Some(name) = single_segment_path(ep).filter(|name| !self.locals.contains(name)) else {
+            return;
+        };
+        if self.module_fields.contains(&name) {
             self.fields.push(name);
+        } else if self.siblings.contains(&name) {
+            // A sibling named without being called — `.flat_map(spellings)`
+            // — ties the two functions together as the call
+            // `.flat_map(|x| spellings(x))` would.
+            self.calls.push(name);
         }
     }
 
@@ -901,6 +906,27 @@ fn alpha() -> i32 {
 fn beta() -> i32 { X }
 "#,
         1
+    )]
+    // A sibling passed by name as a value connects the two functions
+    // like a call to it does (#657).
+    #[case::module_sibling_passed_as_a_value(
+        r#"
+fn outer(xs: Vec<String>) -> Vec<String> {
+    xs.into_iter().flat_map(spellings).collect()
+}
+fn spellings(x: String) -> Vec<String> { Vec::from([x]) }
+"#,
+        1
+    )]
+    // ... unless the name is a local of the function.
+    #[case::module_local_shadows_sibling_value(
+        r#"
+fn outer(spellings: fn(String) -> Vec<String>, xs: Vec<String>) -> Vec<String> {
+    xs.into_iter().flat_map(spellings).collect()
+}
+fn spellings(x: String) -> Vec<String> { Vec::from([x]) }
+"#,
+        2
     )]
     fn module_unit_lcom4(#[case] src: &str, #[case] expected: usize) {
         let u = module_unit(src);

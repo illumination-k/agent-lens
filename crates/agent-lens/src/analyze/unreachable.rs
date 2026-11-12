@@ -230,6 +230,9 @@ impl UnreachableAnalyzer {
             .builder
             .clone()
             .with_interface_facts(true)
+            // Unread here: asked for so the graph is the one `visibility`
+            // builds, and `narrowable` assembles it once for all sections.
+            .with_value_reference_facts(true)
             .build(&roots)?;
         let reach = Reachability::compute(&graph);
         let scan = ReferenceScan::run(&self.builder, &roots, &graph, &reach.candidates)?;

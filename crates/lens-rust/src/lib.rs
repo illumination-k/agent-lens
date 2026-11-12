@@ -29,7 +29,7 @@ mod wrapper;
 pub use call_index::{
     CallIndexOptions, CallKind, CallSite, UseAlias, extract_call_shapes_with_module,
     extract_call_sites, extract_call_sites_with_options,
-    extract_call_sites_with_options_and_base_module,
+    extract_call_sites_with_options_and_base_module, extract_value_reference_shapes_with_module,
 };
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};

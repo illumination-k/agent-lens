@@ -186,6 +186,23 @@ pub(crate) struct CallSiteFacts {
     pub(crate) arguments: Vec<ArgumentShape>,
 }
 
+/// One place a function is named by path without being called: passed
+/// as a value (`.map(fusion::key)`) or imported (`use fusion::key;`).
+///
+/// Exactly one of `to` and `candidates` is populated: `to` when the
+/// path resolved to one node, `candidates` when the resolver could not
+/// decide between several.
+#[derive(Debug, Clone)]
+pub(crate) struct ValueReference {
+    /// Node id of the function the reference is written in. `None` at
+    /// module scope, where a `use` declaration sits.
+    pub(crate) from: Option<String>,
+    /// Lexical module the reference is written in.
+    pub(crate) module: String,
+    pub(crate) to: Option<String>,
+    pub(crate) candidates: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct EdgeWeights {
     pub(crate) call_count: usize,
