@@ -41,8 +41,13 @@
 //! # Schema history
 //!
 //! * `schema_version: 1` — initial shape.
+//! * `schema_version: 2` — `members[].unguarded` and
+//!   `summary.unguarded_count`: a pair the guard could not check, because
+//!   one of its tests reaches no production function over resolved edges
+//!   while having ambiguous call sites, no longer folds.
+//!   `reach_guarded_count` counts only members held by unique reach.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use serde::Serialize;
@@ -55,7 +60,7 @@ use super::runner::render_report;
 use super::similarity::{ScoredCorpus, ScoredUnit, SimilarityAnalyzer, SimilarityMethod};
 use super::{AnalyzeRoots, AnalyzerError, FunctionSelection, OutputFormat};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Default similarity cut. Held at `analyze similarity`'s own default so
 /// a group reported here is a cluster that report would also show — the
@@ -116,7 +121,9 @@ const NOTE: &str = "Structural, not behavioural: two tests scoring alike share a
      the tree, and the Rust adapter keeps literal text out of it. The call graph subtracts what it can \
      disprove, in two directions: a pair whose two tests reach no production function in common \
      is not a pair, and a test that is the sole static caller of something is never offered as \
-     foldable. It traverses resolved edges only and cannot see into a macro's expansion (calls \
+     foldable. A pair with a test that reaches no production function over resolved edges but \
+     has ambiguous call sites was not checked, and is marked unguarded rather than foldable. It \
+     traverses resolved edges only and cannot see into a macro's expansion (calls \
      written in its arguments are seen), so a clean guard is not a coverage proof, and a suite \
      whose tests call only through macro expansions gets no guard at all.";
 
@@ -522,6 +529,10 @@ struct ReachGuard<'a> {
     node_of_unit: HashMap<usize, usize>,
     /// Production nodes each located test reaches.
     reach: HashMap<usize, BTreeSet<usize>>,
+    /// Located tests the guard is blind on: no production function over
+    /// resolved edges, yet call sites the resolver left ambiguous. Their
+    /// empty reach is a gap in the graph, not a fact about the test.
+    blind: HashSet<usize>,
     /// Tests the graph could not locate — a language it does not model,
     /// an unparsed file, a body it does not hold as a function. The guard
     /// has nothing to say about these, so they are counted rather than
@@ -551,6 +562,7 @@ impl<'a> ReachGuard<'a> {
 
         let mut node_of_unit = HashMap::new();
         let mut reach = HashMap::new();
+        let mut blind = HashSet::new();
         let mut unmatched_count = 0usize;
         for (unit, neighbors) in adjacency.iter().enumerate() {
             if neighbors.is_empty() {
@@ -565,7 +577,11 @@ impl<'a> ReachGuard<'a> {
                 continue;
             };
             node_of_unit.insert(unit, node);
-            reach.insert(unit, production_reach(graph, &edges, &[node]));
+            let production = production_reach(graph, &edges, &[node]);
+            if production.is_empty() && has_ambiguous_calls(graph, &edges, node) {
+                blind.insert(unit);
+            }
+            reach.insert(unit, production);
         }
         Self {
             graph,
@@ -573,8 +589,16 @@ impl<'a> ReachGuard<'a> {
             test_nodes,
             node_of_unit,
             reach,
+            blind,
             unmatched_count,
         }
+    }
+
+    /// Whether the guard could not check the pair: one of its tests is
+    /// [blind](Self::blind), so neither [`Self::related`] nor
+    /// [`Self::unique_reach`] had its real targets to rule on.
+    fn unguarded(&self, a: usize, b: usize) -> bool {
+        self.blind.contains(&a) || self.blind.contains(&b)
     }
 
     /// Whether two tests exercise anything in common. Unknown counts as
@@ -613,6 +637,17 @@ impl<'a> ReachGuard<'a> {
         unique.dedup();
         unique
     }
+}
+
+/// Whether `start`, or anything it reaches over resolved edges, has a
+/// call site the resolver left ambiguous.
+fn has_ambiguous_calls(graph: &CallGraph, edges: &[Vec<usize>], start: usize) -> bool {
+    bfs(edges, &[start]).into_iter().any(|visit| {
+        graph
+            .nodes
+            .get(visit.node)
+            .is_some_and(|node| node.outgoing_calls.ambiguous_call_count > 0)
+    })
 }
 
 /// Non-test nodes a forward traversal from `starts` reaches.
@@ -745,7 +780,7 @@ impl GroupView {
         let members: Vec<MemberView> = group
             .members
             .iter()
-            .filter_map(|member| MemberView::build(member, units, guard))
+            .filter_map(|member| MemberView::build(group.representative, member, units, guard))
             .collect();
         let min_similarity = fold_min(members.iter().map(|m| m.similarity));
         let min_value_similarity = fold_min(members.iter().map(|m| m.value_similarity));
@@ -797,8 +832,13 @@ struct MemberView {
     similarity: f64,
     value_similarity: f64,
     /// Whether the guard let this one through. `false` is always
-    /// explained by `unique_reach`.
+    /// explained by `unique_reach` or `unguarded`.
     folds: bool,
+    /// The guard could not check this pair: this test or the
+    /// representative reaches no production function over resolved
+    /// edges but has ambiguous call sites, so what it exercises is
+    /// unknown rather than nothing.
+    unguarded: bool,
     /// Production functions this test is the only static exerciser of.
     /// Present only when the guard held the member back.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -807,10 +847,12 @@ struct MemberView {
 
 impl MemberView {
     fn build(
+        representative: usize,
         member: &Neighbor,
         units: &[ScoredUnit],
         guard: Option<&ReachGuard<'_>>,
     ) -> Option<Self> {
+        let unguarded = guard.is_some_and(|guard| guard.unguarded(representative, member.unit));
         let unique = guard
             .map(|guard| guard.unique_reach(member.unit))
             .filter(|functions| !functions.is_empty())
@@ -819,7 +861,8 @@ impl MemberView {
             test: TestRef::build(units.get(member.unit)?),
             similarity: member.similarity,
             value_similarity: member.value_similarity,
-            folds: unique.is_none(),
+            folds: unique.is_none() && !unguarded,
+            unguarded,
             unique_reach: unique,
         })
     }
@@ -854,8 +897,12 @@ struct Summary {
     redundant_test_count: usize,
     /// Of those, how many the guard let through.
     foldable_count: usize,
-    /// Of those, how many the guard held back.
+    /// Of those, how many the guard held back as the sole static caller
+    /// of something.
     reach_guarded_count: usize,
+    /// Of those, how many the guard could not check — see
+    /// `members[].unguarded`. Not foldable, and not held by evidence.
+    unguarded_count: usize,
     /// Tests with a near-copy that the call graph could not locate, so
     /// the guard could not rule on them. Non-zero means `foldable_count`
     /// counts rows nothing checked.
@@ -905,12 +952,18 @@ impl Summary {
         } = inputs;
         let redundant_test_count: usize = groups.iter().map(|group| group.members.len()).sum();
         let foldable_count: usize = groups.iter().map(|group| group.foldable_count).sum();
+        let reach_guarded_count = groups
+            .iter()
+            .flat_map(|group| &group.members)
+            .filter(|member| member.unique_reach.is_some())
+            .count();
         Self {
             test_function_count: scored.units.len(),
             group_count: groups.len(),
             redundant_test_count,
             foldable_count,
-            reach_guarded_count: redundant_test_count - foldable_count,
+            reach_guarded_count,
+            unguarded_count: redundant_test_count - foldable_count - reach_guarded_count,
             graph_unmatched_test_count: guard.map_or(0, |guard| guard.unmatched_count),
             unrelated_pair_count,
             opaque_body_test_count,
@@ -1029,6 +1082,13 @@ fn guard_suffix(report: &Report, summary: &Summary) -> String {
         return " (reach guard off)".to_owned();
     }
     let mut suffix = format!(", {} held by unique reach", summary.reach_guarded_count);
+    if summary.unguarded_count > 0 {
+        let _ = write!(
+            suffix,
+            ", {} unguarded (ambiguous calls only)",
+            summary.unguarded_count,
+        );
+    }
     if summary.graph_unmatched_test_count > 0 {
         let _ = write!(
             suffix,
@@ -1051,6 +1111,10 @@ fn member_line(member: &MemberView) -> String {
         member.value_similarity,
     );
     match &member.unique_reach {
+        None if member.unguarded => format!(
+            "{head} — unguarded: a test of this pair reaches no production function over \
+             resolved edges but has ambiguous call sites"
+        ),
         None => format!("{head} — fold"),
         Some(unique) => format!(
             "{head} — held: sole static caller of {} ({})",
@@ -1132,7 +1196,7 @@ mod tests {
         write_file(dir.path(), "src/lib.rs", &one_target_source());
 
         let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
-        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["schema_version"], 2);
         assert_eq!(report["summary"]["group_count"], 1);
         // Three near-copies: one is kept, two fold into it.
         assert_eq!(report["summary"]["redundant_test_count"], 2);
@@ -1147,6 +1211,141 @@ mod tests {
         assert_eq!(members, ["beta", "gamma"]);
         // The outlier shares the target but not the body.
         assert!(!members.contains(&"outlier"));
+    }
+
+    /// One module per importer, each defining `read` and testing it
+    /// through `import`. `{m}` in `import` is the module's own name.
+    fn write_same_named_importers(dir: &std::path::Path, import: &str) {
+        write_file(dir, "src/lib.rs", "pub mod a;\npub mod b;\n");
+        for (module, seed) in [("a", 1u32), ("b", 2)] {
+            write_file(
+                dir,
+                &format!("src/{module}.rs"),
+                &format!(
+                    "pub fn read(a: u32, b: u32) -> u32 {{ a + b + {seed} }}\n\
+                     #[cfg(test)]\nmod tests {{\n{}\n\
+                     #[test]\nfn reads_{module}() {{\n{}}}\n}}\n",
+                    import.replace("{m}", module),
+                    test_body("read", seed)
+                ),
+            );
+        }
+    }
+
+    /// Two modules define `read` and test it the same way. However the
+    /// test names its own module's `read`, the two tests exercise
+    /// different functions and are not a pair. Regression for #659,
+    /// where the glob forms stayed ambiguous and the pair went through
+    /// as a foldable duplicate.
+    #[rstest]
+    #[case::super_glob("use super::*;")]
+    #[case::crate_glob("use crate::{m}::*;")]
+    #[case::explicit("use super::read;")]
+    fn same_named_functions_in_sibling_modules_are_not_a_group(#[case] import: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write_same_named_importers(dir.path(), import);
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+
+        assert_eq!(report["summary"]["group_count"], 0, "{import}");
+        assert_eq!(report["summary"]["unrelated_pair_count"], 1, "{import}");
+        assert_eq!(report["summary"]["unguarded_count"], 0, "{import}");
+    }
+
+    /// Two types with a same-named method, called on a receiver: no
+    /// import says which `read` a test means, so both tests reach
+    /// nothing over resolved edges and the guard has not checked the
+    /// pair. It is reported, but as unguarded rather than foldable.
+    fn ambiguous_receiver_source() -> String {
+        format!(
+            "pub struct Left;\npub struct Right;\n\
+             impl Left {{ pub fn read(&self, a: u32, b: u32) -> u32 {{ a + b }} }}\n\
+             impl Right {{ pub fn read(&self, a: u32, b: u32) -> u32 {{ a * b }} }}\n\
+             #[cfg(test)]\nmod tests {{\nuse super::*;\n\
+             #[test]\nfn reads_left() {{\n{}}}\n\
+             #[test]\nfn reads_right() {{\n{}}}\n\
+             }}\n",
+            test_body("Left.read", 1),
+            test_body("Right.read", 2),
+        )
+    }
+
+    #[test]
+    fn a_pair_the_guard_could_not_check_is_unguarded_not_foldable() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &ambiguous_receiver_source());
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+
+        let summary = &report["summary"];
+        assert_eq!(summary["group_count"], 1);
+        assert_eq!(summary["redundant_test_count"], 1);
+        assert_eq!(summary["foldable_count"], 0);
+        assert_eq!(summary["reach_guarded_count"], 0);
+        assert_eq!(summary["unguarded_count"], 1);
+        let member = &report["groups"][0]["members"][0];
+        assert_eq!(member["folds"], false);
+        assert_eq!(member["unguarded"], true);
+        assert!(member.get("unique_reach").is_none());
+
+        let md = analyze_md(dir.path(), TestRedundancyAnalyzer::new());
+        assert!(md.contains("0 foldable of 1 redundant test(s)"), "{md}");
+        assert!(md.contains("1 unguarded (ambiguous calls only)"), "{md}");
+        assert!(md.contains("`reads_right`"), "{md}");
+        assert!(md.contains("— unguarded: "), "{md}");
+        assert!(!md.contains("— fold"), "{md}");
+    }
+
+    /// With the guard off nothing was checked on purpose, so nothing is
+    /// singled out as unchecked.
+    #[test]
+    fn unguarded_is_a_guard_verdict_and_absent_without_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &ambiguous_receiver_source());
+
+        let report = analyze_json(
+            dir.path(),
+            TestRedundancyAnalyzer::new().with_reach_guard(false),
+        );
+
+        assert_eq!(report["summary"]["foldable_count"], 1);
+        assert_eq!(report["summary"]["unguarded_count"], 0);
+        assert_eq!(report["groups"][0]["members"][0]["unguarded"], false);
+    }
+
+    /// A test that resolves its target is not blind, whatever ambiguous
+    /// call sites it also has: the guard had something to rule on.
+    #[test]
+    fn an_ambiguous_call_beside_a_resolved_one_does_not_unguard() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = |seed: u32| {
+            format!(
+                "{}let extra = Left.read(first, second);\nassert!(extra > 0);\n",
+                test_body("shared", seed)
+            )
+        };
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            &format!(
+                "pub struct Left;\npub struct Right;\n\
+                 impl Left {{ pub fn read(&self, a: u32, b: u32) -> u32 {{ a + b }} }}\n\
+                 impl Right {{ pub fn read(&self, a: u32, b: u32) -> u32 {{ a * b }} }}\n\
+                 pub fn shared(a: u32, b: u32) -> u32 {{ a + b }}\n\
+                 #[cfg(test)]\nmod tests {{\nuse super::*;\n\
+                 #[test]\nfn one() {{\n{}}}\n\
+                 #[test]\nfn two() {{\n{}}}\n\
+                 }}\n",
+                body(1),
+                body(2),
+            ),
+        );
+
+        let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
+
+        assert_eq!(report["summary"]["foldable_count"], 1);
+        assert_eq!(report["summary"]["unguarded_count"], 0);
+        assert_eq!(report["groups"][0]["members"][0]["folds"], true);
     }
 
     /// The representative is the test that covers the most others, and

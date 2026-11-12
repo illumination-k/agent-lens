@@ -557,11 +557,11 @@ mod tests {
     }
 
     #[test]
-    fn glob_imported_typed_path_resolves_via_suffix_narrowing() {
+    fn glob_imported_typed_path_resolves_through_the_glob() {
         // Without an explicit `use crate::a::Foo`, a `Foo::new()` call in
-        // module `c` cannot match any direct lexical candidate, so it
-        // hits the last-segment fallback. The suffix narrow then picks
-        // `crate::a::Foo::new` out of the workspace's `new` candidates.
+        // module `c` matches no direct lexical candidate. The glob in
+        // scope names the module `Foo` comes from, so the call resolves
+        // to `crate::a::Foo::new` without the last-segment fallback.
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path(),
@@ -574,7 +574,7 @@ mod tests {
         let report = analyze_json(dir.path());
         let edge = edge_by_callee(&report, "new");
         assert_eq!(edge["resolution"], "resolved");
-        assert_eq!(edge["resolution_method"], "path_suffix");
+        assert_eq!(edge["resolution_method"], "lexical");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
             Some("crate::a::Foo::new"),

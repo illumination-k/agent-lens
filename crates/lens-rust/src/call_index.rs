@@ -25,11 +25,11 @@
 //!
 //! Treat the result as guidance for an LLM, not as a precise call graph.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use lens_domain::{
-    ArgumentShape, CallShape, ImportShape, LexicalResolutionStatus, ReceiverExprKind, SyntaxFact,
-    qualify, qualify_module, starts_uppercase,
+    ArgumentShape, CallShape, GLOB_IMPORT_ALIAS, ImportShape, LexicalResolutionStatus,
+    ReceiverExprKind, SyntaxFact, qualify, qualify_module, starts_uppercase,
 };
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -212,6 +212,18 @@ fn path_segments(path: String) -> Vec<String> {
     }
 }
 
+/// The `use` declarations of one lexical scope.
+#[derive(Debug, Clone, Default)]
+struct AliasScope {
+    /// Names the scope binds itself (`use a::parse;`, `use a::b as c;`).
+    named: BTreeMap<String, String>,
+    /// Names that reach the scope through a glob of an enclosing module
+    /// which imports them. A `named` entry shadows these.
+    inherited: BTreeMap<String, String>,
+    /// Modules glob-imported into the scope.
+    globs: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone)]
 struct CallerContext {
     name: String,
@@ -233,7 +245,12 @@ struct CallVisitor {
     /// can be qualified as `Foo::method`. Pushed on entry to
     /// `Item::Impl` and popped on exit.
     impl_owners: Vec<Option<String>>,
-    alias_scopes: Vec<BTreeMap<String, String>>,
+    alias_scopes: Vec<AliasScope>,
+    /// The inline modules enclosing the one being walked, outermost
+    /// first: each one's path and module-level `use` scope. What a
+    /// `use super::*;` in a nested module brings in beyond the parent's
+    /// own items — the parent's imports are in scope for the child too.
+    enclosing_modules: Vec<(String, AliasScope)>,
     /// Names of the `mod` items declared in each module being walked,
     /// innermost last — what a bare leading `use` segment may name
     /// relative to the current module (see [`use_aliases_for`]).
@@ -255,6 +272,7 @@ impl CallVisitor {
             modules: vec![base_module.to_owned()],
             impl_owners: Vec::new(),
             alias_scopes: Vec::new(),
+            enclosing_modules: Vec::new(),
             child_modules: Vec::new(),
             local_callables: Vec::new(),
             sites: Vec::new(),
@@ -270,7 +288,7 @@ impl CallVisitor {
     /// check is needed because `syn::visit::Visit` does not expose a
     /// "skip this subtree" hook.
     fn visit_items(&mut self, items: &[Item]) {
-        self.alias_scopes.push(BTreeMap::new());
+        self.alias_scopes.push(AliasScope::default());
         self.child_modules.push(
             items
                 .iter()
@@ -302,12 +320,17 @@ impl CallVisitor {
                 }
                 if let Some((_, items)) = &item_mod.content {
                     let outer_alias_scopes = std::mem::take(&mut self.alias_scopes);
+                    self.enclosing_modules.push((
+                        self.current_module().to_owned(),
+                        outer_alias_scopes.first().cloned().unwrap_or_default(),
+                    ));
                     self.modules.push(qualify_module(
                         self.current_module(),
                         &item_mod.ident.to_string(),
                     ));
                     self.visit_items(items);
                     self.modules.pop();
+                    self.enclosing_modules.pop();
                     self.alias_scopes = outer_alias_scopes;
                 }
             }
@@ -386,15 +409,27 @@ impl CallVisitor {
     }
 
     fn current_aliases(&self) -> Vec<UseAlias> {
-        let mut aliases = BTreeMap::new();
+        let mut named = BTreeMap::new();
+        let mut inherited = BTreeMap::new();
+        let mut globs = BTreeSet::new();
         for scope in &self.alias_scopes {
-            for (alias, target) in scope {
-                aliases.insert(alias.clone(), target.clone());
-            }
+            named.extend(scope.named.clone());
+            inherited.extend(scope.inherited.clone());
+            globs.extend(scope.globs.iter().cloned());
         }
-        aliases
+        // A name the scope binds itself shadows one a glob brought in.
+        inherited.extend(named);
+        globs
             .into_iter()
-            .map(|(alias, target)| UseAlias { alias, target })
+            .map(|target| UseAlias {
+                alias: GLOB_IMPORT_ALIAS.to_owned(),
+                target,
+            })
+            .chain(
+                inherited
+                    .into_iter()
+                    .map(|(alias, target)| UseAlias { alias, target }),
+            )
             .collect()
     }
 
@@ -406,7 +441,22 @@ impl CallVisitor {
             return;
         };
         for alias in aliases {
-            scope.insert(alias.alias, alias.target);
+            if alias.alias != GLOB_IMPORT_ALIAS {
+                scope.named.insert(alias.alias, alias.target);
+                continue;
+            }
+            // `use super::*;` in an inline module: the enclosing
+            // module's own imports come along with its items.
+            if let Some((_, outer)) = self
+                .enclosing_modules
+                .iter()
+                .find(|(module, _)| *module == alias.target)
+            {
+                scope.inherited.extend(outer.inherited.clone());
+                scope.inherited.extend(outer.named.clone());
+                scope.globs.extend(outer.globs.iter().cloned());
+            }
+            scope.globs.insert(alias.target);
         }
     }
 
@@ -453,7 +503,7 @@ impl CallVisitor {
 
 impl<'ast> Visit<'ast> for CallVisitor {
     fn visit_block(&mut self, block: &'ast Block) {
-        self.alias_scopes.push(BTreeMap::new());
+        self.alias_scopes.push(AliasScope::default());
         visit::visit_block(self, block);
         self.alias_scopes.pop();
     }
@@ -746,7 +796,7 @@ fn walk_use_tree(
             Some(rename.rename.to_string()),
             leaves,
         ),
-        UseTree::Glob(_) => leaves.push(("*".to_owned(), prefix.clone())),
+        UseTree::Glob(_) => leaves.push((GLOB_IMPORT_ALIAS.to_owned(), prefix.clone())),
         UseTree::Group(group) => {
             for item in &group.items {
                 walk_use_tree(item, prefix, leaves);
@@ -1354,6 +1404,60 @@ mod b {
         .unwrap();
         assert_eq!(sites.len(), 1);
         assert!(sites[0].visible_aliases.is_empty());
+    }
+
+    /// A glob binds no name, so two of them must not overwrite each
+    /// other, and `use super::*;` in an inline module also brings in what
+    /// the enclosing module imported — by name or by glob — unless the
+    /// module binds that name itself. Regression for #659.
+    #[rstest]
+    #[case::two_globs(
+        "use crate::a::*;\nuse crate::b::*;\nfn caller() { parse(); }\n",
+        &[("*", "crate::a"), ("*", "crate::b")]
+    )]
+    #[case::super_glob_inherits_named_import(
+        "use crate::a::parse;\nmod tests {\n    use super::*;\n    fn caller() { parse(); }\n}\n",
+        &[("*", "crate"), ("parse", "crate::a::parse")]
+    )]
+    #[case::super_glob_inherits_glob(
+        "use crate::a::*;\nmod tests {\n    use super::*;\n    fn caller() { parse(); }\n}\n",
+        &[("*", "crate"), ("*", "crate::a")]
+    )]
+    #[case::own_import_shadows_inherited(
+        "use crate::a::parse;\nmod tests {\n    use super::*;\n    use crate::b::parse;\n    fn caller() { parse(); }\n}\n",
+        &[("*", "crate"), ("parse", "crate::b::parse")]
+    )]
+    #[case::own_import_shadows_inherited_in_either_order(
+        "use crate::a::parse;\nmod tests {\n    use crate::b::parse;\n    use super::*;\n    fn caller() { parse(); }\n}\n",
+        &[("*", "crate"), ("parse", "crate::b::parse")]
+    )]
+    #[case::grandparent_imports_come_through_two_globs(
+        "use crate::a::parse;\nmod outer {\n    use super::*;\n    mod inner {\n        use super::*;\n        fn caller() { parse(); }\n    }\n}\n",
+        &[("*", "crate"), ("*", "crate::outer"), ("parse", "crate::a::parse")]
+    )]
+    #[case::glob_of_another_module_inherits_nothing(
+        "use crate::a::parse;\nmod tests {\n    use crate::b::*;\n    fn caller() { parse(); }\n}\n",
+        &[("*", "crate::b")]
+    )]
+    fn glob_imports_are_kept_and_carry_the_enclosing_modules_imports(
+        #[case] src: &str,
+        #[case] expected: &[(&str, &str)],
+    ) {
+        let sites = extract_call_sites_with_options_and_base_module(
+            src,
+            CallIndexOptions {
+                include_cfg_test_blocks: true,
+            },
+            "crate",
+        )
+        .unwrap();
+        assert_eq!(sites.len(), 1);
+        let aliases: Vec<(&str, &str)> = sites[0]
+            .visible_aliases
+            .iter()
+            .map(|alias| (alias.alias.as_str(), alias.target.as_str()))
+            .collect();
+        assert_eq!(aliases, expected);
     }
 
     #[test]

@@ -184,10 +184,10 @@ pub use signature_similarity::{
 };
 pub use source_walk::{IncludeAll, SourceFilter, collect_files_with_extension};
 pub use syntax::{
-    ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, ImportShape,
-    InterfaceMethodShape, InterfaceShape, LexicalResolutionStatus, OwnerKind, OwnerShape,
-    ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact, TraitDeclShape,
-    TraitImplShape, VisibilityShape, callee_names_local_binding,
+    ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, GLOB_IMPORT_ALIAS,
+    ImportShape, InterfaceMethodShape, InterfaceShape, LexicalResolutionStatus, OwnerKind,
+    OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
+    TraitDeclShape, TraitImplShape, VisibilityShape, callee_names_local_binding,
 };
 pub use token_similarity::{
     TokenIdf, TokenProfile, lcs_similarity, lcs_similarity_upper_bound, token_similarity,
