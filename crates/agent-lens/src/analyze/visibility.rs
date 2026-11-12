@@ -1983,6 +1983,28 @@ mod tests {
         }
     }
 
+    /// An unresolved reference is weighed against a proposed scope from
+    /// where it needs its target visible: its own module, the scope a
+    /// restricted re-export hands the name out to, or — for a `pub use`
+    /// — nowhere a module scope contains.
+    #[rstest]
+    #[case::plain_reference(None, Some("app::build"))]
+    #[case::restricted_re_export(Some(ReExportScope::Module("app".to_owned())), Some("app"))]
+    #[case::public_re_export(Some(ReExportScope::Public), None)]
+    fn a_reference_reaches_as_far_as_its_re_export(
+        #[case] re_export: Option<ReExportScope>,
+        #[case] expected: Option<&str>,
+    ) {
+        let reference = ValueReference {
+            from: None,
+            module: "app::build".to_owned(),
+            to: None,
+            candidates: Vec::new(),
+            re_export,
+        };
+        assert_eq!(reference_reach(&reference), expected);
+    }
+
     /// A glob covers everything under the module it names, so items in
     /// nested modules below it are re-exported too.
     #[test]

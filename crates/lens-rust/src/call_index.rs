@@ -1347,7 +1347,7 @@ mod tests {
     #[test]
     fn a_re_export_scope_stays_on_its_own_leaves() {
         let references = extract_value_reference_shapes_with_module(
-            "use crate::m::first;\npub use crate::m::{Key, second};\nfn a(v: V) { v.map(m::third); }\n",
+            "use crate::m::first;\npub use crate::m::{Key, second, Other};\nfn a(v: V) { v.map(m::third); }\n",
             CallIndexOptions::default(),
             "app",
         )
