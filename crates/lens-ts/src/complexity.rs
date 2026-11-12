@@ -384,7 +384,7 @@ impl<'a> Visit<'a> for ComplexityVisitor {
     }
 
     fn visit_string_literal(&mut self, it: &StringLiteral<'a>) {
-        self.halstead.operand(it.value.as_str());
+        self.halstead.operand(&crate::walk::string_literal_text(it));
     }
 
     fn visit_numeric_literal(&mut self, it: &NumericLiteral<'a>) {

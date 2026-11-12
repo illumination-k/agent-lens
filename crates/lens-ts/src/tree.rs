@@ -161,7 +161,7 @@ pub fn expr_tree(expr: &Expression) -> TreeNode {
         // Identifiers and literals — values matter for APTED's value-level
         // matching, so they are passed through verbatim.
         Expression::Identifier(id) => TreeNode::new("Ident", id.name.as_str()),
-        Expression::StringLiteral(s) => TreeNode::new("Lit", s.value.as_str()),
+        Expression::StringLiteral(s) => TreeNode::new("Lit", crate::walk::string_literal_text(s)),
         Expression::NumericLiteral(n) => TreeNode::new("Lit", n.raw_str()),
         Expression::BigIntLiteral(b) => TreeNode::new("Lit", b.raw.as_deref().unwrap_or("")),
         Expression::BooleanLiteral(b) => {
@@ -314,7 +314,9 @@ fn jsx_attribute_tree(a: &JSXAttribute) -> TreeNode {
 
 fn jsx_attribute_value_tree(value: &JSXAttributeValue) -> TreeNode {
     match value {
-        JSXAttributeValue::StringLiteral(s) => TreeNode::new("Lit", s.value.as_str()),
+        JSXAttributeValue::StringLiteral(s) => {
+            TreeNode::new("Lit", crate::walk::string_literal_text(s))
+        }
         JSXAttributeValue::ExpressionContainer(c) => jsx_expression_tree(&c.expression),
         JSXAttributeValue::Element(e) => jsx_element_tree(e),
         JSXAttributeValue::Fragment(f) => jsx_fragment_tree(f),
@@ -374,7 +376,12 @@ fn object_expr(o: &ObjectExpression) -> TreeNode {
             // the same arity is the same tree, and a returned record is
             // pure filler in a `--target blocks` window (issue #441).
             ObjectPropertyKind::ObjectProperty(p) => {
-                TreeNode::new("Property", p.key.static_name().unwrap_or_default())
+                let key = p.key.static_name();
+                TreeNode::new(
+                    "Property",
+                    key.map(|name| name.display().to_string())
+                        .unwrap_or_default(),
+                )
             }
             ObjectPropertyKind::SpreadProperty(s) => node_with("Spread", [expr_tree(&s.argument)]),
         }),

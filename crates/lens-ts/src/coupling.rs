@@ -175,16 +175,17 @@ impl<'a> Visit<'a> for DynamicImportVisitor {
 
 pub(crate) fn static_string_value<'a>(expr: &'a oxc_ast::ast::Expression<'a>) -> Option<&'a str> {
     match expr {
-        oxc_ast::ast::Expression::StringLiteral(lit) => Some(lit.value.as_str()),
-        oxc_ast::ast::Expression::TemplateLiteral(lit) if lit.quasis.len() == 1 => {
-            lit.quasis[0].value.cooked.map(|cooked| cooked.as_str())
-        }
+        oxc_ast::ast::Expression::StringLiteral(lit) => lit.value.as_str(),
+        oxc_ast::ast::Expression::TemplateLiteral(lit) if lit.quasis.len() == 1 => lit.quasis[0]
+            .value
+            .cooked
+            .and_then(|cooked| cooked.as_str()),
         _ => None,
     }
 }
 
 fn maybe_push_import(out: &mut Vec<ImportLink>, decl: &ImportDeclaration<'_>) {
-    let specifier = decl.source.value.to_string();
+    let specifier = crate::walk::string_literal_text(&decl.source).into_owned();
     if !is_followable_specifier(&specifier) {
         return;
     }
@@ -211,7 +212,7 @@ fn maybe_push_import(out: &mut Vec<ImportLink>, decl: &ImportDeclaration<'_>) {
 }
 
 fn maybe_push_re_export_named(out: &mut Vec<ImportLink>, decl: &ExportFromDeclaration<'_>) {
-    let specifier = decl.source.value.to_string();
+    let specifier = crate::walk::string_literal_text(&decl.source).into_owned();
     if !is_followable_specifier(&specifier) {
         return;
     }
@@ -226,7 +227,7 @@ fn maybe_push_re_export_named(out: &mut Vec<ImportLink>, decl: &ExportFromDeclar
 }
 
 fn maybe_push_re_export_all(out: &mut Vec<ImportLink>, decl: &ExportAllDeclaration<'_>) {
-    let specifier = decl.source.value.to_string();
+    let specifier = crate::walk::string_literal_text(&decl.source).into_owned();
     if !is_followable_specifier(&specifier) {
         return;
     }

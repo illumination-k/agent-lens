@@ -327,7 +327,7 @@ fn enum_member_name(name: &TSEnumMemberName) -> Option<String> {
     match name {
         TSEnumMemberName::Identifier(id) => Some(id.name.to_string()),
         TSEnumMemberName::String(literal) | TSEnumMemberName::ComputedString(literal) => {
-            Some(literal.value.to_string())
+            Some(crate::walk::string_literal_text(literal).into_owned())
         }
         TSEnumMemberName::ComputedTemplateString(_) => None,
     }
@@ -340,6 +340,17 @@ mod tests {
 
     fn extract(source: &str) -> Vec<TypeShape> {
         extract_type_defs(source, Dialect::Ts).expect("source should parse")
+    }
+
+    /// A string key spelling a lone surrogate is not UTF-8; it must still
+    /// surface as a name, with the surrogate escaped.
+    #[rstest]
+    #[case::plain(r#"enum E { "a b" = 1 }"#, "a b")]
+    #[case::lone_surrogate(r#"enum E { "x\uD800y" = 1 }"#, "x\\ud800y")]
+    fn enum_string_member_names_are_plain_strings(#[case] source: &str, #[case] expected: &str) {
+        let shapes = extract(source);
+        let names: Vec<_> = shapes[0].variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, [expected]);
     }
 
     #[test]
