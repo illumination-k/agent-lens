@@ -189,6 +189,9 @@ impl SingleUseAnalyzer {
             .builder
             .clone()
             .with_interface_facts(true)
+            // Unread here: asked for so the graph is the one `visibility`
+            // builds, and `narrowable` assembles it once for all sections.
+            .with_value_reference_facts(true)
             .build(&roots)?;
         let thresholds = Thresholds {
             max_loc: self.max_loc.unwrap_or(DEFAULT_MAX_LOC),

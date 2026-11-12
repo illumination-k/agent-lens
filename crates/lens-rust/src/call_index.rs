@@ -35,9 +35,10 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Block, Expr, ExprCall, ExprMacro, ExprMethodCall, FnArg, GenericArgument, GenericParam,
-    Generics, ImplItem, Item, ItemFn, ItemUse, Local, Macro, Pat, PathArguments, Signature,
-    StmtMacro, Token, TraitItem, Type, TypeParamBound, UnOp, UseTree, WherePredicate,
+    Block, Expr, ExprCall, ExprMacro, ExprMethodCall, ExprPath, FnArg, GenericArgument,
+    GenericParam, Generics, ImplItem, Item, ItemFn, ItemUse, Local, Macro, Pat, PatIdent,
+    PathArguments, Signature, StmtMacro, Token, TraitItem, Type, TypeParamBound, UnOp, UseTree,
+    WherePredicate,
 };
 
 use crate::attrs::has_cfg_test;
@@ -133,10 +134,48 @@ pub fn extract_call_sites_with_options_and_base_module(
     opts: CallIndexOptions,
     base_module: &str,
 ) -> Result<Vec<CallSite>, RustParseError> {
+    collect_sites(source, opts, base_module, Collect::Calls)
+}
+
+fn collect_sites(
+    source: &str,
+    opts: CallIndexOptions,
+    base_module: &str,
+    collect: Collect,
+) -> Result<Vec<CallSite>, RustParseError> {
     let file = syn::parse_file(source)?;
-    let mut visitor = CallVisitor::new(opts, base_module);
+    let mut visitor = CallVisitor::new(opts, base_module, collect);
     visitor.visit_items(&file.items);
     Ok(visitor.into_sites())
+}
+
+/// Every place `source` names an item by path *without calling it*, in
+/// the shape of a call so the same resolver can attribute it: a path
+/// expression outside call position (`.map(fusion::key)`, `apply(v,
+/// key)`, `let f: fn(&str) -> usize = m::key;`) and each leaf of a `use`
+/// declaration (`use m::key;`).
+///
+/// Both need the named item to be visible from where they are written
+/// exactly as a call would, which is what a visibility audit has to know
+/// and the call sites alone do not say. Most of what comes back names no
+/// function at all (`Color::Red`, an imported type): the consumer
+/// resolves each against the workspace's functions and drops the rest.
+///
+/// A bare name the enclosing function binds — a parameter, a `let`, a
+/// closure parameter, a pattern binding, a nested `fn` — is a local, not
+/// a path to an item, and is left out; so are `self` and any path whose
+/// last segment starts uppercase (a type, variant, or constant by
+/// convention, never a function). A `use` leaf is
+/// reported with its absolute target where the path is rooted at
+/// `crate`/`self`/`super` or a child module, and as written otherwise
+/// (a path through another crate of the workspace).
+pub fn extract_value_reference_shapes_with_module(
+    source: &str,
+    opts: CallIndexOptions,
+    base_module: &str,
+) -> Result<Vec<CallShape>, RustParseError> {
+    collect_sites(source, opts, base_module, Collect::ValueReferences)
+        .map(|sites| sites.into_iter().map(CallShape::from).collect())
 }
 
 /// Extract neutral call syntax facts with an explicit lexical base module.
@@ -219,8 +258,19 @@ struct CallerContext {
     impl_owner: Option<String>,
 }
 
+/// What one walk of [`CallVisitor`] gathers into its `sites`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Collect {
+    /// Call expressions — the call index proper.
+    Calls,
+    /// Paths that name an item without calling it — see
+    /// [`extract_value_reference_shapes_with_module`].
+    ValueReferences,
+}
+
 struct CallVisitor {
     opts: CallIndexOptions,
+    collect: Collect,
     /// Stack of qualified caller names. The top of the stack is the
     /// nearest enclosing function — closures and nested `fn` items
     /// inherit their parent's name (refining that would require
@@ -244,19 +294,25 @@ struct CallVisitor {
     /// function's locals, while a closure body does (it shares the
     /// scope, and the visitor never pushes one for it).
     local_callables: Vec<HashSet<String>>,
+    /// Every name bound in each enclosing function's own scope, with the
+    /// same stacking as `local_callables`. Filled only when collecting
+    /// value references, where a bare name that is a local names no item.
+    local_names: Vec<HashSet<String>>,
     sites: Vec<CallSite>,
 }
 
 impl CallVisitor {
-    fn new(opts: CallIndexOptions, base_module: &str) -> Self {
+    fn new(opts: CallIndexOptions, base_module: &str, collect: Collect) -> Self {
         Self {
             opts,
+            collect,
             callers: Vec::new(),
             modules: vec![base_module.to_owned()],
             impl_owners: Vec::new(),
             alias_scopes: Vec::new(),
             child_modules: Vec::new(),
             local_callables: Vec::new(),
+            local_names: Vec::new(),
             sites: Vec::new(),
         }
     }
@@ -354,7 +410,13 @@ impl CallVisitor {
         self.callers.push(caller);
         self.local_callables
             .push(local_callable_bindings(sig, block));
+        if self.collect == Collect::ValueReferences {
+            self.local_names.push(local_names(sig, block));
+        }
         visit::visit_block(self, block);
+        if self.collect == Collect::ValueReferences {
+            self.local_names.pop();
+        }
         self.local_callables.pop();
         self.callers.pop();
     }
@@ -401,7 +463,14 @@ impl CallVisitor {
     fn add_aliases_from_use(&mut self, item_use: &ItemUse) {
         let no_children = HashSet::new();
         let child_modules = self.child_modules.last().unwrap_or(&no_children);
-        let aliases = use_aliases_for(self.current_module(), child_modules, &item_use.tree);
+        let leaves = use_leaves(child_modules, &item_use.tree);
+        let aliases = use_aliases_for(self.current_module(), &leaves);
+        if self.collect == Collect::ValueReferences {
+            let line = item_use.span().start().line;
+            for path in use_leaf_paths(self.current_module(), &leaves) {
+                self.record_value_reference(path, line);
+            }
+        }
         let Some(scope) = self.alias_scopes.last_mut() else {
             return;
         };
@@ -418,10 +487,54 @@ impl CallVisitor {
         arguments: Vec<ArgumentShape>,
         line: usize,
     ) {
-        let caller = self.current_caller();
-        let module = self.current_module().to_owned();
+        if self.collect != Collect::Calls {
+            return;
+        }
         let callee_is_locally_bound =
             call_kind == CallKind::Path && self.is_locally_bound(callee_path.as_deref());
+        self.push_site(
+            callee_name,
+            callee_path,
+            call_kind,
+            callee_is_locally_bound,
+            arguments,
+            line,
+        );
+    }
+
+    /// Record `path` — `::`-joined segments naming an item outside call
+    /// position — as a site of its own, shaped like a path call with no
+    /// arguments.
+    ///
+    /// A path whose last segment starts uppercase is dropped: by Rust's
+    /// naming convention it is a type, a variant, or a constant, and
+    /// those are most of the paths in any file.
+    fn record_value_reference(&mut self, path: String, line: usize) {
+        let name = path.rsplit("::").next().unwrap_or(&path).to_owned();
+        if starts_uppercase(&name) {
+            return;
+        }
+        self.push_site(
+            Some(name),
+            Some(path),
+            CallKind::Path,
+            false,
+            Vec::new(),
+            line,
+        );
+    }
+
+    fn push_site(
+        &mut self,
+        callee_name: Option<String>,
+        callee_path: Option<String>,
+        call_kind: CallKind,
+        callee_is_locally_bound: bool,
+        arguments: Vec<ArgumentShape>,
+        line: usize,
+    ) {
+        let caller = self.current_caller();
+        let module = self.current_module().to_owned();
         let callee_path = callee_path.map(|p| rewrite_crate_prefix(&p, &module));
         self.sites.push(CallSite {
             callee_name,
@@ -448,6 +561,19 @@ impl CallVisitor {
         self.local_callables
             .last()
             .is_some_and(|bound| bound.contains(path))
+    }
+
+    /// Whether a path expression is a bare name the innermost function
+    /// scope binds, or `self`: a value, not a path to an item.
+    fn names_local_value(&self, path: &syn::Path) -> bool {
+        let Some(ident) = path.get_ident() else {
+            return false;
+        };
+        ident == "self"
+            || self
+                .local_names
+                .last()
+                .is_some_and(|bound| bound.contains(&ident.to_string()))
     }
 }
 
@@ -488,7 +614,25 @@ impl<'ast> Visit<'ast> for CallVisitor {
         self.record(callee_name, callee_path, CallKind::Path, arguments, line);
         // Recurse into arguments and the callee expression so nested
         // calls get their own sites (e.g. `outer(inner())` records both).
-        visit::visit_expr_call(self, call);
+        // A callee that is a plain path is the call just recorded, not a
+        // value reference, so it is walked without being visited as one.
+        match callee_path_expr(&call.func) {
+            Some(path) => visit::visit_expr_path(self, path),
+            None => self.visit_expr(&call.func),
+        }
+        for argument in &call.args {
+            self.visit_expr(argument);
+        }
+    }
+
+    fn visit_expr_path(&mut self, expr: &'ast ExprPath) {
+        if self.collect == Collect::ValueReferences
+            && expr.qself.is_none()
+            && !self.names_local_value(&expr.path)
+        {
+            self.record_value_reference(path_idents(&expr.path), expr.span().start().line);
+        }
+        visit::visit_expr_path(self, expr);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
@@ -696,6 +840,37 @@ impl<'ast> Visit<'ast> for LocalBindingCollector {
     }
 }
 
+/// Every name `sig` and `block` bind as a value: parameters, `let` and
+/// pattern bindings, closure parameters, and nested `fn` items. Collected
+/// body-wide for the reason [`local_callable_bindings`] is: a use that
+/// precedes its binding and means an outer item is rare, and here a
+/// dropped reference only leaves a visibility row as it was.
+fn local_names(sig: &Signature, block: &Block) -> HashSet<String> {
+    let mut collector = LocalNameCollector {
+        out: HashSet::new(),
+    };
+    collector.visit_signature(sig);
+    collector.visit_block(block);
+    collector.out
+}
+
+/// Collects binding names without descending into nested `fn` items,
+/// whose bodies are separate scopes.
+struct LocalNameCollector {
+    out: HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for LocalNameCollector {
+    fn visit_pat_ident(&mut self, pat: &'ast PatIdent) {
+        self.out.insert(pat.ident.to_string());
+        visit::visit_pat_ident(self, pat);
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+        self.out.insert(item.sig.ident.to_string());
+    }
+}
+
 /// Every name a `use` item binds, as an alias of its absolute target.
 ///
 /// `child_modules` are the `mod` items declared beside the `use`: under
@@ -704,24 +879,42 @@ impl<'ast> Visit<'ast> for LocalBindingCollector {
 /// if it were spelled `self::geo::area`. Any other bare leading segment
 /// names an extern crate, which no workspace node can match, so it
 /// contributes no alias.
-fn use_aliases_for(
-    current_module: &str,
-    child_modules: &HashSet<String>,
-    tree: &UseTree,
-) -> Vec<UseAlias> {
+fn use_aliases_for(current_module: &str, leaves: &[(String, Vec<String>)]) -> Vec<UseAlias> {
+    leaves
+        .iter()
+        .filter_map(|(alias, segments)| {
+            absolutize_use_segments(current_module, segments).map(|target| UseAlias {
+                alias: alias.clone(),
+                target,
+            })
+        })
+        .collect()
+}
+
+/// `(bound name, path segments)` for every leaf of a `use` tree, with a
+/// leading child-module segment spelled out as `self::<child>`.
+fn use_leaves(child_modules: &HashSet<String>, tree: &UseTree) -> Vec<(String, Vec<String>)> {
     let mut leaves = Vec::new();
     walk_use_tree(tree, &mut Vec::new(), &mut leaves);
+    for (_, segments) in &mut leaves {
+        if segments
+            .first()
+            .is_some_and(|first| child_modules.contains(first))
+        {
+            segments.insert(0, "self".to_owned());
+        }
+    }
     leaves
-        .into_iter()
-        .filter_map(|(alias, mut segments)| {
-            if segments
-                .first()
-                .is_some_and(|first| child_modules.contains(first))
-            {
-                segments.insert(0, "self".to_owned());
-            }
-            absolutize_use_segments(current_module, &segments)
-                .map(|target| UseAlias { alias, target })
+}
+
+/// The path each non-glob `use` leaf names: absolute where
+/// [`absolutize_use_segments`] can root it, as written otherwise.
+fn use_leaf_paths(current_module: &str, leaves: &[(String, Vec<String>)]) -> Vec<String> {
+    leaves
+        .iter()
+        .filter(|(alias, _)| alias != "*")
+        .map(|(_, segments)| {
+            absolutize_use_segments(current_module, segments).unwrap_or_else(|| segments.join("::"))
         })
         .collect()
 }
@@ -887,21 +1080,41 @@ fn argument_shape(expr: &Expr) -> ArgumentShape {
 /// `(crate::a::foo)(x)` still resolves to `foo`. Anything more
 /// elaborate (closures, projection, casts) returns `None`.
 fn path_call_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        Expr::Reference(r) => path_call_name(&r.expr),
-        Expr::Paren(p) => path_call_name(&p.expr),
-        Expr::Group(g) => path_call_name(&g.expr),
-        _ => None,
-    }
+    callee_path_expr(expr)?
+        .path
+        .segments
+        .last()
+        .map(|s| s.ident.to_string())
 }
 
 fn path_call_path(expr: &Expr) -> Option<String> {
+    let path = callee_path_expr(expr)?;
+    if path.qself.is_some() {
+        return Some(render_tokens(path));
+    }
+    Some(path_idents(&path.path))
+}
+
+/// The segments of `path` joined by `::`, without generic arguments:
+/// `m::apply::<T>` names the same item as `m::apply`, and the turbofish
+/// rendered as a segment of its own would match no qualified name.
+fn path_idents(path: &syn::Path) -> String {
+    let segments: Vec<String> = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect();
+    segments.join("::")
+}
+
+/// The path a free-call callee names, behind any `&`, parens, and
+/// invisible groups.
+fn callee_path_expr(expr: &Expr) -> Option<&ExprPath> {
     match expr {
-        Expr::Path(_) => Some(render_tokens(expr)),
-        Expr::Reference(r) => path_call_path(&r.expr),
-        Expr::Paren(p) => path_call_path(&p.expr),
-        Expr::Group(g) => path_call_path(&g.expr),
+        Expr::Path(path) => Some(path),
+        Expr::Reference(r) => callee_path_expr(&r.expr),
+        Expr::Paren(p) => callee_path_expr(&p.expr),
+        Expr::Group(g) => callee_path_expr(&g.expr),
         _ => None,
     }
 }
@@ -920,6 +1133,97 @@ mod tests {
             .iter()
             .map(|s| (s.callee_name.as_deref(), s.caller_name.as_deref()))
             .collect()
+    }
+
+    /// `(path, enclosing function)` of every value reference in `src`.
+    fn value_references(src: &str) -> Vec<(String, Option<String>)> {
+        extract_value_reference_shapes_with_module(src, CallIndexOptions::default(), "app")
+            .unwrap()
+            .into_iter()
+            .map(|shape| {
+                (
+                    shape.callee_path().unwrap(),
+                    shape.caller_qualified_name().map(ToOwned::to_owned),
+                )
+            })
+            .collect()
+    }
+
+    fn reference_paths(src: &str) -> Vec<String> {
+        value_references(src)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    #[rstest]
+    #[case::method_argument("fn a(v: V) { v.map(m::key); }", &["m::key"])]
+    #[case::call_argument("fn a(v: V) { apply(v, m::key); }", &["m::key"])]
+    #[case::let_initialiser("fn a() { let f: fn() = m::key; }", &["m::key"])]
+    #[case::bare_name("fn a(v: V) { v.map(key); }", &["key"])]
+    #[case::behind_a_reference("fn a(v: V) { apply(v, &m::key); }", &["m::key"])]
+    #[case::macro_argument("fn a() { let _ = vec![m::key]; }", &["m::key"])]
+    #[case::turbofish_is_dropped("fn a(v: V) { v.map(m::key::<u8>); }", &["m::key"])]
+    #[case::crate_keyword_is_rewritten("fn a(v: V) { v.map(crate::m::key); }", &["app::m::key"])]
+    #[case::self_type_path("impl S { fn a(v: V) { v.map(Self::key); } }", &["Self::key"])]
+    #[case::callee_is_a_call_not_a_reference("fn a() { m::key(); (m::other)(); }", &[])]
+    #[case::callee_arguments_still_count("fn a() { m::run(m::key); }", &["m::key"])]
+    #[case::receiver_is_no_item("fn a(&self) { self.go(); }", &[])]
+    #[case::uppercase_last_segment("fn a(v: V) { v.map(Some); f(Color::Red, LIMIT); }", &[])]
+    #[case::qualified_self("fn a(v: V) { v.map(<S as T>::key); }", &[])]
+    #[case::parameter("fn a(key: u8, v: V) { v.push(key); }", &[])]
+    #[case::let_binding("fn a(v: V) { let key = 1; v.push(key); }", &[])]
+    #[case::closure_parameter("fn a(v: V) { v.map(|key| key); }", &[])]
+    #[case::pattern_binding("fn a(v: V) { if let Some(key) = v { drop(key); } }", &[])]
+    #[case::nested_fn("fn a(v: V) { fn key() {} v.map(key); }", &[])]
+    #[case::qualified_path_is_not_shadowed("fn a(key: u8, v: V) { v.map(m::key); }", &["m::key"])]
+    fn paths_outside_call_position_are_value_references(
+        #[case] src: &str,
+        #[case] expected: &[&str],
+    ) {
+        assert_eq!(reference_paths(src), expected);
+    }
+
+    #[rstest]
+    #[case::rooted_at_super("mod b { use super::m::key; }", &["app::m::key"])]
+    #[case::rooted_at_crate("use crate::m::{key, other as o};", &["app::m::key", "app::m::other"])]
+    #[case::child_module("mod m {}\nuse m::key;", &["app::m::key"])]
+    #[case::another_crate("use core_lib::m::key;", &["core_lib::m::key"])]
+    #[case::glob_names_nothing("use crate::m::*;", &[])]
+    #[case::type_import("use crate::m::Key;", &[])]
+    #[case::block_scoped("fn a() { use crate::m::key; }", &["app::m::key"])]
+    fn use_leaves_are_value_references(#[case] src: &str, #[case] expected: &[&str]) {
+        assert_eq!(reference_paths(src), expected);
+    }
+
+    #[test]
+    fn value_references_carry_their_enclosing_function_and_module() {
+        let shapes = extract_value_reference_shapes_with_module(
+            "use crate::m::key;\nmod inner { impl S { fn go(v: V) { v.map(super::m::key); } } }\n",
+            CallIndexOptions::default(),
+            "app",
+        )
+        .unwrap();
+        let facts: Vec<_> = shapes
+            .iter()
+            .map(|shape| (shape.caller_module(), shape.caller_qualified_name()))
+            .collect();
+        assert_eq!(
+            facts,
+            [
+                (Some("app"), None),
+                (Some("app::inner"), Some("app::inner::S::go")),
+            ],
+        );
+    }
+
+    /// The reference walk shares the visitor with the call index, which
+    /// must keep returning calls and nothing else.
+    #[test]
+    fn the_call_index_records_no_value_references() {
+        let sites = run("use crate::m::key;\nfn a(v: V) { v.map(m::key); (m::other)(m::key); }\n");
+        let names: Vec<_> = sites.iter().map(|s| s.callee_name.as_deref()).collect();
+        assert_eq!(names, [Some("map"), Some("other")]);
     }
 
     #[test]
@@ -1531,6 +1835,15 @@ fn caller() {
         // referenced from this file.
         let src = "const X: i32 = f();\n";
         assert_eq!(names(&run(src)), [(Some("f"), None)]);
+    }
+
+    #[rstest]
+    #[case::function("fn a() { m::apply::<T>(1); }", "m::apply")]
+    #[case::type_arguments("fn a() { Vec::<u8>::new(); }", "Vec::new")]
+    #[case::qualified_self_is_kept("fn a() { <S as T>::make(); }", "< S as T >::make")]
+    fn generic_arguments_are_no_part_of_a_callee_path(#[case] src: &str, #[case] expected: &str) {
+        let sites = run(src);
+        assert_eq!(sites[0].callee_path.as_deref(), Some(expected));
     }
 
     #[test]

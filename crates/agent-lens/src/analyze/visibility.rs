@@ -24,6 +24,12 @@
 //!   resolver refuses to attribute (`.clone()`, `.get()`) — are counted
 //!   per row when they sit outside the proposed scope. A flagged row is
 //!   the one to check by hand first.
+//! - A Rust function need not be called to need its visibility: passing
+//!   it by path as a value (`.map(fusion::key)`, `read_ids(&p,
+//!   ids::cas_id)`) or importing it (`use fusion::key;`) requires it to
+//!   be visible from there just the same. Those sites are resolved like
+//!   calls and their modules join the callers' in the fold; one the
+//!   resolver could not decide counts with the ambiguous call sites.
 //! - Interface dispatch hides callers wholesale: in a Go codebase built
 //!   around interfaces, a concrete method's callers name the interface,
 //!   never the method, so every exported implementation looks uncalled.
@@ -61,8 +67,9 @@
 //! # Schema history
 //!
 //! * `schema_version: 1` — initial shape; later additive fields:
-//!   `may_satisfy_interfaces` per finding (omitted when empty) and
-//!   `interface_satisfying_count` in the summary.
+//!   `may_satisfy_interfaces` per finding (omitted when empty),
+//!   `interface_satisfying_count` in the summary, and
+//!   `value_reference_count` per finding.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -73,6 +80,7 @@ use serde::Serialize;
 
 use super::call_graph::model::{
     CallGraphEdge, CallGraphNode, ModuleResolutionSummary, NodeVisibility, Resolution,
+    ValueReference,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
@@ -112,7 +120,9 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
      still permit, and the compiler rejects it immediately if a caller was missed. Only resolved \
      edges carry a caller module, so callers reached through ambiguous call sites, or through \
      receiver calls on a name the resolver refuses to attribute, are invisible — sites of either \
-     kind that name the function from outside the proposed scope are counted per row. Callers \
+     kind that name the function from outside the proposed scope are counted per row. A Rust \
+     function named by path without being called — passed as a value, or imported with `use` — \
+     counts as used from that module. Callers \
      outside the analyzed path do not exist here, and only `pub use` re-exports written in a crate \
      root are recognised as intended API, so a surface published another way can still appear. \
      Exported Go methods matching a method of an interface declared in the analyzed tree or of a \
@@ -182,10 +192,14 @@ impl VisibilityAnalyzer {
         // Interface method sets are what tells an uncalled-looking Go
         // method apart from one whose calls dispatch through an
         // interface, so this analyzer always pays for their extraction.
+        // Value references are the uses of a Rust function that no call
+        // edge records: `.map(m::f)` needs `f` visible as much as
+        // `m::f(x)` does.
         let graph = self
             .builder
             .clone()
             .with_interface_facts(true)
+            .with_value_reference_facts(true)
             .build(&roots)?;
         let report = Report::build(&roots, &graph);
         render_report(&report, format, || format_markdown(&report, self.top))
@@ -274,7 +288,8 @@ struct Finding {
     /// The declaration the resolved callers would still permit, written
     /// as the language spells it.
     suggested_visibility: String,
-    /// Distinct resolved callers.
+    /// Distinct resolved callers: functions that call it, or name it by
+    /// path as a value.
     caller_count: usize,
     /// Of `caller_count`, how many are test functions. Narrowing stays
     /// valid for Rust tests (they compile inside the crate) and for Go
@@ -282,11 +297,19 @@ struct Finding {
     /// x_test` needs the export, so a function it calls is never a
     /// finding.
     test_caller_count: usize,
-    /// Distinct modules the resolved callers live in, sorted.
+    /// Distinct modules the resolved callers live in, sorted. Includes
+    /// the modules of `value_reference_count`'s sites.
     caller_modules: Vec<String>,
+    /// Sites that name this function by path without calling it — as a
+    /// value (`.map(m::f)`, a function argument, a `let` initialiser) or
+    /// in a `use` declaration — and resolved to it. Each needs the
+    /// function visible from its module exactly as a call would. Rust
+    /// only; zero elsewhere.
+    value_reference_count: usize,
     /// Ambiguous call sites outside `scope_module` whose candidate set
     /// names this function: the resolver could not decide, so a caller
-    /// the narrowing would break may exist.
+    /// the narrowing would break may exist. Ambiguous value references
+    /// (see `value_reference_count`) are counted here too.
     ambiguous_calls_outside_scope: usize,
     /// Receiver call sites outside `scope_module` on this function's
     /// name, left unresolved because the name is one the resolver
@@ -386,12 +409,17 @@ impl Report {
             .collect();
 
         let callers = graph.resolved_callers();
+        let references = ValueReferences::resolved(graph);
         let interface_index = InterfaceIndex::new(&graph.interfaces);
         let external_tests = external_test_callers(roots.base(), graph);
         let mut findings: Vec<(usize, Finding)> = Vec::new();
         for &(idx, lang) in &audited {
+            let uses = Uses {
+                callers: callers.get(&idx),
+                references: references.get(idx),
+            };
             if let Some(mut finding) =
-                classify(graph, idx, lang, callers.get(&idx), &external_tests)
+                classify(graph, idx, lang, &uses, &references, &external_tests)
             {
                 finding.annotate_interfaces(interface_index.matching(&graph.nodes[idx], lang));
                 findings.push((idx, finding));
@@ -605,6 +633,53 @@ fn external_test_callers(root: &Path, graph: &CallGraph) -> ExternalTestCallers 
         .collect()
 }
 
+/// The resolved value references to each node, by node index, with a
+/// function's references to itself left out (as self-recursion is from
+/// its callers).
+struct ValueReferences<'g> {
+    by_target: BTreeMap<usize, Vec<&'g ValueReference>>,
+    index_by_id: HashMap<&'g str, usize>,
+}
+
+impl<'g> ValueReferences<'g> {
+    fn resolved(graph: &'g CallGraph) -> Self {
+        let index_by_id = graph.node_index_by_id();
+        let mut by_target: BTreeMap<usize, Vec<&ValueReference>> = BTreeMap::new();
+        for reference in &graph.value_references {
+            let Some(&to) = reference.to.as_deref().and_then(|to| index_by_id.get(to)) else {
+                continue;
+            };
+            if reference.from.as_deref() != Some(graph.nodes[to].id.as_str()) {
+                by_target.entry(to).or_default().push(reference);
+            }
+        }
+        Self {
+            by_target,
+            index_by_id,
+        }
+    }
+
+    fn get(&self, idx: usize) -> &[&'g ValueReference] {
+        self.by_target.get(&idx).map_or(&[], Vec::as_slice)
+    }
+
+    /// The function a reference is written in, when it is a node.
+    fn referrer(&self, reference: &ValueReference) -> Option<usize> {
+        reference
+            .from
+            .as_deref()
+            .and_then(|from| self.index_by_id.get(from))
+            .copied()
+    }
+}
+
+/// Everything observed using one function: the functions that call it
+/// and the sites that name it without calling it.
+struct Uses<'a, 'g> {
+    callers: Option<&'a BTreeSet<usize>>,
+    references: &'a [&'g ValueReference],
+}
+
 /// Fold the caller modules into the narrowest scope containing all of
 /// them, and turn that into a finding when it is narrower than the
 /// declaration. Returns `None` for a function whose callers already need
@@ -614,13 +689,23 @@ fn classify(
     graph: &CallGraph,
     idx: usize,
     lang: ExportLang,
-    callers: Option<&BTreeSet<usize>>,
+    uses: &Uses<'_, '_>,
+    references: &ValueReferences<'_>,
     external_tests: &ExternalTestCallers,
 ) -> Option<Finding> {
     let node = &graph.nodes[idx];
-    let callers: Vec<usize> = callers
-        .map(|c| c.iter().copied().collect())
-        .unwrap_or_default();
+    // A function that takes this one by path uses it as a caller does.
+    let callers: BTreeSet<usize> = uses
+        .callers
+        .into_iter()
+        .flatten()
+        .copied()
+        .chain(
+            uses.references
+                .iter()
+                .filter_map(|reference| references.referrer(reference)),
+        )
+        .collect();
     if callers
         .iter()
         .any(|&caller| external_tests.contains(&caller))
@@ -630,6 +715,7 @@ fn classify(
     let caller_modules: BTreeSet<&str> = callers
         .iter()
         .map(|&caller| graph.nodes[caller].module.as_str())
+        .chain(uses.references.iter().map(|r| r.module.as_str()))
         .collect();
 
     let (scope, scope_module) = match lang {
@@ -653,6 +739,7 @@ fn classify(
             .filter(|&&caller| graph.nodes[caller].is_test)
             .count(),
         caller_modules: caller_modules.into_iter().map(ToOwned::to_owned).collect(),
+        value_reference_count: uses.references.len(),
         ambiguous_calls_outside_scope: 0,
         ubiquitous_name_calls_outside_scope: 0,
         may_satisfy_interfaces: Vec::new(),
@@ -753,6 +840,32 @@ fn annotate_outside_calls(
             if !called_from_inside(&graph.nodes[*idx], finding, caller_module) {
                 count_outside_call(finding, edge);
             }
+        }
+    }
+    for reference in &graph.value_references {
+        count_ambiguous_reference(graph, &index_by_id, &slots, findings, reference);
+    }
+}
+
+/// A value reference the resolver could not decide hides a use the same
+/// way an ambiguous call does: count it on every candidate's row it sits
+/// outside the proposed scope of.
+fn count_ambiguous_reference(
+    graph: &CallGraph,
+    index_by_id: &HashMap<&str, usize>,
+    slots: &FindingSlots<'_>,
+    findings: &mut [(usize, Finding)],
+    reference: &ValueReference,
+) {
+    let candidate_slots = reference
+        .candidates
+        .iter()
+        .filter_map(|candidate| index_by_id.get(candidate.as_str()))
+        .filter_map(|idx| slots.by_node.get(idx));
+    for &slot in candidate_slots {
+        let (idx, finding) = &mut findings[slot];
+        if !called_from_inside(&graph.nodes[*idx], finding, Some(&reference.module)) {
+            finding.ambiguous_calls_outside_scope += 1;
         }
     }
 }
@@ -1465,6 +1578,282 @@ mod tests {
             analyze_md(dir.path()).contains("Audited 2 of 4 non-test public function(s)"),
             "the audited count is the public count minus the re-exports",
         );
+    }
+
+    /// `fusion::key` has a direct caller in its own module and a second
+    /// use in the sibling `build`, written `use_site`. Whatever the
+    /// spelling, the sibling needs `key` visible, so the row must not
+    /// narrow below the crate (#657).
+    fn write_fn_value_crate(dir: &Path, use_site: &str) {
+        write_crate(
+            dir,
+            "app",
+            &[
+                ("lib.rs", "pub mod fusion;\npub mod build;\n"),
+                (
+                    "fusion.rs",
+                    "pub fn key(l: &str) -> usize { l.len() }\n\
+                     pub fn sorted(mut v: Vec<String>) -> Vec<String> { v.sort_by_key(|l| key(l)); v }\n",
+                ),
+                ("build.rs", use_site),
+            ],
+        );
+    }
+
+    #[rstest]
+    #[case::closure_call(
+        "pub fn keys(v: &[&str]) -> Vec<usize> { v.iter().map(|l| super::fusion::key(l)).collect() }\n"
+    )]
+    #[case::method_argument(
+        "pub fn keys(v: &[&str]) -> Vec<usize> { v.iter().copied().map(super::fusion::key).collect() }\n"
+    )]
+    #[case::imported_then_bare(
+        "use super::fusion::key;\n\
+         pub fn keys(v: &[&str]) -> Vec<usize> { v.iter().copied().map(key).collect() }\n"
+    )]
+    #[case::let_initialiser(
+        "pub fn keys(v: &[&str]) -> Vec<usize> {\n\
+         \x20   let f: fn(&str) -> usize = super::fusion::key;\n\
+         \x20   v.iter().copied().map(f).collect()\n}\n"
+    )]
+    #[case::function_argument(
+        "fn apply(v: &[&str], f: fn(&str) -> usize) -> Vec<usize> { v.iter().copied().map(f).collect() }\n\
+         pub fn keys(v: &[&str]) -> Vec<usize> { apply(v, super::fusion::key) }\n"
+    )]
+    #[case::macro_argument(
+        "pub fn keys() -> Vec<fn(&str) -> usize> { vec![super::fusion::key] }\n"
+    )]
+    #[case::import_alone("#[allow(unused_imports)]\nuse super::fusion::key;\n")]
+    fn a_function_named_by_path_without_a_call_is_used_from_that_module(#[case] use_site: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write_fn_value_crate(dir.path(), use_site);
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            suggestion_for(&report, "app::fusion::key").as_deref(),
+            Some("pub(crate)"),
+            "report: {report}",
+        );
+    }
+
+    /// A `use` inside a `#[cfg(test)]` module is a reference like any
+    /// other while tests are in the graph, and gone with them under
+    /// `--exclude-tests`.
+    #[rstest]
+    #[case::tests_kept(false, "pub(crate)")]
+    #[case::tests_excluded(true, "drop `pub`")]
+    fn a_reference_in_a_cfg_test_module_follows_the_test_filter(
+        #[case] exclude_tests: bool,
+        #[case] expected: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_fn_value_crate(
+            dir.path(),
+            "#[cfg(test)]\nmod tests {\n    #[allow(unused_imports)]\n    use crate::fusion::key;\n}\n",
+        );
+
+        let json = VisibilityAnalyzer::new()
+            .with_exclude_tests(exclude_tests)
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            suggestion_for(&report, "app::fusion::key").as_deref(),
+            Some(expected),
+            "report: {report}",
+        );
+    }
+
+    /// A `use` at module scope is written in no function: it widens the
+    /// scope by its module and is counted as a reference, not a caller.
+    #[test]
+    fn a_module_scope_import_adds_a_module_but_no_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fn_value_crate(
+            dir.path(),
+            "#[allow(unused_imports)]\nuse super::fusion::key;\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let row = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .find(|f| f["qualified_name"] == "app::fusion::key")
+            .unwrap();
+        assert_eq!(row["caller_count"], 1, "only `sorted` calls it: {row}");
+        assert_eq!(row["value_reference_count"], 1);
+        assert_eq!(
+            row["caller_modules"],
+            serde_json::json!(["app::build", "app::fusion"]),
+        );
+    }
+
+    /// A turbofish is no part of the path a call names: the sibling's
+    /// `fusion::make::<u8>()` is a caller of `fusion::make`.
+    #[test]
+    fn a_turbofish_call_from_a_sibling_is_a_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "app",
+            &[
+                ("lib.rs", "pub mod fusion;\npub mod build;\n"),
+                (
+                    "fusion.rs",
+                    "pub fn make<T: Default>() -> T { T::default() }\n\
+                     pub fn local() -> u8 { make::<u8>() }\n",
+                ),
+                (
+                    "build.rs",
+                    "pub fn other() -> u8 { super::fusion::make::<u8>() }\n",
+                ),
+            ],
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            suggestion_for(&report, "app::fusion::make").as_deref(),
+            Some("pub(crate)"),
+            "report: {report}",
+        );
+    }
+
+    /// A value reference is the only use here, so before #657 the row
+    /// read `no_resolved_callers`; it is a caller like any other, and is
+    /// reported with the count of sites that named it.
+    #[test]
+    fn a_value_reference_alone_is_a_resolved_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "app",
+            &[
+                ("lib.rs", "pub mod fusion;\npub mod build;\n"),
+                ("fusion.rs", "pub fn key(l: &str) -> usize { l.len() }\n"),
+                (
+                    "build.rs",
+                    "pub fn keys(v: &[&str]) -> Vec<usize> { v.iter().copied().map(super::fusion::key).collect() }\n",
+                ),
+            ],
+        );
+
+        let report = analyze_json(dir.path());
+        let row = report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .find(|f| f["qualified_name"] == "app::fusion::key")
+            .unwrap();
+        assert_eq!(row["caller_scope"], "same_crate", "row: {row}");
+        assert_eq!(row["caller_count"], 1);
+        assert_eq!(row["value_reference_count"], 1);
+        assert_eq!(row["caller_modules"], serde_json::json!(["app::build"]));
+    }
+
+    /// The binary passes `ids::cas_id` by path. Another crate needs the
+    /// `pub` it has, so the row must go, exactly as it does when the
+    /// binary calls the function (#657, cross-crate half).
+    #[rstest]
+    #[case::called("read_ids(&[\"50-99-7\"], |l| ids::cas_id(l))")]
+    #[case::passed_by_path("read_ids(&[\"50-99-7\"], ids::cas_id)")]
+    fn a_function_another_crate_takes_by_path_keeps_its_pub(#[case] use_site: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "core_lib",
+            &[
+                ("lib.rs", "pub mod chemical;\n"),
+                (
+                    "chemical/mod.rs",
+                    "pub mod ids;\npub fn parse(q: &str) -> Option<String> { ids::cas_id(q) }\n",
+                ),
+                (
+                    "chemical/ids.rs",
+                    "pub fn cas_id(s: &str) -> Option<String> { s.contains('-').then(|| format!(\"cas:{s}\")) }\n",
+                ),
+            ],
+        );
+        write_crate(
+            dir.path(),
+            "cli",
+            &[(
+                "main.rs",
+                &format!(
+                    "use core_lib::chemical::{{self, ids}};\n\
+                     fn read_ids(lines: &[&str], parse: fn(&str) -> Option<String>) -> Vec<String> {{\n\
+                     \x20   lines.iter().filter_map(|l| parse(l)).collect()\n}}\n\
+                     fn main() {{\n\
+                     \x20   println!(\"{{:?}}\", {use_site});\n\
+                     \x20   println!(\"{{:?}}\", chemical::parse(\"50-99-7\"));\n}}\n"
+                ),
+            )],
+        );
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            suggestion_for(&report, "core_lib::chemical::ids::cas_id"),
+            None,
+            "report: {report}",
+        );
+    }
+
+    /// A bare name the function binds is a local, whatever the workspace
+    /// defines under that name: `key` the parameter is not `fusion::key`.
+    #[rstest]
+    #[case::parameter("pub fn keys(key: usize) -> usize { std::convert::identity(key) }\n")]
+    #[case::let_binding("pub fn keys() -> usize { let key = 1; std::convert::identity(key) }\n")]
+    #[case::closure_parameter(
+        "pub fn keys(v: &[usize]) -> Vec<usize> { v.iter().map(|key| std::convert::identity(*key)).collect() }\n"
+    )]
+    #[case::pattern_binding(
+        "pub fn keys(v: Option<usize>) -> usize { match v { Some(key) => std::convert::identity(key), None => 0 } }\n"
+    )]
+    fn a_local_sharing_the_function_name_is_no_reference(#[case] use_site: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write_fn_value_crate(dir.path(), use_site);
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            suggestion_for(&report, "app::fusion::key").as_deref(),
+            Some("drop `pub`"),
+            "report: {report}",
+        );
+    }
+
+    /// Two `key`s and a bare reference the resolver cannot place: the
+    /// rows stay, flagged like an ambiguous call would flag them.
+    #[test]
+    fn an_ambiguous_value_reference_flags_the_rows_it_might_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "app",
+            &[
+                ("lib.rs", "pub mod one;\npub mod two;\npub mod build;\n"),
+                ("one.rs", "pub fn key(l: &str) -> usize { l.len() }\n"),
+                ("two.rs", "pub fn key(l: &str) -> usize { l.len() + 1 }\n"),
+                (
+                    "build.rs",
+                    "use super::*;\n\
+                     pub fn keys(v: &[&str]) -> Vec<usize> { v.iter().copied().map(key).collect() }\n",
+                ),
+            ],
+        );
+
+        let report = analyze_json(dir.path());
+        for name in ["app::one::key", "app::two::key"] {
+            let row = report["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["findings"].as_array().unwrap())
+                .find(|f| f["qualified_name"] == name)
+                .unwrap();
+            assert_eq!(row["ambiguous_calls_outside_scope"], 1, "row: {row}");
+        }
     }
 
     /// A glob covers everything under the module it names, so items in
