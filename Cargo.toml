@@ -22,7 +22,7 @@ criterion = "0.8"
 ignore = "0.4"
 proptest = "1"
 rayon = "1"
-rstest = "0.27"
+rstest = "0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 tempfile = "3"
