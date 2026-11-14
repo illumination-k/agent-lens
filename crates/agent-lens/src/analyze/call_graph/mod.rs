@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
-use lens_rust::CallIndexOptions;
+use lens_rust::{CallIndexOptions, ValueReferenceShape};
 
 use super::cargo_meta::CrateNameCache;
 use super::index::{AnalysisIndex, SourceKey};
@@ -728,7 +728,7 @@ fn extract_value_references(
     source: &str,
     module: &str,
     include_cfg_test_blocks: bool,
-) -> Result<Arc<Vec<CallShape>>, AnalyzerError> {
+) -> Result<Arc<Vec<ValueReferenceShape>>, AnalyzerError> {
     let extract = || {
         lens_rust::extract_value_reference_shapes_with_module(
             source,
@@ -792,7 +792,7 @@ pub(crate) struct FileGraphInput {
     /// Paths naming an item without calling it, shaped as calls. Empty
     /// unless value-reference facts were requested (and the language
     /// extracts them).
-    pub(crate) value_references: Arc<Vec<CallShape>>,
+    pub(crate) value_references: Arc<Vec<ValueReferenceShape>>,
 }
 
 impl SourceLang {
@@ -1130,8 +1130,9 @@ fn resolve_value_reference(
     resolver: &Resolver,
     caller_index: &CallerIndex,
     file: &FileGraphInput,
-    site: &CallShape,
+    reference: &ValueReferenceShape,
 ) -> Option<ValueReference> {
+    let site = &reference.site;
     let from = match site.caller_qualified_name() {
         Some(caller) => Some(caller_index.resolve_in_file(&file.file, caller, site.line)?),
         None => None,
@@ -1149,6 +1150,7 @@ fn resolve_value_reference(
             .to_owned(),
         to: resolved.to,
         candidates: resolved.candidates,
+        re_export: reference.re_export.clone(),
     })
 }
 

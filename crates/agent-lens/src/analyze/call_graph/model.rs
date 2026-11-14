@@ -11,6 +11,7 @@ use lens_domain::{
     ArgumentShape, BuiltinFunctionNames, FunctionShape, InertAttributeNames, OwnerKind, SyntaxFact,
     UbiquitousMethodNames, VisibilityShape,
 };
+use lens_rust::ReExportScope;
 use serde::Serialize;
 
 /// One function definition in the call graph.
@@ -201,6 +202,10 @@ pub(crate) struct ValueReference {
     pub(crate) module: String,
     pub(crate) to: Option<String>,
     pub(crate) candidates: Vec<String>,
+    /// For a leaf of a `use` declared with a visibility: the scope the
+    /// re-export hands the name out to. The named item must be at least
+    /// that visible, or the declaration itself does not compile.
+    pub(crate) re_export: Option<ReExportScope>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

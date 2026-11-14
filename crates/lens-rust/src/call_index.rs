@@ -38,7 +38,7 @@ use syn::{
     Block, Expr, ExprCall, ExprMacro, ExprMethodCall, ExprPath, FnArg, GenericArgument,
     GenericParam, Generics, ImplItem, Item, ItemFn, ItemUse, Local, Macro, Pat, PatIdent,
     PathArguments, Signature, StmtMacro, Token, TraitItem, Type, TypeParamBound, UnOp, UseTree,
-    WherePredicate,
+    Visibility, WherePredicate,
 };
 
 use crate::attrs::has_cfg_test;
@@ -169,13 +169,47 @@ fn collect_sites(
 /// reported with its absolute target where the path is rooted at
 /// `crate`/`self`/`super` or a child module, and as written otherwise
 /// (a path through another crate of the workspace).
+///
+/// A leaf of a `use` declared with a visibility (`pub use`, `pub(crate)
+/// use`, …) is a re-export, and carries how far it hands the name out:
+/// the item it names has to be at least that visible for the
+/// declaration itself to compile.
 pub fn extract_value_reference_shapes_with_module(
     source: &str,
     opts: CallIndexOptions,
     base_module: &str,
-) -> Result<Vec<CallShape>, RustParseError> {
-    collect_sites(source, opts, base_module, Collect::ValueReferences)
-        .map(|sites| sites.into_iter().map(CallShape::from).collect())
+) -> Result<Vec<ValueReferenceShape>, RustParseError> {
+    let file = syn::parse_file(source)?;
+    let mut visitor = CallVisitor::new(opts, base_module, Collect::ValueReferences);
+    visitor.visit_items(&file.items);
+    let mut re_exports = std::mem::take(&mut visitor.re_exports);
+    Ok(visitor
+        .into_sites()
+        .into_iter()
+        .enumerate()
+        .map(|(index, site)| ValueReferenceShape {
+            site: CallShape::from(site),
+            re_export: re_exports.remove(&index),
+        })
+        .collect())
+}
+
+/// One value reference: the path shaped as a call, and — for a leaf of
+/// a re-exporting `use` — the scope the re-export is visible in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueReferenceShape {
+    pub site: CallShape,
+    pub re_export: Option<ReExportScope>,
+}
+
+/// How far a `use` declaration with a visibility hands a name out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReExportScope {
+    /// `pub use`: the name is public wherever the module is.
+    Public,
+    /// `pub(crate) use`, `pub(super) use`, `pub(in path) use`: the
+    /// absolute path of the module the name is visible within.
+    Module(String),
 }
 
 /// Extract neutral call syntax facts with an explicit lexical base module.
@@ -316,6 +350,9 @@ struct CallVisitor {
     /// value references, where a bare name that is a local names no item.
     local_names: Vec<HashSet<String>>,
     sites: Vec<CallSite>,
+    /// Re-export scope of the value-reference sites that are leaves of a
+    /// `use` declared with a visibility, by index into `sites`.
+    re_exports: BTreeMap<usize, ReExportScope>,
 }
 
 impl CallVisitor {
@@ -332,6 +369,7 @@ impl CallVisitor {
             local_callables: Vec::new(),
             local_names: Vec::new(),
             sites: Vec::new(),
+            re_exports: BTreeMap::new(),
         }
     }
 
@@ -495,16 +533,30 @@ impl CallVisitor {
             .collect()
     }
 
+    /// Record each non-glob leaf of a `use` as a value reference; the
+    /// leaves of one declared with a visibility carry its re-export
+    /// scope.
+    fn record_use_references(&mut self, item_use: &ItemUse, leaves: &[(String, Vec<String>)]) {
+        let line = item_use.span().start().line;
+        let re_export = re_export_scope(self.current_module(), &item_use.vis);
+        for path in use_leaf_paths(self.current_module(), leaves) {
+            let recorded = self.sites.len();
+            self.record_value_reference(path, line);
+            if let Some(scope) = &re_export
+                && self.sites.len() > recorded
+            {
+                self.re_exports.insert(recorded, scope.clone());
+            }
+        }
+    }
+
     fn add_aliases_from_use(&mut self, item_use: &ItemUse) {
         let no_children = HashSet::new();
         let child_modules = self.child_modules.last().unwrap_or(&no_children);
         let leaves = use_leaves(child_modules, &item_use.tree);
         let aliases = use_aliases_for(self.current_module(), &leaves);
         if self.collect == Collect::ValueReferences {
-            let line = item_use.span().start().line;
-            for path in use_leaf_paths(self.current_module(), &leaves) {
-                self.record_value_reference(path, line);
-            }
+            self.record_use_references(item_use, &leaves);
         }
         let Some(scope) = self.alias_scopes.last_mut() else {
             return;
@@ -1057,6 +1109,28 @@ fn absolutize_use_segments(current_module: &str, segments: &[String]) -> Option<
     }
 }
 
+/// The scope a `use` with visibility `vis`, written in `current_module`,
+/// re-exports its names to. `None` for a plain `use`, for `pub(self)`,
+/// and for a `pub(in …)` path that cannot be rooted: those hand the name
+/// no further than an import does.
+fn re_export_scope(current_module: &str, vis: &Visibility) -> Option<ReExportScope> {
+    match vis {
+        Visibility::Public(_) => Some(ReExportScope::Public),
+        Visibility::Restricted(restricted) => {
+            let segments: Vec<String> = restricted
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            absolutize_use_segments(current_module, &segments)
+                .filter(|scope| scope != current_module)
+                .map(ReExportScope::Module)
+        }
+        Visibility::Inherited => None,
+    }
+}
+
 fn module_segments(module: &str) -> Vec<String> {
     module.split("::").map(ToOwned::to_owned).collect()
 }
@@ -1190,10 +1264,13 @@ mod tests {
         extract_value_reference_shapes_with_module(src, CallIndexOptions::default(), "app")
             .unwrap()
             .into_iter()
-            .map(|shape| {
+            .map(|reference| {
                 (
-                    shape.callee_path().unwrap(),
-                    shape.caller_qualified_name().map(ToOwned::to_owned),
+                    reference.site.callee_path().unwrap(),
+                    reference
+                        .site
+                        .caller_qualified_name()
+                        .map(ToOwned::to_owned),
                 )
             })
             .collect()
@@ -1246,6 +1323,49 @@ mod tests {
         assert_eq!(reference_paths(src), expected);
     }
 
+    #[rstest]
+    #[case::plain_import("use crate::m::key;", None)]
+    #[case::public("pub use crate::m::key;", Some(ReExportScope::Public))]
+    #[case::crate_wide("mod a { pub(crate) use crate::m::key; }", Some(ReExportScope::Module("app".to_owned())))]
+    #[case::parent("mod a { mod b { pub(super) use crate::m::key; } }", Some(ReExportScope::Module("app::a".to_owned())))]
+    #[case::in_path("mod a { mod b { pub(in crate::a) use crate::m::key; } }", Some(ReExportScope::Module("app::a".to_owned())))]
+    #[case::own_module("mod a { pub(self) use crate::m::key; }", None)]
+    #[case::super_above_the_root("pub(super) use crate::m::key;", None)]
+    fn a_use_leaf_carries_the_scope_it_re_exports_to(
+        #[case] src: &str,
+        #[case] expected: Option<ReExportScope>,
+    ) {
+        let references =
+            extract_value_reference_shapes_with_module(src, CallIndexOptions::default(), "app")
+                .unwrap();
+        let scopes: Vec<_> = references.into_iter().map(|r| r.re_export).collect();
+        assert_eq!(scopes, [expected]);
+    }
+
+    /// Only the leaves of the re-exporting `use` carry its scope: a type
+    /// leaf records no site, and the sites around it keep their own.
+    #[test]
+    fn a_re_export_scope_stays_on_its_own_leaves() {
+        let references = extract_value_reference_shapes_with_module(
+            "use crate::m::first;\npub use crate::m::{Key, second, Other};\nfn a(v: V) { v.map(m::third); }\n",
+            CallIndexOptions::default(),
+            "app",
+        )
+        .unwrap();
+        let facts: Vec<_> = references
+            .iter()
+            .map(|r| (r.site.callee_name(), r.re_export.clone()))
+            .collect();
+        assert_eq!(
+            facts,
+            [
+                (Some("first"), None),
+                (Some("second"), Some(ReExportScope::Public)),
+                (Some("third"), None),
+            ],
+        );
+    }
+
     #[test]
     fn value_references_carry_their_enclosing_function_and_module() {
         let shapes = extract_value_reference_shapes_with_module(
@@ -1256,7 +1376,12 @@ mod tests {
         .unwrap();
         let facts: Vec<_> = shapes
             .iter()
-            .map(|shape| (shape.caller_module(), shape.caller_qualified_name()))
+            .map(|reference| {
+                (
+                    reference.site.caller_module(),
+                    reference.site.caller_qualified_name(),
+                )
+            })
             .collect();
         assert_eq!(
             facts,

@@ -54,9 +54,15 @@
 //! - Items a crate root re-exports with `pub use` are dropped from the
 //!   audit instead of reported: narrowing one breaks the re-export
 //!   statement itself, not merely a caller. That scan is textual and
-//!   reads only `src/lib.rs`, so a `pub use` chained through an
-//!   intermediate module is missed, and `pub mod` — how most Rust APIs
-//!   are actually reached — is deliberately not treated as evidence.
+//!   reads only `src/lib.rs`; it is what covers the methods of a
+//!   re-exported type and a glob's subtree. `pub mod` — how most Rust
+//!   APIs are actually reached — is deliberately not treated as evidence.
+//! - A re-export in any other module binds just as hard: the compiler
+//!   rejects a `use` wider than the item it names (E0364). A function a
+//!   `pub use` names, wherever it is written, is therefore dropped from
+//!   the audit too, and one a restricted re-export names (`pub(crate)
+//!   use`, `pub(super) use`, `pub(in …) use`) is never proposed a
+//!   visibility narrower than that re-export's scope.
 //!
 //! Scope is Rust and Go, the two adapters that extract export status.
 //! TypeScript and Python functions are counted and skipped rather than
@@ -90,6 +96,7 @@ use super::format::{
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
+use lens_rust::ReExportScope;
 
 mod pub_use;
 
@@ -123,8 +130,10 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
      kind that name the function from outside the proposed scope are counted per row. A Rust \
      function named by path without being called — passed as a value, or imported with `use` — \
      counts as used from that module. Callers \
-     outside the analyzed path do not exist here, and only `pub use` re-exports written in a crate \
-     root are recognised as intended API, so a surface published another way can still appear. \
+     outside the analyzed path do not exist here. A function a `pub use` names is left out as \
+     intended API, and one a restricted re-export names (`pub(crate) use`, …) keeps at least that \
+     re-export's scope; a type's methods and a glob's contents are left out only for a `pub use` \
+     written in a crate root, so a surface published another way can still appear. \
      Exported Go methods matching a method of an interface declared in the analyzed tree or of a \
      well-known standard-library interface (same name and parameter count) are annotated rather \
      than trusted: their callers can dispatch through the interface, which no static edge \
@@ -234,8 +243,9 @@ struct Audit {
     /// Rust crate names seen, from each file's enclosing `Cargo.toml`.
     crates: Vec<String>,
     /// Of `public_function_count`, how many were left out because a
-    /// crate root re-exports them (or the type owning them) with `pub
-    /// use`: narrowing those breaks the re-export itself.
+    /// `pub use` re-exports them — by name from any module, or through
+    /// the type owning them or a glob from a crate root: narrowing
+    /// those breaks the re-export itself.
     re_exported_function_count: usize,
     /// A single Rust crate in scope means no cross-crate caller can
     /// exist in the graph, so a library's own API surface is
@@ -402,14 +412,15 @@ impl Report {
         let crate_dirs = rust_crate_dirs(graph);
         let re_exports = ReExports::scan(roots.base(), &crate_dirs);
         let public = public_nodes(graph);
+        let references = ValueReferences::resolved(graph);
         let audited: Vec<(usize, ExportLang)> = public
             .iter()
             .copied()
             .filter(|&(idx, _)| !re_exports.covers(&graph.nodes[idx]))
+            .filter(|&(idx, _)| !references.publicly_re_exported(idx))
             .collect();
 
         let callers = graph.resolved_callers();
-        let references = ValueReferences::resolved(graph);
         let interface_index = InterfaceIndex::new(&graph.interfaces);
         let external_tests = external_test_callers(roots.base(), graph);
         let mut findings: Vec<(usize, Finding)> = Vec::new();
@@ -663,6 +674,15 @@ impl<'g> ValueReferences<'g> {
         self.by_target.get(&idx).map_or(&[], Vec::as_slice)
     }
 
+    /// Whether a `pub use` names this function. The compiler rejects a
+    /// re-export wider than its item, so nothing narrower than `pub`
+    /// compiles — whichever module the `use` is written in.
+    fn publicly_re_exported(&self, idx: usize) -> bool {
+        self.get(idx)
+            .iter()
+            .any(|reference| reference.re_export == Some(ReExportScope::Public))
+    }
+
     /// The function a reference is written in, when it is a node.
     fn referrer(&self, reference: &ValueReference) -> Option<usize> {
         reference
@@ -718,8 +738,16 @@ fn classify(
         .chain(uses.references.iter().map(|r| r.module.as_str()))
         .collect();
 
+    // A restricted re-export needs the item visible throughout the scope
+    // it hands the name out to, not merely from the module it sits in.
+    let needed_from: BTreeSet<&str> = caller_modules
+        .iter()
+        .copied()
+        .chain(uses.references.iter().filter_map(|r| re_export_module(r)))
+        .collect();
+
     let (scope, scope_module) = match lang {
-        ExportLang::Rust => rust_scope(&node.module, &caller_modules)?,
+        ExportLang::Rust => rust_scope(&node.module, &needed_from)?,
         ExportLang::Go => go_scope(&node.module, &caller_modules)?,
     };
     Some(Finding {
@@ -744,6 +772,26 @@ fn classify(
         ubiquitous_name_calls_outside_scope: 0,
         may_satisfy_interfaces: Vec::new(),
     })
+}
+
+/// The module a restricted re-export (`pub(crate) use`, `pub(super)
+/// use`, `pub(in …) use`) is visible within.
+fn re_export_module(reference: &ValueReference) -> Option<&str> {
+    match &reference.re_export {
+        Some(ReExportScope::Module(module)) => Some(module),
+        Some(ReExportScope::Public) | None => None,
+    }
+}
+
+/// Where a value reference needs its target visible from: the module it
+/// is written in, or — for a re-export — the scope it re-exports to.
+/// `None` for a `pub use`, which no module scope contains.
+fn reference_reach(reference: &ValueReference) -> Option<&str> {
+    match &reference.re_export {
+        None => Some(&reference.module),
+        Some(ReExportScope::Module(module)) => Some(module),
+        Some(ReExportScope::Public) => None,
+    }
 }
 
 /// Rust: fold every caller module into the deepest module that is an
@@ -864,7 +912,7 @@ fn count_ambiguous_reference(
         .filter_map(|idx| slots.by_node.get(idx));
     for &slot in candidate_slots {
         let (idx, finding) = &mut findings[slot];
-        if !called_from_inside(&graph.nodes[*idx], finding, Some(&reference.module)) {
+        if !called_from_inside(&graph.nodes[*idx], finding, reference_reach(reference)) {
             finding.ambiguous_calls_outside_scope += 1;
         }
     }
@@ -1580,6 +1628,85 @@ mod tests {
         );
     }
 
+    /// `chemical::deep::forms::lookup` is called only from `chemical::deep`,
+    /// which also names it in the `use` declaration `re_export`.
+    fn write_re_exporting_crate(dir: &Path, forms_decl: &str, re_export: &str) {
+        write_crate(
+            dir,
+            "app",
+            &[
+                ("lib.rs", "pub mod chemical;\n"),
+                ("chemical/mod.rs", "pub mod deep;\n"),
+                (
+                    "chemical/deep/mod.rs",
+                    &format!(
+                        "{forms_decl}\n#[allow(unused_imports)]\n{re_export}\n\
+                         pub fn twice(s: &str) -> usize {{ forms::lookup(s) * 2 }}\n"
+                    ),
+                ),
+                (
+                    "chemical/deep/forms.rs",
+                    "pub fn lookup(s: &str) -> usize { s.len() }\n",
+                ),
+            ],
+        );
+    }
+
+    /// A `pub use` outside the crate root binds like one in it: the
+    /// compiler rejects a re-export wider than its item (E0364), so the
+    /// function is intended API and not a row — whether or not the
+    /// module it lives in is itself public.
+    #[rstest]
+    #[case::public_module("pub mod forms;", "pub use forms::lookup;")]
+    #[case::private_module("mod forms;", "pub use forms::lookup;")]
+    #[case::brace_group("mod forms;", "pub use forms::{lookup};")]
+    #[case::alias("mod forms;", "pub use forms::lookup as find;")]
+    #[case::rooted_at_crate("mod forms;", "pub use crate::chemical::deep::forms::lookup;")]
+    fn a_pub_use_in_any_module_takes_its_target_out_of_the_audit(
+        #[case] forms_decl: &str,
+        #[case] re_export: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_re_exporting_crate(dir.path(), forms_decl, re_export);
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            suggestion_for(&report, "app::chemical::deep::forms::lookup"),
+            None,
+            "narrowing a re-exported function breaks the `pub use`: {report}",
+        );
+        assert_eq!(report["audit"]["re_exported_function_count"], 1);
+        assert_eq!(report["audit"]["public_function_count"], 2);
+    }
+
+    /// A restricted re-export hands the name out to a scope wider than
+    /// the module it is written in, and the item has to be visible
+    /// throughout it; a plain `use` needs only its own module.
+    #[rstest]
+    #[case::plain_import("use forms::lookup;", "pub(super)")]
+    #[case::own_module("pub(self) use forms::lookup;", "pub(super)")]
+    #[case::parent("pub(super) use forms::lookup;", "pub(in crate::chemical)")]
+    #[case::in_path(
+        "pub(in crate::chemical) use forms::lookup;",
+        "pub(in crate::chemical)"
+    )]
+    #[case::crate_wide("pub(crate) use forms::lookup;", "pub(crate)")]
+    fn a_restricted_re_export_bounds_the_suggestion_by_its_scope(
+        #[case] re_export: &str,
+        #[case] expected: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_re_exporting_crate(dir.path(), "mod forms;", re_export);
+
+        let report = analyze_json(dir.path());
+        assert_eq!(
+            suggestion_for(&report, "app::chemical::deep::forms::lookup").as_deref(),
+            Some(expected),
+            "{report}",
+        );
+        assert_eq!(report["audit"]["re_exported_function_count"], 0);
+    }
+
     /// `fusion::key` has a direct caller in its own module and a second
     /// use in the sibling `build`, written `use_site`. Whatever the
     /// spelling, the sibling needs `key` visible, so the row must not
@@ -1854,6 +1981,28 @@ mod tests {
                 .unwrap();
             assert_eq!(row["ambiguous_calls_outside_scope"], 1, "row: {row}");
         }
+    }
+
+    /// An unresolved reference is weighed against a proposed scope from
+    /// where it needs its target visible: its own module, the scope a
+    /// restricted re-export hands the name out to, or — for a `pub use`
+    /// — nowhere a module scope contains.
+    #[rstest]
+    #[case::plain_reference(None, Some("app::build"))]
+    #[case::restricted_re_export(Some(ReExportScope::Module("app".to_owned())), Some("app"))]
+    #[case::public_re_export(Some(ReExportScope::Public), None)]
+    fn a_reference_reaches_as_far_as_its_re_export(
+        #[case] re_export: Option<ReExportScope>,
+        #[case] expected: Option<&str>,
+    ) {
+        let reference = ValueReference {
+            from: None,
+            module: "app::build".to_owned(),
+            to: None,
+            candidates: Vec::new(),
+            re_export,
+        };
+        assert_eq!(reference_reach(&reference), expected);
     }
 
     /// A glob covers everything under the module it names, so items in
