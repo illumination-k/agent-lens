@@ -384,7 +384,7 @@ impl<'a> Visit<'a> for ComplexityVisitor {
     }
 
     fn visit_string_literal(&mut self, it: &StringLiteral<'a>) {
-        self.halstead.operand(it.value.as_str());
+        self.halstead.operand(&crate::walk::string_literal_text(it));
     }
 
     fn visit_numeric_literal(&mut self, it: &NumericLiteral<'a>) {
@@ -1022,6 +1022,19 @@ function f(): void {
             "expected total_operators >= 3, got {}",
             f.halstead.total_operators,
         );
+    }
+
+    /// A string literal is an operand: the declared name alone is one,
+    /// the name plus its literal is two.
+    #[test]
+    fn halstead_counts_a_string_literal_as_an_operand() {
+        let f = one(r#"
+function f(): void {
+    const a = "x";
+}
+"#);
+        assert_eq!(f.halstead.total_operands, 2);
+        assert_eq!(f.halstead.distinct_operands, 2);
     }
 
     #[test]

@@ -585,14 +585,14 @@ fn expression_argument_shape(expr: &Expression) -> ArgumentShape {
                 .as_ref()
                 .map_or_else(|| lit.value.to_string(), ToString::to_string),
         ),
-        Expression::StringLiteral(lit) => literal(format!("\"{}\"", lit.value)),
+        Expression::StringLiteral(lit) => literal(format!("\"{}\"", lit.value.display())),
         Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
             match template
                 .quasis
                 .first()
                 .and_then(|q| q.value.cooked.as_ref())
             {
-                Some(text) => literal(format!("\"{text}\"")),
+                Some(text) => literal(format!("\"{}\"", text.display())),
                 None => ArgumentShape::Other,
             }
         }
@@ -765,7 +765,11 @@ fn collect_imports(
         let Some(specifiers) = &import.specifiers else {
             continue;
         };
-        let imported = imported_module(module, import.source.value.as_str(), context);
+        let imported = imported_module(
+            module,
+            &crate::walk::string_literal_text(&import.source),
+            context,
+        );
         for specifier in specifiers {
             let (local, name, exported) = match specifier {
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => (
@@ -825,7 +829,7 @@ impl<'a> Visit<'a> for DynamicImportCollector<'_, '_> {
                             property.value.get_binding_identifier(),
                         ) && !property.computed
                         {
-                            bind(local, ImportedName::Named, Some(key.to_string()));
+                            bind(local, ImportedName::Named, Some(key.display().to_string()));
                         }
                     }
                 }
@@ -881,7 +885,9 @@ fn module_export_name(name: &ModuleExportName) -> Option<String> {
     match name {
         ModuleExportName::IdentifierName(id) => Some(id.name.to_string()),
         ModuleExportName::IdentifierReference(id) => Some(id.name.to_string()),
-        ModuleExportName::StringLiteral(s) => Some(s.value.to_string()),
+        ModuleExportName::StringLiteral(s) => {
+            Some(crate::walk::string_literal_text(s).into_owned())
+        }
     }
 }
 

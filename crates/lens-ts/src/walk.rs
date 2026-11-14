@@ -32,6 +32,8 @@
 //! analysers should add a `FunctionVisitor` impl rather than rewriting
 //! the AST shape.
 
+use std::borrow::Cow;
+
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use oxc_span::GetSpan;
@@ -554,6 +556,17 @@ fn callback_shape<'b, 'a>(
     }
 }
 
+/// The text of a string literal. oxc stores the value as WTF-8, which
+/// is not UTF-8 when the source spells a lone surrogate (`"\uD800"`);
+/// those rare values are rendered with the surrogate escaped as
+/// `\uXXXX` so every caller gets a plain Rust string.
+pub(crate) fn string_literal_text<'a>(literal: &StringLiteral<'a>) -> Cow<'a, str> {
+    match literal.value.as_str() {
+        Some(text) => Cow::Borrowed(text),
+        None => Cow::Owned(literal.value.display().to_string()),
+    }
+}
+
 /// Resolve a `PropertyKey` into the user-visible method name. Shared
 /// between [`walk_class`], `cohesion`, and `wrapper` so the three
 /// agree on how to spell `["computed-string"]`, `#private`, etc.
@@ -561,7 +574,7 @@ pub(crate) fn method_key_name(key: &PropertyKey) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
         PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name)),
-        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+        PropertyKey::StringLiteral(s) => Some(string_literal_text(s).into_owned()),
         _ => None,
     }
 }

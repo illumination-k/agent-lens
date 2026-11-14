@@ -85,7 +85,9 @@ fn callee_root_identifier<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
 /// its `#N` index alone.
 pub(crate) fn call_title(call: &CallExpression) -> Option<String> {
     let raw = match call.arguments.first()?.as_expression()? {
-        Expression::StringLiteral(literal) => literal.value.as_str().to_owned(),
+        Expression::StringLiteral(literal) => {
+            crate::walk::string_literal_text(literal).into_owned()
+        }
         Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
             .quasis
             .iter()
