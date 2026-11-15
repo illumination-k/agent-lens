@@ -104,18 +104,12 @@ pub fn build_module_tree(
         let path = module_path_for_rel(rel);
         let mut imports = Vec::new();
         for file in &files {
-            // A walked file that fails to parse loses its imports with a
-            // warning instead of failing the whole module tree: syntax
-            // newer than the bundled grammar must not disable analysis
-            // of every package around it. An explicit single-file root
-            // (above) keeps the hard error.
-            match parse_imports(file) {
-                Ok(found) => imports.extend(found),
-                Err(CouplingError::Parse { path, source }) => {
-                    tracing::warn!(path = %path.display(), error = %source, "skipping file: parse failed");
-                }
-                Err(other) => return Err(other),
-            }
+            // A walked file that cannot be read or parsed loses its
+            // imports with a warning instead of failing the whole module
+            // tree ([`CouplingError::skip_walked_file`]). An explicit
+            // single-file root (above) keeps the hard error.
+            let found = CouplingError::skip_walked_file(parse_imports(file))?;
+            imports.extend(found.into_iter().flatten());
         }
         out.push(GoPackage {
             path,
@@ -549,6 +543,45 @@ mod tests {
         let err = build_module_tree(&broken, &IncludeAll)
             .expect_err("explicit file root keeps the hard error");
         assert!(matches!(err, CouplingError::Parse { .. }), "{err:?}");
+    }
+
+    /// A walked file that is not valid UTF-8 loses only its own imports
+    /// the same way (issue #493); named as the root it is still a read
+    /// error.
+    #[test]
+    fn undecodable_walked_file_is_skipped_but_an_explicit_root_errors() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(root.path(), "go.mod", "module github.com/x/proj\n");
+        write(
+            root.path(),
+            "main.go",
+            "package main\n\nimport \"github.com/x/proj/pkg/util\"\n\nfunc main() { util.Run() }\n",
+        );
+        write(
+            root.path(),
+            "pkg/util/util.go",
+            "package util\n\nfunc Run() {}\n",
+        );
+        let latin1 = root.path().join("pkg/util/latin1.go");
+        std::fs::write(&latin1, b"package util\n\nvar s = \"\xff\xfe\"\n").expect("write");
+
+        let modules =
+            build_module_tree(root.path(), &IncludeAll).expect("bad file must not fail the tree");
+        let mut paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["crate", "crate::pkg::util"]);
+        assert_eq!(
+            extract_edges(&modules),
+            vec![edge("crate", "crate::pkg::util", "util")],
+            "edges from readable files survive",
+        );
+
+        let err = build_module_tree(&latin1, &IncludeAll)
+            .expect_err("explicit file root keeps the hard error");
+        assert!(
+            matches!(&err, CouplingError::Io { path, .. } if *path == latin1),
+            "{err:?}",
+        );
     }
 
     /// An unreadable `go.mod` costs every import in the scan its module

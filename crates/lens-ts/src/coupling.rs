@@ -30,6 +30,16 @@ pub struct TsModule {
     links: Vec<ImportLink>,
 }
 
+/// Read one source file and pull out its import links, unresolved.
+fn load_links(file: &Path) -> Result<Vec<ImportLink>, CouplingError> {
+    let source = std::fs::read_to_string(file).map_err(|source| CouplingError::Io {
+        path: file.to_path_buf(),
+        source,
+    })?;
+    let dialect = Dialect::from_path(file).unwrap_or(Dialect::Ts);
+    parse_links(&source, dialect).map_err(|source| CouplingError::parse(file, source))
+}
+
 /// Build the transitive file graph rooted at `entry` by following every
 /// module specifier that resolves to a project source file: relative
 /// ones, tsconfig `paths` aliases, and, when `entry` sits in a JS/TS
@@ -45,25 +55,12 @@ pub fn build_module_tree(entry: &Path) -> Result<Vec<TsModule>, CouplingError> {
         if !seen.insert(file.clone()) {
             continue;
         }
-        let source = std::fs::read_to_string(&file).map_err(|source| CouplingError::Io {
-            path: file.clone(),
-            source,
-        })?;
-        let dialect = Dialect::from_path(&file).unwrap_or(Dialect::Ts);
-        // A followed import that fails to parse drops out of the module
-        // tree with a warning instead of failing the whole build: syntax
-        // newer than the bundled parser must not disable analysis of
-        // every module around it. The entry file the caller named keeps
-        // the hard error.
-        let mut links = match parse_links(&source, dialect) {
-            Ok(links) => links,
-            Err(source) if file != entry => {
-                tracing::warn!(path = %file.display(), error = %source, "skipping file: parse failed");
-                continue;
-            }
-            Err(source) => {
-                return Err(CouplingError::parse(file.clone(), source));
-            }
+        // A followed import that cannot be read or parsed drops out of
+        // the module tree with a warning instead of failing the whole
+        // build; the entry file the caller named keeps the hard error.
+        let loaded = load_links(&file);
+        let Some(mut links) = CouplingError::skip_unless_named(file == entry, loaded)? else {
+            continue;
         };
         for link in &mut links {
             link.target = resolver.resolve(&file, &link.specifier);
@@ -348,6 +345,38 @@ mod tests {
 
         let err = build_module_tree(&root.join("broken.ts")).unwrap_err();
         assert!(matches!(err, CouplingError::Parse { .. }), "{err:?}");
+    }
+
+    /// A followed import that is not valid UTF-8 drops out the same way
+    /// (issue #493); named as the entry it is still a read error.
+    #[test]
+    fn undecodable_followed_import_is_skipped_but_the_entry_errors() {
+        let project = mk_temp_project();
+        let root = project.path();
+        let entry = root.join("main.ts");
+        std::fs::write(
+            &entry,
+            "import { add } from './util'; import { bad } from './latin1';",
+        )
+        .expect("write main");
+        std::fs::write(
+            root.join("util.ts"),
+            "export function add(a:number,b:number){ return a+b; }",
+        )
+        .expect("write util");
+        let latin1 = root.join("latin1.ts");
+        std::fs::write(&latin1, b"export const bad = \"\xff\xfe\";").expect("write latin1");
+
+        let modules = build_module_tree(&entry).expect("bad import must not fail the tree");
+        let mut paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["crate::main", "crate::util"]);
+
+        let err = build_module_tree(&latin1).unwrap_err();
+        assert!(
+            matches!(&err, CouplingError::Io { path, .. } if path.ends_with("latin1.ts")),
+            "{err:?}",
+        );
     }
 
     #[test]

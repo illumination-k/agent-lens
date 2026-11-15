@@ -180,7 +180,7 @@ agent-lens analyze footprint . --format md
 # Path filters work everywhere; several trees form one corpus, so a duplicate
 # or call edge spanning them is visible where per-tree runs would miss it
 agent-lens analyze similarity packages cli web/src --format md --exclude-tests
-agent-lens analyze hotspot . --exclude 'target/**' --exclude '**/generated/**'
+agent-lens analyze hotspot . --exclude vendor --exclude 'docs/generated/**'
 ```
 
 Conventions that hold across analyzers:
@@ -484,11 +484,11 @@ are the component's own. The template — `{expr}` interpolations and
 template looks unused to the call-graph analyzers, and a component imported
 only for the template still counts as a module dependency.
 
-A file the parser cannot handle — usually syntax newer than the bundled
-grammars — fails the run only when it was named explicitly. Files found by
-walking a directory or module are skipped with a stderr warning (and dropped
-from call/module graphs), so one too-new file cannot disable analysis of the
-code around it.
+A file that cannot be read or parsed — usually one that is not valid UTF-8,
+or syntax newer than the bundled grammars — fails the run only when it was
+named explicitly. Files found by walking a directory or module are skipped
+with a stderr warning (and dropped from call/module graphs), so one vendored
+fixture or too-new file cannot disable analysis of the code around it.
 
 Known gap: Go 1.27 generalized `new` to take an arbitrary expression
 (`new(mk("hi"))`, `new(3)`), which `tree-sitter-go` does not parse yet. Such
