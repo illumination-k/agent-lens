@@ -16,6 +16,7 @@ mod common;
 mod complexity;
 mod coupling;
 mod dependence;
+mod macro_args;
 mod macro_items;
 mod method_names;
 mod parser;
