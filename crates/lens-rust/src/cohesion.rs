@@ -22,6 +22,14 @@
 //! same impl block (or sibling free functions in the same module). Calls to
 //! anything else are dropped on the floor — the cohesion graph only ever
 //! sees in-unit edges.
+//!
+//! Macros are not expanded, but the arguments of an expression- or
+//! statement-position macro are read as the expressions they are when
+//! they parse as such (`format!("{}", self.text)`, `vec![plural(&x)]`,
+//! the scrutinee of `matches!`), the way the call graph reads them; see
+//! [`crate::macro_args::macro_argument_exprs`]. A macro with its own grammar
+//! contributes nothing, and neither does a macro argument that names the
+//! enclosing function itself (see [`forget_own_name`]).
 
 use std::collections::HashSet;
 
@@ -29,13 +37,14 @@ use lens_domain::{CohesionUnit, CohesionUnitKind, MethodCohesion};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
-    Arm, Expr, ExprCall, ExprClosure, ExprField, ExprForLoop, ExprIf, ExprLet, ExprMethodCall,
-    ExprPath, ExprWhile, FnArg, ImplItem, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod,
-    ItemStatic, Local, Member, Pat,
+    Arm, Expr, ExprCall, ExprClosure, ExprField, ExprForLoop, ExprIf, ExprLet, ExprMacro,
+    ExprMethodCall, ExprPath, ExprWhile, FnArg, ImplItem, ImplItemFn, Item, ItemConst, ItemFn,
+    ItemImpl, ItemMod, ItemStatic, Local, Macro, Member, Pat, StmtMacro,
 };
 
 use crate::attrs::{has_cfg_test, is_test_function};
 use crate::common::{split_guard, type_path_last_ident};
+use crate::macro_args::macro_argument_exprs;
 
 /// Failures produced while extracting cohesion units.
 #[derive(Debug, thiserror::Error)]
@@ -157,11 +166,16 @@ fn method_cohesion(
     method: &ImplItemFn,
     siblings: &std::collections::HashSet<String>,
 ) -> MethodCohesion {
-    let mut visitor = SelfRefVisitor::default();
+    let name = method.sig.ident.to_string();
+    let mut visitor = SelfRefVisitor {
+        owner: &name,
+        fields: Vec::new(),
+        calls: Vec::new(),
+    };
     visitor.visit_block(&method.block);
 
     MethodCohesion::from_refs(
-        method.sig.ident.to_string(),
+        name.clone(),
         method.sig.span().start().line,
         method.block.span().end().line,
         visitor.fields,
@@ -174,13 +188,14 @@ fn has_self_receiver(method: &ImplItemFn) -> bool {
     matches!(method.sig.inputs.first(), Some(FnArg::Receiver(_)))
 }
 
-#[derive(Default)]
-struct SelfRefVisitor {
+struct SelfRefVisitor<'a> {
+    /// Name of the method being read; see [`forget_own_name`].
+    owner: &'a str,
     fields: Vec<String>,
     calls: Vec<String>,
 }
 
-impl<'ast> Visit<'ast> for SelfRefVisitor {
+impl<'ast> Visit<'ast> for SelfRefVisitor<'_> {
     fn visit_expr_field(&mut self, ef: &'ast ExprField) {
         if is_self_expr(&ef.base) {
             // Tuple-struct fields (`self.0`) participate in cohesion just
@@ -212,6 +227,22 @@ impl<'ast> Visit<'ast> for SelfRefVisitor {
             self.calls.push(path.segments[1].ident.to_string());
         }
         syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_macro(&mut self, mac: &'ast ExprMacro) {
+        self.read_macro_arguments(&mac.mac);
+    }
+
+    fn visit_stmt_macro(&mut self, mac: &'ast StmtMacro) {
+        self.read_macro_arguments(&mac.mac);
+    }
+}
+
+impl SelfRefVisitor<'_> {
+    fn read_macro_arguments(&mut self, mac: &Macro) {
+        let seen = self.calls.len();
+        visit_macro_arguments(self, mac);
+        forget_own_name(&mut self.calls, seen, self.owner);
     }
 }
 
@@ -296,7 +327,9 @@ fn module_function_cohesion(
     siblings: &HashSet<String>,
 ) -> MethodCohesion {
     let locals = collect_local_names(func);
+    let name = func.sig.ident.to_string();
     let mut visitor = ModuleRefVisitor {
+        owner: &name,
         module_fields,
         siblings,
         locals: &locals,
@@ -306,7 +339,7 @@ fn module_function_cohesion(
     visitor.visit_block(&func.block);
 
     MethodCohesion::from_refs(
-        func.sig.ident.to_string(),
+        name.clone(),
         func.sig.span().start().line,
         func.block.span().end().line,
         visitor.fields,
@@ -453,6 +486,16 @@ impl<'ast> Visit<'ast> for LocalWalker<'_> {
     fn visit_item_mod(&mut self, _: &'ast ItemMod) {
         // Likewise for nested modules.
     }
+
+    // A closure or `let` written in a macro's arguments binds names
+    // the same way one outside does.
+    fn visit_expr_macro(&mut self, mac: &'ast ExprMacro) {
+        visit_macro_arguments(self, &mac.mac);
+    }
+
+    fn visit_stmt_macro(&mut self, mac: &'ast StmtMacro) {
+        visit_macro_arguments(self, &mac.mac);
+    }
 }
 
 /// Visitor that records (a) free identifier references that resolve to
@@ -460,6 +503,8 @@ impl<'ast> Visit<'ast> for LocalWalker<'_> {
 /// both cases skipping names shadowed by a function-local binding.
 /// Mirrors [`SelfRefVisitor`] but tracks free names instead of `self.x`.
 struct ModuleRefVisitor<'a> {
+    /// Name of the function being read; see [`forget_own_name`].
+    owner: &'a str,
     module_fields: &'a HashSet<String>,
     siblings: &'a HashSet<String>,
     locals: &'a HashSet<String>,
@@ -505,9 +550,50 @@ impl<'ast> Visit<'ast> for ModuleRefVisitor<'_> {
     fn visit_item_mod(&mut self, _: &'ast ItemMod) {}
     fn visit_item_impl(&mut self, _: &'ast ItemImpl) {}
 
-    // Don't double-walk macro contents (and we couldn't do anything
-    // useful with them anyway — macros are tokens, not expressions).
-    fn visit_macro(&mut self, _: &'ast syn::Macro) {}
+    fn visit_expr_macro(&mut self, mac: &'ast ExprMacro) {
+        self.read_macro_arguments(&mac.mac);
+    }
+
+    fn visit_stmt_macro(&mut self, mac: &'ast StmtMacro) {
+        self.read_macro_arguments(&mac.mac);
+    }
+}
+
+impl ModuleRefVisitor<'_> {
+    fn read_macro_arguments(&mut self, mac: &Macro) {
+        let seen = self.calls.len();
+        visit_macro_arguments(self, mac);
+        forget_own_name(&mut self.calls, seen, self.owner);
+    }
+}
+
+/// Walk the arguments of an expression- or statement-position macro as
+/// the expressions they are, so `format!("{}", self.text)` reads `text`
+/// and `vec![plural(&x)]` calls `plural`. The call graph reads macro
+/// arguments through the same [`macro_argument_exprs`], which keeps the
+/// two views of one function in agreement; arguments that are no
+/// expression list are skipped silently by both.
+fn visit_macro_arguments<V: for<'ast> Visit<'ast>>(visitor: &mut V, mac: &Macro) {
+    for expr in macro_argument_exprs(mac) {
+        visitor.visit_expr(&expr);
+    }
+}
+
+/// Drop the calls recorded from index `seen` on that name `owner`, the
+/// function a macro's arguments were just read for.
+///
+/// A macro argument naming the enclosing function is a template far
+/// more often than recursion: `each_section!(self.with_top(top))`
+/// inside `with_top` expands to calls on the fields, and
+/// `dispatch!(lang, source, parse)` inside `parse` names another
+/// crate's `parse`. Neither is a call of the function to itself, and a
+/// self-call adds no edge anyway. Its only effect would be to make a
+/// method that is inert count as a component of its own. This is the one
+/// place cohesion reads a macro's arguments differently from the call
+/// graph, which keeps the site.
+fn forget_own_name(calls: &mut Vec<String>, seen: usize, owner: &str) {
+    let in_macro = calls.split_off(seen);
+    calls.extend(in_macro.into_iter().filter(|name| name != owner));
 }
 
 /// Return the single-segment, unqualified, no-leading-colon name from
@@ -931,6 +1017,186 @@ fn spellings(x: String) -> Vec<String> { Vec::from([x]) }
     fn module_unit_lcom4(#[case] src: &str, #[case] expected: usize) {
         let u = module_unit(src);
         assert_eq!(u.components.len(), expected);
+    }
+
+    /// The `outer` → `spellings` → `plural` → `suffix` chain of #660,
+    /// with only the body of `spellings` varying.
+    fn spellings_module(body: &str) -> String {
+        format!(
+            r#"
+pub fn outer(x: String) -> usize {{
+    spellings(x).len()
+}}
+
+fn spellings(x: String) -> Vec<String> {{
+    {body}
+}}
+
+fn plural(x: &str) -> String {{
+    suffix(x, "s")
+}}
+
+fn suffix(x: &str, s: &str) -> String {{
+    x.to_string() + s
+}}
+"#
+        )
+    }
+
+    fn method<'a>(unit: &'a CohesionUnit, name: &str) -> &'a MethodCohesion {
+        unit.methods
+            .iter()
+            .find(|m| m.name == name)
+            .expect("method is in the unit")
+    }
+
+    /// A call written in a macro's arguments is an edge like the same
+    /// call outside one (#660): the bisect table of the issue, where
+    /// every row is one chain.
+    #[rstest]
+    #[case::plain_call("let y = plural(&x); Vec::from([y, x])")]
+    #[case::let_then_vec("let y = plural(&x); vec![y, x]")]
+    #[case::vec("vec![plural(&x), x]")]
+    #[case::format(r#"vec![format!("{}", plural(&x))]"#)]
+    #[case::format_let(r#"let y = format!("{}", plural(&x)); Vec::from([y])"#)]
+    #[case::println(r#"println!("{}", plural(&x)); Vec::from([x])"#)]
+    #[case::assert(r#"assert_eq!(plural(&x), "as"); Vec::from([x])"#)]
+    #[case::assert_bool("assert!(plural(&x).is_empty()); Vec::from([x])")]
+    #[case::dbg("Vec::from([dbg!(plural(&x))])")]
+    #[case::custom_macro(
+        "macro_rules! id { ($e:expr) => { $e } }\n    Vec::from([id!(plural(&x))])"
+    )]
+    #[case::closure_in_vec("vec![(|| plural(&x))()]")]
+    #[case::matches_let(
+        r#"let y = plural(&x); if matches!(y.as_str(), "as") { Vec::new() } else { Vec::from([x]) }"#
+    )]
+    #[case::matches(
+        r#"if matches!(plural(&x).as_str(), "as") { Vec::new() } else { Vec::from([x]) }"#
+    )]
+    #[case::matches_simple("if matches!(plural(&x), _) { Vec::new() } else { Vec::from([x]) }")]
+    #[case::assert_matches(r#"assert!(matches!(plural(&x).as_str(), "as")); Vec::from([x])"#)]
+    #[case::sibling_as_a_value_in_a_macro("vec![Some(x.as_str()).map(plural).unwrap_or_default()]")]
+    fn module_call_in_macro_arguments_forms_an_edge(#[case] body: &str) {
+        let u = module_unit(&spellings_module(body));
+        assert_eq!(method(&u, "spellings").calls, ["plural"], "{body}");
+        assert_eq!(u.components.len(), 1, "{body}");
+    }
+
+    /// What is no expression of the function stays out of the graph: a
+    /// macro with its own grammar, a pattern, a named argument's label,
+    /// and a name bound inside the arguments.
+    #[rstest]
+    #[case::repeat_form("vec![plural(&x); 2]")]
+    #[case::pattern("if matches!(x.as_str(), plural) { Vec::new() } else { Vec::from([x]) }")]
+    #[case::named_argument_label(r#"vec![format!("{plural}", plural = x)]"#)]
+    #[case::closure_parameter_in_a_macro("vec![(|plural: String| plural)(x)]")]
+    #[case::closure_parameter_in_a_statement_macro(
+        r#"println!("{}", (|plural: &str| plural.len())(&x)); Vec::from([x])"#
+    )]
+    #[case::let_in_a_macro("vec![{ let plural = x; plural }]")]
+    #[case::own_name_in_a_macro("dispatch!(lang, x, spellings)")]
+    #[case::own_name_called_in_a_macro("vec![spellings(x).concat()]")]
+    #[case::own_name_in_a_statement_macro("each!(spellings(x.clone())); Vec::from([x])")]
+    fn module_macro_arguments_add_no_edge_for_non_expressions(#[case] body: &str) {
+        let u = module_unit(&spellings_module(body));
+        assert!(method(&u, "spellings").calls.is_empty(), "{body}");
+        assert_eq!(u.components.len(), 2, "{body}");
+    }
+
+    /// Module-level fields read in a macro's arguments count, in
+    /// expression and statement position alike.
+    #[rstest]
+    #[case::expression_macro(r#"format!("{}", LIMIT)"#)]
+    #[case::statement_macro(r#"println!("{}", LIMIT); String::new()"#)]
+    #[case::named_argument_value(r#"format!("{n}", n = LIMIT)"#)]
+    #[case::matches_scrutinee(r#"if matches!(LIMIT, 1) { String::new() } else { "x".into() }"#)]
+    fn module_field_in_macro_arguments_is_a_reference(#[case] body: &str) {
+        let src = format!(
+            "const LIMIT: i32 = 1;\nfn reader() -> i32 {{ LIMIT }}\nfn shown() -> String {{ {body} }}\n"
+        );
+        let u = module_unit(&src);
+        assert_eq!(method(&u, "shown").fields, ["LIMIT"], "{body}");
+        assert_eq!(u.components.len(), 1, "{body}");
+    }
+
+    /// `Name::label` of #660: `self.method()` calls and `self.field`
+    /// reads in a macro's arguments count like the same ones outside.
+    #[rstest]
+    #[case::plain("let u = self.upper(); u + self.lang()", &["lang", "upper"], &[], 1)]
+    #[case::format_method(
+        r#"format!("{}{}", self.upper(), self.lang())"#,
+        &["lang", "upper"],
+        &[],
+        1
+    )]
+    #[case::plain_field("self.text.clone() + &self.lang", &[], &["lang", "text"], 1)]
+    #[case::format_field(r#"format!("{}{}", self.text, self.lang)"#, &[], &["lang", "text"], 1)]
+    #[case::statement_macro(
+        r#"println!("{}{}", self.lang, self.upper()); String::new()"#,
+        &["upper"],
+        &["lang"],
+        1
+    )]
+    #[case::nested_macro(
+        r#"format!("{}", vec![self.lang.clone(), self.upper()].len())"#,
+        &["upper"],
+        &["lang"],
+        1
+    )]
+    #[case::self_type_call(r#"format!("{}", Self::upper(self))"#, &["upper"], &[], 2)]
+    #[case::named_argument(
+        r#"format!("{t}{l}", t = self.text, l = self.lang())"#,
+        &["lang"],
+        &["text"],
+        1
+    )]
+    #[case::matches_scrutinee(
+        r#"if matches!(self.upper().as_str(), "X") { String::new() } else { self.lang.clone() }"#,
+        &["upper"],
+        &["lang"],
+        1
+    )]
+    #[case::own_grammar_stays_opaque("vec![self.text.clone(); 2].concat()", &[], &[], 3)]
+    // A template naming the method it is written in is no recursion:
+    // `label` stays inert, so the unit is `lang` and `upper` alone.
+    #[case::own_name_in_a_macro("each_section!(self.label())", &[], &[], 3)]
+    #[case::own_name_in_a_statement_macro("each_section!(Self::label(self)); String::new()", &[], &[], 3)]
+    #[case::own_name_beside_a_sibling_in_a_macro(
+        r#"format!("{}{}", self.upper(), self.label())"#,
+        &["upper"],
+        &[],
+        2
+    )]
+    // Recursion written outside a macro is still a call, before one
+    // and after it.
+    #[case::recursion_around_a_macro(
+        r#"let a = self.label(); println!("{}", self.upper()); a + &self.label()"#,
+        &["label", "upper"],
+        &[],
+        2
+    )]
+    fn impl_refs_in_macro_arguments_are_collected(
+        #[case] body: &str,
+        #[case] calls: &[&str],
+        #[case] fields: &[&str],
+        #[case] lcom4: usize,
+    ) {
+        let src = format!(
+            r#"
+pub struct Name {{ text: String, lang: String }}
+
+impl Name {{
+    pub fn label(&self) -> String {{ {body} }}
+    pub fn lang(&self) -> &str {{ &self.lang }}
+    fn upper(&self) -> String {{ self.text.to_uppercase() }}
+}}
+"#
+        );
+        let u = unit(&src);
+        let label = method(&u, "label");
+        assert_eq!(label.calls, calls, "{body}");
+        assert_eq!(label.fields, fields, "{body}");
+        assert_eq!(u.components.len(), lcom4, "{body}");
     }
 
     #[test]

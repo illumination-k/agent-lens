@@ -17,7 +17,8 @@
 //!   invisible. Calls written in the arguments of an expression- or
 //!   statement-position macro (`assert_eq!(f(x), 1)`, `vec![g()]`,
 //!   `write!(out, "{}", h())`) are recorded when the arguments parse as a
-//!   comma-separated list of expressions — see [`macro_argument_exprs`].
+//!   comma-separated list of expressions, and so is the scrutinee of
+//!   `matches!(f(x), Ok(_))` — see [`macro_argument_exprs`].
 //! * **`#[cfg(test)]` modules are skipped.** Test scaffolding is
 //!   forwarding by design and would inflate reuse counts without
 //!   reflecting production usage. This matches the existing wrapper
@@ -31,18 +32,18 @@ use lens_domain::{
     ArgumentShape, CallShape, GLOB_IMPORT_ALIAS, ImportShape, LexicalResolutionStatus,
     ReceiverExprKind, SyntaxFact, qualify, qualify_module, starts_uppercase,
 };
-use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     Block, Expr, ExprCall, ExprMacro, ExprMethodCall, ExprPath, FnArg, GenericArgument,
     GenericParam, Generics, ImplItem, Item, ItemFn, ItemUse, Local, Macro, Pat, PatIdent,
-    PathArguments, Signature, StmtMacro, Token, TraitItem, Type, TypeParamBound, UnOp, UseTree,
+    PathArguments, Signature, StmtMacro, TraitItem, Type, TypeParamBound, UnOp, UseTree,
     Visibility, WherePredicate,
 };
 
 use crate::attrs::has_cfg_test;
 use crate::common::{impl_self_type_name, render_tokens, type_path_last_ident};
+use crate::macro_args::macro_argument_exprs;
 use crate::parser::RustParseError;
 
 /// One call-site occurrence inside a Rust source file.
@@ -774,30 +775,6 @@ impl CallVisitor {
     }
 }
 
-/// The arguments of `mac` when they parse as a comma-separated list of
-/// expressions (`assert_eq!`, `vec!`, `format!`, `write!`, `println!`),
-/// otherwise nothing: a macro with its own grammar (`vec![x; n]`,
-/// `select! { .. }`, a DSL) keeps its calls invisible rather than being
-/// read half-way. The pattern-taking macros are skipped even when their
-/// pattern parses as an expression, since `Foo::Bar(_)` there is a
-/// variant pattern, not a call.
-fn macro_argument_exprs(mac: &Macro) -> Vec<Expr> {
-    let name = mac.path.segments.last().map(|s| s.ident.to_string());
-    if name.as_deref().is_some_and(is_pattern_macro) {
-        return Vec::new();
-    }
-    mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
-        .map(|args| args.into_iter().collect())
-        .unwrap_or_default()
-}
-
-fn is_pattern_macro(name: &str) -> bool {
-    matches!(
-        name,
-        "matches" | "assert_matches" | "debug_assert_matches" | "let_assert"
-    )
-}
-
 /// Names bound to a callable inside one function's own scope: closures
 /// and nested `fn` items held in a `let`, `fn`-typed locals, and
 /// parameters of `Fn`/`FnMut`/`FnOnce`/`fn` type.
@@ -1304,6 +1281,9 @@ mod tests {
     #[case::pattern_binding("fn a(v: V) { if let Some(key) = v { drop(key); } }", &[])]
     #[case::nested_fn("fn a(v: V) { fn key() {} v.map(key); }", &[])]
     #[case::qualified_path_is_not_shadowed("fn a(key: u8, v: V) { v.map(m::key); }", &["m::key"])]
+    #[case::macro_named_argument_is_a_label("fn a() { let _ = format!(\"{key}\", key = m::other); }", &["m::other"])]
+    #[case::macro_assignment_to_a_path("fn a() { m!(m::key = m::other); }", &["m::key", "m::other"])]
+    #[case::matches_scrutinee("fn a() -> bool { matches!(m::key, m::Other) }", &["m::key"])]
     fn paths_outside_call_position_are_value_references(
         #[case] src: &str,
         #[case] expected: &[&str],
@@ -1513,8 +1493,10 @@ mod tests {
 
     /// Calls in the arguments of an expression- or statement-position
     /// macro are sites of the enclosing function, nested macros
-    /// included; arguments with their own grammar (`vec![x; n]`) or a
-    /// pattern (`matches!`) stay opaque.
+    /// included, and so is the scrutinee of `matches!`; arguments with
+    /// their own grammar (`vec![x; n]`), a pattern (what follows the
+    /// scrutinee, or leads `let_assert!`) and a named argument's label
+    /// stay opaque.
     #[rstest]
     #[case::assert_eq("fn t() { assert_eq!(f(1), 2); }", &["f"])]
     #[case::format_in_expr("fn t() -> String { format!(\"{}\", f(1)) }", &["f"])]
@@ -1522,6 +1504,16 @@ mod tests {
     #[case::nested("fn t() { assert!(vec![f()].is_empty()); }", &["is_empty", "f"])]
     #[case::repeat_form("fn t() { let _ = vec![f(); 2]; }", &[])]
     #[case::pattern("fn t() { assert!(matches!(x, Foo::Bar(_))); }", &[])]
+    #[case::matches_scrutinee("fn t() -> bool { matches!(f(1).g(), \"as\") }", &["g", "f"])]
+    #[case::matches_wildcard("fn t() -> bool { matches!(f(1), _) }", &["f"])]
+    #[case::matches_pattern_is_no_call("fn t() -> bool { matches!(f(1), Foo::Bar(_) | Baz(..)) }", &["f"])]
+    #[case::matches_guard_is_opaque("fn t() -> bool { matches!(f(1), Some(n) if h(n)) }", &["f"])]
+    #[case::assert_matches("fn t() { assert!(matches!(f(1).g(), \"as\")); }", &["g", "f"])]
+    #[case::assert_matches_macro("fn t() { assert_matches!(f(1), Ok(_)); }", &["f"])]
+    #[case::debug_assert_matches("fn t() { debug_assert_matches!(f(1), Ok(_), \"{}\", 1); }", &["f"])]
+    #[case::matches_without_scrutinee("fn t() { matches!(); }", &[])]
+    #[case::let_assert_leads_with_a_pattern("fn t() { let_assert!(Foo::Bar(x) = f(1)); }", &[])]
+    #[case::named_argument("fn t() -> String { format!(\"{n}\", n = f(1)) }", &["f"])]
     #[case::item_position("m!(f()); fn t() {}", &[])]
     fn macro_arguments_are_call_sites(#[case] src: &str, #[case] expected: &[&str]) {
         let sites = run(src);
