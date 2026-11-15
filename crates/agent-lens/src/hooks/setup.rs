@@ -184,33 +184,36 @@ impl ConfigFormat for ClaudeSettings {
         Ok(text)
     }
 
-    fn installed_commands(
+    fn visit_commands(
         document: &mut Value,
         path: &Path,
         block: &EventBlock,
-    ) -> Result<Vec<String>, SetupError> {
+        visit: &mut dyn FnMut(&str) -> Option<String>,
+    ) -> Result<(), SetupError> {
         let entries = event_entries(document, path, block)?;
-        let mut out = Vec::new();
-        for entry in entries.iter() {
-            let Some(entry_obj) = entry.as_object() else {
+        for entry in entries.iter_mut() {
+            let Some(entry_obj) = entry.as_object_mut() else {
                 return Err(SetupError::shape(path, format!("hooks.{}[]", block.event)));
             };
-            let Some(hooks) = entry_obj.get("hooks") else {
+            let Some(hooks) = entry_obj.get_mut("hooks") else {
                 continue;
             };
-            let Some(hooks) = hooks.as_array() else {
+            let Some(hooks) = hooks.as_array_mut() else {
                 return Err(SetupError::shape(
                     path,
                     format!("hooks.{}[].hooks", block.event),
                 ));
             };
             for hook in hooks {
-                if let Some(cmd) = hook.get("command").and_then(Value::as_str) {
-                    out.push(cmd.to_string());
+                let Some(slot) = hook.get_mut("command") else {
+                    continue;
+                };
+                if let Some(rewritten) = slot.as_str().and_then(&mut *visit) {
+                    *slot = Value::String(rewritten);
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     fn append_matcher_group(
@@ -272,7 +275,7 @@ mod tests {
     use crate::hooks::setup_engine::{self, conformance};
 
     fn plan(path: PathBuf) -> Result<setup_engine::SetupPlan<Value>, SetupError> {
-        setup_engine::plan::<ClaudeSettings>(path, &setup_engine::HookSelection::default())
+        setup_engine::plan::<ClaudeSettings>(path, &setup_engine::HookSelection::default(), None)
     }
 
     fn apply(plan: &setup_engine::SetupPlan<Value>) -> Result<(), SetupError> {
@@ -653,6 +656,7 @@ mod tests {
         let plan = setup_engine::plan::<ClaudeSettings>(
             dir.path().join("settings.json"),
             &selection(only, skip),
+            None,
         )
         .unwrap();
         assert_eq!(plan.added_commands, expected);
@@ -668,6 +672,7 @@ mod tests {
         let err = setup_engine::plan::<ClaudeSettings>(
             dir.path().join("settings.json"),
             &selection(only, skip),
+            None,
         )
         .unwrap_err();
         assert!(
@@ -682,6 +687,7 @@ mod tests {
         let err = setup_engine::plan::<ClaudeSettings>(
             dir.path().join("settings.json"),
             &selection(&["subagent-stop"], &["session-start"]),
+            None,
         )
         .unwrap_err();
         assert!(
@@ -703,7 +709,7 @@ mod tests {
         apply(&plan(path.clone()).unwrap()).unwrap();
 
         let narrowed =
-            setup_engine::plan::<ClaudeSettings>(path, &selection(&["stop"], &[])).unwrap();
+            setup_engine::plan::<ClaudeSettings>(path, &selection(&["stop"], &[]), None).unwrap();
         assert!(!narrowed.changed());
         assert!(narrowed.added_commands.is_empty());
     }
@@ -760,5 +766,205 @@ mod tests {
         assert_eq!(pre[1]["hooks"].as_array().unwrap().len(), 1);
         let post = plan.after["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1, "PostToolUse must not gain a duplicate block");
+    }
+
+    const MISE: &str = "mise exec -- agent-lens";
+    /// A prefix with no `agent-lens` in it: only the same `--command`
+    /// can recognise it.
+    const WRAPPER: &str = "/opt/bin/al";
+
+    /// `--command`, held to the same contract in both formats.
+    #[rstest]
+    #[case::written_for_every_command(
+        conformance::custom_prefix_is_written_for_every_command::<ClaudeSettings>(MISE)
+    )]
+    #[case::wrapper_written_for_every_command(
+        conformance::custom_prefix_is_written_for_every_command::<ClaudeSettings>(WRAPPER)
+    )]
+    #[case::same_prefix_is_idempotent(
+        conformance::rerunning_with_the_same_prefix_is_idempotent::<ClaudeSettings>(MISE)
+    )]
+    #[case::same_wrapper_is_idempotent(
+        conformance::rerunning_with_the_same_prefix_is_idempotent::<ClaudeSettings>(WRAPPER)
+    )]
+    #[case::default_rerun_keeps_the_prefix(
+        conformance::default_rerun_keeps_a_custom_prefix::<ClaudeSettings>(MISE)
+    )]
+    #[case::another_prefix_rewrites(
+        conformance::rerunning_with_another_prefix_rewrites_in_place::<ClaudeSettings>(
+            Some(MISE),
+            "/usr/local/bin/agent-lens",
+        )
+    )]
+    #[case::bare_then_custom_rewrites(
+        conformance::rerunning_with_another_prefix_rewrites_in_place::<ClaudeSettings>(None, MISE)
+    )]
+    #[case::custom_then_bare_rewrites(
+        conformance::rerunning_with_another_prefix_rewrites_in_place::<ClaudeSettings>(
+            Some(MISE),
+            "agent-lens",
+        )
+    )]
+    fn command_prefix_contract(#[case] _ran: ()) {}
+
+    fn plan_with(
+        path: &Path,
+        selection: &setup_engine::HookSelection,
+        prefix: &str,
+    ) -> setup_engine::SetupPlan<Value> {
+        let prefix: setup_engine::CommandPrefix = prefix.parse().unwrap();
+        setup_engine::plan::<ClaudeSettings>(path.to_path_buf(), selection, Some(&prefix)).unwrap()
+    }
+
+    /// The default prefix is `agent-lens`, so a run without `--command`
+    /// and one with `--command agent-lens` write the same file.
+    #[test]
+    fn explicit_default_prefix_matches_the_default_output() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let explicit = plan_with(&path, &setup_engine::HookSelection::default(), "agent-lens");
+        let default = plan(path).unwrap();
+        assert_eq!(explicit.after, default.after);
+        assert_eq!(explicit.added_commands, default.added_commands);
+    }
+
+    /// A `--command` re-run touches the `command` of our handlers and
+    /// nothing else: user hooks — even one sharing our arguments — keep
+    /// their text, and our handlers keep their flags and sibling keys.
+    #[test]
+    fn rewriting_leaves_unrelated_hooks_and_handler_keys_alone() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let user_group = json!({
+            "matcher": "Bash",
+            "hooks": [
+                {"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/lint.sh"},
+                {"type": "command", "command": "/opt/other-tool hook post-tool-use similarity"},
+                {"type": "prompt", "prompt": "agent-lens hook post-tool-use wrapper"},
+            ],
+        });
+        let existing = json!({
+            "permissions": {"allow": ["Bash(agent-lens hook stop delta)"]},
+            "hooks": {
+                "PostToolUse": [
+                    user_group,
+                    {
+                        "matcher": "Edit",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "agent-lens hook post-tool-use similarity --threshold 0.9",
+                                "timeout": 5,
+                            },
+                            {"type": "command", "command": "/bin/agent-lens hook post-tool-use wrapper"},
+                        ],
+                    },
+                ],
+                "Notification": [{
+                    "hooks": [{"type": "command", "command": "agent-lens hook stop delta"}],
+                }],
+            },
+        });
+        fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        let plan = plan_with(&path, &selection(&["post-tool-use"], &[]), MISE);
+        assert_eq!(
+            plan.rewritten_commands,
+            [
+                "mise exec -- agent-lens hook post-tool-use similarity --threshold 0.9",
+                "mise exec -- agent-lens hook post-tool-use wrapper",
+            ],
+        );
+        assert_eq!(
+            plan.added_commands,
+            ["mise exec -- agent-lens hook post-tool-use footprint"],
+        );
+        let post = &plan.after["hooks"]["PostToolUse"];
+        assert_eq!(post[0], user_group, "the user's group is untouched");
+        assert_eq!(
+            post[1],
+            json!({
+                "matcher": "Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "mise exec -- agent-lens hook post-tool-use similarity --threshold 0.9",
+                        "timeout": 5,
+                    },
+                    {"type": "command", "command": "mise exec -- agent-lens hook post-tool-use wrapper"},
+                ],
+            }),
+        );
+        assert_eq!(post.as_array().unwrap().len(), 3);
+        // An event we don't wire, and keys outside `hooks`, are not ours
+        // to rewrite whatever they contain.
+        assert_eq!(
+            plan.after["hooks"]["Notification"],
+            existing["hooks"]["Notification"]
+        );
+        assert_eq!(plan.after["permissions"], existing["permissions"]);
+    }
+
+    /// `--only` / `--skip` bound the rewrite as they bound the install:
+    /// a handler the run leaves out keeps its prefix.
+    #[test]
+    fn rewriting_is_limited_to_the_selected_handlers() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        apply(&plan(path.clone()).unwrap()).unwrap();
+
+        let rerun = plan_with(&path, &selection(&["stop"], &[]), MISE);
+        assert_eq!(
+            rerun.rewritten_commands,
+            [
+                "mise exec -- agent-lens hook session-start snapshot",
+                "mise exec -- agent-lens hook stop delta",
+            ],
+        );
+        assert!(rerun.added_commands.is_empty());
+        apply(&rerun).unwrap();
+        let untouched = conformance::commands_on_disk::<ClaudeSettings>(&path)
+            .into_iter()
+            .filter(|cmd| cmd.starts_with("agent-lens hook "))
+            .count();
+        assert_eq!(untouched, 9, "the other nine handlers keep the bare prefix");
+    }
+
+    /// A file that already carries the same handler twice, behind two
+    /// prefixes, has both rewritten and gains no third.
+    #[test]
+    fn a_handler_wired_twice_is_rewritten_twice_and_not_appended() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let existing = json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [
+                        {"type": "command", "command": "agent-lens hook stop delta"},
+                        {"type": "command", "command": "/old/agent-lens hook stop delta"},
+                    ],
+                }],
+            },
+        });
+        fs::write(&path, existing.to_string()).unwrap();
+
+        let plan = plan_with(&path, &selection(&["stop"], &[]), WRAPPER);
+        assert_eq!(
+            plan.rewritten_commands,
+            ["/opt/bin/al hook stop delta", "/opt/bin/al hook stop delta"],
+        );
+        assert_eq!(
+            plan.added_commands,
+            ["/opt/bin/al hook session-start snapshot"],
+            "only the snapshot the stop handler requires is missing",
+        );
+        assert_eq!(
+            plan.after["hooks"]["Stop"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(plan.after["hooks"]["Stop"].as_array().unwrap().len(), 1);
     }
 }

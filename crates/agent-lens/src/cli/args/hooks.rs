@@ -1,7 +1,7 @@
 //! `agent-lens hook` / `agent-lens codex-hook` subcommands and their
 //! argument structs.
 
-use agent_lens::hooks::setup_engine::{HookSelection, SetupScope};
+use agent_lens::hooks::setup_engine::{CommandPrefix, HookSelection, SetupScope};
 use clap::{Args, Subcommand};
 
 use crate::cli::examples;
@@ -32,7 +32,9 @@ pub(in crate::cli) enum HookCommand {
     /// The merge is conservative: existing entries are preserved, and a
     /// new block is appended only with the commands that aren't already
     /// wired up. Re-running the command is a no-op once every handler
-    /// is installed.
+    /// is installed. A handler counts as wired up whatever it is invoked
+    /// through: bare `agent-lens`, a path to it, or a launcher ending in
+    /// it.
     #[command(after_long_help = examples::HOOK_SETUP)]
     Setup(SetupArgs),
 }
@@ -49,6 +51,27 @@ pub(in crate::cli) struct SetupArgs {
     pub(in crate::cli) dry_run: bool,
     #[command(flatten)]
     pub(in crate::cli) selection: HookSelectionArgs,
+    #[command(flatten)]
+    pub(in crate::cli) command: CommandPrefixArgs,
+}
+
+/// `--command`, shared by both setup commands.
+#[derive(Debug, Args)]
+pub(in crate::cli) struct CommandPrefixArgs {
+    /// Write this in place of the leading `agent-lens` of every handler
+    /// command: an absolute path, or a launcher such as
+    /// `mise exec -- agent-lens`, for when `agent-lens` is not on the
+    /// `PATH` hooks run with. It is written as given, so quote it for
+    /// the shell the hooks run in.
+    ///
+    /// The selected handlers that are already wired up are rewritten to
+    /// it, keeping their trailing arguments; `rewritten_commands` lists
+    /// them. Without the option they keep what they are invoked through
+    /// and new handlers get a bare `agent-lens`. A handler wired through
+    /// something that does not end in `agent-lens` is only recognised by
+    /// a run given that same value.
+    #[arg(long, value_name = "CMD")]
+    pub(in crate::cli) command: Option<CommandPrefix>,
 }
 
 /// `--only` / `--skip`, shared by both setup commands.
@@ -216,7 +239,9 @@ pub(in crate::cli) enum CodexHookCommand {
     /// preserved, and `[[hooks.SessionStart]]`, `[[hooks.PreToolUse]]`,
     /// `[[hooks.PostToolUse]]`, and `[[hooks.Stop]]` blocks are appended
     /// only for handlers that aren't already wired up. Re-running the
-    /// command is a no-op once every handler is installed.
+    /// command is a no-op once every handler is installed. A handler
+    /// counts as wired up whatever it is invoked through: bare
+    /// `agent-lens`, a path to it, or a launcher ending in it.
     #[command(after_long_help = examples::CODEX_HOOK_SETUP)]
     Setup(CodexSetupArgs),
 }
@@ -234,6 +259,8 @@ pub(in crate::cli) struct CodexSetupArgs {
     pub(in crate::cli) dry_run: bool,
     #[command(flatten)]
     pub(in crate::cli) selection: HookSelectionArgs,
+    #[command(flatten)]
+    pub(in crate::cli) command: CommandPrefixArgs,
 }
 
 #[derive(Debug, Subcommand)]
