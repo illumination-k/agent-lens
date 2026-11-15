@@ -895,7 +895,6 @@ dependencies = [
  "ruff_text_size",
  "tempfile",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -910,7 +909,6 @@ dependencies = [
  "syn 3.0.9",
  "tempfile",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -931,7 +929,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "tracing",
  "tree-sitter",
  "tree-sitter-astro-next",
 ]

@@ -29,6 +29,7 @@ use super::index::{AnalysisIndex, SourceKey};
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, LineRange, SourceFile, SourceLang,
     changed_line_ranges, collect_source_files, read_source, scan_files_par,
+    skip_file_error_if_walked,
 };
 use model::{
     CallGraphEdge, CallGraphNode, DelegationFacts, EdgeWeights, GraphLanguage,
@@ -377,7 +378,12 @@ impl CallGraphBuilder {
             if !graphed_language(&source_file.path) {
                 continue;
             }
-            let (_, source) = read_source(&source_file.path)?;
+            // Same policy as the build: a walked file that cannot be read
+            // was dropped from the graph, so it has no text to hand over.
+            let read = read_source(&source_file.path);
+            let Some((_, source)) = skip_file_error_if_walked(&source_file, read)? else {
+                continue;
+            };
             visit(&source_file.display_path, &source);
             visited += 1;
         }
@@ -1660,6 +1666,38 @@ mod tests {
             .unwrap();
         assert_eq!(visited, ["src/lib.rs"], "the markdown file is not source");
         assert_eq!(count, 1);
+    }
+
+    /// A walked file that is not valid UTF-8 is dropped from the graph
+    /// and from the source-text pass alike (issue #493) — the two must
+    /// agree on the file set — while naming it as the target is still a
+    /// read error for both.
+    #[test]
+    fn walked_undecodable_file_is_dropped_from_the_graph_and_the_source_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/ok.py", "def ok():\n    return 1\n");
+        let latin1 = dir.path().join("src/latin1.py");
+        std::fs::write(&latin1, b"def bad():\n    return \"\xff\xfe\"\n").unwrap();
+
+        let roots = AnalyzeRoots::from(dir.path());
+        let graph = CallGraphBuilder::new().build(&roots).unwrap();
+        let files: BTreeSet<&str> = graph.nodes.iter().map(|n| n.file.as_str()).collect();
+        assert_eq!(files, BTreeSet::from(["src/ok.py"]));
+
+        let mut visited = Vec::new();
+        let count = CallGraphBuilder::new()
+            .visit_source_texts(&roots, |file, _| visited.push(file.to_owned()))
+            .unwrap();
+        assert_eq!(visited, ["src/ok.py"]);
+        assert_eq!(count, 1, "a skipped file is not counted as visited");
+
+        let explicit = AnalyzeRoots::from(&latin1);
+        let err = CallGraphBuilder::new().build(&explicit).unwrap_err();
+        assert!(matches!(err, AnalyzerError::Io { .. }), "{err:?}");
+        let err = CallGraphBuilder::new()
+            .visit_source_texts(&explicit, |_, _| {})
+            .unwrap_err();
+        assert!(matches!(err, AnalyzerError::Io { .. }), "{err:?}");
     }
 
     /// One unparseable file found by the directory walk is dropped from

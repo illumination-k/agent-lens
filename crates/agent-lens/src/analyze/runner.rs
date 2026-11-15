@@ -92,10 +92,10 @@ impl FilterConfig {
     /// able to say "N files were inspected, none had findings" rather
     /// than the misleading "0 file(s)".
     ///
-    /// A walked file that fails to parse is warned about and skipped
-    /// rather than failing the run ([`scan_files_par`]), so
-    /// one file using syntax newer than the bundled grammars cannot
-    /// disable the whole report.
+    /// A walked file that cannot be read or parsed is warned about and
+    /// skipped rather than failing the run ([`scan_files_par`]), so one
+    /// undecodable fixture, or one file using syntax newer than the
+    /// bundled grammars, cannot disable the whole report.
     pub fn collect_per_file<R: Send>(
         &self,
         roots: &AnalyzeRoots,
