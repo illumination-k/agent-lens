@@ -301,6 +301,7 @@ agent-lens hook setup --scope user    # user scope: $HOME/.claude/settings.json
 agent-lens hook setup --dry-run       # preview the exact block without writing
 agent-lens hook setup --only pre-tool-use,stop       # just these handlers
 agent-lens hook setup --skip post-tool-use:footprint # everything but this one
+agent-lens hook setup --command 'mise exec -- agent-lens' # not on the hooks' PATH
 ```
 
 The merge is conservative: existing entries are preserved, missing handlers
@@ -308,6 +309,11 @@ are appended, and re-running is a no-op once everything is installed.
 `--only` / `--skip` take a hook id (`post-tool-use:similarity`) or a bare event
 (`post-tool-use`); an unknown one is rejected with the valid list. Selecting a
 stop `delta` also installs the `session-start:snapshot` it compares against.
+
+Hooks run without your interactive shell's setup, so a per-project mise install
+is often not on their `PATH`. `--command` writes a path or a launcher in place
+of the bare `agent-lens`; re-running with it rewrites the handlers already
+wired up instead of appending duplicates.
 
 ### As a Codex hook
 
@@ -322,8 +328,8 @@ agent-lens codex-hook setup --dry-run          # preview without writing
 agent-lens codex-hook setup --skip session-start:summary
 ```
 
-The same conservative merge and `--only` / `--skip` selection apply: existing
-keys and comments are preserved and re-running is a no-op.
+The same conservative merge, `--only` / `--skip` selection and `--command`
+apply: existing keys and comments are preserved and re-running is a no-op.
 
 ### As an opencode plugin
 

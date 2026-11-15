@@ -12,7 +12,7 @@ use std::path::Path;
 use agent_lens::hooks::codex::setup::CodexConfig;
 use agent_lens::hooks::setup::ClaudeSettings;
 use agent_lens::hooks::setup_engine::{
-    self, ConfigFormat, HookSelection, SetupScope, SetupSummary,
+    self, CommandPrefix, ConfigFormat, HookSelection, SetupScope, SetupSummary,
 };
 use tracing::info;
 
@@ -25,6 +25,7 @@ pub(super) fn run_hook_setup(args: SetupArgs) -> Result<(), Box<dyn std::error::
         args.scope,
         args.dry_run,
         &args.selection.into_selection(),
+        args.command.command.as_ref(),
         &cwd,
     )
 }
@@ -39,6 +40,7 @@ pub(super) fn run_codex_hook_setup(args: CodexSetupArgs) -> Result<(), Box<dyn s
         args.scope,
         args.dry_run,
         &args.selection.into_selection(),
+        args.command.command.as_ref(),
         &project_root,
     )
 }
@@ -49,10 +51,11 @@ fn run_setup<F: ConfigFormat>(
     scope: SetupScope,
     dry_run: bool,
     selection: &HookSelection,
+    command: Option<&CommandPrefix>,
     project_root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = setup_engine::resolve_path::<F>(scope, project_root)?;
-    let plan = setup_engine::plan::<F>(path, selection)?;
+    let plan = setup_engine::plan::<F>(path, selection, command)?;
     let wrote = apply_setup_plan(dry_run, &plan, F::FILE_LABEL, || {
         setup_engine::apply::<F>(&plan)
     })?;
@@ -60,6 +63,7 @@ fn run_setup<F: ConfigFormat>(
         path: &plan.path,
         wrote,
         added_commands: &plan.added_commands,
+        rewritten_commands: &plan.rewritten_commands,
         document: &plan.after,
     })
 }
@@ -85,6 +89,7 @@ fn apply_setup_plan<T: PartialEq, E: Into<Box<dyn std::error::Error>>>(
     info!(
         path = %path,
         added = plan.added_commands.len(),
+        rewritten = plan.rewritten_commands.len(),
         "wrote {file_label}",
     );
     Ok(true)
@@ -101,6 +106,7 @@ mod tests {
             before: Some(0),
             after,
             added_commands: added.iter().map(|s| (*s).to_string()).collect(),
+            rewritten_commands: Vec::new(),
         }
     }
 

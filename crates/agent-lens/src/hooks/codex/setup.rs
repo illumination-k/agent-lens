@@ -151,37 +151,43 @@ impl ConfigFormat for CodexConfig {
         Ok(payload.clone())
     }
 
-    fn installed_commands(
+    fn visit_commands(
         document: &mut DocumentMut,
         path: &Path,
         block: &EventBlock,
-    ) -> Result<Vec<String>, SetupError> {
+        visit: &mut dyn FnMut(&str) -> Option<String>,
+    ) -> Result<(), SetupError> {
         let entries = event_entries(document, path, block)?;
-        let mut out = Vec::new();
-        for group in entries.iter() {
-            let Some(handlers_item) = group.get("hooks") else {
+        for group in entries.iter_mut() {
+            let Some(handlers_item) = group.get_mut("hooks") else {
                 continue;
             };
-            let Some(handlers) = handlers_item.as_array_of_tables() else {
+            let Some(handlers) = handlers_item.as_array_of_tables_mut() else {
                 return Err(SetupError::shape(
                     path,
                     format!("hooks.{}[].hooks", block.event),
                 ));
             };
-            for handler in handlers.iter() {
-                let Some(cmd_item) = handler.get("command") else {
+            for handler in handlers.iter_mut() {
+                let Some(cmd_item) = handler.get_mut("command") else {
                     continue;
                 };
-                let Some(cmd) = cmd_item.as_str() else {
+                let Some(slot) = cmd_item.as_value_mut().filter(|slot| slot.is_str()) else {
                     return Err(SetupError::shape(
                         path,
                         format!("hooks.{}[].hooks[].command", block.event),
                     ));
                 };
-                out.push(cmd.to_string());
+                if let Some(rewritten) = slot.as_str().and_then(&mut *visit) {
+                    // Keep the value's decor: a trailing comment on the
+                    // `command` line is the user's.
+                    let decor = slot.decor().clone();
+                    *slot = rewritten.into();
+                    *slot.decor_mut() = decor;
+                }
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     fn append_matcher_group(
@@ -240,7 +246,7 @@ mod tests {
     use crate::hooks::setup_engine::{self, conformance};
 
     fn plan(path: PathBuf) -> Result<setup_engine::SetupPlan<String>, SetupError> {
-        setup_engine::plan::<CodexConfig>(path, &setup_engine::HookSelection::default())
+        setup_engine::plan::<CodexConfig>(path, &setup_engine::HookSelection::default(), None)
     }
 
     fn apply(plan: &setup_engine::SetupPlan<String>) -> Result<(), SetupError> {
@@ -482,5 +488,134 @@ type = \"prompt\"
     )]
     fn queues_exactly(#[case] existing: &str, #[case] expected: &[&str]) {
         conformance::queues_exactly::<CodexConfig>(existing, expected);
+    }
+
+    const MISE: &str = "mise exec -- agent-lens";
+    /// A prefix with no `agent-lens` in it: only the same `--command`
+    /// can recognise it.
+    const WRAPPER: &str = "/opt/bin/al";
+
+    /// `--command`, held to the same contract in both formats.
+    #[rstest]
+    #[case::written_for_every_command(
+        conformance::custom_prefix_is_written_for_every_command::<CodexConfig>(MISE)
+    )]
+    #[case::wrapper_written_for_every_command(
+        conformance::custom_prefix_is_written_for_every_command::<CodexConfig>(WRAPPER)
+    )]
+    #[case::same_prefix_is_idempotent(
+        conformance::rerunning_with_the_same_prefix_is_idempotent::<CodexConfig>(MISE)
+    )]
+    #[case::same_wrapper_is_idempotent(
+        conformance::rerunning_with_the_same_prefix_is_idempotent::<CodexConfig>(WRAPPER)
+    )]
+    #[case::default_rerun_keeps_the_prefix(
+        conformance::default_rerun_keeps_a_custom_prefix::<CodexConfig>(MISE)
+    )]
+    #[case::another_prefix_rewrites(
+        conformance::rerunning_with_another_prefix_rewrites_in_place::<CodexConfig>(
+            Some(MISE),
+            "/usr/local/bin/agent-lens",
+        )
+    )]
+    #[case::bare_then_custom_rewrites(
+        conformance::rerunning_with_another_prefix_rewrites_in_place::<CodexConfig>(None, MISE)
+    )]
+    #[case::custom_then_bare_rewrites(
+        conformance::rerunning_with_another_prefix_rewrites_in_place::<CodexConfig>(
+            Some(MISE),
+            "agent-lens",
+        )
+    )]
+    fn command_prefix_contract(#[case] _ran: ()) {}
+
+    fn plan_with(
+        path: &Path,
+        selection: &setup_engine::HookSelection,
+        prefix: &str,
+    ) -> setup_engine::SetupPlan<String> {
+        let prefix: setup_engine::CommandPrefix = prefix.parse().unwrap();
+        setup_engine::plan::<CodexConfig>(path.to_path_buf(), selection, Some(&prefix)).unwrap()
+    }
+
+    /// A `--command` re-run rewrites the `command` of our handlers and
+    /// nothing else: comments, sibling keys, user hooks — even one
+    /// sharing our arguments — and trailing flags all survive.
+    #[test]
+    fn rewriting_leaves_unrelated_hooks_comments_and_keys_alone() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let existing = "\
+# top-level comment
+model = \"gpt-5\"
+
+[[hooks.PostToolUse]]
+matcher = \"^shell$\"
+
+[[hooks.PostToolUse.hooks]]
+type = \"command\"
+command = \"/opt/other-tool codex-hook post-tool-use similarity\"
+
+[[hooks.PostToolUse]]
+matcher = \"^apply_patch$\"
+
+[[hooks.PostToolUse.hooks]]
+type = \"command\"
+# keep the bar high
+command = \"agent-lens codex-hook post-tool-use similarity --threshold 0.9\" # tuned
+timeout = 5
+
+[[hooks.PostToolUse.hooks]]
+type = \"command\"
+command = '/bin/agent-lens codex-hook post-tool-use wrapper'
+
+[[hooks.PostToolUse.hooks]]
+type = \"command\"
+command = \"agent-lens codex-hook post-tool-use footprint\"
+";
+        fs::write(&path, existing).unwrap();
+
+        let selection = setup_engine::HookSelection {
+            only: vec!["post-tool-use".to_owned()],
+            skip: Vec::new(),
+        };
+        let plan = plan_with(&path, &selection, MISE);
+        assert_eq!(
+            plan.rewritten_commands,
+            [
+                "mise exec -- agent-lens codex-hook post-tool-use similarity --threshold 0.9",
+                "mise exec -- agent-lens codex-hook post-tool-use wrapper",
+                "mise exec -- agent-lens codex-hook post-tool-use footprint",
+            ],
+        );
+        assert!(plan.added_commands.is_empty());
+        let expected = existing
+            .replace(
+                "\"agent-lens codex-hook post-tool-use similarity",
+                "\"mise exec -- agent-lens codex-hook post-tool-use similarity",
+            )
+            .replace(
+                "'/bin/agent-lens codex-hook post-tool-use wrapper'",
+                "\"mise exec -- agent-lens codex-hook post-tool-use wrapper\"",
+            )
+            .replace(
+                "\"agent-lens codex-hook post-tool-use footprint",
+                "\"mise exec -- agent-lens codex-hook post-tool-use footprint",
+            );
+        assert_eq!(plan.after, expected);
+    }
+
+    /// A `command` that is not a string is still a shape error, whatever
+    /// TOML type it is.
+    #[rstest]
+    #[case::integer("command = 1")]
+    #[case::inline_table("command = { run = \"agent-lens\" }")]
+    #[case::table("[hooks.Stop.hooks.command]\nrun = \"agent-lens\"")]
+    fn non_string_command_is_reported(#[case] command: &str) {
+        let contents = format!("[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\n{command}\n");
+        conformance::unexpected_shape_is_reported::<CodexConfig>(
+            &contents,
+            "hooks.Stop[].hooks[].command",
+        );
     }
 }

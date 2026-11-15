@@ -938,6 +938,74 @@ fn codex_hook_setup_project_writes_config_toml() {
     assert!(contents.contains("agent-lens codex-hook post-tool-use similarity"));
 }
 
+/// `--command` end to end: the prefix reaches every handler of both
+/// setups, a re-run with another one rewrites instead of appending, and
+/// only then does the summary carry `rewritten_commands`.
+#[rstest]
+#[case::claude("hook", ".claude/settings.json", "hook", 11)]
+#[case::codex("codex-hook", ".codex/config.toml", "codex-hook", 8)]
+fn setup_command_prefix_is_written_and_rewritten(
+    #[case] tree: &str,
+    #[case] file: &str,
+    #[case] subcommand: &str,
+    #[case] handlers: usize,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = |command: &str| {
+        let args = [tree, "setup", "--scope", "project", "--command", command];
+        stdout_json(&agent_lens(&args, dir.path(), None))
+    };
+    let lines_with = |needle: &str| {
+        std::fs::read_to_string(dir.path().join(file))
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
+    };
+
+    let first = setup("mise exec -- agent-lens");
+    assert_eq!(first["wrote"], true);
+    assert_eq!(first["added_commands"].as_array().unwrap().len(), handlers);
+    assert!(first.get("rewritten_commands").is_none(), "got {first}");
+    assert_eq!(
+        lines_with(&format!("\"mise exec -- agent-lens {subcommand} ")),
+        handlers,
+    );
+
+    let again = setup("mise exec -- agent-lens");
+    assert_eq!(again["wrote"], false);
+
+    let moved = setup("/opt/bin/agent-lens");
+    assert_eq!(moved["wrote"], true);
+    assert_eq!(moved["added_commands"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        moved["rewritten_commands"].as_array().unwrap().len(),
+        handlers,
+    );
+    assert_eq!(
+        lines_with(&format!("\"/opt/bin/agent-lens {subcommand} ")),
+        handlers,
+    );
+    assert_eq!(lines_with("mise"), 0);
+    assert_eq!(lines_with(&format!("agent-lens {subcommand} ")), handlers);
+}
+
+#[rstest]
+#[case::claude_empty(&["hook", "setup", "--dry-run", "--command", ""])]
+#[case::claude_blank(&["hook", "setup", "--dry-run", "--command", "  "])]
+#[case::codex_empty(&["codex-hook", "setup", "--dry-run", "--command", ""])]
+fn setup_rejects_an_empty_command(#[case] args: &[&str]) {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(args, dir.path(), None);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("the command must not be empty"),
+        "got {stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
 const BRANCHY_RS: &str = "fn branchy(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\n";
 
 #[test]

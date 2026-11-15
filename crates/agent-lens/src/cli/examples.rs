@@ -393,6 +393,7 @@ Examples:
     agent-lens hook setup --scope user
     agent-lens hook setup --only pre-tool-use,stop
     agent-lens hook setup --skip post-tool-use:footprint
+    agent-lens hook setup --command 'mise exec -- agent-lens'
 ";
 
 pub const CODEX_HOOK_SETUP: &str = "\
@@ -401,6 +402,7 @@ Examples:
     agent-lens codex-hook setup --dry-run
     agent-lens codex-hook setup --scope project
     agent-lens codex-hook setup --skip session-start:summary
+    agent-lens codex-hook setup --command \"$HOME/.local/bin/agent-lens\"
 ";
 
 pub const SKILLS: &str = "\
