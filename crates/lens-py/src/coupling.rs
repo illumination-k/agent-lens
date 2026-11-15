@@ -71,18 +71,12 @@ pub fn build_module_tree(
                 });
             }
         };
-        // A walked file that fails to parse drops out of the module tree
-        // with a warning instead of failing the whole build: syntax newer
-        // than the bundled parser must not disable analysis of every
-        // module around it. An explicit single-file root (above) keeps
-        // the hard error.
-        match parse_one(&file, module_path_for_rel(rel)) {
-            Ok(module) => out.push(module),
-            Err(CouplingError::Parse { path, source }) => {
-                tracing::warn!(path = %path.display(), error = %source, "skipping file: parse failed");
-            }
-            Err(other) => return Err(other),
-        }
+        // A walked file that cannot be read or parsed drops out of the
+        // module tree with a warning instead of failing the whole build
+        // ([`CouplingError::skip_walked_file`]). An explicit single-file
+        // root (above) keeps the hard error.
+        let loaded = parse_one(&file, module_path_for_rel(rel));
+        out.extend(CouplingError::skip_walked_file(loaded)?);
     }
     Ok(out)
 }
@@ -417,6 +411,35 @@ mod tests {
 
         let err = build_module_tree(&broken, &IncludeAll).unwrap_err();
         assert!(matches!(err, super::CouplingError::Parse { .. }), "{err:?}",);
+    }
+
+    /// A walked file that is not valid UTF-8 — a vendored encoding
+    /// fixture, say — drops out the same way instead of failing the
+    /// tree (issue #493); named as the root it is still a read error.
+    #[test]
+    fn undecodable_walked_file_is_skipped_but_an_explicit_root_errors() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("a.py"), "class A: pass\n").expect("write a");
+        std::fs::write(root.path().join("main.py"), "import a\n").expect("write main");
+        let latin1 = root.path().join("latin1.py");
+        std::fs::write(&latin1, b"def bad():\n    return \"\xff\xfe\"\n").expect("write latin1");
+
+        let modules =
+            build_module_tree(root.path(), &IncludeAll).expect("bad file must not fail the tree");
+        let mut paths: Vec<&str> = modules.iter().map(|m| m.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["crate::a", "crate::main"]);
+        assert_eq!(
+            extract_edges(&modules),
+            vec![e("crate::main", "crate::a", "a")],
+            "edges between readable files survive",
+        );
+
+        let err = build_module_tree(&latin1, &IncludeAll).unwrap_err();
+        assert!(
+            matches!(&err, super::CouplingError::Io { path, .. } if *path == latin1),
+            "{err:?}",
+        );
     }
 
     #[test]

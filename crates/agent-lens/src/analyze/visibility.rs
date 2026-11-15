@@ -22,8 +22,10 @@
 //!   kinds of site that can hide one — an ambiguous call naming the
 //!   function among its candidates, and a receiver call on a name the
 //!   resolver refuses to attribute (`.clone()`, `.get()`) — are counted
-//!   per row when they sit outside the proposed scope. A flagged row is
-//!   the one to check by hand first.
+//!   per row when they sit outside the proposed scope. A flagged row
+//!   gets no narrowing at all: its suggestion is a `verify:` naming the
+//!   count, because the callers that would break are the ones the
+//!   resolver could not see.
 //! - A Rust function need not be called to need its visibility: passing
 //!   it by path as a value (`.map(fusion::key)`, `read_ids(&p,
 //!   ids::cas_id)`) or importing it (`use fusion::key;`) requires it to
@@ -127,7 +129,8 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
      still permit, and the compiler rejects it immediately if a caller was missed. Only resolved \
      edges carry a caller module, so callers reached through ambiguous call sites, or through \
      receiver calls on a name the resolver refuses to attribute, are invisible — sites of either \
-     kind that name the function from outside the proposed scope are counted per row. A Rust \
+     kind that name the function from outside the proposed scope are counted per row, and a row \
+     carrying any is given a `verify:` suggestion instead of a narrowing. A Rust \
      function named by path without being called — passed as a value, or imported with `use` — \
      counts as used from that module. Callers \
      outside the analyzed path do not exist here. A function a `pub use` names is left out as \
@@ -145,6 +148,9 @@ const NOTE: &str = "Candidates, not verdicts: each row is a visibility the resol
 /// satisfaction without a compile error at any of them.
 const INTERFACE_SUGGESTION: &str =
     "verify: unexporting compiles but drops the interface satisfaction";
+
+/// What every suggestion that is not an edit to apply starts with.
+const VERIFY_PREFIX: &str = "verify:";
 
 analyzer_options! {
     /// Options of the `visibility` section of `analyze narrowable`; the `narrowable` options
@@ -296,7 +302,10 @@ struct Finding {
     /// defining module when there are none.
     scope_module: String,
     /// The declaration the resolved callers would still permit, written
-    /// as the language spells it.
+    /// as the language spells it — or a `verify: …` reason when the
+    /// evidence does not support an edit: no resolved caller, a possible
+    /// interface satisfaction, or call sites outside `scope_module` the
+    /// resolver could not attribute.
     suggested_visibility: String,
     /// Distinct resolved callers: functions that call it, or name it by
     /// path as a value.
@@ -358,6 +367,31 @@ impl Finding {
         {
             self.suggested_visibility = INTERFACE_SUGGESTION.to_owned();
         }
+    }
+
+    /// Withdraw a narrowing that call sites outside the proposed scope
+    /// might break. The resolved callers are only the ones the resolver
+    /// could attribute: a `self.append(..)` resolves while every
+    /// `x.append(..)` in a sibling module does not, so narrowing to the
+    /// resolved scope fails to compile exactly when the count is right.
+    /// A row that already says `verify:` keeps its own reason.
+    fn demote_unverified_narrowing(&mut self) {
+        if self.possible_external_caller() && !self.suggested_visibility.starts_with(VERIFY_PREFIX)
+        {
+            self.suggested_visibility = format!("{VERIFY_PREFIX} {}", self.outside_calls());
+        }
+    }
+
+    /// The unattributed call sites outside the proposed scope, by kind:
+    /// where to look for the caller a narrowing would break.
+    fn outside_calls(&self) -> String {
+        let ambiguous = self.ambiguous_calls_outside_scope;
+        let receiver = self.ubiquitous_name_calls_outside_scope;
+        let scope = &self.scope_module;
+        format!(
+            "{ambiguous} ambiguous and {receiver} unattributable receiver call site(s) outside \
+             `{scope}` name it"
+        )
     }
 
     /// Whether calls may reach this method through interface dispatch
@@ -862,8 +896,8 @@ fn suggest(lang: ExportLang, scope: CallerScope, module: &str, scope_module: &st
 /// Count, per finding, the call sites that could still reach it from
 /// outside the proposed scope: ambiguous sites carrying it in their
 /// candidate set, and receiver calls the resolver declined to attribute
-/// (see [`gated_by_name`]). Both are reasons to check a row before
-/// narrowing it, and neither drops it.
+/// (see [`gated_by_name`]). Neither drops the row, but either one
+/// replaces its narrowing with a `verify:` suggestion.
 fn annotate_outside_calls(
     graph: &CallGraph,
     external_tests: &ExternalTestCallers,
@@ -893,6 +927,9 @@ fn annotate_outside_calls(
     for reference in &graph.value_references {
         count_ambiguous_reference(graph, &index_by_id, &slots, findings, reference);
     }
+    findings
+        .iter_mut()
+        .for_each(|(_, finding)| finding.demote_unverified_narrowing());
 }
 
 /// A value reference the resolver could not decide hides a use the same
@@ -1302,15 +1339,12 @@ fn render_finding(finding: &Finding) -> String {
             let _ = write!(row, ", {} in tests", finding.test_caller_count);
         }
     }
-    if finding.possible_external_caller() {
-        let _ = write!(
-            row,
-            " — verify first: {} ambiguous and {} unattributable receiver call site(s) outside \
-             `{}` name it",
-            finding.ambiguous_calls_outside_scope,
-            finding.ubiquitous_name_calls_outside_scope,
-            finding.scope_module,
-        );
+    // A withdrawn narrowing already is this caveat; only a row that says
+    // `verify:` for another reason needs it spelled out as well.
+    let outside_calls = finding.outside_calls();
+    if finding.possible_external_caller() && !finding.suggested_visibility.ends_with(&outside_calls)
+    {
+        let _ = write!(row, " — verify first: {outside_calls}");
     }
     if finding.may_dispatch_via_interface() {
         let _ = write!(
@@ -2206,6 +2240,264 @@ mod tests {
         assert!(
             analyze_md(dir.path()).contains("0 ambiguous and 1 unattributable receiver call"),
             "the caveat names the receiver call it rests on",
+        );
+    }
+
+    /// The finding reported for one function.
+    fn row(report: &Value, qualified_name: &str) -> Value {
+        report["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .find(|f| f["qualified_name"] == qualified_name)
+            .unwrap_or_else(|| panic!("no row for {qualified_name}: {report}"))
+            .clone()
+    }
+
+    /// Issue #656's bisect table. `Frag::<name>` is called from a sibling
+    /// module as `a.<name>(b)`, and from its own module either the same
+    /// way or as `self.<name>(..)`. The resolver attributes a receiver
+    /// call on an ordinary name but, for a ubiquitous one like `append`,
+    /// only the `self.` form — so that one resolved call used to narrow
+    /// the method to its module while the sibling's call was merely
+    /// counted, and dropping `pub` as told failed with E0624.
+    fn write_frag_crate(dir: &Path, name: &str, own_module_call: &str) {
+        let (twice, local) = if own_module_call == "self" {
+            (
+                format!("self.{name}(other) + self.{name}(other)"),
+                "f.twice(other)".to_owned(),
+            )
+        } else {
+            ("other.0.len()".to_owned(), format!("f.{name}(other)"))
+        };
+        write_crate(
+            dir,
+            "app",
+            &[
+                (
+                    "lib.rs",
+                    "mod build;\nmod other;\n\
+                     pub fn run() -> usize {\n\
+                     let mut a = build::Frag(vec![]);\n\
+                     build::local(&mut a, &build::Frag(vec![1])) + other::join(&mut a, &build::Frag(vec![2]))\n\
+                     }\n",
+                ),
+                (
+                    "build.rs",
+                    &format!(
+                        "pub struct Frag(pub Vec<u32>);\n\
+                         impl Frag {{\n\
+                         pub fn {name}(&mut self, other: &Frag) -> usize {{ self.0.extend(&other.0); self.0.len() }}\n\
+                         pub fn twice(&mut self, other: &Frag) -> usize {{ {twice} }}\n\
+                         }}\n\
+                         pub fn local(f: &mut Frag, other: &Frag) -> usize {{ {local} }}\n",
+                    ),
+                ),
+                (
+                    "other.rs",
+                    &format!(
+                        "use super::build::Frag;\n\
+                         pub fn join(a: &mut Frag, b: &Frag) -> usize {{ a.{name}(b) }}\n"
+                    ),
+                ),
+            ],
+        );
+    }
+
+    #[rstest]
+    #[case::method_control("absorb", "receiver", "same_crate", "pub(crate)", 0)]
+    #[case::method_common(
+        "append",
+        "receiver",
+        "no_resolved_callers",
+        "verify: no resolved caller in the analyzed tree",
+        1
+    )]
+    #[case::method_self_control("absorb", "self", "same_crate", "pub(crate)", 0)]
+    #[case::method_self(
+        "append",
+        "self",
+        "same_module",
+        "verify: 0 ambiguous and 1 unattributable receiver call site(s) outside `app::build` name it",
+        1
+    )]
+    fn a_row_with_an_unattributable_call_outside_its_scope_is_not_narrowed(
+        #[case] name: &str,
+        #[case] own_module_call: &str,
+        #[case] caller_scope: &str,
+        #[case] suggestion: &str,
+        #[case] outside: u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_frag_crate(dir.path(), name, own_module_call);
+
+        let report = analyze_json(dir.path());
+        let method = row(&report, &format!("app::build::Frag::{name}"));
+        assert_eq!(method["caller_scope"], caller_scope, "row: {method}");
+        assert_eq!(method["suggested_visibility"], suggestion, "row: {method}");
+        assert_eq!(
+            method["ubiquitous_name_calls_outside_scope"], outside,
+            "row: {method}",
+        );
+        assert_eq!(
+            row(&report, "app::build::local")["suggested_visibility"],
+            "pub(crate)",
+            "a row no unattributed site names keeps its narrowing: {report}",
+        );
+    }
+
+    /// An ambiguous call outside the scope withdraws the narrowing the
+    /// same way: `x.target()` in `caller` may be either `target`, and
+    /// each has a resolved caller only in its own module.
+    #[test]
+    fn a_row_with_an_ambiguous_call_outside_its_scope_is_not_narrowed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_crate(
+            dir.path(),
+            "app",
+            &[
+                ("lib.rs", "pub mod one;\npub mod two;\npub mod caller;\n"),
+                (
+                    "one.rs",
+                    "pub struct A;\nimpl A { pub fn target(&self) -> usize { 1 } }\n\
+                     pub struct C;\nimpl C { pub fn target(&self) -> usize { 3 } }\n\
+                     pub fn local(a: &A) -> usize { A::target(a) }\n",
+                ),
+                (
+                    "two.rs",
+                    "pub struct B;\nimpl B { pub fn target(&self) -> usize { 2 } }\n\
+                     pub fn local(b: &B) -> usize { B::target(b) }\n",
+                ),
+                (
+                    "caller.rs",
+                    "pub fn calls(x: &crate::one::A) -> usize { x.target() }\n",
+                ),
+            ],
+        );
+
+        let report = analyze_json(dir.path());
+        for (name, scope) in [
+            ("app::one::A::target", "app::one"),
+            ("app::two::B::target", "app::two"),
+        ] {
+            let target = row(&report, name);
+            assert_eq!(target["caller_scope"], "same_module", "row: {target}");
+            assert_eq!(target["ambiguous_calls_outside_scope"], 1, "row: {target}");
+            assert_eq!(
+                target["suggested_visibility"],
+                format!(
+                    "verify: 1 ambiguous and 0 unattributable receiver call site(s) outside `{scope}` \
+                     name it"
+                ),
+                "row: {target}",
+            );
+        }
+        let md = analyze_md(dir.path());
+        assert!(
+            md.contains(
+                "→ verify: 1 ambiguous and 0 unattributable receiver call site(s) outside `app::one` \
+                 name it; 1 caller(s) in `app::one`\n"
+            ),
+            "the withdrawn narrowing is the caveat, stated once: {md}",
+        );
+        assert!(!md.contains("drop `pub`"), "got: {md}");
+        assert!(
+            md.contains(
+                "→ verify: no resolved caller in the analyzed tree; no resolved caller — verify \
+                 first: 1 ambiguous and 0 unattributable receiver call site(s) outside \
+                 `app::one` name it\n"
+            ),
+            "a row that says `verify:` for another reason still carries it: {md}",
+        );
+    }
+
+    fn finding_suggesting(suggestion: &str, ambiguous: usize, ubiquitous: usize) -> Finding {
+        Finding {
+            id: "app::build::f".to_owned(),
+            qualified_name: "app::build::f".to_owned(),
+            file: "src/build.rs".to_owned(),
+            start_line: 1,
+            end_line: 1,
+            loc: 1,
+            visibility: NodeVisibility::Public,
+            caller_scope: CallerScope::SameModule,
+            scope_module: "app::build".to_owned(),
+            suggested_visibility: suggestion.to_owned(),
+            caller_count: 1,
+            test_caller_count: 0,
+            caller_modules: vec!["app::build".to_owned()],
+            value_reference_count: 0,
+            ambiguous_calls_outside_scope: ambiguous,
+            ubiquitous_name_calls_outside_scope: ubiquitous,
+            may_satisfy_interfaces: Vec::new(),
+        }
+    }
+
+    /// Either counter withdraws a narrowing, the reason names both,
+    /// and a suggestion that is already a `verify:` keeps its own.
+    #[rstest]
+    #[case::nothing_outside("drop `pub`", 0, 0, "drop `pub`")]
+    #[case::ambiguous_only(
+        "drop `pub`",
+        1,
+        0,
+        "verify: 1 ambiguous and 0 unattributable receiver call site(s) outside `app::build` name it"
+    )]
+    #[case::ubiquitous_only(
+        "pub(crate)",
+        0,
+        2,
+        "verify: 0 ambiguous and 2 unattributable receiver call site(s) outside `app::build` name it"
+    )]
+    #[case::both(
+        "unexport: lowercase the initial letter",
+        1,
+        2,
+        "verify: 1 ambiguous and 2 unattributable receiver call site(s) outside `app::build` name it"
+    )]
+    #[case::no_resolved_caller(
+        "verify: no resolved caller in the analyzed tree",
+        1,
+        2,
+        "verify: no resolved caller in the analyzed tree"
+    )]
+    #[case::interface(INTERFACE_SUGGESTION, 0, 1, INTERFACE_SUGGESTION)]
+    fn only_a_narrowing_is_demoted_and_only_by_calls_outside_its_scope(
+        #[case] suggestion: &str,
+        #[case] ambiguous: usize,
+        #[case] ubiquitous: usize,
+        #[case] expected: &str,
+    ) {
+        let mut finding = finding_suggesting(suggestion, ambiguous, ubiquitous);
+        finding.demote_unverified_narrowing();
+        assert_eq!(finding.suggested_visibility, expected);
+    }
+
+    /// Go rows flow through the same counters: `Grow` is a name the Go
+    /// resolver refuses to attribute from a receiver, so the sub-package
+    /// call withdraws the unexport the in-package caller would permit.
+    #[test]
+    fn a_go_row_with_an_unattributable_call_outside_its_package_is_not_unexported() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "pkg/w.go",
+            "package pkg\n\ntype W struct{}\n\nfunc (w W) Grow(n int) int { return n }\n\n\
+             func Local(w W) int { return W.Grow(w, 1) }\n",
+        );
+        write_file(
+            dir.path(),
+            "pkg/sub/s.go",
+            "package sub\n\ntype T struct{}\n\nfunc Use(t T) int { return t.Grow(1) }\n",
+        );
+
+        let grow = row(&analyze_json(dir.path()), "pkg::W::Grow");
+        assert_eq!(grow["caller_scope"], "same_module", "row: {grow}");
+        assert_eq!(
+            grow["suggested_visibility"],
+            "verify: 0 ambiguous and 1 unattributable receiver call site(s) outside `pkg` name it",
+            "row: {grow}",
         );
     }
 

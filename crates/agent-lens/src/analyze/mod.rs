@@ -120,7 +120,9 @@ pub(crate) use format::format_optional_f64;
 pub use path_filter::{AnalyzePathFilter, CompiledPathFilter, PathFilterError};
 pub use roots::AnalyzeRoots;
 pub use source_files::{FunctionSelection, read_source};
-pub(crate) use source_files::{SourceFile, collect_source_files, scan_files_par};
+pub(crate) use source_files::{
+    SourceFile, collect_source_files, scan_files_par, skip_file_error_if_walked,
+};
 
 /// Output format shared across analyzers.
 ///

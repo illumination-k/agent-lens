@@ -46,11 +46,11 @@ pub(crate) struct SourceFile {
     pub path: PathBuf,
     pub display_path: String,
     /// Whether the file was itself named as an analysis root (as opposed
-    /// to being discovered by a directory walk). Parse failures in
-    /// explicitly-named files abort the run — an empty "no findings"
+    /// to being discovered by a directory walk). Read and parse failures
+    /// in explicitly-named files abort the run — an empty "no findings"
     /// report for the one file the caller asked about would be
     /// misleading — while walked files degrade to warn-and-skip; see
-    /// [`skip_parse_error_if_walked`].
+    /// [`skip_file_error_if_walked`].
     pub explicit: bool,
 }
 
@@ -120,16 +120,24 @@ fn collect_root_source_files(
     Ok(())
 }
 
-/// Degradation policy for a file that failed to parse: files discovered
-/// by a directory walk are warned about and dropped from the run —
-/// source using syntax newer than the bundled grammars must not disable
-/// analysis of everything around it — while a file the caller named
-/// explicitly keeps the hard error, and every non-parse failure always
-/// propagates.
+/// Degradation policy for a file that cannot be analyzed: files
+/// discovered by a directory walk are warned about and dropped from the
+/// run, while a file the caller named explicitly keeps the hard error.
 ///
-/// Returns `Ok(None)` for the skipped case so per-file loops can treat
-/// it like any other file without findings.
-pub(crate) fn skip_parse_error_if_walked<T>(
+/// Two failures qualify, both properties of the one file rather than of
+/// the run:
+///
+/// * it failed to parse — source using syntax newer than the bundled
+///   grammars must not disable analysis of everything around it;
+/// * it could not be read — typically a vendored fixture that is
+///   deliberately not UTF-8 (issue #493). Only an I/O error naming the
+///   file itself counts, so a failure reading anything else the scan
+///   touches still propagates.
+///
+/// Every other error always propagates. Returns `Ok(None)` for the
+/// skipped case so per-file loops can treat it like any other file
+/// without findings.
+pub(crate) fn skip_file_error_if_walked<T>(
     file: &SourceFile,
     result: Result<T, AnalyzerError>,
 ) -> Result<Option<T>, AnalyzerError> {
@@ -139,13 +147,17 @@ pub(crate) fn skip_parse_error_if_walked<T>(
             tracing::warn!(path = %file.path.display(), %error, "skipping file: parse failed");
             Ok(None)
         }
+        Err(AnalyzerError::Io { path, source }) if !file.explicit && path == file.path => {
+            tracing::warn!(path = %path.display(), error = %source, "skipping file: read failed");
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }
 
 /// Run `scan` on every file across rayon workers and return the results
-/// in `files` order, dropping walked files that failed to parse
-/// ([`skip_parse_error_if_walked`]).
+/// in `files` order, dropping walked files that could not be read or parsed
+/// ([`skip_file_error_if_walked`]).
 ///
 /// The active analysis index lives in a thread local the workers cannot
 /// see, so it is captured on the calling thread and re-installed around
@@ -161,7 +173,7 @@ pub(crate) fn scan_files_par<T: Send>(
         .par_iter()
         .map(|file| {
             with_installed(index.as_ref(), || {
-                skip_parse_error_if_walked(file, scan(file))
+                skip_file_error_if_walked(file, scan(file))
             })
         })
         .collect();
@@ -301,6 +313,67 @@ mod tests {
                 "packages/src/lib.rs",
             ],
         );
+    }
+
+    fn source_file(path: &str, explicit: bool) -> SourceFile {
+        SourceFile {
+            path: PathBuf::from(path),
+            display_path: path.to_owned(),
+            explicit,
+        }
+    }
+
+    fn read_error(path: &str) -> AnalyzerError {
+        AnalyzerError::Io {
+            path: PathBuf::from(path),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, "not UTF-8"),
+        }
+    }
+
+    fn parse_error() -> AnalyzerError {
+        AnalyzerError::Parse(Box::new(std::io::Error::other("bad token")))
+    }
+
+    /// The whole policy in one table: a walked file's own read or parse
+    /// failure is skipped; the same failure in an explicitly-named file,
+    /// a read failure naming some other path, and every other error
+    /// propagate.
+    #[rstest::rstest]
+    #[case::walked_read_failure(false, read_error("vendor/bad.py"), true)]
+    #[case::walked_parse_failure(false, parse_error(), true)]
+    #[case::explicit_read_failure(true, read_error("vendor/bad.py"), false)]
+    #[case::explicit_parse_failure(true, parse_error(), false)]
+    #[case::walked_read_failure_of_another_path(false, read_error("Cargo.toml"), false)]
+    #[case::walked_other_error(
+        false,
+        AnalyzerError::UnsupportedExtension { path: PathBuf::from("vendor/bad.py") },
+        false
+    )]
+    fn only_a_walked_files_own_read_or_parse_failure_is_skipped(
+        #[case] explicit: bool,
+        #[case] error: AnalyzerError,
+        #[case] skipped: bool,
+    ) {
+        let file = source_file("vendor/bad.py", explicit);
+        let message = error.to_string();
+        match skip_file_error_if_walked::<u8>(&file, Err(error)) {
+            Ok(value) => {
+                assert!(skipped, "{message} must propagate");
+                assert_eq!(value, None);
+            }
+            Err(kept) => {
+                assert!(!skipped, "{message} must be skipped");
+                assert_eq!(kept.to_string(), message);
+            }
+        }
+    }
+
+    #[test]
+    fn a_successful_scan_is_kept_whether_walked_or_explicit() {
+        for explicit in [false, true] {
+            let file = source_file("src/lib.rs", explicit);
+            assert_eq!(skip_file_error_if_walked(&file, Ok(7)).unwrap(), Some(7));
+        }
     }
 
     /// The single-root spellings are unchanged: a directory root gives

@@ -602,6 +602,107 @@ fn analyze_coupling_rejects_a_second_path() {
     assert!(stderr.contains("unexpected argument"), "got: {stderr}");
 }
 
+/// The fixture of issue #493: a module at the root next to a `vendor/`
+/// tree holding one file that is not valid UTF-8.
+fn write_undecodable_vendor_fixture(dir: &Path) {
+    write_file(
+        dir,
+        "a.py",
+        "import os\n\n\ndef a():\n    return os.getcwd()\n",
+    );
+    write_file(dir, "vendor/vendored.py", "def vendored():\n    return 1\n");
+    std::fs::write(
+        dir.join("vendor/bad_encoding.py"),
+        b"def bad():\n    return \"\xff\xfe\"\n",
+    )
+    .unwrap();
+}
+
+/// Every way of spelling "not `vendor/`" keeps the undecodable file from
+/// being read at all — no warning — for a file-scoped analyzer and a
+/// module-graph one alike. The bare name and the trailing-slash form
+/// used to match file names only.
+#[rstest]
+fn exclude_prunes_a_directory_however_it_is_spelled(
+    #[values("complexity", "coupling")] analyzer: &str,
+    #[values("vendor", "vendor/", "vendor/**", "**/vendor/**", "vendor/*")] exclude: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    write_undecodable_vendor_fixture(dir.path());
+
+    let output = agent_lens(
+        &[
+            "analyze",
+            analyzer,
+            ".",
+            "--exclude",
+            exclude,
+            "--format",
+            "md",
+        ],
+        dir.path(),
+        None,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!stderr.contains("bad_encoding.py"), "got: {stderr}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("vendor"), "got: {stdout}");
+    let only_the_root_module = match analyzer {
+        "complexity" => "(1 file(s) scanned, 1 function(s))",
+        _ => "(1 module(s), ",
+    };
+    assert!(stdout.contains(only_the_root_module), "got: {stdout}");
+}
+
+/// With nothing excluded the walk reaches the undecodable file, warns
+/// about it on stderr and reports on the rest; stdout stays the report.
+#[rstest]
+#[case("complexity")]
+#[case("cohesion")]
+#[case("coupling")]
+#[case("communities")]
+#[case("context-span")]
+#[case("function-graph")]
+fn a_walked_undecodable_file_is_warned_about_and_skipped(#[case] analyzer: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    write_undecodable_vendor_fixture(dir.path());
+
+    let output = agent_lens(&["analyze", analyzer, "."], dir.path(), None);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("skipping file: read failed") && stderr.contains("bad_encoding.py"),
+        "got: {stderr}",
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("skipping file"), "got: {stdout}");
+    assert!(!stdout.contains("bad_encoding"), "got: {stdout}");
+}
+
+/// Named as the target, the same file is the one thing the caller asked
+/// about, so it stays a hard error rather than an empty report.
+#[rstest]
+#[case("complexity")]
+#[case("coupling")]
+fn an_explicitly_named_undecodable_file_is_an_error(#[case] analyzer: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    write_undecodable_vendor_fixture(dir.path());
+
+    let output = agent_lens(
+        &["analyze", analyzer, "vendor/bad_encoding.py"],
+        dir.path(),
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to read") && stderr.contains("valid UTF-8"),
+        "got: {stderr}",
+    );
+}
+
 /// `--top` is what bounds a `--format md` report, and the two analyzers
 /// that used to reject it are the ones with the longest listings.
 #[rstest]

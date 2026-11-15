@@ -67,30 +67,26 @@ pub fn build_module_tree(root: &Path) -> Result<Vec<CrateModule>, CouplingError>
     Ok(out)
 }
 
+/// Read and parse one source file, nothing below it.
+fn load_file(file: &Path) -> Result<syn::File, CouplingError> {
+    let source = std::fs::read_to_string(file).map_err(|source| CouplingError::Io {
+        path: file.to_path_buf(),
+        source,
+    })?;
+    syn::parse_file(&source).map_err(|source| CouplingError::parse(file, source))
+}
+
 fn walk_file(
     file: &Path,
     mod_path: ModulePath,
     out: &mut Vec<CrateModule>,
     is_root: bool,
 ) -> Result<(), CouplingError> {
-    let source = std::fs::read_to_string(file).map_err(|source| CouplingError::Io {
-        path: file.to_path_buf(),
-        source,
-    })?;
-    let parsed = match syn::parse_file(&source) {
-        Ok(parsed) => parsed,
-        // A declared submodule file that fails to parse drops out of the
-        // module tree with a warning instead of failing the whole build:
-        // syntax newer than the bundled parser must not disable analysis
-        // of every module around it. The crate root the caller named
-        // keeps the hard error.
-        Err(source) if !is_root => {
-            tracing::warn!(path = %file.display(), error = %source, "skipping file: parse failed");
-            return Ok(());
-        }
-        Err(source) => {
-            return Err(CouplingError::parse(file.to_path_buf(), source));
-        }
+    // A declared submodule file that cannot be read or parsed drops out
+    // of the module tree with a warning instead of failing the whole
+    // build; the crate root the caller named keeps the hard error.
+    let Some(parsed) = CouplingError::skip_unless_named(is_root, load_file(file))? else {
+        return Ok(());
     };
     let items = split_modules(parsed.items, &mod_path, file, out)?;
     out.push(CrateModule {
@@ -558,6 +554,30 @@ mod tests {
         let broken_root = write_file(dir.path(), "broken_root.rs", "fn ??? {");
         let err = build_module_tree(&broken_root).unwrap_err();
         assert!(matches!(err, CouplingError::Parse { .. }), "{err:?}");
+    }
+
+    /// A declared submodule file that is not valid UTF-8 drops out the
+    /// same way (issue #493) — and so do the modules it would have
+    /// declared, which nothing can name any more; as the crate root it
+    /// is still a read error.
+    #[test]
+    fn undecodable_submodule_is_skipped_but_the_root_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "mod good;\nmod latin1;\n");
+        write_file(dir.path(), "good.rs", "pub fn ok() {}\n");
+        let latin1 = dir.path().join("latin1.rs");
+        std::fs::write(&latin1, b"pub const BAD: &str = \"\xff\xfe\";\n").unwrap();
+
+        let tree = build_module_tree(&lib).expect("bad submodule must not fail the tree");
+        let mut p = paths(&tree);
+        p.sort();
+        assert_eq!(p, vec!["crate", "crate::good"]);
+
+        let err = build_module_tree(&latin1).unwrap_err();
+        assert!(
+            matches!(&err, CouplingError::Io { path, .. } if *path == latin1),
+            "{err:?}",
+        );
     }
 
     #[test]
