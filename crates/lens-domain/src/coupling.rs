@@ -90,6 +90,44 @@ impl CouplingError {
             source: Box::new(source),
         }
     }
+
+    /// Degradation policy for one file a module walk reached, applied to
+    /// the result of loading *that file alone*: a read or parse failure
+    /// is warned about and becomes `Ok(None)`, so the walk carries on
+    /// without the file; anything else propagates.
+    ///
+    /// Source using syntax newer than the bundled parser, or a vendored
+    /// fixture that is deliberately not UTF-8, must not disable analysis
+    /// of every module around it. A file the caller named as the root is
+    /// not "reached by the walk" and keeps the hard error — an empty
+    /// report for the one file asked about would be misleading: see
+    /// [`Self::skip_unless_named`].
+    pub fn skip_walked_file<T>(loaded: Result<T, Self>) -> Result<Option<T>, Self> {
+        match loaded {
+            Ok(value) => Ok(Some(value)),
+            Err(Self::Io { path, source }) => {
+                tracing::warn!(path = %path.display(), error = %source, "skipping file: read failed");
+                Ok(None)
+            }
+            Err(Self::Parse { path, source }) => {
+                tracing::warn!(path = %path.display(), error = %source, "skipping file: parse failed");
+                Ok(None)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// [`Self::skip_walked_file`] for an adapter that reaches the root
+    /// and the files below it through one loop: `named` is whether this
+    /// file is the root the caller asked about, whose failures all
+    /// propagate.
+    pub fn skip_unless_named<T>(named: bool, loaded: Result<T, Self>) -> Result<Option<T>, Self> {
+        if named {
+            loaded.map(Some)
+        } else {
+            Self::skip_walked_file(loaded)
+        }
+    }
 }
 
 /// Dotted module path (e.g. `crate::analyze::coupling`).
@@ -753,5 +791,90 @@ mod tests {
     ) {
         use std::error::Error as _;
         assert_eq!(err.source().is_some(), has_source);
+    }
+
+    /// The walked-file policy drops exactly the two failures that belong
+    /// to one file — it could not be read, it could not be parsed — and
+    /// lets a loaded file and every structural error through untouched.
+    #[rstest::rstest]
+    #[case::read_failure(
+        CouplingError::Io {
+            path: "/tmp/x.py".into(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, "not UTF-8"),
+        },
+        true,
+    )]
+    #[case::parse_failure(
+        CouplingError::parse("/tmp/x.py", std::io::Error::other("bad token")),
+        true
+    )]
+    #[case::missing_mod(
+        CouplingError::MissingMod {
+            parent: "crate".to_owned(),
+            name: "foo".to_owned(),
+            near: "/tmp".into(),
+        },
+        false,
+    )]
+    #[case::unsupported_root(
+        CouplingError::UnsupportedRoot {
+            path: "/tmp/x".into(),
+            expected: "a .rs file",
+        },
+        false,
+    )]
+    fn skip_walked_file_drops_only_read_and_parse_failures(
+        #[case] err: CouplingError,
+        #[case] skipped: bool,
+    ) {
+        let message = err.to_string();
+        match CouplingError::skip_walked_file::<u8>(Err(err)) {
+            Ok(value) => {
+                assert!(skipped, "{message} must propagate");
+                assert_eq!(value, None);
+            }
+            Err(kept) => {
+                assert!(!skipped, "{message} must be skipped");
+                assert_eq!(
+                    kept.to_string(),
+                    message,
+                    "the error passes through unchanged"
+                );
+            }
+        }
+    }
+
+    /// Named as the root, a file's read failure is the caller's answer,
+    /// not something to step over; the same failure below the root is.
+    #[test]
+    fn skip_unless_named_keeps_the_error_for_the_named_file_only() {
+        let unreadable = || {
+            Err::<u8, _>(CouplingError::Io {
+                path: "/tmp/x.py".into(),
+                source: std::io::Error::other("not UTF-8"),
+            })
+        };
+        assert!(matches!(
+            CouplingError::skip_unless_named(true, unreadable()),
+            Err(CouplingError::Io { .. })
+        ));
+        assert!(matches!(
+            CouplingError::skip_unless_named(false, unreadable()),
+            Ok(None)
+        ));
+        for named in [true, false] {
+            assert!(matches!(
+                CouplingError::skip_unless_named(named, Ok(7)),
+                Ok(Some(7))
+            ));
+        }
+    }
+
+    #[test]
+    fn skip_walked_file_keeps_a_loaded_file() {
+        assert_eq!(
+            CouplingError::skip_walked_file(Ok(7)).ok().flatten(),
+            Some(7)
+        );
     }
 }

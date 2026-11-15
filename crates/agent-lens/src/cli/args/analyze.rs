@@ -865,11 +865,14 @@ pub(in crate::cli) struct AnalyzePathArgs {
     /// Rust `#[cfg(test)]` modules.
     #[arg(long, conflicts_with = "only_tests")]
     pub(in crate::cli) exclude_tests: bool,
-    /// Exclude paths matching this glob. Repeatable. Bare patterns also
-    /// match at any depth, so `--exclude generated.rs` matches
-    /// `src/generated.rs`. A pattern containing `/` is anchored at the
-    /// analyzed path — with several PATHs, at their deepest common
-    /// ancestor, the same base display paths use.
+    /// Exclude paths matching this glob. Repeatable. A pattern that
+    /// matches a directory excludes everything below it. Bare patterns
+    /// match a file or directory name at any depth, so `--exclude
+    /// generated.rs` matches `src/generated.rs` and `--exclude vendor`
+    /// prunes every `vendor/` directory. A trailing `/` (`vendor/`)
+    /// matches directories only. A pattern containing any other `/` is
+    /// anchored at the analyzed path — with several PATHs, at their
+    /// deepest common ancestor, the same base display paths use.
     #[arg(long = "exclude", value_name = "GLOB")]
     pub(in crate::cli) exclude: Vec<String>,
 }

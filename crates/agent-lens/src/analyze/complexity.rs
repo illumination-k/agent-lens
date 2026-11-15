@@ -649,6 +649,34 @@ def branchy(n):
         assert_eq!(parsed["files"][0]["file"], "ok.go");
     }
 
+    /// A walked file that is not valid UTF-8 — the vendored encoding
+    /// fixture of issue #493 — is skipped the same way; naming it as
+    /// the target is still a read error.
+    #[test]
+    fn walked_undecodable_file_is_skipped_but_an_explicit_target_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.py", "def a(x):\n    return x\n");
+        let latin1 = dir.path().join("vendor/bad_encoding.py");
+        std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+        std::fs::write(&latin1, b"def bad():\n    return \"\xff\xfe\"\n").unwrap();
+
+        let json = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["scanned_file_count"], 2);
+        assert_eq!(parsed["file_count"], 1);
+        assert_eq!(parsed["files"][0]["file"], "a.py");
+
+        let err = ComplexityAnalyzer::new()
+            .analyze(&latin1, OutputFormat::Json)
+            .unwrap_err();
+        assert!(
+            matches!(&err, AnalyzerError::Io { path, .. } if *path == latin1),
+            "{err:?}",
+        );
+    }
+
     #[test]
     fn diff_only_filters_to_changed_functions() {
         let dir = tempfile::tempdir().unwrap();
