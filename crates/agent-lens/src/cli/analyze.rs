@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use agent_lens::analyze::{
     ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer,
-    ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, FootprintAnalyzer,
-    ForwardingAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
-    HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
-    NarrowableAnalyzer, OutputFormat, OwnershipAnalyzer, ReachAnalyzer, RiskAnalyzer,
+    ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, DetailScope,
+    FootprintAnalyzer, ForwardingAnalyzer, FunctionGraphAnalyzer, FunctionSelection,
+    GraphQueryAnalyzer, HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer,
+    LayersAnalyzer, NarrowableAnalyzer, OwnershipAnalyzer, ReachAnalyzer, RiskAnalyzer,
     SearchAnalyzer, SimilarityAnalyzer, TestRedundancyAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
@@ -20,7 +20,7 @@ use super::args::{
     AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
     AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzeOwnershipArgs, AnalyzePathArgs,
     AnalyzeReachArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
-    AnalyzeTestRedundancyArgs,
+    AnalyzeTestRedundancyArgs, ReportShape,
 };
 use super::output::write_stdout_line;
 
@@ -47,7 +47,7 @@ pub(super) fn build_analyze_command(
     tool: config::ToolName,
     profile: &config::Profile,
     targets: &[PathBuf],
-    format: OutputFormat,
+    shape: ReportShape,
 ) -> Result<AnalyzeCommand, ConfigError> {
     let path_filter = AnalyzePathArgs {
         only_tests: profile.only_tests,
@@ -58,7 +58,7 @@ pub(super) fn build_analyze_command(
     // analyzers take the whole list as their root set.
     let common = AnalyzeCommonArgs {
         paths: targets.to_vec(),
-        format,
+        shape,
         path_filter: path_filter.clone(),
     };
     // The graph-rooted pair takes the single entry it requires, so a
@@ -68,7 +68,7 @@ pub(super) fn build_analyze_command(
     let root = || match targets {
         [only] => Ok(AnalyzeRootArgs {
             path: only.clone(),
-            format,
+            shape,
             path_filter: path_filter.clone(),
         }),
         many => Err(ConfigError::MultiPathTool {
@@ -284,31 +284,48 @@ macro_rules! dispatch_analyze {
         match $cmd {
             $(
                 AnalyzeCommand::$wo_variant(args) => {
-                    let (target, format, path_filter) = args.common.into_parts();
-                    <$wo_analyzer>::new()
+                    let (target, shape, path_filter) = args.common.into_parts();
+                    let _detail = DetailScope::enter(shape.detail);
+                    let report = <$wo_analyzer>::new()
                         .with_options(args.opts)
                         .with_analyze_path_args(path_filter)
-                        .analyze(target, format)?
+                        .analyze(target, shape.format.analyzer_format())?;
+                    finish_report(config::ToolName::$wo_variant, shape, report)?
                 }
             )*
             $(
                 AnalyzeCommand::$fo_variant(args) => {
-                    let (target, format, path_filter) = args.common.into_parts();
-                    <$fo_analyzer>::from_options(args.opts)
+                    let (target, shape, path_filter) = args.common.into_parts();
+                    let _detail = DetailScope::enter(shape.detail);
+                    let report = <$fo_analyzer>::from_options(args.opts)
                         .with_analyze_path_args(path_filter)
-                        .analyze(target, format)?
+                        .analyze(target, shape.format.analyzer_format())?;
+                    finish_report(config::ToolName::$fo_variant, shape, report)?
                 }
             )*
             $(
                 AnalyzeCommand::$no_variant(args) => {
-                    let (target, format, path_filter) = args.into_parts();
-                    <$no_analyzer>::new()
+                    let (target, shape, path_filter) = args.into_parts();
+                    let _detail = DetailScope::enter(shape.detail);
+                    let report = <$no_analyzer>::new()
                         .with_analyze_path_args(path_filter)
-                        .analyze(target, format)?
+                        .analyze(target, shape.format.analyzer_format())?;
+                    finish_report(config::ToolName::$no_variant, shape, report)?
                 }
             )*
         }
     };
+}
+
+/// Turn what the analyzer rendered into the format the caller asked
+/// for. The row formats are derived here, once, from the analyzer's
+/// JSON — no analyzer knows they exist.
+fn finish_report(
+    tool: config::ToolName,
+    shape: ReportShape,
+    report: String,
+) -> Result<String, serde_json::Error> {
+    shape.format.finish(tool.as_str(), report, shape.detail)
 }
 
 impl AnalyzeCommand {
@@ -355,8 +372,9 @@ impl AnalyzeCommand {
 #[cfg(test)]
 mod tests {
     use agent_lens::analyze::{
-        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, ForwardingSection,
-        GraphQueryKind, PairKey, ReachSection, SimilarityMethod, UnreachableTier,
+        DEFAULT_SIMILARITY_DRIFT_FLOOR, DEFAULT_SIMILARITY_THRESHOLD, Detail, ForwardingSection,
+        GraphQueryKind, OutputFormat, PairKey, ReachSection, ReportFormat, SimilarityMethod,
+        UnreachableTier,
     };
     use agent_lens::test_support::write_file;
     use clap::Parser;
@@ -498,7 +516,7 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Similarity,
             &profile,
             &[PathBuf::from("/repo/internal"), PathBuf::from("/repo/cmd")],
-            OutputFormat::Json,
+            ReportShape::new(ReportFormat::Json, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Similarity(args) = cmd else {
@@ -528,7 +546,7 @@ fn dispatch(n: i32) -> i32 {
             tool,
             &profile,
             &[PathBuf::from("internal"), PathBuf::from("cmd")],
-            OutputFormat::Json,
+            ReportShape::new(ReportFormat::Json, Detail::Detailed),
         )
         .unwrap_err();
         let ConfigError::MultiPathTool { tool: named, count } = err else {
@@ -548,14 +566,14 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Similarity,
             &profile,
             &[PathBuf::from("/repo/web")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Similarity(args) = cmd else {
             panic!("expected analyze similarity");
         };
         assert_eq!(args.common.paths, [PathBuf::from("/repo/web")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert!((args.opts.threshold - 0.7).abs() < f64::EPSILON);
         assert_eq!(args.opts.min_lines, Some(9));
         assert_eq!(args.opts.top, Some(4));
@@ -574,7 +592,7 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Similarity,
             &profile,
             &[PathBuf::from("web")],
-            OutputFormat::Json,
+            ReportShape::new(ReportFormat::Json, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Similarity(args) = cmd else {
@@ -603,13 +621,13 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Hubs,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Hubs(args) = cmd else {
             panic!("expected analyze hubs");
         };
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(7));
     }
 
@@ -623,13 +641,13 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Risk,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Risk(args) = cmd else {
             panic!("expected analyze risk");
         };
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.since.as_deref(), Some("30.days.ago"));
         assert_eq!(args.opts.top, Some(11));
     }
@@ -643,13 +661,13 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Layers,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Layers(args) = cmd else {
             panic!("expected analyze layers");
         };
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(9));
     }
 
@@ -664,13 +682,13 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Forwarding,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Forwarding(args) = cmd else {
             panic!("expected analyze forwarding");
         };
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(7));
         assert!(args.opts.diff_only);
         assert_eq!(args.opts.section, [ForwardingSection::Delegation]);
@@ -687,13 +705,13 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Reach,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Reach(args) = cmd else {
             panic!("expected analyze reach");
         };
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(6));
         assert_eq!(args.opts.tier, Some(UnreachableTier::Likely));
         assert_eq!(args.opts.section, [ReachSection::Unreachable]);
@@ -710,13 +728,13 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Narrowable,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Narrowable(args) = cmd else {
             panic!("expected analyze narrowable");
         };
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.max_loc, Some(12));
         assert_eq!(args.opts.max_cyclomatic, Some(4));
         assert_eq!(args.opts.min_call_sites, Some(3));
@@ -735,7 +753,7 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Impact,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Impact(args) = cmd else {
@@ -744,7 +762,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.opts.function, ["Resolver::resolve"]);
         assert_eq!(args.opts.depth, Some(3));
         assert_eq!(args.opts.top, Some(5));
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
     }
 
     #[test]
@@ -755,7 +773,7 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Impact,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Json,
+            ReportShape::new(ReportFormat::Json, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Impact(args) = cmd else {
@@ -777,7 +795,7 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::GraphQuery,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Md,
+            ReportShape::new(ReportFormat::Md, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::GraphQuery(args) = cmd else {
@@ -789,7 +807,7 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.opts.depth, Some(3));
         assert_eq!(args.opts.direction, None);
         assert_eq!(args.opts.limit, Some(10));
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
     }
 
     #[test]
@@ -802,7 +820,7 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::GraphQuery,
             &profile,
             &[PathBuf::from("crates")],
-            OutputFormat::Json,
+            ReportShape::new(ReportFormat::Json, Detail::Detailed),
         )
         .unwrap_err();
         assert!(
@@ -826,7 +844,7 @@ fn dispatch(n: i32) -> i32 {
             config::ToolName::Coupling,
             &profile,
             &[PathBuf::from("web")],
-            OutputFormat::Json,
+            ReportShape::new(ReportFormat::Json, Detail::Detailed),
         )
         .unwrap();
         let AnalyzeCommand::Coupling(args) = cmd else {

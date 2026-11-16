@@ -43,6 +43,7 @@ mod raw_references;
 pub mod reach;
 pub mod risk;
 mod roots;
+pub mod rows;
 mod runner;
 pub mod search;
 mod signature_owner;
@@ -117,6 +118,7 @@ pub use diff::{
     ChangedLines, DiffScope, LineRange, changed_line_ranges, parse_diff_range, validate_diff_range,
 };
 pub(crate) use format::format_optional_f64;
+pub use format::{Detail, DetailScope};
 pub use path_filter::{AnalyzePathFilter, CompiledPathFilter, PathFilterError};
 pub use roots::AnalyzeRoots;
 pub use source_files::{FunctionSelection, read_source};
@@ -135,6 +137,56 @@ pub(crate) use source_files::{
 pub enum OutputFormat {
     Json,
     Md,
+}
+
+/// What a caller of `analyze` or `run` can ask for with `--format`: the
+/// two documents an analyzer renders itself, plus the row views derived
+/// from its JSON ([`rows`]).
+///
+/// Kept apart from [`OutputFormat`] on purpose: an analyzer renders JSON
+/// or markdown and nothing else, and the row formats are one shared
+/// transformation of the JSON, so no analyzer has an arm for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportFormat {
+    /// The full machine-readable report.
+    #[default]
+    Json,
+    /// A compact summary tuned for LLM context.
+    Md,
+    /// One self-contained JSON object per finding, one per line.
+    Jsonl,
+    /// One tab-separated table per kind of finding.
+    Tsv,
+}
+
+impl ReportFormat {
+    /// The format the analyzer itself is asked for: the row formats are
+    /// derived from its JSON.
+    pub fn analyzer_format(self) -> OutputFormat {
+        match self {
+            Self::Md => OutputFormat::Md,
+            Self::Json | Self::Jsonl | Self::Tsv => OutputFormat::Json,
+        }
+    }
+
+    /// Turn the analyzer's own output — rendered in
+    /// [`Self::analyzer_format`] — into this format. `analyzer` is the
+    /// `analyze` subcommand name, stamped on every row.
+    pub fn finish(
+        self,
+        analyzer: &str,
+        report: String,
+        detail: Detail,
+    ) -> Result<String, serde_json::Error> {
+        match self {
+            Self::Json | Self::Md => Ok(report),
+            Self::Jsonl | Self::Tsv => {
+                let value: serde_json::Value = serde_json::from_str(&report)?;
+                Ok(rows::render(analyzer, &value, self, detail))
+            }
+        }
+    }
 }
 
 /// Source languages the analyzers know how to handle.

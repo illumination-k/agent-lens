@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use agent_lens::analyze::OutputFormat;
+use super::args::ReportShape;
 use agent_lens::baseline::compare::{self, REGRESSION_EXIT_CODE};
 use agent_lens::baseline::{
     Baseline, NO_SUMMARY_REASON, SCHEMA_VERSION, SkippedTool, ToolBaseline, head_commit, summarizer,
@@ -60,7 +60,7 @@ fn snapshot(resolved: &ResolvedProfile) -> Result<Baseline, Box<dyn std::error::
             continue;
         };
         let report: serde_json::Value =
-            serde_json::from_str(&resolved.run_tool(tool, OutputFormat::Json)?)?;
+            serde_json::from_str(&resolved.run_tool(tool, ReportShape::default())?)?;
         tools.push(ToolBaseline {
             tool: tool.as_str().to_owned(),
             metrics: summarize(&report),

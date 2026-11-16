@@ -23,7 +23,7 @@ use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
 use agent_lens::analyze::test_redundancy::TestRedundancyOptions;
-use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
+use agent_lens::analyze::{AnalyzeRoots, Detail, ReportFormat};
 use clap::{Args, Subcommand};
 
 use crate::cli::examples;
@@ -620,6 +620,38 @@ pub(in crate::cli) enum AnalyzeCommand {
     TestRedundancy(AnalyzeTestRedundancyArgs),
 }
 
+/// How a report is written out: `--format` and `--detail`, the same
+/// two flags on every analyzer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Args)]
+pub(in crate::cli) struct ReportShape {
+    /// Output format. `json` (the default) is the full report and `md`
+    /// a compact summary tuned for LLM context. `jsonl` and `tsv` are
+    /// flat views of the JSON report, built the same way for every
+    /// analyzer: each object in an array of the report is one row, named
+    /// by the `kind` path of that array (`files.functions`) and carrying
+    /// the string fields of the rows enclosing it, so a function row has
+    /// its `file`. `jsonl` writes one object per line with `analyzer`
+    /// and `kind` first; `tsv` writes one table per kind under a
+    /// `# analyzer=… kind=… rows=…` line. Fields outside any array
+    /// (`summary`, `note`) are in the JSON report only.
+    #[arg(long, value_enum, default_value_t = ReportFormat::Json)]
+    pub(in crate::cli) format: ReportFormat,
+    /// How much to render. `detailed` (the default) is everything the
+    /// format carries. `concise` drops what a repeat caller does not
+    /// need: in `md`, the standing explanation each report opens with,
+    /// and listings are capped at 5 rows unless `--top` is given; in
+    /// `jsonl` and `tsv`, rows keep their scalar fields only. `json` is
+    /// the full report at either level.
+    #[arg(long, value_enum, default_value_t = Detail::Detailed)]
+    pub(in crate::cli) detail: Detail,
+}
+
+impl ReportShape {
+    pub(in crate::cli) fn new(format: ReportFormat, detail: Detail) -> Self {
+        Self { format, detail }
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 pub(in crate::cli) struct AnalyzeCommonArgs {
     /// One or more source files or directories to analyze. Several
@@ -629,16 +661,15 @@ pub(in crate::cli) struct AnalyzeCommonArgs {
     /// relative to the paths' deepest common ancestor.
     #[arg(required = true, num_args = 1.., value_name = "PATH")]
     pub(in crate::cli) paths: Vec<PathBuf>,
-    /// Output format. Defaults to JSON.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-    pub(in crate::cli) format: OutputFormat,
+    #[command(flatten)]
+    pub(in crate::cli) shape: ReportShape,
     #[command(flatten)]
     pub(in crate::cli) path_filter: AnalyzePathArgs,
 }
 
 impl AnalyzeCommonArgs {
-    pub(in crate::cli) fn into_parts(self) -> (AnalyzeRoots, OutputFormat, AnalyzePathArgs) {
-        (AnalyzeRoots::new(self.paths), self.format, self.path_filter)
+    pub(in crate::cli) fn into_parts(self) -> (AnalyzeRoots, ReportShape, AnalyzePathArgs) {
+        (AnalyzeRoots::new(self.paths), self.shape, self.path_filter)
     }
 }
 
@@ -654,16 +685,15 @@ impl AnalyzeCommonArgs {
 pub(in crate::cli) struct AnalyzeRootArgs {
     /// Path to a source file, Rust crate root, or directory to analyze.
     pub(in crate::cli) path: PathBuf,
-    /// Output format. Defaults to JSON.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
-    pub(in crate::cli) format: OutputFormat,
+    #[command(flatten)]
+    pub(in crate::cli) shape: ReportShape,
     #[command(flatten)]
     pub(in crate::cli) path_filter: AnalyzePathArgs,
 }
 
 impl AnalyzeRootArgs {
-    pub(in crate::cli) fn into_parts(self) -> (PathBuf, OutputFormat, AnalyzePathArgs) {
-        (self.path, self.format, self.path_filter)
+    pub(in crate::cli) fn into_parts(self) -> (PathBuf, ReportShape, AnalyzePathArgs) {
+        (self.path, self.shape, self.path_filter)
     }
 }
 

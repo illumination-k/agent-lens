@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::analyze::OutputFormat;
+use crate::analyze::{Detail, ReportFormat};
 
 pub use crate::analyze::cohesion::CohesionOptions;
 pub use crate::analyze::communities::CommunitiesOptions;
@@ -124,8 +124,12 @@ pub struct Profile {
     /// relative path is resolved against the directory holding
     /// `agent-lens.toml`.
     pub path: ProfilePaths,
-    /// Output format for the combined report. Defaults to JSON.
-    pub format: Option<OutputFormat>,
+    /// Output format for the combined report: `json` (the default),
+    /// `md`, `jsonl` or `tsv`, as `analyze --format` takes them.
+    pub format: Option<ReportFormat>,
+    /// How much each report renders: `detailed` (the default) or
+    /// `concise`, as `analyze --detail` takes them.
+    pub detail: Option<Detail>,
     /// Extra `--exclude` globs. Passed verbatim, so they keep the same
     /// meaning as on the CLI (matched relative to the analyzed path).
     #[serde(default)]
@@ -632,7 +636,7 @@ since = "90.days.ago"
 
         let web = config.profile("web").unwrap();
         assert_eq!(web.path.paths(), [PathBuf::from("web/")]);
-        assert_eq!(web.format, Some(OutputFormat::Md));
+        assert_eq!(web.format, Some(ReportFormat::Md));
         assert_eq!(web.exclude, ["tests/**/*.ts"]);
         assert!(web.exclude_tests);
         assert!(!web.only_tests);

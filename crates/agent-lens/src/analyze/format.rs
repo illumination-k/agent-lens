@@ -11,6 +11,101 @@ const CONFIDENCE_TOP_MODULES: usize = 5;
 /// [`ConfidenceDeduper`] so the two cannot drift apart.
 const CONFIDENCE_HEADING: &str = "## Resolution confidence (worst modules)";
 
+/// How much of a report a caller wants: `--detail`.
+///
+/// The same switch means the same thing for every analyzer. JSON is the
+/// full report at either level; the levels differ in what is rendered
+/// from it:
+///
+/// * markdown: `concise` leaves out the standing explanation a report
+///   opens with ([`render_note`]) and caps each listing at
+///   [`CONCISE_TOP`] rows unless `--top` says otherwise
+///   ([`top_limit`]);
+/// * the row formats: `concise` keeps a row's scalar fields only
+///   ([`super::rows`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Detail {
+    /// Rows and headline numbers only.
+    Concise,
+    /// Everything the format carries.
+    #[default]
+    Detailed,
+}
+
+/// Rows a markdown listing shows at [`Detail::Concise`] when `--top` is
+/// not given.
+pub(crate) const CONCISE_TOP: usize = 5;
+
+thread_local! {
+    static DETAIL: std::cell::Cell<Detail> = const { std::cell::Cell::new(Detail::Detailed) };
+}
+
+impl Detail {
+    /// The level of the innermost live [`DetailScope`] on this thread,
+    /// [`Detail::Detailed`] outside any.
+    pub(crate) fn current() -> Self {
+        DETAIL.get()
+    }
+}
+
+/// RAII selection of the [`Detail`] level reports rendered on this
+/// thread use, restoring the previous level on drop.
+///
+/// Ambient rather than a parameter for the reason
+/// [`super::index::AnalysisIndexScope`] is: it is one decision about one
+/// invocation, and threading it through every analyzer's options would
+/// put the same field on thirty builders that never read it themselves.
+#[derive(Debug)]
+pub struct DetailScope {
+    previous: Detail,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl DetailScope {
+    pub fn enter(detail: Detail) -> Self {
+        Self {
+            previous: DETAIL.replace(detail),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for DetailScope {
+    fn drop(&mut self) {
+        DETAIL.set(self.previous);
+    }
+}
+
+/// Write a report's standing explanation — what its rows mean and how
+/// far to trust them — as a paragraph of its own. It is the same text on
+/// every run, so [`Detail::Concise`] leaves it out: a caller who asked
+/// for the concise report has read it before, and JSON still carries it.
+pub(crate) fn render_note(out: &mut String, note: &str) {
+    if Detail::current() == Detail::Detailed {
+        let _ = writeln!(out, "\n{note}\n");
+    }
+}
+
+/// The standing explanation as inline text, empty at [`Detail::Concise`]:
+/// for reports that weave the note into a longer line.
+pub(crate) fn note_text(note: &str) -> &str {
+    match Detail::current() {
+        Detail::Detailed => note,
+        Detail::Concise => "",
+    }
+}
+
+/// How many rows a markdown listing shows: `--top` when given, else the
+/// analyzer's `default`, lowered to [`CONCISE_TOP`] at
+/// [`Detail::Concise`].
+pub(crate) fn top_limit(top: Option<usize>, default: usize) -> usize {
+    top.unwrap_or(match Detail::current() {
+        Detail::Detailed => default,
+        Detail::Concise => default.min(CONCISE_TOP),
+    })
+}
+
 pub(crate) fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
     match v {
         Some(x) => format!("{x:.precision$}"),
@@ -218,15 +313,36 @@ pub(crate) fn render_module_sections<G: ModuleSection>(
     render_overflow(out, groups.len(), shown, "module(s)");
 }
 
-/// Close a capped table, naming what was left out. Nothing is written
-/// when nothing was capped: "+0 more" reads as truncation that never
-/// happened.
+/// Close a capped table, naming what was left out and how to see it.
+/// Nothing is written when nothing was capped: "+0 more" reads as
+/// truncation that never happened.
 pub(crate) fn render_overflow(out: &mut String, total: usize, shown: usize, unit: &str) {
+    render_overflow_narrowed(out, total, shown, unit, "");
+}
+
+/// [`render_overflow`] for a listing its analyzer can narrow: `narrow`
+/// names the concrete flag that does it (`` `--min-score 8` ``), and is
+/// put ahead of the generic ways out, because a narrower query is what
+/// keeps the next report small where a higher `--top` only moves the
+/// cut.
+pub(crate) fn render_overflow_narrowed(
+    out: &mut String,
+    total: usize,
+    shown: usize,
+    unit: &str,
+    narrow: &str,
+) {
     let overflow = total.saturating_sub(shown);
     if overflow > 0 {
+        let narrow = if narrow.is_empty() {
+            String::new()
+        } else {
+            format!("{narrow}, ")
+        };
         let _ = writeln!(
             out,
-            "\n+{overflow} more {unit} not shown (raise `--top`; JSON carries every row)."
+            "\n+{overflow} more {unit} not shown (--top {shown}). Narrow it: {narrow}pass a \
+             sub-path, or raise `--top`; `--format jsonl` carries every row."
         );
     }
 }

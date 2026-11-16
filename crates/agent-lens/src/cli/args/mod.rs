@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use agent_lens::analyze::OutputFormat;
+use agent_lens::analyze::{Detail, OutputFormat, ReportFormat};
 use agent_lens::skills;
 use clap::{Args, Parser, Subcommand};
 
@@ -153,7 +153,11 @@ pub(super) struct RunArgs {
     /// `jq`, or reading a JSON profile by eye — without editing the
     /// config.
     #[arg(long, value_enum, value_name = "FORMAT")]
-    pub(super) format: Option<OutputFormat>,
+    pub(super) format: Option<ReportFormat>,
+    /// Override the profile's `detail` for this run: `concise` or
+    /// `detailed`, with the meaning `analyze --detail` gives them.
+    #[arg(long, value_enum, value_name = "DETAIL")]
+    pub(super) detail: Option<Detail>,
     /// Replace the stacked per-tool sections with an entity-joined
     /// digest: one row per file aggregating every analyzer's findings
     /// about it, ranked by cross-tool weight, plus one line per
@@ -486,7 +490,7 @@ mod tests {
             panic!("expected analyze similarity");
         };
         assert_eq!(args.common.paths, [PathBuf::from("src/lib.rs")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert!(args.opts.diff_only);
         assert!(args.common.path_filter.exclude_tests);
         assert_eq!(args.common.path_filter.exclude, ["generated/**"]);
@@ -783,7 +787,7 @@ mod tests {
         };
         assert_eq!(args.opts.since.as_deref(), Some("90.days.ago"));
         assert_eq!(args.opts.top, Some(5));
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
     }
 
     #[test]
@@ -806,7 +810,7 @@ mod tests {
         assert_eq!(args.opts.since.as_deref(), Some("90.days.ago"));
         assert_eq!(args.opts.top, Some(5));
         assert!(args.common.path_filter.exclude_tests);
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
     }
 
     #[test]
@@ -837,7 +841,7 @@ mod tests {
         assert_eq!(args.opts.depth, Some(4));
         assert_eq!(args.opts.direction, None);
         assert_eq!(args.opts.limit, Some(10));
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
     }
 
     #[test]
@@ -892,7 +896,7 @@ mod tests {
         assert_eq!(args.opts.function, ["Resolver::resolve", "helper"]);
         assert_eq!(args.opts.depth, Some(3));
         assert_eq!(args.opts.top, Some(5));
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
     }
 
     #[test]
@@ -927,7 +931,7 @@ mod tests {
             panic!("expected analyze reach");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(
             args.opts.section,
             [ReachSection::Unreachable, ReachSection::Untested]
@@ -943,7 +947,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Reach(args)) = cli.command else {
             panic!("expected analyze reach");
         };
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
         assert!(args.opts.section.is_empty());
         assert_eq!(args.opts.tier, None);
         assert_eq!(args.opts.top, None);
@@ -976,7 +980,7 @@ mod tests {
             panic!("expected analyze narrowable");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(
             args.opts.section,
             [NarrowableSection::SingleUse, NarrowableSection::Parameters]
@@ -1099,7 +1103,7 @@ mod tests {
             panic!("expected analyze hubs");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(10));
         assert!(args.common.path_filter.exclude_tests);
     }
@@ -1122,7 +1126,7 @@ mod tests {
             panic!("expected analyze layers");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(8));
         assert!(args.common.path_filter.exclude_tests);
     }
@@ -1135,7 +1139,7 @@ mod tests {
             panic!("expected analyze layers");
         };
         assert_eq!(args.common.paths, [PathBuf::from(".")]);
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
         assert_eq!(args.opts.top, None);
     }
 
@@ -1159,7 +1163,7 @@ mod tests {
             panic!("expected analyze forwarding");
         };
         assert_eq!(args.common.paths, [PathBuf::from("crates")]);
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(30));
         assert!(args.opts.diff_only);
         assert_eq!(
@@ -1175,7 +1179,7 @@ mod tests {
         let Command::Analyze(AnalyzeCommand::Forwarding(args)) = cli.command else {
             panic!("expected analyze forwarding");
         };
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
         assert_eq!(args.opts.top, None);
         assert!(!args.opts.diff_only);
         assert!(args.opts.section.is_empty());
@@ -1224,7 +1228,7 @@ mod tests {
                 PathBuf::from("web/src"),
             ],
         );
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert!(args.common.path_filter.exclude_tests);
     }
 
@@ -1289,7 +1293,7 @@ mod tests {
             panic!("expected analyze coupling");
         };
         assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert_eq!(args.opts.top, Some(15));
     }
 
@@ -1301,7 +1305,7 @@ mod tests {
             panic!("expected analyze coupling");
         };
         assert_eq!(args.common.path, PathBuf::from("."));
-        assert_eq!(args.common.format, OutputFormat::Json);
+        assert_eq!(args.common.shape.format, ReportFormat::Json);
         assert_eq!(args.opts.top, None);
     }
 
@@ -1313,7 +1317,7 @@ mod tests {
             panic!("expected analyze cycles");
         };
         assert_eq!(args.paths, [PathBuf::from(".")]);
-        assert_eq!(args.format, OutputFormat::Json);
+        assert_eq!(args.shape.format, ReportFormat::Json);
     }
 
     #[test]
@@ -1332,7 +1336,7 @@ mod tests {
             panic!("expected analyze cycles");
         };
         assert_eq!(args.paths, [PathBuf::from("src")]);
-        assert_eq!(args.format, OutputFormat::Md);
+        assert_eq!(args.shape.format, ReportFormat::Md);
         assert!(args.path_filter.exclude_tests);
     }
 
@@ -1344,7 +1348,7 @@ mod tests {
             panic!("expected analyze function-graph");
         };
         assert_eq!(args.paths, [PathBuf::from(".")]);
-        assert_eq!(args.format, OutputFormat::Json);
+        assert_eq!(args.shape.format, ReportFormat::Json);
     }
 
     #[test]
@@ -1362,7 +1366,7 @@ mod tests {
             panic!("expected analyze function-graph");
         };
         assert_eq!(args.paths, [PathBuf::from("src/lib.rs")]);
-        assert_eq!(args.format, OutputFormat::Md);
+        assert_eq!(args.shape.format, ReportFormat::Md);
     }
 
     #[test]
@@ -1380,7 +1384,7 @@ mod tests {
             panic!("expected analyze context-span");
         };
         assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
-        assert_eq!(args.common.format, OutputFormat::Md);
+        assert_eq!(args.common.shape.format, ReportFormat::Md);
         assert!(args.opts.entry_glob.is_empty());
     }
 

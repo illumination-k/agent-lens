@@ -8,12 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_lens::analyze::{AnalysisIndexScope, ConfidenceDeduper, OutputFormat};
+use agent_lens::analyze::{AnalysisIndexScope, ConfidenceDeduper, Detail, ReportFormat};
 use agent_lens::config::{self, ConfigError};
 use tracing::{info, warn};
 
 use super::analyze::build_analyze_command;
-use super::args::{ProfileSelectorArgs, RunArgs};
+use super::args::{ProfileSelectorArgs, ReportShape, RunArgs};
 use super::output::write_stdout_line;
 
 /// A named profile, ready to run: the profile itself plus its target
@@ -118,9 +118,9 @@ impl ResolvedProfile {
     pub(super) fn run_tool(
         &self,
         tool: config::ToolName,
-        format: OutputFormat,
+        shape: ReportShape,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        build_analyze_command(tool, &self.profile, &self.targets, format)?.run()
+        build_analyze_command(tool, &self.profile, &self.targets, shape)?.run()
     }
 }
 
@@ -138,12 +138,19 @@ pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error
     // flags) and reads every tool as JSON, whatever the profile says:
     // the digest is built from structured fields, and the profile's
     // `format` shapes the report a reader of the full sections gets.
-    let format = if args.digest {
-        OutputFormat::Json
+    // `--detail` follows the same precedence, and a digest is built
+    // from the full reports whatever either says.
+    let shape = if args.digest {
+        ReportShape::default()
     } else {
-        args.format
-            .or(resolved.profile.format)
-            .unwrap_or(OutputFormat::Json)
+        ReportShape::new(
+            args.format
+                .or(resolved.profile.format)
+                .unwrap_or(ReportFormat::Json),
+            args.detail
+                .or(resolved.profile.detail)
+                .unwrap_or(Detail::Detailed),
+        )
     };
 
     // One analysis index for the whole tool loop: the profile's
@@ -152,7 +159,7 @@ pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error
     let _index = AnalysisIndexScope::activate();
     let mut sections: Vec<(config::ToolName, String)> = Vec::new();
     for tool in resolved.tools() {
-        sections.push((tool, resolved.run_tool(tool, format)?));
+        sections.push((tool, resolved.run_tool(tool, shape)?));
     }
 
     if args.digest {
@@ -170,7 +177,11 @@ pub(super) fn run_profile(args: RunArgs) -> Result<(), Box<dyn std::error::Error
         ));
     }
 
-    write_stdout_line(&render_profile_report(&resolved.name, format, &sections)?)
+    write_stdout_line(&render_profile_report(
+        &resolved.name,
+        shape.format,
+        &sections,
+    )?)
 }
 
 /// Tool-option tables (`[profile.<name>.<tool>]`) set for a tool the
@@ -219,7 +230,9 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
 
 /// Render the per-tool reports as one document: stacked `## <tool>`
 /// sections for markdown, or a `{profile, results}` object for JSON where
-/// each analyzer's JSON output is nested under its tool name.
+/// each analyzer's JSON output is nested under its tool name. The row
+/// formats need no wrapper — every row already names its analyzer — so
+/// their sections are simply run together.
 ///
 /// The markdown document is one context-window payload, so it gets the
 /// dedupe a standalone report cannot: every call-graph analyzer in the
@@ -228,11 +241,11 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
 /// listing. Per-tool JSON is untouched either way.
 fn render_profile_report(
     profile: &str,
-    format: OutputFormat,
+    format: ReportFormat,
     sections: &[(config::ToolName, String)],
 ) -> Result<String, Box<dyn std::error::Error>> {
     Ok(match format {
-        OutputFormat::Md => {
+        ReportFormat::Md => {
             let mut deduper = ConfidenceDeduper::new();
             let mut out = String::new();
             for (tool, report) in sections {
@@ -249,7 +262,7 @@ fn render_profile_report(
             }
             out
         }
-        OutputFormat::Json => {
+        ReportFormat::Json => {
             let mut results = Vec::with_capacity(sections.len());
             for (tool, report) in sections {
                 let report: serde_json::Value = serde_json::from_str(report)?;
@@ -259,6 +272,9 @@ fn render_profile_report(
                 "profile": profile,
                 "results": results,
             }))?
+        }
+        ReportFormat::Jsonl | ReportFormat::Tsv => {
+            sections.iter().map(|(_, rows)| rows.as_str()).collect()
         }
     })
 }
@@ -273,7 +289,7 @@ mod tests {
             (config::ToolName::Complexity, "complexity body\n".to_owned()),
             (config::ToolName::Forwarding, "forwarding body".to_owned()),
         ];
-        let out = render_profile_report("audit", OutputFormat::Md, &sections).unwrap();
+        let out = render_profile_report("audit", ReportFormat::Md, &sections).unwrap();
         // No leading newline, and a single blank line between sections.
         assert_eq!(
             out,
@@ -298,7 +314,7 @@ mod tests {
                 format!("# Layer map\n\n{confidence}\nlayers note\n\n{row}"),
             ),
         ];
-        let out = render_profile_report("audit", OutputFormat::Md, &sections).unwrap();
+        let out = render_profile_report("audit", ReportFormat::Md, &sections).unwrap();
         assert_eq!(out.matches(row.trim_end()).count(), 1, "got: {out}");
         assert!(
             out.contains("Same worst modules as under `## forwarding`."),
@@ -353,7 +369,7 @@ mod tests {
     #[test]
     fn render_profile_report_json_nests_each_tool_report() {
         let sections = vec![(config::ToolName::Complexity, "{\"k\":1}".to_owned())];
-        let out = render_profile_report("audit", OutputFormat::Json, &sections).unwrap();
+        let out = render_profile_report("audit", ReportFormat::Json, &sections).unwrap();
         let value: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(value["profile"], "audit");
         assert_eq!(value["results"][0]["tool"], "complexity");
