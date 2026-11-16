@@ -47,7 +47,7 @@ use super::module_graph::{GraphPolicy, ModuleFile, ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
 use super::options::analyzer_options;
 use super::{AnalyzePathFilter, OutputFormat, SourceLang, module_graph, relative_display_path};
-use crate::analyze::format::render_overflow;
+use crate::analyze::format::{render_overflow, top_limit};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContextSpanAnalyzerError {
@@ -434,7 +434,7 @@ fn render_modules_table(out: &mut String, modules: &[ModuleSpanView], top: Optio
             .then_with(|| b.direct.cmp(&a.direct))
             .then_with(|| a.path.cmp(&b.path))
     });
-    let limit = top.unwrap_or(sorted.len());
+    let limit = top_limit(top, sorted.len());
     for m in sorted.iter().take(limit) {
         let preview = reachable_preview(&m.reachable);
         let _ = writeln!(

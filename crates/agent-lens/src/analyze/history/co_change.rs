@@ -44,7 +44,7 @@ use serde::Serialize;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
-use crate::analyze::format::render_overflow;
+use crate::analyze::format::{render_note_tight, render_overflow_narrowed, since_hint, top_limit};
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, CompiledPathFilter, OutputFormat, PathFilterError,
 };
@@ -381,7 +381,7 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
         "# Co-change report: {} ({} pair(s) over {} commit(s){scope})\n",
         view.target, view.pair_count, view.commit_count,
     );
-    let _ = writeln!(&mut out, "\n{}", view.note);
+    render_note_tight(&mut out, view.note);
     if view.shallow_clone {
         out.push_str(
             "\n**Shallow clone**: the log is truncated, so every support count below is a lower \
@@ -416,7 +416,7 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
         return out;
     }
 
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let _ = writeln!(
         &mut out,
         "\n## Top {limit} co-changing pairs (support × max confidence)\n"
@@ -445,7 +445,24 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
             p.last_cochange_commits_ago,
         );
     }
-    render_overflow(&mut out, view.pairs.len(), limit, "pair(s)");
+    // The last pair shown is where `--top` cut; its support, as a floor,
+    // is a narrower query whenever it is above the floor in force.
+    match view.pairs.iter().take(limit).next_back() {
+        Some(last) if last.cochanges > view.thresholds.min_support => render_overflow_narrowed(
+            &mut out,
+            view.pairs.len(),
+            limit,
+            "pair(s)",
+            &format!("`--min-support {}`", last.cochanges),
+        ),
+        _ => render_overflow_narrowed(
+            &mut out,
+            view.pairs.len(),
+            limit,
+            "pair(s)",
+            since_hint(view.since),
+        ),
+    }
     out
 }
 

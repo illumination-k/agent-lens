@@ -59,7 +59,10 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::{end_row_with_caveats, render_module_confidence};
+use super::format::{
+    end_row_with_caveats, render_module_confidence, render_note, render_note_tight,
+    render_overflow, render_overflow_narrowed, top_limit,
+};
 use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
 use super::options::analyzer_options;
 use super::raw_references::{RawTarget, identifiers_by_line};
@@ -805,7 +808,7 @@ fn candidate_entry(
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut out = format!(
         "# Single-use report: {} ({} function(s), {} single-caller, {} candidate(s))\n",
         report.root,
@@ -813,7 +816,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.calibration.single_caller_count,
         report.candidates.len(),
     );
-    let _ = writeln!(out, "\n{NOTE}\n");
+    render_note(&mut out, NOTE);
     let _ = writeln!(
         out,
         "Thresholds: loc <= {}, cyclomatic <= {}. Excluded outright: {} trait method(s), \
@@ -833,26 +836,30 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     let (clean, caveated): (Vec<_>, Vec<_>) =
         report.candidates.iter().partition(|e| e.caveats.is_empty());
     let _ = writeln!(out, "\n## Inline candidates (top {limit})");
-    out.push_str(
-        "\nPrivate, one resolved caller, one clean claim. Verify with a bare-name search, \
-         then inline into the caller or say why the name earns its keep.\n",
+    render_note_tight(
+        &mut out,
+        "Private, one resolved caller, one clean claim. Verify with a bare-name search, \
+         then inline into the caller or say why the name earns its keep.",
     );
-    render_entries(&mut out, &clean, limit);
+    render_entries(&mut out, &clean, limit, report.thresholds.max_loc);
 
     let _ = writeln!(out, "\n## Candidates with caveats (top {limit})");
-    out.push_str(
-        "\nSame single-caller shape, but the claim or the edit is weaker — each row says how.\n",
+    render_note_tight(
+        &mut out,
+        "Same single-caller shape, but the claim or the edit is weaker — each row says how.",
     );
-    render_entries(&mut out, &caveated, limit);
+    render_entries(&mut out, &caveated, limit, report.thresholds.max_loc);
 
     if !report.chains.is_empty() {
         let _ = writeln!(out, "\n## Collapsible chains (top {limit})");
-        out.push_str(
-            "\nEach cluster is candidates whose one caller is itself a candidate: inline the \
+        render_note_tight(
+            &mut out,
+            "Each cluster is candidates whose one caller is itself a candidate: inline the \
              members in the order listed (deepest first) and the whole run folds into the \
              sink, reclaiming the summed loc. Caveats on the individual rows above still \
-             apply.\n\n",
+             apply.",
         );
+        out.push('\n');
         for chain in report.chains.iter().take(limit) {
             const MEMBERS_SHOWN: usize = 8;
             let shown: Vec<String> = chain
@@ -876,6 +883,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
             }
             out.push('\n');
         }
+        render_overflow(&mut out, report.chains.len(), limit, "chain(s)");
     }
 
     let _ = writeln!(out, "\n## Threshold calibration");
@@ -890,10 +898,11 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         "cyclomatic",
         report.calibration.cyclomatic.as_ref(),
     );
-    out.push_str(
-        "\nSet `--max-loc` / `--max-cyclomatic` (or `[profile.<name>.narrowable]`) off these \
+    render_note_tight(
+        &mut out,
+        "Set `--max-loc` / `--max-cyclomatic` (or `[profile.<name>.narrowable]`) off these \
          percentiles for this repository's own appetite; p75 keeps the typical extraction, p90 \
-         sweeps in most of the tail.\n",
+         sweeps in most of the tail.",
     );
 
     render_module_confidence(
@@ -905,7 +914,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     out
 }
 
-fn render_entries(out: &mut String, entries: &[&CandidateEntry], limit: usize) {
+fn render_entries(out: &mut String, entries: &[&CandidateEntry], limit: usize, max_loc: usize) {
     if entries.is_empty() {
         out.push_str("\n_None._\n");
         return;
@@ -941,6 +950,19 @@ fn render_entries(out: &mut String, entries: &[&CandidateEntry], limit: usize) {
             let _ = write!(out, ", raw refs={}", entry.raw_reference_count);
         }
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
+    }
+    // Rows rank smallest body first, so the last one shown is the size
+    // the cut fell at; as a ceiling it is only a narrower query when it
+    // sits under the one already in force.
+    match entries.iter().take(limit).next_back() {
+        Some(last) if last.loc < max_loc => render_overflow_narrowed(
+            out,
+            entries.len(),
+            limit,
+            "candidate(s)",
+            &format!("`--max-loc {}`", last.loc),
+        ),
+        _ => render_overflow(out, entries.len(), limit, "candidate(s)"),
     }
 }
 

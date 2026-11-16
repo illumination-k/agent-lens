@@ -49,7 +49,10 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::{end_row_with_caveats, render_module_confidence};
+use super::format::{
+    end_row_with_caveats, render_module_confidence, render_note, render_note_tight,
+    render_overflow, render_overflow_narrowed, top_limit,
+};
 use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
 use super::options::analyzer_options;
 use super::raw_references::{RawTarget, identifiers_by_line};
@@ -1007,7 +1010,7 @@ impl Report {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut out = format!(
         "# Parameters report: {} ({} function(s) in pool, {} constant-argument finding(s), {} dead parameter(s))\n",
         report.root,
@@ -1015,7 +1018,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.constant_arguments.len(),
         report.dead_parameters.len(),
     );
-    let _ = writeln!(out, "\n{NOTE}\n");
+    render_note(&mut out, NOTE);
     let _ = writeln!(
         out,
         "Threshold: min call sites = {}. Excluded outright: {} trait method(s), {} \
@@ -1037,17 +1040,24 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     }
 
     let _ = writeln!(out, "\n## Constant arguments (top {limit})");
-    out.push_str(
-        "\nEvery analyzable production call site passes the value shown (or, for default-only \
+    render_note_tight(
+        &mut out,
+        "Every analyzable production call site passes the value shown (or, for default-only \
          rows, none passes the position at all). Verify with a bare-name search, then inline \
-         the value and drop the parameter — or say why the seam earns its keep.\n",
+         the value and drop the parameter — or say why the seam earns its keep.",
     );
-    render_constant_entries(&mut out, &report.constant_arguments, limit);
+    render_constant_entries(
+        &mut out,
+        &report.constant_arguments,
+        limit,
+        report.thresholds.min_call_sites,
+    );
 
     let _ = writeln!(out, "\n## Dead parameters (top {limit})");
-    out.push_str(
-        "\nThe body never mentions the name past its declaration. Drop the parameter and \
-         update the call sites; a caveat means callers outside the analyzed tree may exist.\n",
+    render_note_tight(
+        &mut out,
+        "The body never mentions the name past its declaration. Drop the parameter and \
+         update the call sites; a caveat means callers outside the analyzed tree may exist.",
     );
     render_dead_entries(&mut out, &report.dead_parameters, limit);
 
@@ -1062,9 +1072,10 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.calibration.several_values_count,
         report.calibration.varying_count,
     );
-    out.push_str(
-        "\nSet `--min-call-sites` (or `[profile.<name>.narrowable]`) off these counts: raising \
-         it trades findings for confidence that \"always\" is not an accident of few callers.\n",
+    render_note_tight(
+        &mut out,
+        "Set `--min-call-sites` (or `[profile.<name>.narrowable]`) off these counts: raising \
+         it trades findings for confidence that \"always\" is not an accident of few callers.",
     );
 
     render_module_confidence(
@@ -1076,7 +1087,12 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     out
 }
 
-fn render_constant_entries(out: &mut String, entries: &[ConstantArgumentEntry], limit: usize) {
+fn render_constant_entries(
+    out: &mut String,
+    entries: &[ConstantArgumentEntry],
+    limit: usize,
+    min_call_sites: usize,
+) {
     if entries.is_empty() {
         out.push_str("\n_None._\n");
         return;
@@ -1116,6 +1132,15 @@ fn render_constant_entries(out: &mut String, entries: &[ConstantArgumentEntry], 
         }
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
+    // One step above the floor in force: the smallest change that asks
+    // for more evidence per row.
+    render_overflow_narrowed(
+        out,
+        entries.len(),
+        limit,
+        "finding(s)",
+        &format!("`--min-call-sites {}`", min_call_sites.saturating_add(1)),
+    );
 }
 
 fn render_dead_entries(out: &mut String, entries: &[DeadParameterEntry], limit: usize) {
@@ -1133,6 +1158,7 @@ fn render_dead_entries(out: &mut String, entries: &[DeadParameterEntry], limit: 
         );
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
+    render_overflow(out, entries.len(), limit, "parameter(s)");
 }
 
 #[cfg(test)]

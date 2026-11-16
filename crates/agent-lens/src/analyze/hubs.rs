@@ -36,7 +36,7 @@ use super::call_graph::model::{
     CallGraphEdge, CallGraphNode, ModuleResolutionSummary, Resolution, ResolutionMethod,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::render_module_confidence;
+use super::format::{render_module_confidence, render_note_tight, render_overflow, top_limit};
 use super::options::analyzer_options;
 use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
@@ -552,17 +552,18 @@ fn percentile_f64(sorted: &[f64], p: usize) -> f64 {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut out = format!(
         "# Hub report: {} ({} function(s), {} analyzed, {} resolved edge(s))\n",
         report.root, report.node_count, report.candidate_count, report.resolved_edge_count,
     );
-    out.push_str(
-        "\nDegrees count resolved call edges only, so every number is a lower bound; \
+    render_note_tight(
+        &mut out,
+        "Degrees count resolved call edges only, so every number is a lower bound; \
          per-node `unres out` and the module confidence list below say how much is missing. \
          Outliers are flagged by a robust rule (> Q3 + 1.5*IQR on the log-scaled metric), \
          not absolute thresholds. `PR` is the PageRank-importance percentile on the \
-         call-count-weighted resolved graph.\n",
+         call-count-weighted resolved graph.",
     );
     if report.candidate_count == 0 {
         out.push_str("\n_No functions to analyze._\n");
@@ -570,7 +571,10 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     }
 
     let _ = writeln!(out, "\n## God functions (outlier fan-out, top {limit})");
-    out.push_str("\nHigh fan-out coordinates many callees and is empirically defect-prone.\n");
+    render_note_tight(
+        &mut out,
+        "High fan-out coordinates many callees and is empirically defect-prone.",
+    );
     render_entries(&mut out, &report.god_functions, limit, |e| {
         format!(
             "fan_out={}, fan_in={}(+{} test), loc={}, PR=p{}, unres out={}",
@@ -587,11 +591,12 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         out,
         "\n## Load-bearing functions (outlier fan-in, top {limit})"
     );
-    out.push_str(
-        "\nHigh fan-in is a blast-radius signal, not a defect signal: check callers \
+    render_note_tight(
+        &mut out,
+        "High fan-in is a blast-radius signal, not a defect signal: check callers \
          before editing these functions. `fallback` is the share of incoming call \
          sites attributed by name-fallback heuristics — higher means the fan-in \
-         itself is less certain.\n",
+         itself is less certain.",
     );
     render_entries(&mut out, &report.load_bearing, limit, |e| {
         format!(
@@ -606,9 +611,10 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     });
 
     let _ = writeln!(out, "\n## Bottlenecks (outlier Henry-Kafura, top {limit})");
-    out.push_str(
-        "\nHK = loc * (fan_in * fan_out)^2 spikes where wide traffic flows through \
-         one function. HK is size-confounded, so read it next to loc.\n",
+    render_note_tight(
+        &mut out,
+        "HK = loc * (fan_in * fan_out)^2 spikes where wide traffic flows through \
+         one function. HK is size-confounded, so read it next to loc.",
     );
     render_entries(&mut out, &report.bottlenecks, limit, |e| {
         format!(
@@ -622,10 +628,11 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         "\n## Misplaced? (cross-module pull > {MISPLACED_PULL_THRESHOLD}, \
          >= {MISPLACED_MIN_CALL_SITES} resolved incident call sites)"
     );
-    out.push_str(
-        "\nMost of the function's resolved call traffic lands in a different module \
+    render_note_tight(
+        &mut out,
+        "Most of the function's resolved call traffic lands in a different module \
          than its own — the deterministic fragment of \"feature envy\". Consider \
-         whether it belongs in the dominant module instead.\n",
+         whether it belongs in the dominant module instead.",
     );
     render_entries(&mut out, &report.misplaced, limit, |e| {
         let pull = e.cross_module_pull.unwrap_or(0.0);
@@ -674,6 +681,7 @@ fn render_entries(
             detail(entry),
         );
     }
+    render_overflow(out, entries.len(), limit, "function(s)");
 }
 
 fn format_fraction(fraction: Option<f64>) -> String {

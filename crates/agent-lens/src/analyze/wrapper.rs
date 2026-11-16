@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use lens_domain::{InterfaceShape, ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
+use super::format::{render_overflow, top_limit};
 use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
@@ -437,7 +438,7 @@ impl<'a> From<&'a WrapperFinding> for WrapperView<'a> {
 }
 
 fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     // The header counts *scanned* files, not files with findings, so a
     // clean run reads "8 file(s) scanned, 0 wrapper(s)" instead of the
     // misleading "0 file(s)" that looks like nothing was analyzed.
@@ -475,14 +476,7 @@ fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
             let _ = writeln!(out, "{}", wrapper_row(w));
         }
     }
-    let omitted = report.item_count().saturating_sub(limit);
-    if omitted > 0 {
-        let _ = writeln!(
-            out,
-            "\n_{omitted} more wrapper(s) not shown (--top {limit}); raise --top or use \
-             --format json for the full list._",
-        );
-    }
+    render_overflow(&mut out, report.item_count(), limit, "wrapper(s)");
     out
 }
 
@@ -635,7 +629,10 @@ fn meaningful(x: i32) -> i32 { let y = x + 1; y * 2 }
         assert!(!md.contains("`two`"), "got: {md}");
         // The second file never starts: the budget ran out inside a.rs.
         assert!(!md.contains("## b.rs"), "got: {md}");
-        assert!(md.contains("_2 more wrapper(s) not shown"), "got: {md}");
+        assert!(
+            md.contains("+2 more wrapper(s) not shown (--top 1)"),
+            "got: {md}"
+        );
 
         // A budget above the finding count lists everything, with no
         // "of N" qualifier and no trailing note.

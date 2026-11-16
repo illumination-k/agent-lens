@@ -21,6 +21,7 @@ use serde::Serialize;
 
 use self::rollup::{FileReport, Rollup};
 use super::FunctionSelection;
+use super::format::{render_overflow, render_overflow_narrowed, top_limit};
 use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
@@ -310,9 +311,15 @@ fn format_markdown(report: &Report<'_>, top: Option<usize>, min_score: Option<u3
     }
     render_top_functions(&mut out, report.files(), top, min_score);
     if let Some(summary) = report.summary() {
-        let limit = top.unwrap_or(DEFAULT_TOP);
-        render_rollups(&mut out, "files", &summary.file_rollups, limit);
-        render_rollups(&mut out, "directories", &summary.directory_rollups, limit);
+        let limit = top_limit(top, DEFAULT_TOP);
+        render_rollups(&mut out, "files", "file(s)", &summary.file_rollups, limit);
+        render_rollups(
+            &mut out,
+            "directories",
+            "directory(ies)",
+            &summary.directory_rollups,
+            limit,
+        );
     }
     out
 }
@@ -387,7 +394,7 @@ fn render_top_functions(
             .then_with(|| a.file.cmp(b.file))
     });
 
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let suffix = min_score.map_or_else(String::new, |s| format!(", cognitive >= {s}"));
     let _ = writeln!(
         out,
@@ -413,11 +420,29 @@ fn render_top_functions(
             format_optional_f64(f.maintainability_index, 0),
         );
     }
+    // The last row shown is the cut `--top` made; its score, as a floor,
+    // is the query that returns this listing without the tail.
+    match rows.iter().take(limit).next_back() {
+        Some(last) => {
+            let floor = last
+                .func
+                .cognitive
+                .max(min_score.map_or(1, |s| s.saturating_add(1)));
+            render_overflow_narrowed(
+                out,
+                rows.len(),
+                limit,
+                "function(s)",
+                &format!("`--min-score {floor}`"),
+            );
+        }
+        None => render_overflow(out, rows.len(), limit, "function(s)"),
+    }
 }
 
 /// Top-N rollup rows. Skipped when there is only one row: a lone file or
 /// directory restates the summary.
-fn render_rollups(out: &mut String, label: &str, rows: &[Rollup], limit: usize) {
+fn render_rollups(out: &mut String, label: &str, unit: &str, rows: &[Rollup], limit: usize) {
     if rows.len() < 2 {
         return;
     }
@@ -429,6 +454,7 @@ fn render_rollups(out: &mut String, label: &str, rows: &[Rollup], limit: usize) 
             r.path, r.cognitive_sum, r.cognitive_max, r.cyclomatic_sum, r.function_count,
         );
     }
+    render_overflow(out, rows.len(), limit, unit);
 }
 
 #[cfg(test)]

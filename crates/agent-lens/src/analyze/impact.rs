@@ -34,6 +34,7 @@ use serde::Serialize;
 
 use super::call_graph::model::{CallGraphNode, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders, match_symbol};
+use super::format::{render_note_tight, top_limit};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, overlaps_any};
@@ -617,7 +618,7 @@ struct ChangedResult {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut out = format!(
         "# Impact: {} ({} changed function(s), union blast radius {} within depth {})\n",
         report.root,
@@ -662,7 +663,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         }
     }
 
-    let _ = writeln!(out, "\n{}", report.note);
+    render_note_tight(&mut out, report.note);
     for changed in &report.changed {
         render_changed(&mut out, changed, limit);
     }
@@ -772,7 +773,15 @@ fn render_rows(out: &mut String, rows: &[FunctionRef], limit: usize) {
         );
     }
     if rows.len() > limit {
-        let _ = writeln!(out, "  - … and {} more (see JSON)", rows.len() - limit);
+        // A nested bullet, not the shared closing paragraph: the list
+        // sits inside one changed function's section, and nothing but
+        // `--top` narrows a caller list.
+        let _ = writeln!(
+            out,
+            "  - +{} more not shown (--top {limit}); raise `--top`, or `--format jsonl` \
+             carries every row",
+            rows.len() - limit,
+        );
     }
 }
 
@@ -1305,7 +1314,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case::limit_below_rows_folds_the_rest(2, Some("  - … and 3 more (see JSON)"))]
+    #[case::limit_below_rows_folds_the_rest(
+        2,
+        Some("  - +3 more not shown (--top 2); raise `--top`")
+    )]
     #[case::limit_equal_to_rows_is_not_truncation(5, None)]
     fn markdown_caps_caller_lists_at_top(#[case] top: usize, #[case] fold_line: Option<&str>) {
         let dir = tempfile::tempdir().unwrap();
@@ -1323,7 +1335,7 @@ mod tests {
         assert!(md.contains("- direct callers (5):"), "got: {md}");
         match fold_line {
             Some(line) => assert!(md.contains(line), "got: {md}"),
-            None => assert!(!md.contains("more (see JSON)"), "got: {md}"),
+            None => assert!(!md.contains("not shown"), "got: {md}"),
         }
     }
 

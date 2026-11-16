@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
+use super::format::{render_overflow_narrowed, top_limit};
 use super::options::analyzer_options;
 use super::runner::{
     FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
@@ -308,7 +309,7 @@ fn render_ranked_units(
     min_score: Option<usize>,
 ) {
     let min_score = min_score.unwrap_or(DEFAULT_MIN_SCORE);
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut rows: Vec<TopUnitRow<'_>> = files
         .iter()
         .flat_map(|file| {
@@ -338,6 +339,15 @@ fn render_ranked_units(
     for row in rows.iter().take(limit) {
         render_unit(out, row.file, row.unit);
     }
+    // The ranking is by LCOM96, so no shown row's LCOM4 is a clean cut;
+    // the next floor up is the smallest step that drops rows.
+    render_overflow_narrowed(
+        out,
+        rows.len(),
+        limit,
+        "unit(s)",
+        &format!("`--min-score {}`", min_score.saturating_add(1)),
+    );
 }
 
 /// Descending compare on `Option<f64>` LCOM96 scores, with `None`

@@ -56,6 +56,7 @@ use lens_domain::graph_algo::bfs;
 use std::sync::Arc;
 
 use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::format::{note_text, render_overflow_narrowed, threshold_hint, top_limit};
 use super::runner::render_report;
 use super::similarity::{ScoredCorpus, ScoredUnit, SimilarityAnalyzer, SimilarityMethod};
 use super::{AnalyzeRoots, AnalyzerError, FunctionSelection, OutputFormat};
@@ -1008,17 +1009,21 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.min_lines,
         report.min_body_nodes,
     );
+    // The score is this run's; the note explaining it is the same on
+    // every run, and takes its separating space with it when left out.
+    let note = note_text(NOTE);
     let _ = writeln!(
         out,
-        "\nSuite redundancy score {:.3} (lower bound). {}",
-        summary.redundancy_score, NOTE,
+        "\nSuite redundancy score {:.3} (lower bound).{}{note}",
+        summary.redundancy_score,
+        if note.is_empty() { "" } else { " " },
     );
     write_calibration(&mut out, report);
     if report.groups.is_empty() {
         let _ = writeln!(out, "\n_No test near-copies at or above threshold._");
         return out;
     }
-    let limit = top.unwrap_or(DEFAULT_TOP).min(report.groups.len());
+    let limit = top_limit(top, DEFAULT_TOP).min(report.groups.len());
     let _ = writeln!(
         out,
         "\n## {} redundancy group(s), {} foldable of {} redundant test(s){}",
@@ -1049,6 +1054,12 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
             let _ = writeln!(out, "  - {}", member_line(member));
         }
     }
+    // A group's weakest pair is the score a higher threshold cuts at.
+    let narrow = report.groups[..limit]
+        .last()
+        .and_then(|last| threshold_hint(last.min_similarity, report.threshold))
+        .unwrap_or_else(|| format!("a higher `--min-lines` (now {})", report.min_lines));
+    render_overflow_narrowed(&mut out, report.groups.len(), limit, "group(s)", &narrow);
     out
 }
 

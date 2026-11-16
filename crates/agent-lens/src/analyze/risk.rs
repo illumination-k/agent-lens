@@ -50,7 +50,9 @@ use serde::Serialize;
 
 use super::call_graph::model::{CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::render_module_confidence;
+use super::format::{
+    render_module_confidence, render_note_tight, render_overflow_narrowed, since_hint, top_limit,
+};
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
@@ -508,8 +510,9 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         "# Risk report: {} ({} file(s) ranked{scope})\n",
         report.root, report.file_count,
     );
-    out.push_str(
-        "\nRank product of churn and call-graph centrality: \
+    render_note_tight(
+        &mut out,
+        "Rank product of churn and call-graph centrality: \
          `rank_product = churn_rank * centrality_rank`, and **lower is riskier** \
          (rank 1 is the top of an axis). This ranks blast radius, not defects: a \
          high row means \"check callers and tests before editing\", not \"fix this\". \
@@ -517,14 +520,15 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
          PageRank importance among the file's functions, the same pass `analyze hubs` \
          reports — so `PR p` percentiles are comparable between the two. Both ranks \
          are competition ranks over the files listed here, so they are relative to \
-         this scope, not absolute.\n",
+         this scope, not absolute.",
     );
-    out.push_str(
-        "\nGranularity is per file: git attributes commits to files, so a quiet \
+    render_note_tight(
+        &mut out,
+        "Granularity is per file: git attributes commits to files, so a quiet \
          function in a churning file inherits that churn. Centrality follows \
          resolved call edges only, so it is a lower bound — ambiguous and unresolved \
          call sites are invisible to it, and the module confidence list below says \
-         where that bites hardest.\n",
+         where that bites hardest.",
     );
 
     if report.files.is_empty() {
@@ -557,7 +561,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         },
     );
 
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let _ = writeln!(
         &mut out,
         "\n## Top {limit} by risk (rank product, lower is riskier)\n"
@@ -588,6 +592,13 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
             f.hottest_cell(),
         );
     }
+    render_overflow_narrowed(
+        &mut out,
+        report.files.len(),
+        limit,
+        "file(s)",
+        since_hint(report.since.as_deref()),
+    );
 
     render_module_confidence(
         &mut out,

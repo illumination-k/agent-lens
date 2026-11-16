@@ -55,6 +55,7 @@ use lens_domain::{
 };
 use serde::Serialize;
 
+use super::format::{render_overflow, top_limit};
 use super::module_graph::{GraphPolicy, build_graph, module_paths};
 use super::module_label::ModuleLabeler;
 use super::options::analyzer_options;
@@ -299,7 +300,7 @@ impl PairView {
 }
 
 fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut out = format!(
         "# Coupling report: {} ({} module(s), {} edge(s), {} cycle(s))\n",
         view.crate_root, view.module_count, view.edge_count, view.cycle_count,
@@ -343,13 +344,7 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView], limit: usize) 
             format_optional_f64(m.instability, 2),
         );
     }
-    let omitted = sorted.len().saturating_sub(limit);
-    if omitted > 0 {
-        let _ = writeln!(
-            out,
-            "\n_{omitted} lower-IFC module(s) not shown; raise --top or use --format json._",
-        );
-    }
+    render_overflow(out, sorted.len(), limit, "lower-IFC module(s)");
 }
 
 fn render_cycles(out: &mut String, cycles: &[CycleView]) {
@@ -369,6 +364,22 @@ fn render_pairs(out: &mut String, pairs: &[PairView], limit: usize) {
     let _ = writeln!(out, "\n## Top coupled pairs\n");
     for p in pairs.iter().take(limit) {
         let _ = writeln!(out, "- {} ↔ {} ({} symbol(s))", p.a, p.b, p.shared_symbols);
+    }
+    let omitted = pairs.len().saturating_sub(limit);
+    if omitted == 0 {
+        return;
+    }
+    if limit < TOP_PAIRS_LIMIT {
+        render_overflow(out, pairs.len(), limit, "pair(s)");
+    } else {
+        // The pair list stops at its own ceiling however high `--top`
+        // goes, so pointing at `--top` here would send the reader to a
+        // flag that cannot show more.
+        let _ = writeln!(
+            out,
+            "\n+{omitted} more pair(s) not shown (the list stops at {TOP_PAIRS_LIMIT}). \
+             `--format jsonl` carries every row."
+        );
     }
 }
 
@@ -487,7 +498,10 @@ mod tests {
         // Three modules exist (crate, crate::a, crate::b); one row of
         // the table survives and the other two are accounted for.
         assert_eq!(md.matches("| crate").count(), 1, "got: {md}");
-        assert!(md.contains("_2 lower-IFC module(s) not shown"), "got: {md}",);
+        assert!(
+            md.contains("+2 more lower-IFC module(s) not shown (--top 1)"),
+            "got: {md}",
+        );
 
         // Above the module count the note disappears entirely.
         let md = CouplingAnalyzer::new()

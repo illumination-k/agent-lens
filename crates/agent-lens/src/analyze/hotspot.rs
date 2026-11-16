@@ -26,6 +26,7 @@ use lens_domain::{FileComplexity, FunctionComplexity, HotspotEntry, compute_hots
 use serde::Serialize;
 use tracing::warn;
 
+use super::format::{render_overflow_narrowed, since_hint, top_limit};
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
@@ -317,7 +318,7 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
         view.summary.score_max, view.summary.commits_max, view.summary.cognitive_max,
     );
 
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let _ = writeln!(
         &mut out,
         "\n## Top {limit} hotspots (commits × cognitive_max)\n"
@@ -337,6 +338,15 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
             f.path, f.score, f.commits, f.cognitive_max, f.cyclomatic_max, f.loc, f.function_count,
         );
     }
+    // Churn is the half of the score a flag controls: a window drops
+    // the files nobody touched lately.
+    render_overflow_narrowed(
+        &mut out,
+        view.files.len(),
+        limit,
+        "file(s)",
+        since_hint(view.since),
+    );
     out
 }
 

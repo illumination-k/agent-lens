@@ -81,9 +81,25 @@ impl Drop for DetailScope {
 /// far to trust them — as a paragraph of its own. It is the same text on
 /// every run, so [`Detail::Concise`] leaves it out: a caller who asked
 /// for the concise report has read it before, and JSON still carries it.
+///
+/// For a note the next paragraph follows without opening a blank line
+/// of its own: the blank line that separates that paragraph from what
+/// came before is written at either level, the note and the blank line
+/// after it only at [`Detail::Detailed`]. [`render_note_tight`] is the
+/// one for a note followed by a block that brings its own.
 pub(crate) fn render_note(out: &mut String, note: &str) {
+    out.push('\n');
     if Detail::current() == Detail::Detailed {
-        let _ = writeln!(out, "\n{note}\n");
+        let _ = writeln!(out, "{note}\n");
+    }
+}
+
+/// [`render_note`] for a report whose next write opens with its own
+/// blank line: the same paragraph without one after it, and nothing at
+/// all at [`Detail::Concise`].
+pub(crate) fn render_note_tight(out: &mut String, note: &str) {
+    if Detail::current() == Detail::Detailed {
+        let _ = writeln!(out, "\n{note}");
     }
 }
 
@@ -104,6 +120,35 @@ pub(crate) fn top_limit(top: Option<usize>, default: usize) -> usize {
         Detail::Detailed => default,
         Detail::Concise => default.min(CONCISE_TOP),
     })
+}
+
+/// [`top_limit`] for a listing with no default cap: `--top` when given,
+/// [`CONCISE_TOP`] at [`Detail::Concise`], otherwise every row.
+pub(crate) fn top_cap(top: Option<usize>) -> Option<usize> {
+    top.or(match Detail::current() {
+        Detail::Detailed => None,
+        Detail::Concise => Some(CONCISE_TOP),
+    })
+}
+
+/// The `--since` hint for a history listing's overflow line. Without a
+/// window the suggestion is a concrete one; inside a window there is no
+/// value to derive, so the flag is named and the choice left open.
+pub(crate) fn since_hint(since: Option<&str>) -> &'static str {
+    if since.is_some() {
+        "a shorter `--since` window"
+    } else {
+        "`--since 90.days.ago`"
+    }
+}
+
+/// The `--threshold` hint for a similarity listing's overflow line: the
+/// score of the last row shown, or `None` when that is not above the
+/// `current` threshold at the two decimals the flag is written to — a
+/// hint that returns the same listing is worse than none.
+pub(crate) fn threshold_hint(last_shown: f64, current: f64) -> Option<String> {
+    let cents = |score: f64| (score * 100.0).round();
+    (cents(last_shown) > cents(current)).then(|| format!("`--threshold {last_shown:.2}`"))
 }
 
 pub(crate) fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
@@ -175,7 +220,12 @@ pub(crate) fn render_module_confidence(
             .then_with(|| b.total_call_count.cmp(&a.total_call_count))
             .then_with(|| a.module.cmp(&b.module))
     });
-    let _ = writeln!(out, "\n{CONFIDENCE_HEADING}\n\n{note}\n");
+    let _ = writeln!(out, "\n{CONFIDENCE_HEADING}\n");
+    // What the undercount does to this analyzer's numbers is the same
+    // sentence on every run; the rows are the finding.
+    if Detail::current() == Detail::Detailed {
+        let _ = writeln!(out, "{note}\n");
+    }
     for m in worst.iter().take(CONFIDENCE_TOP_MODULES) {
         let unresolved = m.total_call_count - m.calls.resolved_call_count;
         let _ = writeln!(
@@ -307,7 +357,10 @@ pub(crate) fn render_module_sections<G: ModuleSection>(
         group.render_items(out, items_per_module);
         let overflow = group.item_count().saturating_sub(items_per_module);
         if overflow > 0 {
-            let _ = writeln!(out, "- +{overflow} more (JSON output carries every row)");
+            let _ = writeln!(
+                out,
+                "- +{overflow} more (`--format jsonl` carries every row)"
+            );
         }
     }
     render_overflow(out, groups.len(), shown, "module(s)");
@@ -377,6 +430,196 @@ mod tests {
     #[case::no_call_sites_at_all(vec![summary("a", 0, 0)])]
     fn nothing_is_rendered_without_unresolved_calls(#[case] modules: Vec<ModuleResolutionSummary>) {
         assert_eq!(render(&modules), "");
+    }
+
+    /// What a writer puts into an empty buffer at `detail`.
+    fn written_at(detail: Detail, write: impl FnOnce(&mut String)) -> String {
+        let _scope = DetailScope::enter(detail);
+        let mut out = String::new();
+        write(&mut out);
+        out
+    }
+
+    #[rstest]
+    #[case::detailed(Detail::Detailed, "\nwhat the rows mean\n\n")]
+    // The blank line the next paragraph leans on survives the note.
+    #[case::concise(Detail::Concise, "\n")]
+    fn render_note_keeps_the_paragraph_break_and_gates_the_note(
+        #[case] detail: Detail,
+        #[case] expected: &str,
+    ) {
+        let out = written_at(detail, |out| render_note(out, "what the rows mean"));
+        assert_eq!(out, expected);
+    }
+
+    #[rstest]
+    #[case::detailed(Detail::Detailed, "\nwhat the rows mean\n")]
+    #[case::concise(Detail::Concise, "")]
+    fn render_note_tight_writes_nothing_at_concise(#[case] detail: Detail, #[case] expected: &str) {
+        let out = written_at(detail, |out| render_note_tight(out, "what the rows mean"));
+        assert_eq!(out, expected);
+    }
+
+    #[rstest]
+    #[case::detailed(Detail::Detailed, "inline note")]
+    #[case::concise(Detail::Concise, "")]
+    fn note_text_is_empty_at_concise(#[case] detail: Detail, #[case] expected: &str) {
+        let _scope = DetailScope::enter(detail);
+        assert_eq!(note_text("inline note"), expected);
+    }
+
+    #[rstest]
+    #[case::detailed_default(Detail::Detailed, None, 20, 20)]
+    #[case::detailed_explicit(Detail::Detailed, Some(3), 20, 3)]
+    #[case::concise_lowers_the_default(Detail::Concise, None, 20, CONCISE_TOP)]
+    // A default already under the concise cap is not raised to it.
+    #[case::concise_keeps_a_smaller_default(Detail::Concise, None, 2, 2)]
+    #[case::concise_explicit_above_the_cap(Detail::Concise, Some(50), 20, 50)]
+    #[case::concise_explicit_zero(Detail::Concise, Some(0), 20, 0)]
+    fn top_limit_prefers_the_flag_then_the_level(
+        #[case] detail: Detail,
+        #[case] top: Option<usize>,
+        #[case] default: usize,
+        #[case] expected: usize,
+    ) {
+        let _scope = DetailScope::enter(detail);
+        assert_eq!(top_limit(top, default), expected);
+    }
+
+    #[rstest]
+    #[case::detailed_is_uncapped(Detail::Detailed, None, None)]
+    #[case::detailed_explicit(Detail::Detailed, Some(3), Some(3))]
+    #[case::concise_caps(Detail::Concise, None, Some(CONCISE_TOP))]
+    #[case::concise_explicit(Detail::Concise, Some(50), Some(50))]
+    fn top_cap_is_uncapped_only_at_detailed_without_the_flag(
+        #[case] detail: Detail,
+        #[case] top: Option<usize>,
+        #[case] expected: Option<usize>,
+    ) {
+        let _scope = DetailScope::enter(detail);
+        assert_eq!(top_cap(top), expected);
+    }
+
+    #[test]
+    fn the_level_is_detailed_outside_any_scope() {
+        assert_eq!(Detail::current(), Detail::Detailed);
+    }
+
+    /// Scopes nest: each restores the level it found, not the default.
+    #[test]
+    fn a_scope_restores_the_level_it_replaced() {
+        let outer = DetailScope::enter(Detail::Concise);
+        assert_eq!(Detail::current(), Detail::Concise);
+        {
+            let _inner = DetailScope::enter(Detail::Detailed);
+            assert_eq!(Detail::current(), Detail::Detailed);
+            {
+                let _innermost = DetailScope::enter(Detail::Concise);
+                assert_eq!(Detail::current(), Detail::Concise);
+            }
+            assert_eq!(Detail::current(), Detail::Detailed);
+        }
+        assert_eq!(Detail::current(), Detail::Concise);
+        drop(outer);
+        assert_eq!(Detail::current(), Detail::Detailed);
+    }
+
+    #[rstest]
+    #[case::narrowed(
+        12,
+        5,
+        "`--min-score 8`",
+        "\n+7 more row(s) not shown (--top 5). Narrow it: `--min-score 8`, pass a sub-path, \
+         or raise `--top`; `--format jsonl` carries every row.\n"
+    )]
+    #[case::no_flag(
+        12,
+        5,
+        "",
+        "\n+7 more row(s) not shown (--top 5). Narrow it: pass a sub-path, or raise `--top`; \
+         `--format jsonl` carries every row.\n"
+    )]
+    #[case::exactly_fits(5, 5, "`--min-score 8`", "")]
+    #[case::under_the_cap(3, 5, "`--min-score 8`", "")]
+    #[case::nothing_to_show(0, 5, "", "")]
+    fn overflow_line_names_the_cut_and_the_narrowing_flag(
+        #[case] total: usize,
+        #[case] shown: usize,
+        #[case] narrow: &str,
+        #[case] expected: &str,
+    ) {
+        let mut out = String::new();
+        render_overflow_narrowed(&mut out, total, shown, "row(s)", narrow);
+        assert_eq!(out, expected);
+    }
+
+    /// The overflow line is a fact about the listing, not explanation:
+    /// it is written at either level.
+    #[test]
+    fn overflow_line_is_written_at_concise() {
+        let out = written_at(Detail::Concise, |out| render_overflow(out, 9, 5, "row(s)"));
+        assert!(
+            out.contains("+4 more row(s) not shown (--top 5)"),
+            "got: {out}"
+        );
+    }
+
+    #[rstest]
+    #[case::unwindowed(None, "`--since 90.days.ago`")]
+    #[case::windowed(Some("30.days.ago"), "a shorter `--since` window")]
+    fn since_hint_is_concrete_only_without_a_window(
+        #[case] since: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(since_hint(since), expected);
+    }
+
+    #[rstest]
+    #[case::above(0.93, 0.85, Some("`--threshold 0.93`"))]
+    #[case::equal(0.85, 0.85, None)]
+    // Equal at the two decimals the flag is written to: no narrower.
+    #[case::equal_after_rounding(0.853, 0.85, None)]
+    #[case::below(0.80, 0.85, None)]
+    fn threshold_hint_needs_a_score_above_the_current_cut(
+        #[case] last_shown: f64,
+        #[case] current: f64,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(threshold_hint(last_shown, current).as_deref(), expected);
+    }
+
+    #[test]
+    fn concise_keeps_the_confidence_rows_and_drops_their_note() {
+        let modules = [summary("murky", 1, 3)];
+        let out = written_at(Detail::Concise, |out| {
+            render_module_confidence(out, &modules, "note text");
+        });
+        assert_eq!(
+            out,
+            "\n## Resolution confidence (worst modules)\n\n\
+             - `murky`: 3/4 call sites not resolved (75%)\n",
+        );
+    }
+
+    /// The fold reads rows from wherever they start, so it holds when
+    /// the note above them is gone.
+    #[test]
+    fn deduper_folds_repeated_rows_at_concise() {
+        let _scope = DetailScope::enter(Detail::Concise);
+        let modules = [summary("murky", 1, 3)];
+        let mut deduper = ConfidenceDeduper::new();
+        assert_eq!(
+            deduper.dedupe("delegation", &body_with_confidence(&modules, "n")),
+            None
+        );
+        let folded = deduper
+            .dedupe("layers", &body_with_confidence(&modules, "n"))
+            .unwrap();
+        assert!(
+            folded.contains("Same worst modules as under `## delegation`."),
+            "got: {folded}",
+        );
+        assert!(!folded.contains("- `murky`"), "got: {folded}");
     }
 
     #[rstest]
@@ -600,7 +843,7 @@ mod tests {
         );
         assert!(!out.contains("`c`"), "got: {out}");
         assert!(
-            out.contains("+1 more module(s) not shown (raise `--top`"),
+            out.contains("+1 more module(s) not shown (--top 2). Narrow it: pass a sub-path"),
             "got: {out}",
         );
     }
@@ -610,7 +853,7 @@ mod tests {
         let out = sections(&[group("a", 5)], 10, 2);
         assert_eq!(out.matches("- item ").count(), 2, "got: {out}");
         assert!(
-            out.contains("- +3 more (JSON output carries every row)"),
+            out.contains("- +3 more (`--format jsonl` carries every row)"),
             "got: {out}",
         );
     }
@@ -631,7 +874,7 @@ mod tests {
         );
         assert_eq!(out.matches("- item ").count(), 1, "got: {out}");
         assert!(
-            out.contains("- +5 more (JSON output carries every row)"),
+            out.contains("- +5 more (`--format jsonl` carries every row)"),
             "got: {out}",
         );
     }
