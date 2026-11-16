@@ -387,7 +387,30 @@ fn render_pairs(out: &mut String, pairs: &[PairView], limit: usize) {
 mod tests {
     use super::*;
     use crate::test_support::write_file;
+    use rstest::rstest;
     use std::path::PathBuf;
+
+    /// At the list's own ceiling `--top` cannot show more, so the line
+    /// must not point there; under it, it must.
+    #[rstest]
+    #[case::under_the_ceiling(TOP_PAIRS_LIMIT - 1, "+3 more pair(s) not shown (--top 9)")]
+    #[case::at_the_ceiling(TOP_PAIRS_LIMIT, "+2 more pair(s) not shown (the list stops at 10)")]
+    fn pair_overflow_names_top_only_while_top_can_show_more(
+        #[case] limit: usize,
+        #[case] expected: &str,
+    ) {
+        let pairs: Vec<PairView> = (0..TOP_PAIRS_LIMIT + 2)
+            .map(|i| PairView {
+                a: format!("a{i}"),
+                b: format!("b{i}"),
+                shared_symbols: 1,
+            })
+            .collect();
+        let mut out = String::new();
+        render_pairs(&mut out, &pairs, limit);
+        assert!(out.contains(expected), "got: {out}");
+        assert_eq!(out.matches("more pair(s)").count(), 1, "got: {out}");
+    }
 
     fn small_crate(dir: &Path) -> PathBuf {
         // Layout:

@@ -1601,6 +1601,14 @@ mod tests {
         assert!(capped.contains("## Most drifted 1 of 2 name key(s)"));
         assert!(capped.contains("`alpha`"));
         assert!(!capped.contains("`beta`"));
+        // No threshold narrows a paired listing, so the line names the
+        // size floor and the value it has now.
+        assert!(
+            capped.contains(
+                "+1 more name key(s) not shown (--top 1). Narrow it: a higher `--min-lines` (now 5), "
+            ),
+            "got: {capped}",
+        );
 
         let full = format_paired_markdown(&report, None, "function");
         assert!(full.contains("## 2 name key(s) with cross-file siblings"));

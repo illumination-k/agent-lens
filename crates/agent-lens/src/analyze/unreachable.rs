@@ -74,7 +74,7 @@ use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builder
 use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::{
     ModuleSection, render_backticked_list, render_module_confidence, render_module_sections,
-    render_note, render_note_tight, top_limit,
+    render_nested_overflow, render_note, render_note_tight, top_limit,
 };
 use super::options::analyzer_options;
 use super::runner::render_report;
@@ -1589,13 +1589,13 @@ fn render_islands(out: &mut String, islands: &[Island]) {
             render_backticked_list(&island.deletion_order, ISLAND_MEMBERS_PER_ROW),
         );
     }
-    let overflow = islands.len().saturating_sub(ISLANDS_SHOWN);
-    if overflow > 0 {
-        let _ = writeln!(
-            out,
-            "- +{overflow} more (`--format jsonl` carries every island)"
-        );
-    }
+    render_nested_overflow(
+        out,
+        "",
+        islands.len(),
+        ISLANDS_SHOWN,
+        " (`--format jsonl` carries every island)",
+    );
 }
 
 #[cfg(test)]

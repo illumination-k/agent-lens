@@ -151,6 +151,43 @@ pub(crate) fn threshold_hint(last_shown: f64, current: f64) -> Option<String> {
     (cents(last_shown) > cents(current)).then(|| format!("`--threshold {last_shown:.2}`"))
 }
 
+/// The hint for a listing a floor flag narrows: `cut` is the value of
+/// the last row shown, and only a floor above the `current` one returns
+/// a shorter listing.
+pub(crate) fn floor_hint<T: PartialOrd + std::fmt::Display>(
+    flag: &str,
+    cut: T,
+    current: T,
+) -> Option<String> {
+    (cut > current).then(|| format!("`{flag} {cut}`"))
+}
+
+/// [`floor_hint`] for a ceiling flag: only a ceiling under the `current`
+/// one narrows.
+pub(crate) fn ceiling_hint<T: PartialOrd + std::fmt::Display>(
+    flag: &str,
+    cut: T,
+    current: T,
+) -> Option<String> {
+    (cut < current).then(|| format!("`{flag} {cut}`"))
+}
+
+/// The overflow bullet of a list nested under a row and capped on its
+/// own, not by `--top`: `<indent>- +N more<tail>`, or nothing when the
+/// list fit.
+pub(crate) fn render_nested_overflow(
+    out: &mut String,
+    indent: &str,
+    total: usize,
+    shown: usize,
+    tail: &str,
+) {
+    let overflow = total.saturating_sub(shown);
+    if overflow > 0 {
+        let _ = writeln!(out, "{indent}- +{overflow} more{tail}");
+    }
+}
+
 pub(crate) fn format_optional_f64(v: Option<f64>, precision: usize) -> String {
     match v {
         Some(x) => format!("{x:.precision$}"),
@@ -586,6 +623,44 @@ mod tests {
         #[case] expected: Option<&str>,
     ) {
         assert_eq!(threshold_hint(last_shown, current).as_deref(), expected);
+    }
+
+    #[rstest]
+    #[case::above(7, 3, Some("`--min-x 7`"))]
+    #[case::equal(3, 3, None)]
+    #[case::below(2, 3, None)]
+    fn floor_hint_needs_a_cut_above_the_current_floor(
+        #[case] cut: usize,
+        #[case] current: usize,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(floor_hint("--min-x", cut, current).as_deref(), expected);
+    }
+
+    #[rstest]
+    #[case::below(2, 3, Some("`--max-x 2`"))]
+    #[case::equal(3, 3, None)]
+    #[case::above(7, 3, None)]
+    fn ceiling_hint_needs_a_cut_under_the_current_ceiling(
+        #[case] cut: usize,
+        #[case] current: usize,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(ceiling_hint("--max-x", cut, current).as_deref(), expected);
+    }
+
+    #[rstest]
+    #[case::over(5, 3, "  - +2 more pair(s)\n")]
+    #[case::exact_fit(3, 3, "")]
+    #[case::under(1, 3, "")]
+    fn nested_overflow_is_written_only_when_rows_were_cut(
+        #[case] total: usize,
+        #[case] shown: usize,
+        #[case] expected: &str,
+    ) {
+        let mut out = String::new();
+        render_nested_overflow(&mut out, "  ", total, shown, " pair(s)");
+        assert_eq!(out, expected);
     }
 
     #[test]

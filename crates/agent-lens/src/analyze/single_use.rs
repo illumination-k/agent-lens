@@ -60,7 +60,7 @@ use super::call_graph::model::{
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::{
-    end_row_with_caveats, render_module_confidence, render_note, render_note_tight,
+    ceiling_hint, end_row_with_caveats, render_module_confidence, render_note, render_note_tight,
     render_overflow, render_overflow_narrowed, top_limit,
 };
 use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
@@ -954,16 +954,13 @@ fn render_entries(out: &mut String, entries: &[&CandidateEntry], limit: usize, m
     // Rows rank smallest body first, so the last one shown is the size
     // the cut fell at; as a ceiling it is only a narrower query when it
     // sits under the one already in force.
-    match entries.iter().take(limit).next_back() {
-        Some(last) if last.loc < max_loc => render_overflow_narrowed(
-            out,
-            entries.len(),
-            limit,
-            "candidate(s)",
-            &format!("`--max-loc {}`", last.loc),
-        ),
-        _ => render_overflow(out, entries.len(), limit, "candidate(s)"),
-    }
+    let narrow = entries
+        .iter()
+        .take(limit)
+        .next_back()
+        .and_then(|last| ceiling_hint("--max-loc", last.loc, max_loc))
+        .unwrap_or_default();
+    render_overflow_narrowed(out, entries.len(), limit, "candidate(s)", &narrow);
 }
 
 fn render_distribution(out: &mut String, label: &str, distribution: Option<&MetricDistribution>) {

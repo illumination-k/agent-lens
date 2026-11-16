@@ -65,7 +65,9 @@ use lens_domain::{
 };
 use serde::Serialize;
 
-use super::format::{render_note_tight, render_overflow, render_overflow_narrowed, top_limit};
+use super::format::{
+    floor_hint, render_note_tight, render_overflow, render_overflow_narrowed, top_limit,
+};
 use super::module_graph::{GraphPolicy, ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
 use super::{AnalyzePathFilter, CrateAnalyzerError, OutputFormat};
@@ -709,16 +711,20 @@ fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
     // Communities list largest first, so the last one shown is the size
     // the cut fell at; as a floor it narrows only when it is above the
     // one already in force.
-    match view.communities.iter().take(limit).next_back() {
-        Some(last) if last.size > view.min_community => render_overflow_narrowed(
-            out,
-            view.communities.len(),
-            limit,
-            "community(ies)",
-            &format!("`--min-community {}`", last.size),
-        ),
-        _ => render_overflow(out, view.communities.len(), limit, "community(ies)"),
-    }
+    let narrow = view
+        .communities
+        .iter()
+        .take(limit)
+        .next_back()
+        .and_then(|last| floor_hint("--min-community", last.size, view.min_community))
+        .unwrap_or_default();
+    render_overflow_narrowed(
+        out,
+        view.communities.len(),
+        limit,
+        "community(ies)",
+        &narrow,
+    );
 }
 
 fn members_cell(members: &[String]) -> String {

@@ -61,7 +61,9 @@ use super::call_graph::model::{
     ModuleResolutionSummary, NodeVisibility, Resolution, ResolutionMethod,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::{render_module_confidence, render_note_tight, render_overflow, top_limit};
+use super::format::{
+    render_module_confidence, render_nested_overflow, render_note_tight, render_overflow, top_limit,
+};
 use super::options::analyzer_options;
 use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
@@ -1002,10 +1004,13 @@ fn render_module_cycles(out: &mut String, cycles: &[ModuleCycle], limit: usize, 
         render_pair_evidence(out, &cycle.pairs, PAIRS_PER_CYCLE, "  ");
         // Capped per cycle, not by `--top`: a nested bullet under the
         // cycle it belongs to.
-        let overflow = cycle.pairs.len().saturating_sub(PAIRS_PER_CYCLE);
-        if overflow > 0 {
-            let _ = writeln!(out, "  - +{overflow} more module pair(s)");
-        }
+        render_nested_overflow(
+            out,
+            "  ",
+            cycle.pairs.len(),
+            PAIRS_PER_CYCLE,
+            " module pair(s)",
+        );
     }
     render_overflow(out, cycles.len(), limit, "cycle(s)");
 }
