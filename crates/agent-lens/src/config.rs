@@ -663,6 +663,7 @@ since = "90.days.ago"
         let backend = config.profile("backend").unwrap();
         assert_eq!(backend.tools, [ToolName::Coupling, ToolName::Hotspot]);
         assert_eq!(backend.format, None);
+        assert_eq!(web.detail, None, "`detail` is optional");
         assert_eq!(
             backend.hotspot.as_ref().unwrap().since.as_deref(),
             Some("90.days.ago"),
@@ -1152,5 +1153,37 @@ since = "90.days.ago"
             find_profile(&chain, "y"),
             Err(ConfigError::Parse { .. })
         ));
+    }
+
+    #[rstest::rstest]
+    #[case::jsonl("format = \"jsonl\"", Some(ReportFormat::Jsonl), None)]
+    #[case::tsv_concise(
+        "format = \"tsv\"\ndetail = \"concise\"",
+        Some(ReportFormat::Tsv),
+        Some(Detail::Concise)
+    )]
+    #[case::detailed("detail = \"detailed\"", None, Some(Detail::Detailed))]
+    fn a_profile_names_its_report_shape_as_the_cli_does(
+        #[case] keys: &str,
+        #[case] format: Option<ReportFormat>,
+        #[case] detail: Option<Detail>,
+    ) {
+        let profile: Profile = toml::from_str(&format!(
+            "path = \"src\"\ntools = [\"complexity\"]\n{keys}\n"
+        ))
+        .unwrap();
+        assert_eq!(profile.format, format);
+        assert_eq!(profile.detail, detail);
+    }
+
+    #[rstest::rstest]
+    #[case::format("format = \"csv\"")]
+    #[case::detail("detail = \"brief\"")]
+    #[case::case_sensitive("detail = \"Concise\"")]
+    fn a_profile_rejects_an_unknown_report_shape(#[case] key: &str) {
+        let parsed = toml::from_str::<Profile>(&format!(
+            "path = \"src\"\ntools = [\"complexity\"]\n{key}\n"
+        ));
+        assert!(parsed.is_err(), "{key} should not parse");
     }
 }

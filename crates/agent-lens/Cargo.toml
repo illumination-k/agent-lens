@@ -52,3 +52,7 @@ harness = false
 [[bench]]
 name = "profile"
 harness = false
+
+[[bench]]
+name = "hook_output"
+harness = false

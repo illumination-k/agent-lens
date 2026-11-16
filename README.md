@@ -177,6 +177,12 @@ agent-lens analyze complexity src/foo.rs --diff-range main...HEAD
 # The pending diff as a whole: how far it sprawled, and what it left behind
 agent-lens analyze footprint . --format md
 
+# One row per finding, shaped the same for every analyzer
+agent-lens analyze complexity src --format jsonl \
+  | jq -c 'select(.kind == "files.functions" and .cognitive > 15)'
+agent-lens analyze hotspot . --format tsv
+agent-lens analyze reach crates --format md --detail concise
+
 # Path filters work everywhere; several trees form one corpus, so a duplicate
 # or call edge spanning them is visible where per-tree runs would miss it
 agent-lens analyze similarity packages cli web/src --format md --exclude-tests
@@ -185,8 +191,9 @@ agent-lens analyze hotspot . --exclude vendor --exclude 'docs/generated/**'
 
 Conventions that hold across analyzers:
 
-- Analyzer commands share `PATH...`, `--format json|md`, `--only-tests`,
-  `--exclude-tests`, and repeatable `--exclude GLOB`. Directory walks follow
+- Analyzer commands share `PATH...`, `--format json|md|jsonl|tsv`,
+  `--detail concise|detailed`, `--only-tests`, `--exclude-tests`, and
+  repeatable `--exclude GLOB`. Directory walks follow
   `.gitignore` and do not descend symlinked directories, so a linked build
   output or virtualenv never joins the corpus. The test flags select whole
   files; `complexity`, `similarity`, and `search` also apply them to test
@@ -220,7 +227,7 @@ For a repeatable multi-analyzer pass, declare a named profile in
 # agent-lens.toml — discovered by walking up from the current directory
 [profile.web]
 path = "web/" # target handed to every tool; also takes an array
-format = "md" # json (default) or md
+format = "md" # json (default), md, jsonl or tsv
 exclude-tests = true # or only-tests, plus extra `exclude` globs
 tools = ["similarity", "complexity", "cohesion"]
 
@@ -234,6 +241,7 @@ min-lines = 8
 agent-lens run web                       # nearest agent-lens.toml defining `web`
 agent-lens run web --config path/to/agent-lens.toml
 agent-lens run web --format json         # override the profile's format
+agent-lens run web --format jsonl        # one row per finding, all tools
 agent-lens run web --digest              # entity-joined rollup, not sections
 ```
 
@@ -458,7 +466,10 @@ ordinary CLI contract: errors exit non-zero.
 | `ownership`       | Files ranked by low code ownership × churn: top-author share, contributor count, and minor contributors (Bird et al.), with identities normalised through `.mailmap`, bots filtered and counted, and `Co-authored-by:` trailers credited.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 All analyzers default to JSON on stdout; `--format md` emits a compact
-Markdown summary tuned to drop straight into an LLM prompt.
+Markdown summary tuned to drop straight into an LLM prompt. `--format jsonl`
+and `--format tsv` flatten the JSON report into one self-contained row per
+finding, shaped the same way for every analyzer, and `--detail concise` trims
+any format for a caller that has read the explanations before.
 
 ## Languages
 

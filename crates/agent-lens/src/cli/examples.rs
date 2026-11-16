@@ -60,8 +60,12 @@ macro_rules! conventions {
         "\
 Reports go to stdout; logs and diagnostics go to stderr via `tracing` (set
 RUST_LOG to change the level). Analyzers default to `--format json`;
-`--format md` is the compact rendering tuned for LLM context. Exit status is
-0 on success and 1 on failure.
+`--format md` is the compact rendering tuned for LLM context. `--format
+jsonl` and `--format tsv` are flat views of the JSON report with the same
+shape for every analyzer: one row per finding, each naming its `kind` and
+carrying the file it belongs to, so one `grep` or `jq -c 'select(…)'` works
+across analyzers. `--detail concise` trims any of them for a repeat caller.
+Exit status is 0 on success and 1 on failure.
 "
     };
 }
@@ -103,7 +107,8 @@ point, so they keep the one-PATH signature.
 
 `--top` bounds the length of a `--format md` report. Every analyzer that
 can produce a long one accepts it; `cycles` does not, because a truncated
-cycle list reads as the whole list.
+cycle list reads as the whole list. A listing that was cut ends with a
+line naming how many rows were left out and the flag that narrows it.
 
 ",
     routing!()

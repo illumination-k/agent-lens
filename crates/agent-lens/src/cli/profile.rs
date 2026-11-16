@@ -366,6 +366,34 @@ mod tests {
         assert!(unused_tool_option_tables(&profile).is_empty());
     }
 
+    /// Row formats need no wrapper: each section already names its
+    /// analyzer on every row, so the sections are run together as they
+    /// are, an empty one adding nothing.
+    #[rstest::rstest]
+    #[case::jsonl(
+        ReportFormat::Jsonl,
+        "{\"analyzer\":\"complexity\",\"kind\":\"files\"}\n",
+        "{\"analyzer\":\"hotspot\",\"kind\":\"files\"}\n"
+    )]
+    #[case::tsv(
+        ReportFormat::Tsv,
+        "# analyzer=complexity kind=files rows=1\nfile\na.rs\n",
+        "# analyzer=hotspot kind=files rows=1\npath\na.rs\n"
+    )]
+    fn render_profile_report_runs_row_sections_together(
+        #[case] format: ReportFormat,
+        #[case] first: &str,
+        #[case] last: &str,
+    ) {
+        let sections = vec![
+            (config::ToolName::Complexity, first.to_owned()),
+            (config::ToolName::Cycles, String::new()),
+            (config::ToolName::Hotspot, last.to_owned()),
+        ];
+        let out = render_profile_report("audit", format, &sections).unwrap();
+        assert_eq!(out, format!("{first}{last}"));
+    }
+
     #[test]
     fn render_profile_report_json_nests_each_tool_report() {
         let sections = vec![(config::ToolName::Complexity, "{\"k\":1}".to_owned())];

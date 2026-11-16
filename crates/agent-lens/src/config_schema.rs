@@ -86,9 +86,15 @@ const PROFILE_FIELDS: &[Field] = &[
     },
     Field {
         key: "format",
-        ty: "\"json\" or \"md\"",
+        ty: "\"json\", \"md\", \"jsonl\", or \"tsv\"",
         presence: "default: json",
-        desc: "Output format for the combined report.",
+        desc: "Output format for the combined report, as analyze --format takes it. jsonl and tsv are flat row views of each tool's JSON; every row names its analyzer, so the tools' rows are run together.",
+    },
+    Field {
+        key: "detail",
+        ty: "\"concise\" or \"detailed\"",
+        presence: "default: detailed",
+        desc: "How much each report renders, as analyze --detail takes it. concise drops the standing explanations and caps listings at 5 rows in md, and keeps scalar fields only in jsonl and tsv; json is the full report at either level.",
     },
     Field {
         key: "exclude",
@@ -976,6 +982,7 @@ mod tests {
             "path",
             "tools",
             "format",
+            "detail",
             "exclude",
             "only-tests",
             "exclude-tests",

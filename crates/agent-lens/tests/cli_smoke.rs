@@ -2458,3 +2458,160 @@ fn a_merged_analyzer_name_points_at_its_new_home() {
         "got: {stderr}",
     );
 }
+
+/// A two-function file whose complexity report nests functions under a
+/// `files[]` entry: the shape the row formats exist to flatten (#585).
+const ROWS_SOURCE: &str =
+    "pub fn quiet() {}\n\npub fn branchy(n: i32) -> i32 {\n    if n > 0 { 1 } else { 0 }\n}\n";
+
+fn stdout_text(output: &Output) -> String {
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+/// `--format jsonl` puts the file on every function row, where the JSON
+/// report only has it on the parent, and agrees with that report row for
+/// row.
+#[test]
+fn analyze_jsonl_rows_are_self_contained_and_match_the_json_report() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), ROWS_SOURCE).unwrap();
+
+    let json = stdout_json(&agent_lens(
+        &["analyze", "complexity", "a.rs"],
+        dir.path(),
+        None,
+    ));
+    let out = stdout_text(&agent_lens(
+        &["analyze", "complexity", "a.rs", "--format", "jsonl"],
+        dir.path(),
+        None,
+    ));
+    let rows: Vec<serde_json::Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        rows.iter().all(|row| row["analyzer"] == "complexity"),
+        "got {out}"
+    );
+
+    let functions: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["kind"] == "files.functions")
+        .collect();
+    let reported = json["files"][0]["functions"].as_array().unwrap();
+    assert_eq!(functions.len(), reported.len());
+    for (row, function) in functions.iter().zip(reported) {
+        assert_eq!(row["file"], json["files"][0]["file"], "row: {row}");
+        for (key, value) in function.as_object().unwrap() {
+            assert_eq!(&row[key], value, "{key} on {row}");
+        }
+    }
+}
+
+#[test]
+fn analyze_tsv_writes_one_table_per_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), ROWS_SOURCE).unwrap();
+
+    let out = stdout_text(&agent_lens(
+        &["analyze", "complexity", "a.rs", "--format", "tsv"],
+        dir.path(),
+        None,
+    ));
+    let table = out
+        .split("# analyzer=complexity kind=")
+        .find(|table| table.starts_with("files.functions rows=2\n"))
+        .unwrap_or_else(|| panic!("no files.functions table: {out}"));
+    let mut lines = table.lines().skip(1);
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    assert!(
+        header.contains(&"name") && header.contains(&"file"),
+        "got {header:?}"
+    );
+    let name = header.iter().position(|column| *column == "name").unwrap();
+    let names: Vec<&str> = lines
+        .take(2)
+        .map(|line| line.split('\t').nth(name).unwrap())
+        .collect();
+    assert_eq!(names, ["quiet", "branchy"]);
+}
+
+/// `--detail` never changes JSON, and trims the row formats to scalars.
+#[test]
+fn analyze_detail_concise_leaves_json_alone_and_trims_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "pub struct S { a: u8, b: u8 }\nimpl S {\n    pub fn a(&self) -> u8 { self.a }\n    pub fn b(&self) -> u8 { self.b }\n}\n",
+    )
+    .unwrap();
+    let run = |flags: &[&str]| {
+        let args: Vec<&str> = ["analyze", "cohesion", "a.rs"]
+            .into_iter()
+            .chain(flags.iter().copied())
+            .collect();
+        stdout_text(&agent_lens(&args, dir.path(), None))
+    };
+
+    assert_eq!(run(&["--detail", "concise"]), run(&[]));
+
+    let detailed = run(&["--format", "jsonl"]);
+    let concise = run(&["--format", "jsonl", "--detail", "concise"]);
+    assert!(detailed.contains("\"components\":[["), "got {detailed}");
+    assert!(!concise.contains("\"components\""), "got {concise}");
+    assert_eq!(concise.lines().count(), detailed.lines().count());
+    assert!(concise.contains("\"lcom4\":2"), "got {concise}");
+}
+
+/// A profile run in a row format is every tool's rows, one after the
+/// other, each naming its analyzer; `detail` comes from the profile and
+/// `--detail` overrides it.
+#[test]
+fn run_profile_in_jsonl_runs_the_tools_rows_together() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/a.rs"),
+        "pub struct S { a: u8, b: u8 }\nimpl S {\n    pub fn a(&self) -> u8 { self.a }\n    pub fn b(&self) -> u8 { self.b }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent-lens.toml"),
+        "[profile.rows]\npath = \"src\"\nformat = \"jsonl\"\ndetail = \"concise\"\ntools = [\"complexity\", \"cohesion\"]\n",
+    )
+    .unwrap();
+
+    let out = stdout_text(&agent_lens(&["run", "rows"], dir.path(), None));
+    let analyzers: Vec<String> = out
+        .lines()
+        .map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            row["analyzer"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    let first_cohesion = analyzers.iter().position(|a| a == "cohesion").unwrap();
+    assert!(first_cohesion > 0, "complexity rows lead: {analyzers:?}");
+    assert!(
+        analyzers[..first_cohesion]
+            .iter()
+            .all(|a| a == "complexity")
+    );
+    assert!(analyzers[first_cohesion..].iter().all(|a| a == "cohesion"));
+    assert!(
+        !out.contains("\"components\""),
+        "profile detail is concise: {out}"
+    );
+
+    let detailed = stdout_text(&agent_lens(
+        &["run", "rows", "--detail", "detailed"],
+        dir.path(),
+        None,
+    ));
+    assert!(detailed.contains("\"components\":[["), "got {detailed}");
+}

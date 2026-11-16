@@ -1309,6 +1309,61 @@ mod tests {
         assert_eq!(args.opts.top, None);
     }
 
+    #[rstest]
+    #[case::defaults(&[], ReportFormat::Json, Detail::Detailed)]
+    #[case::jsonl(&["--format", "jsonl"], ReportFormat::Jsonl, Detail::Detailed)]
+    #[case::tsv_concise(&["--format", "tsv", "--detail", "concise"], ReportFormat::Tsv, Detail::Concise)]
+    #[case::md_concise(&["--detail", "concise", "--format", "md"], ReportFormat::Md, Detail::Concise)]
+    #[case::explicit_detailed(&["--detail", "detailed"], ReportFormat::Json, Detail::Detailed)]
+    fn parses_the_report_shape_on_both_argument_families(
+        #[case] flags: &[&str],
+        #[case] format: ReportFormat,
+        #[case] detail: Detail,
+    ) {
+        // `complexity` takes PATH..., `coupling` the single entry point.
+        for tool in ["complexity", "coupling"] {
+            let argv = ["agent-lens", "analyze", tool, "."]
+                .into_iter()
+                .chain(flags.iter().copied());
+            let cli = Cli::try_parse_from(argv).expect("clean parse");
+            let shape = match cli.command {
+                Command::Analyze(AnalyzeCommand::Complexity(args)) => args.common.shape,
+                Command::Analyze(AnalyzeCommand::Coupling(args)) => args.common.shape,
+                other => panic!("unexpected command: {other:?}"),
+            };
+            assert_eq!(shape, ReportShape::new(format, detail), "{tool} {flags:?}");
+        }
+    }
+
+    #[rstest]
+    #[case::unknown_format(&["--format", "csv"])]
+    #[case::unknown_detail(&["--detail", "brief"])]
+    fn rejects_an_unknown_report_shape(#[case] flags: &[&str]) {
+        let argv = ["agent-lens", "analyze", "complexity", "."]
+            .into_iter()
+            .chain(flags.iter().copied());
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn parses_run_with_format_and_detail_overrides() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "run",
+            "web",
+            "--format",
+            "jsonl",
+            "--detail",
+            "concise",
+        ])
+        .expect("clean parse");
+        let Command::Run(args) = cli.command else {
+            panic!("expected run");
+        };
+        assert_eq!(args.format, Some(ReportFormat::Jsonl));
+        assert_eq!(args.detail, Some(Detail::Concise));
+    }
+
     #[test]
     fn parses_analyze_cycles_default_format_is_json() {
         let cli =
