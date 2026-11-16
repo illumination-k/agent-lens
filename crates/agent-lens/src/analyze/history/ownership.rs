@@ -58,7 +58,7 @@ use serde::Serialize;
 
 use super::churn::{AuthoredCommitRaw, ChurnScope, Contact, ReportablePaths};
 use super::error_from::impl_from_churn_error;
-use crate::analyze::format::render_overflow;
+use crate::analyze::format::{render_note_tight, render_overflow_narrowed, since_hint, top_limit};
 use crate::analyze::{AnalyzePathFilter, AnalyzeRoots, OutputFormat, PathFilterError};
 
 /// Report schema version, bumped when a consumer would have to change.
@@ -670,7 +670,7 @@ fn format_md(view: &ReportView<'_>, top: Option<usize>) -> String {
         "# Ownership: {} ({} commit(s), {} author(s){window})\n",
         view.target, view.commit_count, view.author_count,
     );
-    let _ = writeln!(&mut out, "\n{}", view.note);
+    render_note_tight(&mut out, view.note);
     if view.shallow_clone {
         out.push_str(
             "\n**Shallow clone**: the log is truncated, so authors before the graft are missing. \
@@ -719,7 +719,7 @@ fn format_md(view: &ReportView<'_>, top: Option<usize>) -> String {
         out.push_str("\n_Every file has a single author._\n");
         return out;
     }
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let _ = writeln!(
         &mut out,
         "\n## Top {limit} files by low ownership × churn (commits × (1 − top share))\n\n\
@@ -739,7 +739,13 @@ fn format_md(view: &ReportView<'_>, top: Option<usize>) -> String {
             file.minor_ratio,
         );
     }
-    render_overflow(&mut out, contested.len(), limit, "file(s)");
+    render_overflow_narrowed(
+        &mut out,
+        contested.len(),
+        limit,
+        "file(s)",
+        since_hint(view.since),
+    );
     let solo = view.files.len() - contested.len();
     if solo > 0 {
         let _ = writeln!(

@@ -61,7 +61,7 @@ use super::call_graph::model::{
     ModuleResolutionSummary, NodeVisibility, Resolution, ResolutionMethod,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::render_module_confidence;
+use super::format::{render_module_confidence, render_note_tight, render_overflow, top_limit};
 use super::options::analyzer_options;
 use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
@@ -822,7 +822,7 @@ type PairKey<'a> = (
 );
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let summary = &report.summary;
     let mut out = format!(
         "# Layer map: {} ({} function level(s), {} module level(s), {} function(s), \
@@ -834,8 +834,9 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         summary.module_count,
         summary.resolved_edge_count,
     );
-    out.push_str(
-        "\nLevels are inferred, not declared. `L` is a function level — 1 + max(level of its \
+    render_note_tight(
+        &mut out,
+        "Levels are inferred, not declared. `L` is a function level — 1 + max(level of its \
          callees) over resolved call edges, on the SCC condensation, so a call cycle is one \
          node. `M` is the same computation on the module graph induced by cross-module calls, \
          which is why a module's level need not match its members' levels: a leaf-heavy module \
@@ -846,7 +847,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
          picked by a last-segment heuristic — those edges may not exist. The call listings \
          below are structural facts, not architecture errors: callbacks and dependency \
          injection shape the graph in ways the extracted call facts cannot tell apart from a \
-         design error.\n",
+         design error.",
     );
     if summary.function_count == 0 {
         out.push_str("\n_No functions to analyze._\n");
@@ -924,6 +925,7 @@ fn render_modules(out: &mut String, modules: &[ModuleLevel], limit: usize, summa
             if module.cyclic { " — in a cycle" } else { "" },
         );
     }
+    render_overflow(out, modules.len(), limit, "module(s)");
 }
 
 fn render_entry_points(out: &mut String, entries: &[EntryPoint], limit: usize) {
@@ -932,10 +934,11 @@ fn render_entry_points(out: &mut String, entries: &[EntryPoint], limit: usize) {
         "\n## Entry points ({}, highest function level first; top {limit})",
         entries.len()
     );
-    out.push_str(
-        "\nFunctions with no resolved caller that are `main`, exported, or written in a \
+    render_note_tight(
+        out,
+        "Functions with no resolved caller that are `main`, exported, or written in a \
          language whose adapter does not extract visibility (`visibility_unknown` — the \
-         weakest basis). Read the map down from here.\n",
+         weakest basis). Read the map down from here.",
     );
     if entries.is_empty() {
         out.push_str("\n_None._\n");
@@ -954,6 +957,7 @@ fn render_entry_points(out: &mut String, entries: &[EntryPoint], limit: usize) {
             basis_label(entry.basis),
         );
     }
+    render_overflow(out, entries.len(), limit, "entry point(s)");
 }
 
 fn basis_label(basis: EntryBasis) -> &'static str {
@@ -970,10 +974,11 @@ fn render_module_cycles(out: &mut String, cycles: &[ModuleCycle], limit: usize, 
         "\n## Module cycles ({} cycle(s), {} module(s), {} call site(s); top {limit})",
         summary.module_cycle_count, summary.cyclic_module_count, summary.cyclic_call_count,
     );
-    out.push_str(
-        "\nThese modules call each other directly or transitively, so no level ordering \
+    render_note_tight(
+        out,
+        "These modules call each other directly or transitively, so no level ordering \
          exists between them and every member shares one module level. Each call site below \
-         is a place where the cycle is realised.\n",
+         is a place where the cycle is realised.",
     );
     if cycles.is_empty() {
         out.push_str("\n_None._\n");
@@ -995,7 +1000,14 @@ fn render_module_cycles(out: &mut String, cycles: &[ModuleCycle], limit: usize, 
                 .join(", "),
         );
         render_pair_evidence(out, &cycle.pairs, PAIRS_PER_CYCLE, "  ");
+        // Capped per cycle, not by `--top`: a nested bullet under the
+        // cycle it belongs to.
+        let overflow = cycle.pairs.len().saturating_sub(PAIRS_PER_CYCLE);
+        if overflow > 0 {
+            let _ = writeln!(out, "  - +{overflow} more module pair(s)");
+        }
     }
+    render_overflow(out, cycles.len(), limit, "cycle(s)");
 }
 
 fn render_skip_calls(out: &mut String, pairs: &[ModulePair], limit: usize, summary: &Summary) {
@@ -1005,9 +1017,10 @@ fn render_skip_calls(out: &mut String, pairs: &[ModulePair], limit: usize, summa
          {} call site(s); top {limit})",
         summary.skip_pair_count, summary.skip_call_count,
     );
-    out.push_str(
-        "\nA downward call passing over at least one intermediate module level. Expected for \
-         shared leaf utilities; worth a look when a skipped level owns the same concern.\n",
+    render_note_tight(
+        out,
+        "A downward call passing over at least one intermediate module level. Expected for \
+         shared leaf utilities; worth a look when a skipped level owns the same concern.",
     );
     if pairs.is_empty() {
         out.push_str("\n_None._\n");
@@ -1015,10 +1028,12 @@ fn render_skip_calls(out: &mut String, pairs: &[ModulePair], limit: usize, summa
     }
     out.push('\n');
     render_pair_evidence(out, pairs, limit, "");
+    render_overflow(out, pairs.len(), limit, "module pair(s)");
 }
 
 /// Render module pairs and their call-site evidence as a nested list at
-/// `indent`.
+/// `indent`. What `limit` cut is the caller's to state: the two callers
+/// cap by different things.
 fn render_pair_evidence(out: &mut String, pairs: &[ModulePair], limit: usize, indent: &str) {
     for pair in pairs.iter().take(limit) {
         let _ = writeln!(
@@ -1060,10 +1075,6 @@ fn render_pair_evidence(out: &mut String, pairs: &[ModulePair], limit: usize, in
         if overflow > 0 {
             let _ = writeln!(out, "{indent}  - +{overflow} more caller/callee pair(s)");
         }
-    }
-    let overflow = pairs.len().saturating_sub(limit);
-    if overflow > 0 {
-        let _ = writeln!(out, "{indent}- +{overflow} more module pair(s)");
     }
 }
 

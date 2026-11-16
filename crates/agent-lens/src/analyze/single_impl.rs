@@ -54,7 +54,9 @@ use lens_domain::{SyntaxFact, TraitDeclShape, TraitImplShape, VisibilityShape};
 
 use super::call_graph::model::{GraphLanguage, NodeVisibility};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::end_row_with_caveats;
+use super::format::{
+    end_row_with_caveats, render_note, render_note_tight, render_overflow, top_limit,
+};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::span_references::{AllowedSpan, FileSpans, SpanReferenceIndex};
@@ -719,7 +721,7 @@ impl Report {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let (single, zero): (Vec<_>, Vec<_>) = report
         .findings
         .iter()
@@ -732,7 +734,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         single.len(),
         zero.len(),
     );
-    let _ = writeln!(out, "\n{NOTE}\n");
+    render_note(&mut out, NOTE);
     let _ = writeln!(
         out,
         "Skipped: {} test-scoped declaration(s), {} zero-method interface(s), {} unparsed \
@@ -747,17 +749,19 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
     }
 
     let _ = writeln!(out, "\n## Single-implementation abstractions (top {limit})");
-    out.push_str(
-        "\nOne production type implements each. Replace the abstraction with that type, or \
-         say what the second implementor will be.\n",
+    render_note_tight(
+        &mut out,
+        "One production type implements each. Replace the abstraction with that type, or \
+         say what the second implementor will be.",
     );
     render_entries(&mut out, &single, limit);
 
     let _ = writeln!(out, "\n## No production implementor (top {limit})");
-    out.push_str(
-        "\nNothing in production implements these. With test implementors they are mock-only \
+    render_note_tight(
+        &mut out,
+        "Nothing in production implements these. With test implementors they are mock-only \
          seams; with none they are either dead or satisfied by types outside the analyzed \
-         tree (a Go interface over std types reads this way).\n",
+         tree (a Go interface over std types reads this way).",
     );
     render_entries(&mut out, &zero, limit);
 
@@ -814,6 +818,7 @@ fn render_entries(out: &mut String, entries: &[&AbstractionEntry], limit: usize)
         }
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
+    render_overflow(out, entries.len(), limit, "abstraction(s)");
 }
 
 #[cfg(test)]

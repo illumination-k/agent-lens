@@ -65,6 +65,7 @@ use lens_domain::{
 };
 use serde::Serialize;
 
+use super::format::{render_note_tight, render_overflow, render_overflow_narrowed, top_limit};
 use super::module_graph::{GraphPolicy, ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
 use super::{AnalyzePathFilter, CrateAnalyzerError, OutputFormat};
@@ -573,12 +574,12 @@ fn label(path: &str, labeler: &ModuleLabeler) -> String {
 }
 
 fn format_markdown(view: &ReportView, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut out = format!(
         "# Communities report: {} ({} member(s), {} edge(s), {} communit(ies) at {} granularity)\n",
         view.crate_root, view.node_count, view.edge_count, view.community_count, view.granularity,
     );
-    let _ = writeln!(&mut out, "\n{}", view.note);
+    render_note_tight(&mut out, view.note);
     if view.node_count == 0 {
         out.push_str("\n_No modules discovered._\n");
         return out;
@@ -675,7 +676,7 @@ fn render_misfiled(out: &mut String, rows: &[MisfiledView], limit: usize) {
             row.evidence,
         );
     }
-    render_overflow(out, rows.len(), limit, "misfiled member");
+    render_overflow(out, rows.len(), limit, "misfiled member(s)");
 }
 
 fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
@@ -705,7 +706,19 @@ fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
             members_cell(&c.members),
         );
     }
-    render_overflow(out, view.communities.len(), limit, "community");
+    // Communities list largest first, so the last one shown is the size
+    // the cut fell at; as a floor it narrows only when it is above the
+    // one already in force.
+    match view.communities.iter().take(limit).next_back() {
+        Some(last) if last.size > view.min_community => render_overflow_narrowed(
+            out,
+            view.communities.len(),
+            limit,
+            "community(ies)",
+            &format!("`--min-community {}`", last.size),
+        ),
+        _ => render_overflow(out, view.communities.len(), limit, "community(ies)"),
+    }
 }
 
 fn members_cell(members: &[String]) -> String {
@@ -741,17 +754,7 @@ fn render_spanning(out: &mut String, rows: &[SpanningView], limit: usize) {
             row.community, row.size, row.declared_group_count,
         );
     }
-    render_overflow(out, rows.len(), limit, "spanning community");
-}
-
-fn render_overflow(out: &mut String, total: usize, limit: usize, unit: &str) {
-    let omitted = total.saturating_sub(limit);
-    if omitted > 0 {
-        let _ = writeln!(
-            out,
-            "\n_{omitted} more {unit}(s) not shown; raise --top or use --format json._",
-        );
-    }
+    render_overflow(out, rows.len(), limit, "spanning community(ies)");
 }
 
 #[cfg(test)]

@@ -63,7 +63,9 @@ use serde::Serialize;
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::render_module_confidence;
+use super::format::{
+    render_module_confidence, render_note, render_note_tight, render_overflow, top_limit,
+};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::unreachable::{EntryKind, entry_kind_of, identifiers};
@@ -771,7 +773,7 @@ impl Report {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let mut out = format!(
         "# Test-only report: {} ({} judged function(s), {} test-only, {} public called only \
          by tests)\n",
@@ -780,7 +782,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.summary.test_only_count,
         report.summary.test_only_entry_count,
     );
-    let _ = writeln!(out, "\n{NOTE}\n");
+    render_note(&mut out, NOTE);
     let _ = writeln!(
         out,
         "Entry set: {} production, {} test. Skipped: {} unjudged-language function(s), \
@@ -810,17 +812,19 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         "\n## Test-only functions (top {limit}, {} loc total)",
         report.summary.test_only_loc,
     );
-    out.push_str(
-        "\nNo production call path reaches these; tests do. Move each into test scope, or \
-         delete it with its tests — after checking any reference counts on the row.\n",
+    render_note_tight(
+        &mut out,
+        "No production call path reaches these; tests do. Move each into test scope, or \
+         delete it with its tests — after checking any reference counts on the row.",
     );
     render_entries(&mut out, &test_only, limit);
 
     let _ = writeln!(out, "\n## Public surface only tests call (top {limit})");
-    out.push_str(
-        "\nEach is a public/exported declaration whose only resolved callers are tests. In a \
+    render_note_tight(
+        &mut out,
+        "Each is a public/exported declaration whose only resolved callers are tests. In a \
          binary this is a test-only function wearing `pub`; in a library, consumers outside \
-         the analyzed tree cannot be ruled out.\n",
+         the analyzed tree cannot be ruled out.",
     );
     render_entries(&mut out, &entry_rows, limit);
 
@@ -865,6 +869,7 @@ fn render_entries(out: &mut String, entries: &[&FindingEntry], limit: usize) {
         }
         out.push('\n');
     }
+    render_overflow(out, entries.len(), limit, "function(s)");
 }
 
 #[cfg(test)]

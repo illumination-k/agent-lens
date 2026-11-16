@@ -74,6 +74,7 @@ use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builder
 use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::{
     ModuleSection, render_backticked_list, render_module_confidence, render_module_sections,
+    render_note, render_note_tight, top_limit,
 };
 use super::options::analyzer_options;
 use super::runner::render_report;
@@ -1381,7 +1382,7 @@ fn tier_views(report: &Report, tier: Tier) -> Vec<ModuleView<'_>> {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>, tier: Option<Tier>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let tier = tier.unwrap_or(Tier::Confirmed);
     let summary = &report.summary;
     let mut out = format!(
@@ -1393,7 +1394,7 @@ fn format_markdown(report: &Report, top: Option<usize>, tier: Option<Tier>) -> S
         summary.unknown_count,
         report.audit.judged_function_count,
     );
-    let _ = writeln!(out, "\n{}", report.note);
+    render_note_tight(&mut out, report.note);
     render_entries(&mut out, &report.entries, &report.audit);
 
     if report.audit.judged_function_count == 0 {
@@ -1567,11 +1568,14 @@ fn render_islands(out: &mut String, islands: &[Island]) {
     }
     let _ = writeln!(
         out,
-        "\n## Islands ({} cluster(s) that only call each other, largest first)\n\nEach cluster is \
-         reachable from nothing outside itself, so it comes out in one edit. The order given \
-         removes callers before their callees; adjacent members of a mutually recursive group \
-         have to go together.\n",
+        "\n## Islands ({} cluster(s) that only call each other, largest first)",
         islands.len(),
+    );
+    render_note(
+        out,
+        "Each cluster is reachable from nothing outside itself, so it comes out in one edit. \
+         The order given removes callers before their callees; adjacent members of a mutually \
+         recursive group have to go together.",
     );
     for island in islands.iter().take(ISLANDS_SHOWN) {
         let _ = writeln!(
@@ -1587,7 +1591,10 @@ fn render_islands(out: &mut String, islands: &[Island]) {
     }
     let overflow = islands.len().saturating_sub(ISLANDS_SHOWN);
     if overflow > 0 {
-        let _ = writeln!(out, "- +{overflow} more (JSON output carries every island)");
+        let _ = writeln!(
+            out,
+            "- +{overflow} more (`--format jsonl` carries every island)"
+        );
     }
 }
 
@@ -2199,7 +2206,7 @@ mod tests {
             "got {md}",
         );
         assert!(
-            md.contains("- +1 more (JSON output carries every row)"),
+            md.contains("- +1 more (`--format jsonl` carries every row)"),
             "got {md}",
         );
     }

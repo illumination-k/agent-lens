@@ -63,7 +63,10 @@ use serde::Serialize;
 
 use super::churn::{ChurnScope, ReportablePaths};
 use super::error_from::impl_from_churn_error;
-use crate::analyze::format::{format_optional_f64, render_overflow};
+use crate::analyze::format::{
+    format_optional_f64, render_note_tight, render_overflow, render_overflow_narrowed, since_hint,
+    top_limit,
+};
 use crate::analyze::options::analyzer_options;
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, DiffScope, OutputFormat, PathFilterError, parse_diff_range,
@@ -678,7 +681,7 @@ const DEFAULT_TOP: usize = 20;
 const ENTROPY_PRECISION: usize = 2;
 
 fn format_scope(out: &mut String, scope: &ScopeView<'_>) {
-    let _ = writeln!(out, "\n{}", scope.note);
+    render_note_tight(out, scope.note);
     if scope.shallow_clone {
         out.push_str(
             "\n**Shallow clone**: the log is truncated, so periods before the graft are missing \
@@ -732,7 +735,7 @@ fn format_history(view: &HistoryView<'_>, top: Option<usize>) -> String {
         return out;
     }
 
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let _ = writeln!(
         &mut out,
         "\n## Top {limit} files by history complexity (Σ share × {} entropy)\n",
@@ -758,7 +761,13 @@ fn format_history(view: &HistoryView<'_>, top: Option<usize>) -> String {
             file.path, file.history_complexity, file.commits, file.changed_lines, file.periods,
         );
     }
-    render_overflow(&mut out, view.files.len(), limit, "file(s)");
+    render_overflow_narrowed(
+        &mut out,
+        view.files.len(),
+        limit,
+        "file(s)",
+        since_hint(view.scope.since),
+    );
 
     let _ = writeln!(
         &mut out,
@@ -783,11 +792,12 @@ fn format_history(view: &HistoryView<'_>, top: Option<usize>) -> String {
             period.changed_lines,
         );
     }
-    render_overflow(
+    render_overflow_narrowed(
         &mut out,
         view.periods.len(),
         limit,
         &format!("{}(s)", view.scope.period.as_str()),
+        since_hint(view.scope.since),
     );
     out
 }
@@ -829,7 +839,7 @@ fn format_verdict(view: &VerdictView<'_>, top: Option<usize>) -> String {
         view.reference.distribution.commit_count,
     );
 
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let _ = writeln!(&mut out, "\n## Modules\n\n| module | files | lines |");
     let _ = writeln!(&mut out, "| --- | ---: | ---: |");
     for module in pending.modules.iter().take(limit) {
@@ -839,6 +849,7 @@ fn format_verdict(view: &VerdictView<'_>, top: Option<usize>) -> String {
             module.module, module.files, module.changed_lines,
         );
     }
+    render_overflow(&mut out, pending.modules.len(), limit, "module(s)");
 
     let _ = writeln!(&mut out, "\n## Files\n\n| file | lines | share |");
     let _ = writeln!(&mut out, "| --- | ---: | ---: |");

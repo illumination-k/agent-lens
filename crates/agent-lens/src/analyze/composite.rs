@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
 
-use super::format::ConfidenceDeduper;
+use super::format::{ConfidenceDeduper, render_note_tight};
 use super::index::AnalysisIndex;
 use super::{AnalysisIndexScope, AnalyzerError, OutputFormat};
 
@@ -118,7 +118,8 @@ fn render_json(sections: Vec<Section>) -> Result<String, AnalyzerError> {
 
 fn render_markdown(title: &str, note: &str, sections: &[Section]) -> String {
     let names: Vec<&str> = sections.iter().map(|s| s.name).collect();
-    let mut out = format!("# {title} ({})\n\n{note}\n", names.join(", "));
+    let mut out = format!("# {title} ({})\n", names.join(", "));
+    render_note_tight(&mut out, note);
     // Every section reads the same call graph, so from the second one on
     // the resolution-confidence rows repeat verbatim; fold them into a
     // pointer the way a profile run does.

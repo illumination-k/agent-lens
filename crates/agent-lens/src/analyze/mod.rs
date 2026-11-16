@@ -18,6 +18,8 @@ pub mod coupling;
 mod crate_root;
 pub mod cycles;
 pub mod delegation;
+#[cfg(test)]
+mod detail_tests;
 mod diff;
 mod export_lang;
 pub mod footprint;

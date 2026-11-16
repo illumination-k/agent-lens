@@ -8,6 +8,7 @@ use super::corpus::OwnedUnit;
 use super::options::SimilarityTarget;
 use super::score::{SimilarityComponents, sorted_pair_key};
 use crate::analyze::AnalyzeRoots;
+use crate::analyze::format::{render_overflow_narrowed, threshold_hint, top_cap};
 
 /// Longest representative snippet rendered for a block cluster. Long
 /// enough to show the repeated shape, short enough that a 40-cluster
@@ -412,6 +413,7 @@ pub(super) fn format_markdown(
     target: SimilarityTarget,
 ) -> String {
     let noun = target.noun();
+    let top = top_cap(top);
     let cut = match &report.sweep {
         Some(ladder) => format!("sweep {}", format_ladder(ladder)),
         None => format!("threshold {:.2}", report.threshold),
@@ -454,7 +456,27 @@ pub(super) fn format_markdown(
             );
         }
     }
+    // A cluster's weakest pair is the score a higher threshold cuts at.
+    // `--sweep` excludes `--threshold`, so a sweep falls back on size.
+    let narrow = clusters
+        .last()
+        .filter(|_| report.sweep.is_none())
+        .and_then(|last| threshold_hint(last.min_similarity, report.threshold))
+        .unwrap_or_else(|| min_lines_hint(report.min_lines));
+    render_overflow_narrowed(
+        &mut out,
+        report.clusters.len(),
+        clusters.len(),
+        "cluster(s)",
+        &narrow,
+    );
     out
+}
+
+/// The overflow hint for a listing no threshold value narrows: the flag
+/// and its current value, the choice of a higher one left open.
+fn min_lines_hint(min_lines: usize) -> String {
+    format!("a higher `--min-lines` (now {min_lines})")
 }
 
 /// Body of a block cluster: where it lives, one quoted occurrence, and
@@ -777,6 +799,7 @@ pub(super) fn format_paired_markdown(
     top: Option<usize>,
     noun: &str,
 ) -> String {
+    let top = top_cap(top);
     let mut out = format!(
         "# Similarity report: {} (paired by {}, {} method, {} {noun}(s), drift threshold {:.2}, floor {:.2}, min lines {})\n",
         report.root,
@@ -832,6 +855,13 @@ pub(super) fn format_paired_markdown(
             );
         }
     }
+    render_overflow_narrowed(
+        &mut out,
+        report.groups.len(),
+        groups.len(),
+        "name key(s)",
+        &min_lines_hint(report.min_lines),
+    );
     out
 }
 

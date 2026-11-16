@@ -60,7 +60,9 @@ use super::static_file_graph::{
 };
 use crate::analyze::call_graph::model::{ModuleResolutionSummary, Resolution};
 use crate::analyze::call_graph::{CallGraph, CallGraphBuilder};
-use crate::analyze::format::{render_module_confidence, render_overflow};
+use crate::analyze::format::{
+    render_module_confidence, render_note_tight, render_overflow_narrowed, since_hint, top_limit,
+};
 use crate::analyze::runner::render_report;
 use crate::analyze::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, CompiledPathFilter, OutputFormat,
@@ -276,7 +278,7 @@ impl HiddenCouplingAnalyzer {
             },
         );
         Ok(render_report(&report, format, || {
-            format_markdown(&report, self.top.unwrap_or(DEFAULT_TOP))
+            format_markdown(&report, top_limit(self.top, DEFAULT_TOP))
         })?)
     }
 
@@ -670,7 +672,7 @@ fn format_markdown(report: &Report, top: usize) -> String {
         report.suspect_dependencies.len(),
         report.history.totals.commit_count,
     );
-    let _ = writeln!(&mut out, "\n{NOTE}");
+    render_note_tight(&mut out, NOTE);
     if report.shallow_clone {
         out.push_str(
             "\n**Shallow clone**: the log is truncated, so co-change evidence before the graft \
@@ -754,17 +756,20 @@ struct Section<'a> {
     rule: &'a str,
     /// What one row counts, for the overflow line.
     unit: &'a str,
+    /// The flag that narrows this bucket, for the overflow line.
+    narrow: &'a str,
 }
 
 impl<'a> Section<'a> {
     /// A section whose table is the shared pair columns and nothing else.
-    fn pairs(heading: String, empty: Option<&'a str>) -> Self {
+    fn pairs(heading: String, empty: Option<&'a str>, narrow: &'a str) -> Self {
         Self {
             heading,
             empty,
             columns: PAIR_COLUMNS,
             rule: PAIR_RULE,
             unit: "pair(s)",
+            narrow,
         }
     }
 }
@@ -790,7 +795,7 @@ fn render_section<R>(
     for row in rows.iter().take(top) {
         let _ = writeln!(out, "| {} |", cells(row));
     }
-    render_overflow(out, rows.len(), top, section.unit);
+    render_overflow_narrowed(out, rows.len(), top, section.unit, section.narrow);
 }
 
 fn render_hidden(out: &mut String, report: &Report, top: usize) {
@@ -808,6 +813,7 @@ fn render_hidden(out: &mut String, report: &Report, top: usize) {
                 "_Every co-changing pair is either declared, a test pair, or outside the static \
                  view._\n",
             ),
+            since_hint(report.since.as_deref()),
         )
     };
     render_section(out, &section, &report.hidden_coupling, top, |row| {
@@ -829,20 +835,25 @@ fn render_verdict(verdict: &StaticVerdict) -> String {
 }
 
 fn render_suspect(out: &mut String, report: &Report, top: usize) {
+    let mut heading = format!(
+        "\n## Suspect dependencies ({} edge(s): declared, but the window never moved them \
+         together)\n",
+        report.suspect_dependencies.len(),
+    );
+    render_note_tight(
+        &mut heading,
+        "Weaker than the bucket above, by construction: over one window a stable, correct \
+         dependency and a dead one look the same. Both endpoints changed at least \
+         `--min-support` times here, which is what makes the silence worth a question — is \
+         the edge still load-bearing?",
+    );
     let section = Section {
-        heading: format!(
-            "\n## Suspect dependencies ({} edge(s): declared, but the window never moved them \
-             together)\n\n\
-             Weaker than the bucket above, by construction: over one window a stable, correct \
-             dependency and a dead one look the same. Both endpoints changed at least \
-             `--min-support` times here, which is what makes the silence worth a question — is \
-             the edge still load-bearing?\n",
-            report.suspect_dependencies.len(),
-        ),
+        heading,
         empty: Some("_No declared dependency between two files this busy went unexercised._\n"),
         columns: "a | b | edge | dir | co | commits_a | commits_b",
         rule: "--- | --- | --- | --- | ---: | ---: | ---:",
         unit: "edge(s)",
+        narrow: since_hint(report.since.as_deref()),
     };
     render_section(out, &section, &report.suspect_dependencies, top, |row| {
         format!(
@@ -876,20 +887,22 @@ fn render_context_buckets(out: &mut String, report: &Report, top: usize) {
             report.test_pairs.len(),
         ),
         None,
+        since_hint(report.since.as_deref()),
     );
     render_section(out, &test_pairs, &report.test_pairs, top, |row| {
         render_pair_cells(&row.pair)
     });
-    let outside = Section::pairs(
-        format!(
-            "\n## Outside the static view ({} pair(s): no language backend reads one side)\n\n\
-             Not a missing dependency — there is no static view of these files to miss one. A \
-             doc, a manifest, or a fixture that always moves with a source file is still a real \
-             contract, and the only place it is written down is here.\n",
-            report.no_static_view.len(),
-        ),
-        None,
+    let mut heading = format!(
+        "\n## Outside the static view ({} pair(s): no language backend reads one side)\n",
+        report.no_static_view.len(),
     );
+    render_note_tight(
+        &mut heading,
+        "Not a missing dependency — there is no static view of these files to miss one. A \
+         doc, a manifest, or a fixture that always moves with a source file is still a real \
+         contract, and the only place it is written down is here.",
+    );
+    let outside = Section::pairs(heading, None, since_hint(report.since.as_deref()));
     render_section(out, &outside, &report.no_static_view, top, |row| {
         render_pair_cells(&row.pair)
     });

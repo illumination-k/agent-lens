@@ -94,6 +94,7 @@ use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builder
 use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::{
     ModuleSection, render_backticked_list, render_module_confidence, render_module_sections,
+    render_note_tight, top_limit,
 };
 use super::options::analyzer_options;
 use super::runner::render_report;
@@ -1184,7 +1185,7 @@ fn rewrite_crate_prefix(module: &str) -> String {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let summary = &report.summary;
     let mut out = format!(
         "# Over-exposed visibility: {} ({}/{} audited function(s), across {} module(s))\n",
@@ -1193,7 +1194,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         report.audit.audited_function_count(),
         summary.module_count,
     );
-    let _ = writeln!(out, "\n{}", report.note);
+    render_note_tight(&mut out, report.note);
     render_audit(&mut out, &report.audit);
 
     if report.audit.audited_function_count() == 0 {
@@ -2955,7 +2956,7 @@ mod tests {
         );
         let md = analyze_md(over.path());
         assert!(
-            md.contains("+2 more (JSON output carries every row)"),
+            md.contains("+2 more (`--format jsonl` carries every row)"),
             "got: {md}",
         );
         assert_eq!(
@@ -2980,7 +2981,7 @@ mod tests {
         );
         let md = analyze_md(exact.path());
         assert!(
-            !md.contains("more (JSON output carries every row)"),
+            !md.contains("carries every row)"),
             "nothing was dropped, so nothing is announced: {md}",
         );
     }

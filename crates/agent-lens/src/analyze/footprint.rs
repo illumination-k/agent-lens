@@ -46,6 +46,7 @@ use tracing::warn;
 use super::call_graph::model::CallGraphNode;
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::diff::{FileDiff, diff_files, untracked_file_diffs};
+use super::format::{render_overflow, top_limit};
 use super::function_delta::{
     ChangeKind, FunctionChange, FunctionFact, compare, function_facts, wrapper_findings,
 };
@@ -182,7 +183,7 @@ impl FootprintAnalyzer {
         let roots = roots.into();
         let report = self.measure(&roots)?;
         Ok(render_report(&report, format, || {
-            format_markdown(&report, self.top.unwrap_or(DEFAULT_TOP))
+            format_markdown(&report, top_limit(self.top, DEFAULT_TOP))
         })?)
     }
 
@@ -1129,9 +1130,7 @@ fn section<T>(out: &mut String, title: &str, rows: &[T], top: usize, line: impl 
     for row in rows.iter().take(top) {
         let _ = writeln!(out, "- {}", line(row));
     }
-    if rows.len() > top {
-        let _ = writeln!(out, "- … +{} more", rows.len() - top);
-    }
+    render_overflow(out, rows.len(), top, "row(s)");
 }
 
 #[cfg(test)]
@@ -1343,7 +1342,10 @@ fn unused_helper() -> i32 {
             "got {md}"
         );
         assert!(md.contains("## Outside the main cluster (2)"), "got {md}");
-        assert!(md.contains("- … +1 more"), "`--top 1` hides one row: {md}");
+        assert!(
+            md.contains("+1 more row(s) not shown (--top 1)"),
+            "`--top 1` hides one row: {md}"
+        );
         assert!(
             md.contains("## New wrappers (1)\n- src/lib.rs:"),
             "got {md}"

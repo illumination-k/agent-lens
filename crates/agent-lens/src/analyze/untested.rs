@@ -46,7 +46,9 @@ use serde::Serialize;
 
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::{ModuleSection, render_module_confidence, render_module_sections};
+use super::format::{
+    ModuleSection, render_module_confidence, render_module_sections, render_note_tight, top_limit,
+};
 use super::options::analyzer_options;
 use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
@@ -432,7 +434,7 @@ fn module_groups(
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let summary = &report.summary;
     let mut out = format!(
         "# Untested functions: {} ({}/{} production function(s), {} LOC, across {} module(s))\n",
@@ -442,7 +444,7 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
         summary.untested_loc,
         summary.module_count,
     );
-    let _ = writeln!(out, "\n{}", report.note);
+    render_note_tight(&mut out, report.note);
 
     if report.test_roots.absent {
         out.push_str(
@@ -1030,7 +1032,7 @@ mod tests {
         assert!(md.contains("Structural, not coverage"), "got: {md}");
         assert!(md.contains("Upper-bound support"), "got: {md}");
         assert!(
-            md.contains("+3 more (JSON output carries every row)"),
+            md.contains("+3 more (`--format jsonl` carries every row)"),
             "got: {md}"
         );
         assert_eq!(
@@ -1051,10 +1053,7 @@ mod tests {
              }\n",
         );
         let md = analyze_md(small.path());
-        assert!(
-            !md.contains("more (JSON output carries every row)"),
-            "got: {md}",
-        );
+        assert!(!md.contains("carries every row)"), "got: {md}",);
     }
 
     #[test]

@@ -55,7 +55,7 @@ use super::call_graph::model::{
     GraphLanguage, ModuleResolutionSummary, NodeVisibility, Resolution,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::{render_module_confidence, render_overflow};
+use super::format::{render_module_confidence, render_note_tight, render_overflow, top_limit};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::{AnalyzeRoots, AnalyzerError, DiffScope, LineRange, OutputFormat, overlaps_any};
@@ -880,13 +880,13 @@ fn summarize(chains: &[Chain], modules: &[ModuleRollup]) -> Summary {
 }
 
 fn format_markdown(report: &Report, top: Option<usize>) -> String {
-    let limit = top.unwrap_or(DEFAULT_TOP);
+    let limit = top_limit(top, DEFAULT_TOP);
     let summary = &report.summary;
     let mut out = format!(
         "# Delegation chains: {} ({} chain(s) of {}+ forwarding hops, {} module(s) rolled up)\n",
         report.root, summary.chain_count, MIN_CHAIN_HOPS, summary.module_count,
     );
-    let _ = writeln!(out, "\n{}", report.note);
+    render_note_tight(&mut out, report.note);
     render_audit(&mut out, &report.audit);
 
     if report.chains.is_empty() {
