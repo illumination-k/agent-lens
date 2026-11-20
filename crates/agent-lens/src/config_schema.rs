@@ -7,18 +7,29 @@
 //! the `[profile.<name>]` keys, every per-tool option table, and a worked
 //! example, in the same spirit as [`crate::help_md`].
 //!
-//! The per-tool tables are produced from an exhaustive `match` on
-//! [`ToolName`] (see [`tool_table`]), so adding an analyzer to the config
-//! fails to compile until its schema entry is filled in. Field-level drift
-//! within a table is not a compile error — the `Field` arrays are literals
-//! decoupled from the structs — but the `schema_keys_match_struct_fields`
-//! parity test reflects each struct's serde field list and fails loudly in
-//! both directions (a struct field missing from the schema, or a schema key
-//! whose struct field was removed).
+//! The per-tool tables are generated from each analyzer's options struct
+//! (see [`tool_command`]): the struct is both the `analyze <tool>` flag
+//! group and the `[profile.<name>.<tool>]` table, so its clap metadata —
+//! long name, doc comment, accepted values, default — is the schema, and
+//! a new option documents itself. The `match` there is exhaustive, so a
+//! new analyzer fails to compile until it names its options type. Only
+//! defaults clap cannot see (resolved at run time) are written out, in
+//! [`RUNTIME_DEFAULTS`]. The `schema_keys_match_struct_fields` parity test
+//! still reflects each struct's serde field list, which is what the TOML
+//! actually accepts, against the generated keys.
 
+use std::any::TypeId;
 use std::fmt::Write as _;
 
-use crate::config::{CONFIG_FILE_NAME, ToolName};
+use clap::{Arg, ArgAction, Args, Command};
+
+use crate::config::{
+    CONFIG_FILE_NAME, ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
+    ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions, ForwardingOptions,
+    GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions,
+    NarrowableOptions, OwnershipOptions, ReachOptions, RiskOptions, SearchOptions,
+    SimilarityOptions, TestRedundancyOptions, ToolName,
+};
 
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
@@ -64,12 +75,6 @@ struct Field {
     desc: &'static str,
 }
 
-/// The `[profile.<name>.<tool>]` options table for one analyzer, or
-/// `None` for analyzers that take no overrides.
-struct ToolTable {
-    fields: &'static [Field],
-}
-
 /// Top-level `[profile.<name>]` keys shared by every analyzer.
 const PROFILE_FIELDS: &[Field] = &[
     Field {
@@ -110,644 +115,202 @@ const PROFILE_FIELDS: &[Field] = &[
     },
 ];
 
-/// Per-tool override fields, keyed by analyzer.
+/// One rendered table row. Per-tool rows are built from the options
+/// structs at render time, so they own their text.
+struct Row {
+    key: String,
+    ty: String,
+    presence: String,
+    desc: String,
+}
+
+impl From<&Field> for Row {
+    fn from(field: &Field) -> Self {
+        Self {
+            key: field.key.to_owned(),
+            ty: field.ty.to_owned(),
+            presence: field.presence.to_owned(),
+            desc: field.desc.to_owned(),
+        }
+    }
+}
+
+/// The clap argument surface of one analyzer's options struct, or `None`
+/// for analyzers that take no per-tool overrides.
 ///
-/// This `match` is exhaustive on purpose: a new [`ToolName`] variant will
-/// not compile until its schema entry is added here, so the rendered
-/// reference stays in lockstep with the config structs.
-fn tool_table(tool: ToolName) -> Option<ToolTable> {
-    let fields: &'static [Field] = match tool {
-        ToolName::Similarity => &[
-            Field {
-                key: "threshold",
-                ty: "float",
-                presence: "default: 0.85",
-                desc: "Similarity cut for clustering. Omitting it applies the default, not \"no cut\".",
-            },
-            Field {
-                key: "sweep",
-                ty: "array<float>",
-                presence: "optional",
-                desc: "Multi-threshold sweep ladder. When set it supersedes threshold as the clustering cut.",
-            },
-            Field {
-                key: "min-lines",
-                ty: "int",
-                presence: "default: 5 (functions) / 3 (types)",
-                desc: "Ignore units shorter than this many lines. Omitting it applies the target-specific default, not \"no floor\".",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the report to the top N results.",
-            },
-            Field {
-                key: "method",
-                ty: "\"tsed\", \"token\", \"lcs\" or \"pdg\"",
-                presence: "optional",
-                desc: "Body-scoring algorithm: tsed (tree-edit distance, default), token (k-gram overlap), lcs (longest common token subsequence; order-aware, tolerant of a large inserted gap) or pdg (dependence-graph kernel; invariant to statement order and local names).",
-            },
-            Field {
-                key: "idf",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Weight token k-grams by inverse document frequency over the corpus, so boilerplate every body repeats counts for less. Only affects method = \"token\".",
-            },
-            Field {
-                key: "target",
-                ty: "\"functions\" or \"types\"",
-                presence: "optional",
-                desc: "Comparison unit: functions (default) or type definitions (struct/class/interface/enum/alias member shapes). With types, paired-by only accepts the qualified/name key.",
-            },
-            Field {
-                key: "doc-overlap",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Roll the per-pair doc-comment overlap up into the markdown report. Diagnostic only; it never feeds the similarity score, and JSON output carries the per-pair values either way.",
-            },
-            Field {
-                key: "paired-by",
-                ty: "\"qualified\" or \"method\"",
-                presence: "optional",
-                desc: "Match functions by name key first and score second, reporting every cross-file match regardless of threshold, most drifted first. qualified keys on the normalized owner-qualified name; method keys on the method segment alone.",
-            },
-            Field {
-                key: "drift-floor",
-                ty: "float",
-                presence: "default: 0.30",
-                desc: "Floor for paired-by: name matches scoring below this are dropped as unrelated namesakes rather than reported as drift. Only read when paired-by is set.",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Restrict analysis to functions touched by the working-tree diff.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Restrict analysis to functions touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
-            },
-        ],
-        ToolName::Complexity => &[
-            Field {
-                key: "min-score",
-                ty: "int",
-                presence: "optional",
-                desc: "Drop functions scoring below this threshold.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the report to the top N results.",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Restrict analysis to functions touched by the working-tree diff.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Restrict analysis to functions touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
-            },
-        ],
-        ToolName::Cohesion => &[
-            Field {
-                key: "min-score",
-                ty: "int",
-                presence: "optional",
-                desc: "Drop units scoring below this threshold.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the report to the top N results.",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Restrict analysis to units touched by the working-tree diff.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Restrict analysis to units touched by the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
-            },
-        ],
-        ToolName::Hotspot => &[
-            Field {
-                key: "since",
-                ty: "string",
-                presence: "optional",
-                desc: "Git revision window for churn, e.g. \"90.days.ago\".",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the report to the top N results.",
-            },
-        ],
-        ToolName::Risk => &[
-            Field {
-                key: "since",
-                ty: "string",
-                presence: "optional",
-                desc: "Git revision window for the churn axis, e.g. \"90.days.ago\". Centrality reflects the current source either way.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown table to the top N riskiest files.",
-            },
-        ],
-        ToolName::Communities => &[
-            Field {
-                key: "algorithm",
-                ty: "\"greedy\" or \"leiden\"",
-                presence: "default: greedy",
-                desc: "Partitioner: greedy modularity agglomeration, or deterministic Leiden (faster on large graphs, never returns a disconnected community).",
-            },
-            Field {
-                key: "co-change-share",
-                ty: "float",
-                presence: "default: 0.5",
-                desc: "Under weights = \"both\", the share of total edge weight carried by co-change; the static graph carries the rest. Within [0.0, 1.0].",
-            },
-            Field {
-                key: "granularity",
-                ty: "\"file\" or \"module\"",
-                presence: "default: file",
-                desc: "What a community member is: one module-graph node (file), or the containing module those nodes collapse into (module).",
-            },
-            Field {
-                key: "max-commit-files",
-                ty: "int",
-                presence: "default: 50",
-                desc: "Commits touching more files than this are dropped from the co-change half.",
-            },
-            Field {
-                key: "min-community",
-                ty: "int",
-                presence: "default: 2",
-                desc: "Smallest community that gets reported. The partition, and therefore both modularity figures, is unaffected.",
-            },
-            Field {
-                key: "min-support",
-                ty: "int",
-                presence: "default: 3",
-                desc: "Fewest shared commits for a file pair to become a co-change edge.",
-            },
-            Field {
-                key: "resolution",
-                ty: "float",
-                presence: "default: 1.0",
-                desc: "Modularity resolution γ. Above 1 favours smaller communities, below 1 larger ones; both modularity figures are scored at it. Must be above 0.",
-            },
-            Field {
-                key: "since",
-                ty: "string",
-                presence: "optional",
-                desc: "Git revision window for the co-change half, e.g. \"180.days.ago\". Only read when weights is co-change or both.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap each markdown listing to the top N rows.",
-            },
-            Field {
-                key: "weights",
-                ty: "\"static\", \"co-change\" or \"both\"",
-                presence: "default: static",
-                desc: "What an edge is: resolved static references, git co-change (Jaccard over commits), or both normalised and blended. co-change and both need a git working tree and add a static-vs-co-change partition comparison.",
-            },
-        ],
-        ToolName::CoChange => &[
-            Field {
-                key: "since",
-                ty: "string",
-                presence: "optional",
-                desc: "Git window for the history read, e.g. \"180.days.ago\". Every count, confidence and lift figure is computed inside it.",
-            },
-            Field {
-                key: "min-support",
-                ty: "int",
-                presence: "default: 3",
-                desc: "Minimum co-change count for a pair to be reported. Below this a pair is coincidence rather than a pattern.",
-            },
-            Field {
-                key: "min-confidence",
-                ty: "float",
-                presence: "default: 0.5",
-                desc: "Minimum for a pair's stronger confidence direction. The gate reads the stronger one so asymmetric pairs survive.",
-            },
-            Field {
-                key: "max-commit-files",
-                ty: "int",
-                presence: "default: 50",
-                desc: "Drop commits touching more files than this, as tangled or squashed. Also the cost bound, since pair counting is quadratic in a commit's file count.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown table to the top N pairs.",
-            },
-        ],
-        ToolName::ChangeEntropy => &[
-            Field {
-                key: "since",
-                ty: "string",
-                presence: "optional",
-                desc: "Git window for the history read, e.g. \"180.days.ago\". Periods, file rows and the reference distribution are all computed inside it.",
-            },
-            Field {
-                key: "period",
-                ty: "\"week\" or \"month\"",
-                presence: "default: week",
-                desc: "Bucket entropy is measured over: ISO weeks or calendar months, both in UTC so a commit's bucket does not depend on when the report was run.",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Report the pending working-tree change as one change set — files touched, modules spanned, entropy, and its percentile among this repository's commits — instead of the history.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Like diff-only, but for the change in a git revision range (e.g. \"HEAD~1..HEAD\"). Mutually exclusive with diff-only.",
-            },
-            Field {
-                key: "min-commits",
-                ty: "int",
-                presence: "default: 3",
-                desc: "Omit periods with fewer counted commits than this: entropy over two commits is noise.",
-            },
-            Field {
-                key: "max-commit-files",
-                ty: "int",
-                presence: "default: 50",
-                desc: "Drop commits touching more files than this, as tangled or squashed. They take part in nothing, the reference distribution included.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown tables to the top N rows.",
-            },
-        ],
-        ToolName::Ownership => &[
-            Field {
-                key: "since",
-                ty: "string",
-                presence: "optional",
-                desc: "Git window for the history read, e.g. \"180.days.ago\". Every share and count is computed inside it.",
-            },
-            Field {
-                key: "minor-threshold",
-                ty: "float",
-                presence: "default: 0.05",
-                desc: "A contributor whose share of a file's commits is strictly below this is minor (Bird et al.). Must be within [0.0, 1.0].",
-            },
-            Field {
-                key: "bot-pattern",
-                ty: "array<string> (globs)",
-                presence: "default: [\"*\\\\[bot\\\\]*\"]",
-                desc: "Globs matched case-insensitively against `Name <email>`; a match is a bot, dropped from authorship and counted. Replaces the default rather than adding to it.",
-            },
-            Field {
-                key: "include-bots",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Keep bot authors instead of dropping them.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown table to the top N files.",
-            },
-        ],
-        ToolName::HiddenCoupling => &[
-            Field {
-                key: "since",
-                ty: "string",
-                presence: "optional",
-                desc: "Git window for the history half, e.g. \"180.days.ago\". The static graph reflects the current source either way.",
-            },
-            Field {
-                key: "min-support",
-                ty: "int",
-                presence: "default: 3",
-                desc: "Co-change count a pair must clear to count as co-changing, and the count a declared dependency (and each of its endpoints) must fall under to count as suspect.",
-            },
-            Field {
-                key: "min-confidence",
-                ty: "float",
-                presence: "default: 0.5",
-                desc: "Minimum for a pair's stronger confidence direction before it is measured against the static graph.",
-            },
-            Field {
-                key: "max-commit-files",
-                ty: "int",
-                presence: "default: 50",
-                desc: "Drop commits touching more files than this, as tangled or squashed. Also the cost bound, since pair counting is quadratic in a commit's file count.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap each markdown bucket to the top N rows.",
-            },
-        ],
-        ToolName::Search => &[
-            Field {
-                key: "query",
-                ty: "string",
-                presence: "required",
-                desc: "What to search for. Tokenized like the corpus, so `parse_diff_range`, `parseDiffRange` and `parse diff range` are one query.",
-            },
-            Field {
-                key: "limit",
-                ty: "int",
-                presence: "default: 20",
-                desc: "Cap the result list. Unlike top, this caps JSON too — a ranked list is the output, not a view of it.",
-            },
-            Field {
-                key: "fuzzy",
-                ty: "\"off\", \"missing\", or \"always\"",
-                presence: "default: missing",
-                desc: "When to expand a query term to nearby vocabulary by character-trigram overlap. `missing` expands only terms the corpus never spells; `always` also expands terms that already matched.",
-            },
-            Field {
-                key: "explain",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Attach the per-term scoring breakdown to every hit. Off by default: ranking has already happened, so the numbers behind it are for auditing an ordering, not for acting on a result.",
-            },
-            Field {
-                key: "rank",
-                ty: "\"bm25\" or \"graph\"",
-                presence: "default: bm25",
-                desc: "Ranking signal. `graph` scales relevance by a call-graph importance prior (1 + ln(1 + fan_in)), re-ordering the top candidates so load-bearing matches lead.",
-            },
-        ],
-        ToolName::Hubs => &[Field {
-            key: "top",
-            ty: "int",
-            presence: "optional",
-            desc: "Cap each markdown ranking to the top N results.",
-        }],
-        ToolName::Impact => &[
-            Field {
-                key: "function",
-                ty: "array<string>",
-                presence: "default: []",
-                desc: "Seed symbols (qualified-name suffix or exact node id). When empty, seeds come from the unstaged working-tree diff.",
-            },
-            Field {
-                key: "depth",
-                ty: "int",
-                presence: "default: 5",
-                desc: "Reverse-traversal depth cap in call hops (cycles count as one).",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown caller and test lists to the top N rows.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Seed the query from the given git revision range (`HEAD~1..HEAD`) instead of the working-tree diff. Ignored when function is set.",
-            },
-        ],
-        ToolName::Footprint => &[
-            Field {
-                key: "depth",
-                ty: "int",
-                presence: "default: 2",
-                desc: "Caller hops the scatter check walks from each touched function. Two touched functions belong together when their capped caller closures intersect.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap each markdown list to the top N rows.",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Measure the unstaged working-tree diff. This is also what an unset scope reads: there is no footprint without a diff.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Measure the given git revision range (`HEAD~1..HEAD`, `main...topic`) instead of the working tree. Mutually exclusive with diff-only.",
-            },
-        ],
-        ToolName::Layers => &[Field {
-            key: "top",
-            ty: "int",
-            presence: "optional",
-            desc: "Cap each markdown listing to the top N rows.",
-        }],
-        ToolName::TestRedundancy => &[
-            Field {
-                key: "threshold",
-                ty: "float",
-                presence: "default: 0.85",
-                desc: "Similarity at or above which two test bodies are near-copies. Held at the `similarity` default so a group here is a cluster that report would also show.",
-            },
-            Field {
-                key: "method",
-                ty: "\"tsed\", \"token\", \"lcs\" or \"pdg\"",
-                presence: "default: tsed",
-                desc: "Body-scoring algorithm, as `similarity`'s. `pdg` reads dependence structure, so a copied test whose arrange step moved still scores as a copy.",
-            },
-            Field {
-                key: "min-lines",
-                ty: "int",
-                presence: "default: 5",
-                desc: "Minimum source line count for a test to be considered.",
-            },
-            Field {
-                key: "min-body-nodes",
-                ty: "int",
-                presence: "default: 8",
-                desc: "Minimum body-tree nodes a test needs before it is eligible. Guards against bodies the parser keeps opaque — a Rust test whose whole body is one unexpanded `assert_eq!` is a two-node tree, identical to every other such test however different the assertion, and its `#[rstest]` signature carries it past any `min-lines` floor.",
-            },
-            Field {
-                key: "no-reach-guard",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Offer a test as foldable even when the call graph shows it is the only one with a resolved path to some production function. Skips building the graph.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown group list to the top N groups.",
-            },
-        ],
-        ToolName::Reach => &[
-            Field {
-                key: "section",
-                ty: "array of \"untested\", \"test-only\", \"unreachable\"",
-                presence: "default: all three",
-                desc: "Sections to report, always in the order untested, test-only, unreachable. `untested`: entry points reach it, no test does. `test-only`: a test reaches it, no production entry point does. `unreachable`: neither does.",
-            },
-            Field {
-                key: "tier",
-                ty: "\"confirmed\", \"likely\", or \"unknown\"",
-                presence: "default: confirmed",
-                desc: "Lowest confidence tier the unreachable section renders in markdown. JSON always carries every tier.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap each section's markdown listing to the top N rows.",
-            },
-        ],
-        ToolName::Narrowable => &[
-            Field {
-                key: "section",
-                ty: "array of \"single-use\", \"single-impl\", \"parameters\", \"visibility\"",
-                presence: "default: all four",
-                desc: "Sections to report, always in the order single-use, single-impl, parameters, visibility.",
-            },
-            Field {
-                key: "max-loc",
-                ty: "int",
-                presence: "default: 30",
-                desc: "single-use body-size ceiling in source lines: a single-caller function larger than this is excluded from the candidate list (the calibration section still counts it).",
-            },
-            Field {
-                key: "max-cyclomatic",
-                ty: "int",
-                presence: "default: 6",
-                desc: "single-use cyclomatic-complexity ceiling: a single-caller function branching more than this is excluded from the candidate list (the calibration section still counts it).",
-            },
-            Field {
-                key: "min-call-sites",
-                ty: "int",
-                presence: "default: 2",
-                desc: "parameters floor: minimum resolved production call sites a parameter needs before \"always the same value\" is reported. A single-caller function's arguments are the single-use section's finding.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap each section's markdown listing to the top N rows.",
-            },
-        ],
-        ToolName::GraphQuery => &[
-            Field {
-                key: "query",
-                ty: "\"callers\" / \"callees\" / \"neighborhood\" / \"path\"",
-                presence: "required",
-                desc: "Traversal verb to run.",
-            },
-            Field {
-                key: "symbol",
-                ty: "string",
-                presence: "required",
-                desc: "Function to start from: a `::`-segment suffix of its qualified name, or an exact node id.",
-            },
-            Field {
-                key: "to",
-                ty: "string",
-                presence: "optional",
-                desc: "Destination symbol. Required by the path query, invalid for the others.",
-            },
-            Field {
-                key: "depth",
-                ty: "int",
-                presence: "default: 1 (path: unbounded)",
-                desc: "Traversal depth cap in call hops.",
-            },
-            Field {
-                key: "direction",
-                ty: "\"in\" / \"out\" / \"both\"",
-                presence: "default: both",
-                desc: "Traversal direction. Only valid for the neighborhood query.",
-            },
-            Field {
-                key: "limit",
-                ty: "int",
-                presence: "default: 50",
-                desc: "Cap the result set by node count.",
-            },
-        ],
-        ToolName::ContextSpan => &[
-            Field {
-                key: "entry-glob",
-                ty: "array<string> (globs)",
-                presence: "default: []",
-                desc: "Entry-point globs used to seed the span walk.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "optional",
-                desc: "Cap the markdown module table to the top N spans.",
-            },
-        ],
-        ToolName::Forwarding => &[
-            Field {
-                key: "section",
-                ty: "array of \"wrapper\", \"delegation\"",
-                presence: "default: both",
-                desc: "Sections to report, always in the order wrapper, delegation. `wrapper`: single forwarding hops with argument-level evidence. `delegation`: the chains those hops stack into, with the terminus doing the work, and a per-module roll-up.",
-            },
-            Field {
-                key: "top",
-                ty: "int",
-                presence: "default: 20",
-                desc: "Cap each section's markdown listing to the top N rows (wrappers in file order).",
-            },
-            Field {
-                key: "diff-only",
-                ty: "bool",
-                presence: "default: false",
-                desc: "Keep only wrappers, and chains with a hop or terminus, on an unstaged changed line.",
-            },
-            Field {
-                key: "diff-range",
-                ty: "string",
-                presence: "optional",
-                desc: "Keep only wrappers, and chains with a hop or terminus, on a line changed in the given git revision range (`HEAD~1..HEAD`, `main...topic`). Mutually exclusive with diff-only.",
-            },
-        ],
-        ToolName::Coupling => &[Field {
-            key: "top",
-            ty: "int",
-            presence: "default: 20",
-            desc: "Cap the markdown module table to the top N modules by IFC.",
-        }],
-        // Analyzers that take no per-tool overrides. Declaring a
-        // `[profile.<name>.cycles]` table is a parse error.
-        ToolName::Cycles | ToolName::FunctionGraph => return None,
+/// Every options struct is both the `analyze <tool>` flag group and the
+/// `[profile.<name>.<tool>]` table, so its clap metadata — long name, doc
+/// comment, accepted values, default — *is* the schema. This `match` is
+/// exhaustive on purpose: a new [`ToolName`] variant will not compile
+/// until it names its options type here.
+fn tool_command(tool: ToolName) -> Option<Command> {
+    fn of<T: Args>(name: &'static str) -> Option<Command> {
+        Some(T::augment_args(Command::new(name)))
+    }
+    match tool {
+        ToolName::Search => of::<SearchOptions>("search"),
+        ToolName::Similarity => of::<SimilarityOptions>("similarity"),
+        ToolName::Complexity => of::<ComplexityOptions>("complexity"),
+        ToolName::Cohesion => of::<CohesionOptions>("cohesion"),
+        ToolName::Hotspot => of::<HotspotOptions>("hotspot"),
+        ToolName::Risk => of::<RiskOptions>("risk"),
+        // `hidden-coupling` scopes the same history window with the same
+        // thresholds as `co-change`, so they share one options type.
+        ToolName::CoChange | ToolName::HiddenCoupling => of::<CoChangeOptions>("co-change"),
+        ToolName::ChangeEntropy => of::<ChangeEntropyOptions>("change-entropy"),
+        ToolName::Ownership => of::<OwnershipOptions>("ownership"),
+        ToolName::Hubs => of::<HubsOptions>("hubs"),
+        ToolName::Impact => of::<ImpactOptions>("impact"),
+        ToolName::Footprint => of::<FootprintOptions>("footprint"),
+        ToolName::Layers => of::<LayersOptions>("layers"),
+        ToolName::Reach => of::<ReachOptions>("reach"),
+        ToolName::Narrowable => of::<NarrowableOptions>("narrowable"),
+        ToolName::TestRedundancy => of::<TestRedundancyOptions>("test-redundancy"),
+        ToolName::Forwarding => of::<ForwardingOptions>("forwarding"),
+        ToolName::GraphQuery => of::<GraphQueryOptions>("graph-query"),
+        ToolName::ContextSpan => of::<ContextSpanOptions>("context-span"),
+        ToolName::Coupling => of::<CouplingOptions>("coupling"),
+        ToolName::Communities => of::<CommunitiesOptions>("communities"),
+        // Declaring a `[profile.<name>.cycles]` table is a parse error.
+        ToolName::Cycles | ToolName::FunctionGraph => None,
+    }
+}
+
+/// Defaults clap cannot see: an `Option<_>` field the analyzer resolves
+/// at run time, or a default that depends on another key. Everything
+/// else in a row comes from the options struct; a test holds each entry
+/// to a real key that has no clap default of its own.
+const RUNTIME_DEFAULTS: &[(ToolName, &str, &str)] = &[
+    (ToolName::Search, "limit", "20"),
+    (ToolName::Search, "fuzzy", "missing"),
+    (ToolName::Search, "rank", "bm25"),
+    (
+        ToolName::Similarity,
+        "min-lines",
+        "5 (functions) / 3 (types)",
+    ),
+    (ToolName::Ownership, "bot-pattern", "[\"*\\\\[bot\\\\]*\"]"),
+    (ToolName::Impact, "depth", "5"),
+    (ToolName::Footprint, "depth", "2"),
+    (ToolName::Reach, "section", "all three"),
+    (ToolName::Reach, "tier", "confirmed"),
+    (ToolName::Narrowable, "section", "all four"),
+    (ToolName::Narrowable, "max-loc", "30"),
+    (ToolName::Narrowable, "max-cyclomatic", "6"),
+    (ToolName::Narrowable, "min-call-sites", "2"),
+    (ToolName::TestRedundancy, "min-lines", "5"),
+    (ToolName::TestRedundancy, "min-body-nodes", "8"),
+    (ToolName::Forwarding, "top", "20"),
+    (ToolName::Forwarding, "section", "both"),
+    (ToolName::GraphQuery, "depth", "1 (path: unbounded)"),
+    (ToolName::GraphQuery, "direction", "both"),
+    (ToolName::GraphQuery, "limit", "50"),
+    (ToolName::Coupling, "top", "20"),
+];
+
+/// Per-tool rows, sorted by key, derived from the options struct.
+fn tool_rows(tool: ToolName) -> Option<Vec<Row>> {
+    let command = tool_command(tool)?;
+    let mut rows: Vec<Row> = command
+        .get_arguments()
+        .filter(|arg| !arg.is_hide_set())
+        .filter_map(|arg| {
+            let key = arg.get_long()?;
+            Some(Row {
+                key: key.to_owned(),
+                ty: value_type(arg),
+                presence: presence(tool, key, arg),
+                desc: arg
+                    .get_help()
+                    .map(|help| help.to_string().replace('\n', " "))
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
+    Some(rows)
+}
+
+/// The TOML value type of one option.
+fn value_type(arg: &Arg) -> String {
+    if matches!(arg.get_action(), ArgAction::SetTrue | ArgAction::SetFalse) {
+        return "bool".to_owned();
+    }
+    let choices: Vec<String> = arg
+        .get_possible_values()
+        .iter()
+        .filter(|value| !value.is_hide_set())
+        .map(|value| format!("\"{}\"", value.get_name()))
+        .collect();
+    let base = if choices.is_empty() {
+        scalar_type(arg).to_owned()
+    } else {
+        english_or(&choices)
     };
-    Some(ToolTable { fields })
+    if matches!(arg.get_action(), ArgAction::Append) {
+        format!("array<{base}>")
+    } else {
+        base
+    }
+}
+
+fn scalar_type(arg: &Arg) -> &'static str {
+    let id = arg.get_value_parser().type_id();
+    let is = |t: TypeId| id == t;
+    if is(TypeId::of::<f64>()) {
+        "float"
+    } else if [
+        TypeId::of::<usize>(),
+        TypeId::of::<u8>(),
+        TypeId::of::<u16>(),
+        TypeId::of::<u32>(),
+        TypeId::of::<u64>(),
+        TypeId::of::<i32>(),
+        TypeId::of::<i64>(),
+    ]
+    .into_iter()
+    .any(is)
+    {
+        "int"
+    } else {
+        "string"
+    }
+}
+
+/// `"a"`, `"a" or "b"`, `"a", "b" or "c"`.
+fn english_or(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} or {last}", init.join(", ")),
+    }
+}
+
+/// `required`, `default: …`, or `optional`, in that order of precedence:
+/// a clap default, then a runtime default, then what the action implies.
+fn presence(tool: ToolName, key: &str, arg: &Arg) -> String {
+    if arg.is_required_set() {
+        return "required".to_owned();
+    }
+    let defaults: Vec<String> = arg
+        .get_default_values()
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect();
+    if !defaults.is_empty() {
+        return format!("default: {}", defaults.join(", "));
+    }
+    if let Some(&(_, _, value)) = RUNTIME_DEFAULTS
+        .iter()
+        .find(|&&(t, k, _)| t == tool && k == key)
+    {
+        return format!("default: {value}");
+    }
+    match arg.get_action() {
+        ArgAction::SetTrue => "default: false".to_owned(),
+        ArgAction::Append => "default: []".to_owned(),
+        _ => "optional".to_owned(),
+    }
 }
 
 /// A compact, valid config that exercises a profile, shared filters,
@@ -803,7 +366,8 @@ pub fn render() -> String {
         "\nOne table per profile. `<name>` is the argument passed to \
          `agent-lens run <name>`.\n",
     );
-    render_fields(&mut out, PROFILE_FIELDS);
+    let profile_rows: Vec<Row> = PROFILE_FIELDS.iter().map(Row::from).collect();
+    render_rows(&mut out, &profile_rows);
 
     out.push_str(
         "\n## Per-tool overrides\n\nEach `[profile.<name>.<tool>]` table is \
@@ -815,8 +379,8 @@ pub fn render() -> String {
     for tool in TOOL_ORDER {
         let name = tool.as_str();
         let _ = writeln!(out, "\n### `[profile.<name>.{name}]`");
-        match tool_table(tool) {
-            Some(table) => render_fields(&mut out, table.fields),
+        match tool_rows(tool) {
+            Some(rows) => render_rows(&mut out, &rows),
             None => {
                 let _ = writeln!(out, "\nNo options. Declaring this table is a parse error.");
             }
@@ -829,14 +393,19 @@ pub fn render() -> String {
     out
 }
 
-/// Render a slice of fields as a Markdown table.
-fn render_fields(out: &mut String, fields: &[Field]) {
+/// Render rows as a Markdown table. A literal `|` in a cell would split
+/// it, so cells escape it.
+fn render_rows(out: &mut String, rows: &[Row]) {
     out.push_str("\n| Key | Type | Presence | Description |\n| --- | --- | --- | --- |\n");
-    for field in fields {
+    let cell = |text: &str| text.replace('|', "\\|");
+    for row in rows {
         let _ = writeln!(
             out,
             "| `{}` | {} | {} | {} |",
-            field.key, field.ty, field.presence, field.desc,
+            row.key,
+            cell(&row.ty),
+            cell(&row.presence),
+            cell(&row.desc),
         );
     }
 }
@@ -933,12 +502,9 @@ mod tests {
     /// struct field missing from the schema, and a schema key whose field was
     /// removed.
     fn assert_tool_parity<'de, T: serde::Deserialize<'de>>(tool: ToolName) {
-        let schema: BTreeSet<&str> = tool_table(tool)
-            .unwrap_or_else(|| panic!("{tool:?} should have an options table"))
-            .fields
-            .iter()
-            .map(|f| f.key)
-            .collect();
+        let rows =
+            tool_rows(tool).unwrap_or_else(|| panic!("{tool:?} should have an options table"));
+        let schema: BTreeSet<&str> = rows.iter().map(|r| r.key.as_str()).collect();
         let fields: BTreeSet<&str> = reflect::field_names::<T>().into_iter().collect();
         assert_eq!(schema, fields, "schema/struct field drift for {tool:?}");
     }
@@ -985,7 +551,7 @@ mod tests {
             .chain(
                 TOOL_ORDER
                     .into_iter()
-                    .filter(|&t| tool_table(t).is_some())
+                    .filter(|&t| tool_command(t).is_some())
                     .map(ToolName::as_str),
             )
             .collect();
@@ -1048,7 +614,7 @@ mod tests {
     #[test]
     fn tool_table_marks_only_cycles_and_function_graph_as_optionless() {
         for tool in TOOL_ORDER {
-            let has_table = tool_table(tool).is_some();
+            let has_table = tool_command(tool).is_some();
             let expect_table = !matches!(tool, ToolName::Cycles | ToolName::FunctionGraph);
             assert_eq!(has_table, expect_table, "mismatch for {tool:?}");
         }
@@ -1060,7 +626,7 @@ mod tests {
         // every table line must carry exactly five separators.
         for line in render().lines().filter(|l| l.starts_with("| ")) {
             assert_eq!(
-                line.matches('|').count(),
+                line.matches('|').count() - line.matches("\\|").count(),
                 5,
                 "table row is not 4 columns: {line}",
             );
@@ -1081,5 +647,51 @@ mod tests {
                 std::path::PathBuf::from("cmd")
             ],
         );
+    }
+
+    /// A runtime default names a real key, and only one clap does not
+    /// already default — otherwise the struct and this table disagree
+    /// about which value wins.
+    #[test]
+    fn runtime_defaults_name_keys_without_a_clap_default() {
+        for &(tool, key, _) in RUNTIME_DEFAULTS {
+            let command = tool_command(tool).unwrap_or_else(|| panic!("{tool:?} has no options"));
+            let arg = command
+                .get_arguments()
+                .find(|a| a.get_long() == Some(key))
+                .unwrap_or_else(|| panic!("{tool:?} has no `{key}` option"));
+            assert!(
+                arg.get_default_values().is_empty(),
+                "{tool:?}.{key} already has a clap default; drop the runtime entry",
+            );
+        }
+    }
+
+    /// The generated rows read the options struct, so a value enum lists
+    /// every variant — the hand-written table once omitted `blocks`.
+    #[rstest::rstest]
+    #[case("| `target` | \"functions\", \"types\" or \"blocks\" | default: functions |")]
+    #[case("| `weights` | \"static\", \"co-change\" or \"both\" | default: static |")]
+    #[case("| `diff-only` | bool | default: false |")]
+    #[case("| `limit` | int | default: 20 |")]
+    // `graph-query` has its own `limit`: a runtime default belongs to one
+    // tool, not to every key spelled the same.
+    #[case("| `limit` | int | default: 50 |")]
+    #[case("| `sweep` | array<float> | default: [] |")]
+    #[case("| `bot-pattern` | array<string> | default: [\"*\\\\[bot\\\\]*\"] |")]
+    #[case("| `query` | \"callers\", \"callees\", \"neighborhood\" or \"path\" | required |")]
+    fn rows_are_generated_from_the_options_structs(#[case] row: &str) {
+        let md = render();
+        assert!(md.contains(row), "missing `{row}` in:\n{md}");
+    }
+
+    #[rstest::rstest]
+    #[case(&[], "")]
+    #[case(&["\"a\""], "\"a\"")]
+    #[case(&["\"a\"", "\"b\""], "\"a\" or \"b\"")]
+    #[case(&["\"a\"", "\"b\"", "\"c\""], "\"a\", \"b\" or \"c\"")]
+    fn choices_read_as_an_english_list(#[case] items: &[&str], #[case] expected: &str) {
+        let owned: Vec<String> = items.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(english_or(&owned), expected);
     }
 }
