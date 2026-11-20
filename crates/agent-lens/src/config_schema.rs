@@ -257,7 +257,7 @@ fn value_type(arg: &Arg) -> String {
 fn scalar_type(arg: &Arg) -> &'static str {
     let id = arg.get_value_parser().type_id();
     let is = |t: TypeId| id == t;
-    if is(TypeId::of::<f64>()) || is(TypeId::of::<f32>()) {
+    if is(TypeId::of::<f64>()) {
         "float"
     } else if [
         TypeId::of::<usize>(),
@@ -674,6 +674,10 @@ mod tests {
     #[case("| `weights` | \"static\", \"co-change\" or \"both\" | default: static |")]
     #[case("| `diff-only` | bool | default: false |")]
     #[case("| `limit` | int | default: 20 |")]
+    // `graph-query` has its own `limit`: a runtime default belongs to one
+    // tool, not to every key spelled the same.
+    #[case("| `limit` | int | default: 50 |")]
+    #[case("| `sweep` | array<float> | default: [] |")]
     #[case("| `bot-pattern` | array<string> | default: [\"*\\\\[bot\\\\]*\"] |")]
     #[case("| `query` | \"callers\", \"callees\", \"neighborhood\" or \"path\" | required |")]
     fn rows_are_generated_from_the_options_structs(#[case] row: &str) {
