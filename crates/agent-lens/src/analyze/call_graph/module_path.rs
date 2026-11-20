@@ -175,7 +175,11 @@ fn go_module_path_from_file(file: &str, source: &str) -> String {
     if !segments.is_empty() {
         return segments.join("::");
     }
-    extract_go_package_name(source).unwrap_or_else(|| ROOTLESS_MODULE.to_owned())
+    // The clause reader skips block comments too: a root file that
+    // opens with a `/* Package x ... */` doc would otherwise fall back
+    // to the placeholder and split the root package in two.
+    lens_golang::package_clause_name(source)
+        .map_or_else(|| ROOTLESS_MODULE.to_owned(), ToOwned::to_owned)
 }
 
 /// Read a `display_path` as a [`PathBuf`].
@@ -186,30 +190,6 @@ fn go_module_path_from_file(file: &str, source: &str) -> String {
 /// to it is enough to make the segment rules host-independent.
 fn normalize_separators(file: &str) -> PathBuf {
     PathBuf::from(file.replace('\\', "/"))
-}
-
-/// Pluck the package name out of the first `package <name>` line.
-/// Skips line comments and blank lines; ignores `package` keywords
-/// that appear inside block comments because the simple scan can't
-/// see the comment boundaries — that's acceptable since `gofmt`-clean
-/// Go always declares its package on the first non-comment line.
-fn extract_go_package_name(source: &str) -> Option<String> {
-    for raw in source.lines() {
-        let line = raw.trim_start();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("package")
-            && let Some(first) = rest.split_whitespace().next()
-        {
-            return Some(first.to_owned());
-        }
-        // First non-comment, non-blank line that wasn't a package
-        // clause: bail out — anything else means we wandered past the
-        // header and the file is malformed for our purposes.
-        return None;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -314,6 +294,9 @@ mod tests {
     // bail on the first comment, and the package clause below would
     // never be reached.
     #[case("solo.go", "// header\n\npackage solo\nfunc f() {}\n", "solo")]
+    // A package doc in a block comment (pflag's `flag.go`) is skipped
+    // too, or the root package splits into `pflag` and the placeholder.
+    #[case("flag.go", "/*\nPackage pflag ...\n*/\npackage pflag\n", "pflag")]
     // No parent directory and no package clause: fall back to the
     // placeholder so qualified names stay non-empty.
     #[case("loose.go", "// pkg-less\n", "module")]

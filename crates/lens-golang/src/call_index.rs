@@ -19,13 +19,17 @@ use std::collections::HashSet;
 use lens_domain::{
     ArgumentShape, BodyShape, CallShape, FunctionShape, ImportShape, LexicalResolutionStatus,
     OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan,
-    SyntaxFact, VisibilityShape, callee_names_local_binding, qualify_module, starts_uppercase,
+    SyntaxFact, ValueTypeHint, VisibilityShape, callee_names_local_binding, qualify_module,
+    starts_uppercase,
 };
 use tree_sitter::Node;
 
 use crate::attrs::name_looks_like_test_function;
 use crate::node_text::node_str;
 use crate::parser::{GoParseError, parse_tree, unquote_go_string_literal};
+use crate::value_types::{
+    GoTypeFacts, ImportAliases, PREDECLARED_TYPES, TypeScope, import_aliases, type_facts_in_tree,
+};
 use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Extract neutral function-shape facts for Go.
@@ -50,6 +54,38 @@ pub fn extract_call_shapes_with_module(
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let imports = collect_imports(tree.root_node(), bytes);
+    let aliases = import_aliases(&imports);
+    Ok(call_shapes_in_tree(
+        tree.root_node(),
+        bytes,
+        module,
+        &imports,
+        &aliases,
+    ))
+}
+
+/// The call shapes and the package-level type facts of one Go file, from
+/// one parse: the call graph wants both of every file.
+pub fn extract_call_shapes_and_type_facts_with_module(
+    source: &str,
+    module: &str,
+) -> Result<(Vec<CallShape>, GoTypeFacts), GoParseError> {
+    let tree = parse_tree(source)?;
+    let bytes = source.as_bytes();
+    let imports = collect_imports(tree.root_node(), bytes);
+    let aliases = import_aliases(&imports);
+    let calls = call_shapes_in_tree(tree.root_node(), bytes, module, &imports, &aliases);
+    let facts = type_facts_in_tree(tree.root_node(), bytes, module, &aliases);
+    Ok((calls, facts))
+}
+
+fn call_shapes_in_tree(
+    root: Node<'_>,
+    bytes: &[u8],
+    module: &str,
+    imports: &[ImportShape],
+    aliases: &ImportAliases<'_>,
+) -> Vec<CallShape> {
     let namespace_aliases: HashSet<String> = imports
         .iter()
         .filter_map(|import| {
@@ -61,12 +97,25 @@ pub fn extract_call_shapes_with_module(
             (exported.is_none()).then(|| alias.clone())
         })
         .collect();
-
     let mut out = Vec::new();
-    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
-        collect_calls_in_function(&site, bytes, module, &imports, &namespace_aliases, &mut out);
+    walk_top_level_fns(root, bytes, &mut |site| {
+        let scope = FileScope {
+            module,
+            imports,
+            aliases,
+            namespace_aliases: &namespace_aliases,
+        };
+        collect_calls_in_function(&site, bytes, &scope, &mut out);
     });
-    Ok(out)
+    out
+}
+
+/// The facts of one file every function's call walk reads.
+struct FileScope<'a> {
+    module: &'a str,
+    imports: &'a [ImportShape],
+    aliases: &'a ImportAliases<'a>,
+    namespace_aliases: &'a HashSet<String>,
 }
 
 fn function_shape(site: &FnSite<'_, '_>, source: &[u8], module: &str) -> FunctionShape {
@@ -142,25 +191,26 @@ fn parameter_signature(node: Node<'_>, source: &[u8]) -> SignatureShape {
 fn collect_calls_in_function(
     site: &FnSite<'_, '_>,
     source: &[u8],
-    module: &str,
-    imports: &[ImportShape],
-    namespace_aliases: &HashSet<String>,
+    file: &FileScope<'_>,
     out: &mut Vec<CallShape>,
 ) {
+    let module = file.module;
     let owner = site.owner.as_deref();
     let caller_qualified = match owner {
         Some(class) => qualify_module(module, &format!("{class}::{}", site.name)),
         None => qualify_module(module, site.name),
     };
     let locally_bound = local_callable_bindings(site, source);
+    let types = TypeScope::for_function(source, module, file.aliases, site.node, site.body);
     let ctx = CallContext {
         source,
         module,
         caller_qualified_name: &caller_qualified,
         caller_owner: owner.map(ToOwned::to_owned),
-        imports,
-        namespace_aliases,
+        imports: file.imports,
+        namespace_aliases: file.namespace_aliases,
         locally_bound,
+        types,
     };
     visit_calls(site.body, &ctx, out);
 }
@@ -268,7 +318,7 @@ fn collect_func_literal_binding_names(node: Node<'_>, source: &[u8], out: &mut H
 
 /// Flatten an `expression_list` / `identifier_list` into its elements; a
 /// bare node (single-element list) stands for itself.
-fn expression_list_children(node: Node<'_>) -> Vec<Node<'_>> {
+pub(crate) fn expression_list_children(node: Node<'_>) -> Vec<Node<'_>> {
     if matches!(node.kind(), "expression_list" | "identifier_list") {
         let mut cursor = node.walk();
         node.named_children(&mut cursor).collect()
@@ -291,6 +341,9 @@ struct CallContext<'a> {
     /// Callable names bound in this function's own scope — see
     /// [`local_callable_bindings`].
     locally_bound: HashSet<String>,
+    /// Static types of the names this function binds — see
+    /// [`TypeScope::for_function`].
+    types: TypeScope<'a>,
 }
 
 fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) {
@@ -319,6 +372,8 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
             arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(locally_bound),
             callee_binding: SyntaxFact::Unknown,
+            receiver_type: receiver_type_hint(callee, &ctx.types)
+                .map_or(SyntaxFact::Unknown, SyntaxFact::Known),
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: ctx.imports.to_vec(),
             line: node.start_position().row + 1,
@@ -336,6 +391,21 @@ fn visit_calls(node: Node<'_>, ctx: &CallContext<'_>, out: &mut Vec<CallShape>) 
         }
         visit_calls(child, ctx, out);
     }
+}
+
+/// The static type of the value a selector call (`x.M()`, `s.f.M()`,
+/// `NewT().M()`) is made on. A namespace-aliased call (`pkg.F()`) has no
+/// receiver value, and so no hint.
+fn receiver_type_hint(callee: Node<'_>, types: &TypeScope<'_>) -> Option<ValueTypeHint> {
+    let mut callee = callee;
+    while callee.kind() == "parenthesized_expression" {
+        let mut cursor = callee.walk();
+        callee = callee.named_children(&mut cursor).next()?;
+    }
+    if callee.kind() != "selector_expression" {
+        return None;
+    }
+    types.expr_hint(callee.child_by_field_name("operand")?, 0)
 }
 
 /// Classify the arguments of one `argument_list`.
@@ -550,32 +620,6 @@ fn index_reads_as_type(index: Node<'_>, source: &[u8]) -> bool {
             .is_some_and(|name| starts_uppercase(name) || PREDECLARED_TYPES.contains(&name))
 }
 
-/// Go's predeclared type names.
-const PREDECLARED_TYPES: &[&str] = &[
-    "any",
-    "bool",
-    "byte",
-    "comparable",
-    "complex128",
-    "complex64",
-    "error",
-    "float32",
-    "float64",
-    "int",
-    "int16",
-    "int32",
-    "int64",
-    "int8",
-    "rune",
-    "string",
-    "uint",
-    "uint16",
-    "uint32",
-    "uint64",
-    "uint8",
-    "uintptr",
-];
-
 fn expression_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
     match node.kind() {
         "identifier" | "type_identifier" | "package_identifier" => {
@@ -597,7 +641,7 @@ fn expression_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
     }
 }
 
-fn collect_imports(root: Node<'_>, source: &[u8]) -> Vec<ImportShape> {
+pub(crate) fn collect_imports(root: Node<'_>, source: &[u8]) -> Vec<ImportShape> {
     let mut out = Vec::new();
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -681,6 +725,26 @@ mod tests {
 
     fn calls(src: &str, module: &str) -> Vec<CallShape> {
         extract_call_shapes_with_module(src, module).unwrap()
+    }
+
+    /// The one-parse extractor the call graph uses gives what the two
+    /// separate extractors give.
+    #[test]
+    fn calls_and_type_facts_come_from_one_parse_unchanged() {
+        let src = concat!(
+            "package m\n\n",
+            "type S struct{ out *S }\n\n",
+            "func New() *S { return &S{} }\n\n",
+            "func (s *S) Run() { s.out.Run(); New().Run() }\n",
+        );
+        let (calls, facts) = extract_call_shapes_and_type_facts_with_module(src, "m").unwrap();
+        assert_eq!(calls, extract_call_shapes_with_module(src, "m").unwrap());
+        assert_eq!(
+            facts,
+            crate::extract_type_facts_with_module(src, "m").unwrap()
+        );
+        assert_eq!(calls.len(), 3);
+        assert_eq!(facts.types.len(), 1);
     }
 
     /// The non-constant boundary of the classifier: negation of

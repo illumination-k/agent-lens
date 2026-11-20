@@ -237,7 +237,7 @@ and recall are both verdicts.
 `O` is the set of mapped oracle pairs (caller node, callee node); `R_m` the
 agent-lens `resolved` pairs with resolution method `m` (`lexical`,
 `self_method`, `last_segment`, `path_suffix`, `crate_narrowed`, and for
-TypeScript and Python `binding`). A resolved edge with no caller node (a call in
+TypeScript, Python and Go `binding`). A resolved edge with no caller node (a call in
 module-level code: a Rust `const` initialiser) is outside every set and only
 counted (`resolved edge excluded`).
 
@@ -404,6 +404,43 @@ left there: `reflect.Value.Type` bound to an in-repo `Type` method by
 its false positives), and lo's self-edges on generic functions
 (`Contains → Contains`), which come from the oracle collapsing instantiation
 wrappers.
+
+#### Typed receivers
+
+Measured 2026-11-20 after binding Go receiver calls through declared types
+(`lens-golang`'s `value_types`, joined across files by the call graph's
+`go_types`): a receiver's type comes from a method receiver, a typed
+parameter or `var`, a composite literal, `new(T)`, a type assertion, a
+function's declared result, a package variable, a struct field, or an
+embedded struct (promoted methods and fields), and the call binds to that
+type's method (`binding`). A receiver of a type or package variable from
+outside the workspace (`newSet *goflag.FlagSet`, `os.Stdout`) binds
+`External`, so no same-named workspace method absorbs it. A name the
+function binds to two different types, an interface, and a type parameter
+keep the name-based resolution. The same change fixed the root package's
+module path for a file that opens with a `/* ... */` package doc (pflag's
+`flag.go` was `module::`, every other root file `pflag::`), which had split
+pflag's root package in two.
+
+| Repository                  | Precision before    | Precision after     | Static recall before | Static recall after |
+| --------------------------- | ------------------- | ------------------- | -------------------- | ------------------- |
+| pflag + go-cmp (micro-avg.) | 0.989 (1474 / 1491) | 0.997 (1733 / 1739) | 0.838 (1470 / 1754)  | 0.986 (1729 / 1754) |
+| google/uuid v1.6.0          | 1.000 (159 / 159)   | 1.000 (182 / 182)   | 0.828                | 0.948               |
+| BurntSushi/toml v1.5.0      | 0.968 (692 / 715)   | 0.987 (773 / 783)   | 0.889                | 0.994               |
+| samber/lo v1.51.0           | 0.993 (144 / 145)   | 0.993 (147 / 148)   | 0.706                | 0.721               |
+| gorilla/mux v1.8.1          | 0.981 (358 / 365)   | 0.986 (489 / 496)   | 0.669                | 0.914               |
+| spf13/cast v1.9.2           | 0.667 (94 / 141)    | 0.667 (94 / 141)    | 0.803                | 0.803               |
+
+Both columns were measured with the same harness on the same day (the
+discovery targets' precision counts every agent-lens-only pair, cast's
+generated-file edges included). On pflag + go-cmp, `binding` resolves 1032
+edges at precision 1.000 (1029 / 1029 in scope). What is left: pflag's
+`reflect.TypeOf(x).Name()` and `goflag.NewFlagSet(...)` locals (a call into
+an external package can return a workspace type when generic, so its result
+is not read as external), go-cmp receivers bound per case of a type switch
+(`switch s := ps.(type)`), indexed values (`pp[0].IsNil()`), a call through a
+func-typed parameter (`f(x, y).Equal()`), and a package variable whose type
+differs between build-tagged files (`debug`).
 
 ### TypeScript
 

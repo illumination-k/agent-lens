@@ -19,21 +19,21 @@
 [[adjudication]]
 target = "pflag"
 caller = "pflag::wrapFlagValue"
-callee = "module::FlagSet::Name"
+callee = "pflag::FlagSet::Name"
 verdict = "agent_lens_wrong"
 note = "golangflag.go:54 `t.Name()` is reflect.Type.Name (stdlib)"
 
 [[adjudication]]
 target = "pflag"
 caller = "pflag::FlagSet::GetText"
-callee = "module::FlagSet::Name"
+callee = "pflag::FlagSet::Name"
 verdict = "agent_lens_wrong"
 note = "text.go:57 `reflect.TypeOf(...).Name()` is reflect.Type.Name (stdlib)"
 
 [[adjudication]]
 target = "pflag"
 caller = "pflag::textValue::Type"
-callee = "module::FlagSet::Name"
+callee = "pflag::FlagSet::Name"
 verdict = "agent_lens_wrong"
 note = "text.go:48 `reflect.ValueOf(v.p).Type().Name()` is reflect.Type.Name (stdlib)"
 

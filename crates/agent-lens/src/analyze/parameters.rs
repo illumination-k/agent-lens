@@ -1910,6 +1910,7 @@ mod tests {
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
             callee_binding: SyntaxFact::Unknown,
+            receiver_type: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 2,
@@ -1931,6 +1932,7 @@ mod tests {
                 interfaces: Arc::new(Vec::new()),
                 macro_facts: None,
                 value_references: Arc::new(Vec::new()),
+                go_type_facts: None,
             }],
             true,
         );

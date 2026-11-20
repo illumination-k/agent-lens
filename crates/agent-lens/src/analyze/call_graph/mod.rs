@@ -11,6 +11,7 @@
 //! expansion, cross-crate resolution, runtime timing, or git history
 //! traversal is attempted here.
 
+mod go_types;
 #[cfg(test)]
 mod metamorphic_tests;
 pub(crate) mod model;
@@ -355,6 +356,7 @@ impl CallGraphBuilder {
         let files = attach_macro_generated_methods(files, |f, path_is_test| {
             self.includes_function(f, path_is_test)
         });
+        let files = go_types::bind_go_receiver_calls(files);
         Ok(CallGraph::build(files, self.argument_facts))
     }
 
@@ -424,13 +426,24 @@ impl CallGraphBuilder {
             resolver,
             module_of: &module_of,
         });
-        let calls = extract_call_shapes(
-            lang,
-            &source,
-            &module,
-            !self.exclude_tests,
-            ts_imports.as_ref(),
-        )?;
+        // Go reads the package-level type facts in the same parse as the
+        // calls; every other language has none.
+        let (calls, go_type_facts) = match lang {
+            SourceLang::Go => {
+                let shared = extract_go_calls_and_types(&source, &module)?;
+                (Arc::clone(&shared.0), Some(Arc::clone(&shared.1)))
+            }
+            _ => (
+                extract_call_shapes(
+                    lang,
+                    &source,
+                    &module,
+                    !self.exclude_tests,
+                    ts_imports.as_ref(),
+                )?,
+                None,
+            ),
+        };
         // Complexity (node weights) and wrapper findings (delegation
         // facts) are the same facts `analyze complexity` and `analyze
         // wrapper` report, so both go through the shared index helpers.
@@ -464,6 +477,7 @@ impl CallGraphBuilder {
             interfaces,
             macro_facts,
             value_references,
+            go_type_facts,
         })
     }
 
@@ -705,6 +719,29 @@ fn attach_macro_generated_methods(
     files
 }
 
+/// Call shapes and package-level type facts of one Go file, from one
+/// parse. The pair keeps a typed table of the active index (no other fact
+/// has this value type) instead of the call-shape table.
+fn extract_go_calls_and_types(
+    source: &str,
+    module: &str,
+) -> Result<Arc<GoCallsAndTypes>, AnalyzerError> {
+    let extract = || {
+        lens_golang::extract_call_shapes_and_type_facts_with_module(source, module)
+            .map(|(calls, facts)| (Arc::new(calls), Arc::new(facts)))
+            .map_err(parse_err)
+    };
+    let Some(index) = AnalysisIndex::active() else {
+        return extract().map(Arc::new);
+    };
+    index.memoize_typed(
+        (SourceKey::new(SourceLang::Go, source), module.to_owned()),
+        extract,
+    )
+}
+
+type GoCallsAndTypes = (Arc<Vec<CallShape>>, Arc<lens_golang::GoTypeFacts>);
+
 /// Interface method sets for one (Go) file. Only collected when the
 /// builder was asked for interface facts.
 fn extract_interfaces(
@@ -799,6 +836,9 @@ pub(crate) struct FileGraphInput {
     /// unless value-reference facts were requested (and the language
     /// extracts them).
     pub(crate) value_references: Arc<Vec<ValueReferenceShape>>,
+    /// Package-level type declarations (Go only), joined across files by
+    /// [`go_types::bind_go_receiver_calls`].
+    pub(crate) go_type_facts: Option<Arc<lens_golang::GoTypeFacts>>,
 }
 
 impl SourceLang {

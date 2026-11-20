@@ -34,10 +34,14 @@ mod statements;
 #[cfg(test)]
 mod test_support;
 mod type_defs;
+mod value_types;
 mod walk;
 mod wrapper;
 
-pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};
+pub use call_index::{
+    extract_call_shapes_and_type_facts_with_module, extract_call_shapes_with_module,
+    extract_function_shapes_with_module,
+};
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::extract_context_spans;
@@ -50,4 +54,5 @@ pub use module_path::{is_external_test_package, package_clause_name, package_seg
 pub use parser::{GoParseError, GoParser};
 pub use statements::extract_statement_seqs;
 pub use type_defs::extract_type_defs;
+pub use value_types::{GoTypeDecl, GoTypeFacts, GoTypeKind, extract_type_facts_with_module};
 pub use wrapper::find_wrappers;

@@ -470,6 +470,7 @@ impl FunctionBodyCallVisitor<'_, '_> {
             arguments: SyntaxFact::Known(arguments),
             callee_is_locally_bound: SyntaxFact::Known(callee_is_locally_bound),
             callee_binding,
+            receiver_type: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: collector.imports.clone(),
             line,
