@@ -16,7 +16,8 @@
 //! outside the workspace, an interface, an unknown declaration) changes
 //! nothing, so the call keeps the name-based resolution it had.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use lens_domain::{CallShape, CalleeBinding, SyntaxFact, ValueTypeHint};
@@ -25,20 +26,31 @@ use lens_golang::{GoTypeDecl, GoTypeFacts, GoTypeKind};
 use super::FileGraphInput;
 use super::model::GraphLanguage;
 
-/// How many declarations a hint may pass through (a variable holding a
-/// call's result whose type is an alias, a field of an embedded field…)
-/// before the lookup gives up. Bounds alias and variable cycles.
-const MAX_DEPTH: usize = 8;
+/// How many declarations one lookup may pass through (a variable holding
+/// a call's result whose type is an alias, a field of an embedded
+/// field…) before it gives up. Bounds variable, alias and embedding
+/// cycles, and the fan-out of a type embedding many others.
+const LOOKUP_STEPS: usize = 64;
+
+/// The steps left to one lookup — see [`LOOKUP_STEPS`].
+struct Budget(Cell<usize>);
+
+impl Budget {
+    fn new() -> Self {
+        Self(Cell::new(LOOKUP_STEPS))
+    }
+
+    /// Spend one step: `None` once none is left.
+    fn step(&self) -> Option<()> {
+        let left = self.0.get().checked_sub(1)?;
+        self.0.set(left);
+        Some(())
+    }
+}
 
 /// Give every Go receiver call whose receiver type the hints pin down a
 /// binding to the method it calls.
 pub(crate) fn bind_go_receiver_calls(mut files: Vec<FileGraphInput>) -> Vec<FileGraphInput> {
-    if !files
-        .iter()
-        .any(|file| file.language == GraphLanguage::Go && file.go_type_facts.is_some())
-    {
-        return files;
-    }
     // Every binding is computed before any file changes: the index
     // borrows the facts of every file.
     let bindings: Vec<Vec<Option<CalleeBinding>>> = {
@@ -76,50 +88,30 @@ fn apply_bindings(file: &mut FileGraphInput, bindings: Vec<Option<CalleeBinding>
     }
 }
 
+/// `path`, then each shorter suffix of it that starts on a `::` boundary:
+/// `github.com::x::cmp::Path`, `x::cmp::Path`, `cmp::Path`, `Path`.
+fn path_suffixes(path: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(path).chain(
+        path.match_indices("::")
+            .map(move |(at, separator)| &path[at + separator.len()..]),
+    )
+}
+
 /// Declarations keyed by qualified name, looked up either exactly or by
 /// an import-rooted path ending with the key (`github.com::x::cmp::Path`
 /// finds `cmp::Path`), the way `Resolver::narrow_by_import_path` reads a
 /// Go import.
-struct SuffixMap<V> {
-    entries: HashMap<String, V>,
-    by_last_segment: HashMap<String, BTreeSet<String>>,
-}
+struct SuffixMap<V>(HashMap<String, V>);
 
 impl<V> SuffixMap<V> {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            by_last_segment: HashMap::new(),
-        }
-    }
-
-    fn insert(&mut self, key: String, value: V) {
-        self.by_last_segment
-            .entry(last_segment(&key).to_owned())
-            .or_default()
-            .insert(key.clone());
-        self.entries.insert(key, value);
-    }
-
-    /// The key `path` names: itself, else the one key it ends with on a
-    /// segment boundary. Two such keys leave the path unresolved.
+    /// The longest suffix of `path` that is a key.
     fn key_for(&self, path: &str) -> Option<&str> {
-        if let Some((key, _)) = self.entries.get_key_value(path) {
-            return Some(key);
-        }
-        let mut matching = self
-            .by_last_segment
-            .get(last_segment(path))?
-            .iter()
-            .filter(|key| key.contains("::") && path.ends_with(&format!("::{key}")));
-        match (matching.next(), matching.next()) {
-            (Some(key), None) => Some(key),
-            _ => None,
-        }
+        path_suffixes(path)
+            .find_map(|suffix| self.0.get_key_value(suffix).map(|(key, _)| key.as_str()))
     }
 
     fn get(&self, path: &str) -> Option<&V> {
-        self.entries.get(self.key_for(path)?)
+        self.0.get(self.key_for(path)?)
     }
 }
 
@@ -136,9 +128,9 @@ struct GoTypeIndex<'a> {
 impl<'a> GoTypeIndex<'a> {
     fn new(files: &'a [FileGraphInput]) -> Self {
         let mut index = Self {
-            types: SuffixMap::new(),
-            results: SuffixMap::new(),
-            vars: SuffixMap::new(),
+            types: SuffixMap(HashMap::new()),
+            results: SuffixMap(HashMap::new()),
+            vars: SuffixMap(HashMap::new()),
             functions: HashSet::new(),
             packages: HashSet::new(),
         };
@@ -152,23 +144,22 @@ impl<'a> GoTypeIndex<'a> {
                     .iter()
                     .filter_map(|f| f.qualified_name.known_value().map(String::as_str)),
             );
-            let Some(facts) = file.go_type_facts.as_deref() else {
-                continue;
-            };
-            index.add(facts);
+            if let Some(facts) = file.go_type_facts.as_deref() {
+                index.add(facts);
+            }
         }
         index
     }
 
     fn add(&mut self, facts: &'a GoTypeFacts) {
         for decl in &facts.types {
-            self.types.insert(decl.qualified_name.clone(), decl);
+            self.types.0.insert(decl.qualified_name.clone(), decl);
         }
         for (name, results) in &facts.function_results {
-            self.results.insert(name.clone(), results.as_slice());
+            self.results.0.insert(name.clone(), results.as_slice());
         }
         for (name, hint) in &facts.package_vars {
-            self.vars.insert(name.clone(), hint);
+            self.vars.0.insert(name.clone(), hint);
         }
     }
 
@@ -184,9 +175,10 @@ impl<'a> GoTypeIndex<'a> {
         }
         let hint = site.receiver_type.known_value()?;
         let method = site.callee_name()?;
-        if let Some(ty) = self.resolve(hint, 0) {
+        let budget = Budget::new();
+        if let Some(ty) = self.resolve(hint, &budget) {
             return self
-                .method_on(ty, method, 0)
+                .method_on(ty, method, &budget)
                 .map(CalleeBinding::Declaration);
         }
         self.names_external_package(hint)
@@ -208,76 +200,62 @@ impl<'a> GoTypeIndex<'a> {
         // An import path names a workspace package when one of its
         // segment-boundary suffixes is a module path of the graph
         // (`github.com::x::proj::cmp` for `cmp`).
-        let suffixes = std::iter::once(package).chain(
-            package
-                .match_indices("::")
-                .map(|(at, separator)| &package[at + separator.len()..]),
-        );
-        !suffixes
-            .into_iter()
-            .any(|suffix| self.packages.contains(suffix))
+        !path_suffixes(package).any(|suffix| self.packages.contains(suffix))
     }
 
     /// The workspace type (its qualified name) a hint denotes.
-    fn resolve(&self, hint: &ValueTypeHint, depth: usize) -> Option<&'a str> {
-        if depth > MAX_DEPTH {
-            return None;
-        }
+    fn resolve(&self, hint: &ValueTypeHint, budget: &Budget) -> Option<&'a str> {
+        budget.step()?;
         match hint {
-            ValueTypeHint::Named(path) => self.named(path, depth),
-            ValueTypeHint::PackageVar(path) => self.resolve(self.vars.get(path)?, depth + 1),
+            ValueTypeHint::Named(path) => self.named(path, budget),
+            ValueTypeHint::PackageVar(path) => self.resolve(self.vars.get(path)?, budget),
             ValueTypeHint::CallResult { callee, index } => {
-                // `T(x)` converts: the value has type `T`.
-                if *index == 0
-                    && !self.functions.contains(callee.as_str())
-                    && self.types.key_for(callee).is_some()
-                {
-                    return self.named(callee, depth);
+                // `T(x)` converts: the value has type `T`. A package
+                // cannot declare a function and a type of one name.
+                if self.types.key_for(callee).is_some() {
+                    return self.named(callee, budget);
                 }
                 let result = self.results.get(callee)?.get(*index)?.as_ref()?;
-                self.resolve(result, depth + 1)
+                self.resolve(result, budget)
             }
             ValueTypeHint::MethodResult {
                 receiver,
                 method,
                 index,
             } => {
-                let owner = self.resolve(receiver, depth + 1)?;
-                let declared = self.method_on(owner, method, depth + 1)?;
+                let owner = self.resolve(receiver, budget)?;
+                let declared = self.method_on(owner, method, budget)?;
                 let result = self.results.get(&declared)?.get(*index)?.as_ref()?;
-                self.resolve(result, depth + 1)
+                self.resolve(result, budget)
             }
             ValueTypeHint::Field { owner, field } => {
-                let owner = self.resolve(owner, depth + 1)?;
-                self.field_of(owner, field, depth + 1)
+                let owner = self.resolve(owner, budget)?;
+                self.field_of(owner, field, budget)
             }
         }
     }
 
     /// A named type, through `type A = B` aliases.
-    fn named(&self, path: &str, depth: usize) -> Option<&'a str> {
-        let key = self.types.key_for(path)?;
-        let decl = *self.types.entries.get(key)?;
+    fn named(&self, path: &str, budget: &Budget) -> Option<&'a str> {
+        let decl = *self.types.get(path)?;
         match &decl.alias_of {
-            Some(target) => self.resolve(target, depth + 1),
+            Some(target) => self.resolve(target, budget),
             None => Some(decl.qualified_name.as_str()),
         }
     }
 
-    fn field_of(&self, owner: &str, field: &str, depth: usize) -> Option<&'a str> {
-        if depth > MAX_DEPTH {
-            return None;
-        }
-        let decl = *self.types.entries.get(owner)?;
+    fn field_of(&self, owner: &str, field: &str, budget: &Budget) -> Option<&'a str> {
+        budget.step()?;
+        let decl = *self.types.0.get(owner)?;
         if let Some((_, hint)) = decl.fields.iter().find(|(name, _)| name == field) {
-            return self.resolve(hint.as_ref()?, depth + 1);
+            return self.resolve(hint.as_ref()?, budget);
         }
         // A field promoted from an embedded struct.
         let mut promoted = decl
             .embedded
             .iter()
-            .filter_map(|embedded| self.resolve(embedded, depth + 1))
-            .filter_map(|embedded| self.field_of(embedded, field, depth + 1));
+            .filter_map(|embedded| self.resolve(embedded, budget))
+            .filter_map(|embedded| self.field_of(embedded, field, budget));
         match (promoted.next(), promoted.next()) {
             (Some(ty), None) => Some(ty),
             _ => None,
@@ -287,11 +265,9 @@ impl<'a> GoTypeIndex<'a> {
     /// The qualified name of method `method` on `owner`: declared on it,
     /// else promoted from exactly one embedded type. An interface
     /// declares no method node, so a call on one stays unbound.
-    fn method_on(&self, owner: &str, method: &str, depth: usize) -> Option<String> {
-        if depth > MAX_DEPTH {
-            return None;
-        }
-        let decl = *self.types.entries.get(owner)?;
+    fn method_on(&self, owner: &str, method: &str, budget: &Budget) -> Option<String> {
+        budget.step()?;
+        let decl = *self.types.0.get(owner)?;
         if decl.kind == GoTypeKind::Interface {
             return None;
         }
@@ -306,15 +282,11 @@ impl<'a> GoTypeIndex<'a> {
         let mut promoted = decl
             .embedded
             .iter()
-            .filter_map(|embedded| self.resolve(embedded, depth + 1))
-            .filter_map(|embedded| self.method_on(embedded, method, depth + 1));
+            .filter_map(|embedded| self.resolve(embedded, budget))
+            .filter_map(|embedded| self.method_on(embedded, method, budget));
         match (promoted.next(), promoted.next()) {
             (Some(target), None) => Some(target),
             _ => None,
         }
     }
-}
-
-fn last_segment(path: &str) -> &str {
-    path.rsplit("::").next().unwrap_or(path)
 }
