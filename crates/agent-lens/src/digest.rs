@@ -2297,6 +2297,7 @@ mod tests {
     #[case(json!({ "target": "functions", "clusters": [] }), "similarity", "")]
     #[case(json!({ "clusters": [] }), "similarity", "")]
     #[case(json!({ "target": "blocks", "clusters": [] }), "similarity blocks", " --target blocks")]
+    #[case(json!({ "target": "types", "clusters": [] }), "similarity types", " --target types")]
     fn similarity_drill_down_names_a_non_default_target(
         #[case] report: Value,
         #[case] label: &str,
