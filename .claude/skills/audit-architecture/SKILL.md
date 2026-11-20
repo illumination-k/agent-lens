@@ -7,7 +7,7 @@ description: Use when the user wants to evaluate the structural health of a modu
 
 Five analyzers cover the architecture question:
 
-- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), Go modules (package-granular), and Python package trees (file-granular, in-tree imports only).
+- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, Abstractness `A = Na/Nc` and distance from the main sequence `D = |A + I - 1|` (Rust and Go only), and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), Go modules (package-granular), and Python package trees (file-granular, in-tree imports only).
 - `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, Python, and Go. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
 - `layers` — inferred Lakos levelization of the call graph: a level per function and per module, the entry-point set, the module cycles that make levelization impossible (with the concrete call sites), and downward calls skipping a level. Needs no crate root or entry file — it walks any directory of Rust, TS/JS, Python, or Go.
 - `communities` — the clusters the dependency graph forms, scored against the module boundaries the repository declares. Modularity `Q` for both partitions over one graph, plus the members filed in one module but wired into another. Greedy or Leiden (`--algorithm`), tunable resolution, and optional git co-change edge weights (`--weights co-change|both`, which also compares the static and co-change clusterings). Same entry-point rule as `coupling`.
@@ -39,6 +39,7 @@ Look for, in order:
 2. **High Fan-In** with high churn (`agent-lens analyze risk <path> --format md` does that cross-reference for you, at file granularity). A hub everyone depends on that keeps changing is a serialization point for the team.
 3. **High Fan-Out**. A module that depends on too many others is hard to test in isolation. Often a sign the module is doing orchestration that should be pushed up.
 4. **High Instability with high Fan-In**. Martin's diagnostic: stable hubs (low Instability) are good; unstable hubs (high Instability) are fragile.
+5. **High distance `D`** (the markdown "Main-sequence distance" section). `stable+concrete` (zone of pain) with high Fan-In and high churn is the real problem: dependents pin a module that offers no abstraction to extend. Value-type modules that rarely change land there harmlessly. `unstable+abstract` (zone of uselessness) is an abstraction nobody depends on — cross-check with `narrowable --section single-impl`.
 
 ### 2. Vertical shape (layers)
 
@@ -142,6 +143,7 @@ The analyzers tell different stories that often line up:
 | Cycle between A and B            | —                            | Move the shared abstraction into a third module both depend on.                                            |
 | Instability ≈ 1 on a leaf module | —                            | Fine. Leaves are supposed to be unstable.                                                                  |
 | Instability ≈ 0 with high churn  | —                            | Stable hub that keeps changing. Either it's miscategorised or the hub abstraction is wrong.                |
+| `D` ≈ 1, `stable+concrete`, hot  | —                            | Dependents pin concrete types that keep changing. Extract a trait / interface at the seam they use.        |
 | `layers` wide member span        | One `impl` has LCOM4 ≥ 2     | The module holds two layers _and_ two responsibilities — split along the level boundary.                   |
 | `communities` misfiled member    | —                            | The file's dependencies put it in another module; move it, or find the abstraction that would let it stay. |
 | `communities` spanning community | —                            | No declared module owns the cluster. A new module, not a move.                                             |

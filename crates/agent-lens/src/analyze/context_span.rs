@@ -263,6 +263,7 @@ fn build_ts_graph_from_entry_globs(
                 .or_insert_with(|| ModuleFile {
                     path: module.path,
                     file: module.file,
+                    types: None,
                 });
         }
         all_edges.extend(edges);

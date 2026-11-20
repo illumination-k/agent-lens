@@ -6,8 +6,10 @@
 //! derived from the cross-module reference graph: Number of Couplings,
 //! Fan-In, Fan-Out, simplified Henry-Kafura Information Flow Complexity,
 //! per-pair Inter-module Coupling (distinct shared symbols),
-//! Robert C. Martin's Instability `I = Ce / (Ca + Ce)`, and the strongly
-//! connected components of the dependency graph (cycles). JSON is the
+//! Robert C. Martin's Instability `I = Ce / (Ca + Ce)`, Abstractness
+//! `A = Na / Nc` and distance from the main sequence `D = |A + I - 1|`
+//! (Rust and Go), and the strongly connected components of the
+//! dependency graph (cycles). JSON is the
 //! default machine-readable output; `--format md` emits a compact
 //! summary tuned for LLM context windows rather than for humans.
 //!
@@ -45,13 +47,20 @@
 //!   dropped, matching the single-tree scope of the other backends.
 //!   Dynamic imports (`importlib`, `__import__`) are invisible, and
 //!   `sys.path` manipulation is not modelled.
+//! * Abstractness: Rust counts a module's own `trait`s against its
+//!   `struct` / `enum` / `union`s, skipping `#[cfg(test)]` items; Go
+//!   counts a package's `interface` types against its other named types,
+//!   skipping `_test.go` files. Aliases are not counted, and a module
+//!   declaring no types has no abstractness. TypeScript / JavaScript and
+//!   Python take no census, so their modules carry neither `A` nor `D`.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
 use lens_domain::{
     CouplingEdge, CouplingReport, DependencyCycle, ModuleMetrics, ModulePath, PairCoupling,
-    compute_report,
+    TypeCensus, compute_report, main_sequence_distance,
 };
 use serde::Serialize;
 
@@ -77,6 +86,10 @@ const DEFAULT_TOP: usize = 20;
 /// exhibit rather than the report's ranking, so it keeps its own tighter
 /// cap and `--top` can only narrow it further.
 const TOP_PAIRS_LIMIT: usize = 10;
+
+/// Modules listed in the markdown main-sequence section. Like the pair
+/// list it is a supporting exhibit with its own cap.
+const TOP_DISTANCE_LIMIT: usize = 10;
 
 /// Analyzer entry point.
 #[derive(Debug, Default, Clone)]
@@ -138,8 +151,13 @@ impl CouplingAnalyzer {
         graph
             .edges
             .retain(|e| kept.contains(&e.from) && kept.contains(&e.to));
+        let census: HashMap<ModulePath, TypeCensus> = graph
+            .modules
+            .iter()
+            .filter_map(|m| m.types.map(|t| (m.path.clone(), t)))
+            .collect();
         let report = compute_report(&module_paths(&graph), graph.edges);
-        let view = ReportView::new(&graph.root, &graph.labeler, &report);
+        let view = ReportView::new(&graph.root, &graph.labeler, &report, &census);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
@@ -193,7 +211,12 @@ struct ReportView<'a> {
 }
 
 impl<'a> ReportView<'a> {
-    fn new(root: &Path, labeler: &ModuleLabeler, report: &'a CouplingReport) -> Self {
+    fn new(
+        root: &Path,
+        labeler: &ModuleLabeler,
+        report: &'a CouplingReport,
+        census: &HashMap<ModulePath, TypeCensus>,
+    ) -> Self {
         Self {
             crate_root: root.display().to_string(),
             module_count: report.modules.len(),
@@ -202,7 +225,7 @@ impl<'a> ReportView<'a> {
             modules: report
                 .modules
                 .iter()
-                .map(|m| ModuleView::new(m, labeler))
+                .map(|m| ModuleView::new(m, labeler, census.get(&m.path).copied()))
                 .collect(),
             edges: report
                 .edges
@@ -233,16 +256,38 @@ struct ModuleView {
     /// JSON when the module has no edges (so the ratio is undefined).
     #[serde(skip_serializing_if = "Option::is_none")]
     instability: Option<f64>,
+    /// Abstract and concrete type declarations counted for the module.
+    /// Omitted where the language takes no census (TS/JS, Python).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abstract_types: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concrete_types: Option<usize>,
+    /// Martin's abstractness `A = Na / Nc`. Omitted when the module
+    /// declares no types or the language takes no census.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abstractness: Option<f64>,
+    /// Distance from the main sequence `D = |A + I - 1|`. Omitted unless
+    /// both `abstractness` and `instability` are defined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distance: Option<f64>,
 }
 
 impl ModuleView {
-    fn new(m: &ModuleMetrics, labeler: &ModuleLabeler) -> Self {
+    fn new(m: &ModuleMetrics, labeler: &ModuleLabeler, census: Option<TypeCensus>) -> Self {
+        let abstractness = census.and_then(TypeCensus::abstractness);
+        let distance = abstractness
+            .zip(m.instability)
+            .map(|(a, i)| main_sequence_distance(a, i));
         Self {
             path: labeler.label(&m.path),
             fan_in: m.fan_in,
             fan_out: m.fan_out,
             ifc: m.ifc,
             instability: m.instability,
+            abstract_types: census.map(|c| c.abstract_types),
+            concrete_types: census.map(|c| c.concrete_types),
+            abstractness,
+            distance,
         }
     }
 }
@@ -313,6 +358,7 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
     // "these are the cycles" while hiding the rest, and the list is
     // short whenever the news is good.
     render_cycles(&mut out, &view.cycles);
+    render_distance(&mut out, &view.modules, limit.min(TOP_DISTANCE_LIMIT));
     render_pairs(&mut out, &view.pairs, limit.min(TOP_PAIRS_LIMIT));
     out
 }
@@ -322,8 +368,11 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView], limit: usize) 
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
     let _ = writeln!(out, "\n## Modules (by IFC desc, top {limit})\n");
-    let _ = writeln!(out, "| module | fan_in | fan_out | ifc | instability |");
-    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
+    let _ = writeln!(
+        out,
+        "| module | fan_in | fan_out | ifc | instability | abstractness | distance |"
+    );
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
     let mut sorted: Vec<&ModuleView> = modules.iter().collect();
     sorted.sort_by(|a, b| {
         b.ifc
@@ -335,12 +384,14 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView], limit: usize) 
     for m in sorted.iter().take(limit) {
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} |",
             m.path,
             m.fan_in,
             m.fan_out,
             m.ifc,
             format_optional_f64(m.instability, 2),
+            format_optional_f64(m.abstractness, 2),
+            format_optional_f64(m.distance, 2),
         );
     }
     let omitted = sorted.len().saturating_sub(limit);
@@ -359,6 +410,63 @@ fn render_cycles(out: &mut String, cycles: &[CycleView]) {
     let _ = writeln!(out, "\n## Dependency cycles\n");
     for c in cycles {
         let _ = writeln!(out, "- {} module(s): {}", c.size, c.members.join(" → "));
+    }
+}
+
+/// Modules furthest from the main sequence, with the side of the line
+/// they fall on: below it (`A + I < 1`) is stable and concrete, the
+/// zone of pain, where dependents pin a module that offers no
+/// abstraction to extend; above it is unstable and abstract, the zone of
+/// uselessness. Modules on the line (`D = 0`) are not listed.
+fn render_distance(out: &mut String, modules: &[ModuleView], limit: usize) {
+    let mut ranked: Vec<(&ModuleView, f64, f64, f64)> = modules
+        .iter()
+        .filter_map(|m| Some((m, m.abstractness?, m.instability?, m.distance?)))
+        .filter(|&(_, _, _, d)| d > 0.0)
+        .collect();
+    if ranked.is_empty() {
+        return;
+    }
+    ranked.sort_by(|a, b| {
+        b.3.total_cmp(&a.3)
+            .then_with(|| b.0.fan_in.cmp(&a.0.fan_in))
+            .then_with(|| a.0.path.cmp(&b.0.path))
+    });
+    let _ = writeln!(
+        out,
+        "\n## Main-sequence distance (D = |A + I - 1| desc, top {limit})\n"
+    );
+    let _ = writeln!(
+        out,
+        "| module | fan_in | A | I | D | types (abstract/concrete) | side |"
+    );
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: | ---: | --- |");
+    for &(m, a, i, d) in ranked.iter().take(limit) {
+        let side = if a + i < 1.0 {
+            "stable+concrete"
+        } else {
+            "unstable+abstract"
+        };
+        let _ = writeln!(
+            out,
+            "| {} | {} | {a:.2} | {i:.2} | {d:.2} | {}/{} | {side} |",
+            m.path,
+            m.fan_in,
+            m.abstract_types.unwrap_or(0),
+            m.concrete_types.unwrap_or(0),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n_stable+concrete costs only where the module changes: value-type modules sit there \
+         harmlessly; cross-check churn with `analyze hotspot`._"
+    );
+    let omitted = ranked.len().saturating_sub(limit);
+    if omitted > 0 {
+        let _ = writeln!(
+            out,
+            "_{omitted} module(s) closer to the main sequence not shown; use --format json._",
+        );
     }
 }
 
@@ -484,9 +592,10 @@ mod tests {
             .analyze(&lib, OutputFormat::Md)
             .unwrap();
         assert!(md.contains("(by IFC desc, top 1)"), "got: {md}");
+        let table = |md: &str| md.split("## Main-sequence").next().unwrap().to_owned();
         // Three modules exist (crate, crate::a, crate::b); one row of
         // the table survives and the other two are accounted for.
-        assert_eq!(md.matches("| crate").count(), 1, "got: {md}");
+        assert_eq!(table(&md).matches("| crate").count(), 1, "got: {md}");
         assert!(md.contains("_2 lower-IFC module(s) not shown"), "got: {md}",);
 
         // Above the module count the note disappears entirely.
@@ -495,7 +604,7 @@ mod tests {
             .analyze(&lib, OutputFormat::Md)
             .unwrap();
         assert!(!md.contains("not shown"), "got: {md}");
-        assert_eq!(md.matches("| crate").count(), 3, "got: {md}");
+        assert_eq!(table(&md).matches("| crate").count(), 3, "got: {md}");
     }
 
     /// JSON is the machine-readable half and must stay complete: `--top`
@@ -676,6 +785,131 @@ mod tests {
         assert_eq!(a["instability"].as_f64().unwrap(), 0.0);
         // b only depends on others (Ca=0, Ce>0), so I = 1.
         assert_eq!(b["instability"].as_f64().unwrap(), 1.0);
+    }
+
+    fn module<'v>(parsed: &'v serde_json::Value, path: &str) -> &'v serde_json::Value {
+        parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["path"] == path)
+            .unwrap_or_else(|| panic!("{path} present"))
+    }
+
+    /// `a` is depended on (I = 0) and declares one struct and no trait
+    /// (A = 0): the corner of the zone of pain. `b` declares no types,
+    /// so it carries a census but no abstractness, and no distance.
+    #[test]
+    fn json_report_records_abstractness_and_main_sequence_distance() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = small_crate(dir.path());
+        let json = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let a = module(&parsed, "crate::a");
+        assert_eq!(a["abstract_types"], 0);
+        assert_eq!(a["concrete_types"], 1);
+        assert_eq!(a["abstractness"].as_f64(), Some(0.0));
+        assert_eq!(a["distance"].as_f64(), Some(1.0));
+        let b = module(&parsed, "crate::b");
+        assert_eq!(b["concrete_types"], 0);
+        assert!(b.get("abstractness").is_none(), "got {b}");
+        assert!(b.get("distance").is_none(), "got {b}");
+    }
+
+    /// A stable module of traits sits on the main sequence (A = 1,
+    /// I = 0), so it gets a distance of zero and no markdown row, while
+    /// the stable concrete one is listed on the stable+concrete side.
+    #[test]
+    fn markdown_distance_section_lists_off_sequence_modules_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            "pub mod port;\npub mod model;\npub mod app;\n",
+        );
+        write_file(dir.path(), "port.rs", "pub trait Store {}\n");
+        write_file(dir.path(), "model.rs", "pub struct Row;\n");
+        write_file(
+            dir.path(),
+            "app.rs",
+            "use crate::port::Store;\nuse crate::model::Row;\nfn _f(_s: &dyn Store, _r: Row) {}\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            module(&parsed, "crate::port")["distance"].as_f64(),
+            Some(0.0)
+        );
+
+        let md = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        let section = md
+            .split("## Main-sequence distance")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("distance section");
+        assert!(
+            section.contains("| crate::model | 1 | 0.00 | 0.00 | 1.00 | 0/1 | stable+concrete |"),
+            "got: {md}"
+        );
+        assert!(!section.contains("crate::port"), "got: {md}");
+    }
+
+    #[test]
+    fn typescript_modules_carry_no_abstractness() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = write_file(
+            dir.path(),
+            "main.ts",
+            "import { Row } from './model'; export const r: Row = { id: 1 };\n",
+        );
+        write_file(
+            dir.path(),
+            "model.ts",
+            "export interface Row { id: number }\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(&main, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let model = module(&parsed, "model");
+        for key in [
+            "abstract_types",
+            "concrete_types",
+            "abstractness",
+            "distance",
+        ] {
+            assert!(model.get(key).is_none(), "{key} in {model}");
+        }
+    }
+
+    #[test]
+    fn go_package_abstractness_counts_interfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module example.com/p\n");
+        write_file(
+            dir.path(),
+            "app/app.go",
+            "package app\n\nimport \"example.com/p/store\"\n\nfunc Run(s store.Store) {}\n",
+        );
+        write_file(
+            dir.path(),
+            "store/store.go",
+            "package store\n\ntype Store interface{ Get() }\n\ntype Mem struct{}\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let store = module(&parsed, "example.com/p/store");
+        assert_eq!(store["abstractness"].as_f64(), Some(0.5));
+        assert_eq!(store["instability"].as_f64(), Some(0.0));
+        assert_eq!(store["distance"].as_f64(), Some(0.5));
     }
 
     #[test]

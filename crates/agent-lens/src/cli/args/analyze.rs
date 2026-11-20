@@ -64,7 +64,9 @@ pub(in crate::cli) enum AnalyzeCommand {
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
-    /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, and the strongly
+    /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, Abstractness
+    /// `Na/Nc` and distance from the main sequence `|A+I-1|` (Rust and
+    /// Go: traits / interfaces against concrete types), and the strongly
     /// connected components of the dependency graph (cycles). `path`
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one, a TypeScript / JavaScript entry file

@@ -27,7 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lens_domain::{CouplingEdge, CouplingError, EdgeKind, ModulePath};
+use lens_domain::{CouplingEdge, CouplingError, EdgeKind, ModulePath, TypeCensus};
 use syn::visit::Visit;
 use syn::{ExprPath, Item, ItemImpl, ItemUse, TypePath, UseTree};
 
@@ -139,6 +139,37 @@ fn split_modules(
         }
     }
     Ok(kept)
+}
+
+/// Count the abstract and concrete types `module` declares directly —
+/// the input to Martin's abstractness.
+///
+/// A `trait` (or trait alias) is abstract; a `struct`, `enum`, or
+/// `union` is concrete. Type aliases declare no new type and are not
+/// counted, and nor is anything gated behind `#[cfg(test)]`: test
+/// fixtures are not part of what the module offers its dependents.
+/// Macro-generated types are invisible to `syn` and therefore uncounted.
+pub fn type_census(module: &CrateModule) -> TypeCensus {
+    let mut census = TypeCensus::default();
+    for item in &module.items {
+        let (attrs, is_abstract) = match item {
+            Item::Trait(t) => (&t.attrs, true),
+            Item::TraitAlias(t) => (&t.attrs, true),
+            Item::Struct(s) => (&s.attrs, false),
+            Item::Enum(e) => (&e.attrs, false),
+            Item::Union(u) => (&u.attrs, false),
+            _ => continue,
+        };
+        if crate::attrs::has_cfg_test(attrs) {
+            continue;
+        }
+        if is_abstract {
+            census.abstract_types += 1;
+        } else {
+            census.concrete_types += 1;
+        }
+    }
+    census
 }
 
 /// Collect every cross-module reference in `modules` as a list of
@@ -1003,5 +1034,42 @@ mod tests {
             "Bar",
             EdgeKind::Use
         ));
+    }
+
+    #[test]
+    fn type_census_counts_each_module_s_own_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+            pub trait Store {}
+            pub trait Alias = Store;
+            pub struct Mem;
+            pub enum Kind { A }
+            pub union U { a: u8 }
+            pub type Id = u64;
+            #[cfg(test)]
+            struct Fixture;
+            pub mod inner { pub trait Port {} }
+            "#,
+        );
+        let modules = build_module_tree(&root).unwrap();
+        let census_of =
+            |p: &str| type_census(modules.iter().find(|m| m.path.as_str() == p).unwrap());
+        assert_eq!(
+            census_of("crate"),
+            TypeCensus {
+                abstract_types: 2,
+                concrete_types: 3
+            }
+        );
+        assert_eq!(
+            census_of("crate::inner"),
+            TypeCensus {
+                abstract_types: 1,
+                concrete_types: 0
+            }
+        );
     }
 }
