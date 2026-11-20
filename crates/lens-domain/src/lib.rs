@@ -187,7 +187,7 @@ pub use syntax::{
     ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, GLOB_IMPORT_ALIAS,
     ImportShape, InterfaceMethodShape, InterfaceShape, LexicalResolutionStatus, OwnerKind,
     OwnerShape, ParameterShape, ReceiverExprKind, SignatureShape, SourceSpan, SyntaxFact,
-    TraitDeclShape, TraitImplShape, VisibilityShape, callee_names_local_binding,
+    TraitDeclShape, TraitImplShape, ValueTypeHint, VisibilityShape, callee_names_local_binding,
 };
 pub use token_similarity::{
     TokenIdf, TokenProfile, lcs_similarity, lcs_similarity_upper_bound, token_similarity,

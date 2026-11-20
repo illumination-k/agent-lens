@@ -873,6 +873,7 @@ mod tests {
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
             callee_binding: SyntaxFact::Unknown,
+            receiver_type: SyntaxFact::Unknown,
             lexical_resolution: lens_domain::LexicalResolutionStatus::NotAttempted,
             visible_imports: vec![
                 ImportShape {
@@ -1503,6 +1504,7 @@ mod tests {
     fn bound_site(path: &str, binding: CalleeBinding) -> CallShape {
         CallShape {
             callee_binding: SyntaxFact::Known(binding),
+            receiver_type: SyntaxFact::Unknown,
             ..site(path)
         }
     }

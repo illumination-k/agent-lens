@@ -550,6 +550,13 @@ Go packages are named by the nearest `go.mod` above them, so a scan can span
 several modules. A directory holding `go.work` is a Go root in its own
 right: one graph over every module under it, with imports between those
 modules as edges and labels relative to the workspace root.
+Go call graphs bind a method call through the receiver's declared type,
+across the package's files: a method receiver, a typed parameter or
+`var`, a composite literal, `new(T)`, a type assertion, a function's
+declared result, a package variable, a struct field, and a method promoted
+from an embedded struct resolve with `binding`. A receiver of a type from a
+package outside the workspace (`*flag.FlagSet`) is never matched to a
+workspace method; an interface value keeps name-based resolution.
 
 In TypeScript / JavaScript, callbacks registered with a recognised test
 harness (`describe`, `it`, `test`, hooks, `it.skip`-style chains) are units

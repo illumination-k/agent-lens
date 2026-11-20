@@ -368,6 +368,13 @@ pub struct CallShape {
     /// not a plain name or path; consumers then fall back to name-based
     /// resolution.
     pub callee_binding: SyntaxFact<CalleeBinding>,
+    /// For a call on a receiver value (`x.m()`), what the adapter read
+    /// about that value's static type from declarations — see
+    /// [`ValueTypeHint`]. A pass that sees every file can turn it into a
+    /// [`Self::callee_binding`]. `Unknown` when the adapter does not
+    /// track types or the receiver's type is not written anywhere it
+    /// reads.
+    pub receiver_type: SyntaxFact<ValueTypeHint>,
     pub lexical_resolution: LexicalResolutionStatus,
     pub visible_imports: Vec<ImportShape>,
     pub line: usize,
@@ -383,6 +390,37 @@ pub enum CalleeBinding {
     /// Nothing the workspace declares: an ambient global (`fetch`,
     /// `describe`) or an import from an external package (`react`).
     External,
+}
+
+/// The static type of a value as its declarations spell it, before any
+/// lookup across files: the adapter sees one file, so a type that comes
+/// from another file's declaration (a function's result, a package
+/// variable, a struct field) stays a reference to that declaration.
+///
+/// Every path is qualified: under the caller's module (`pflag::FlagSet`)
+/// or, through an import, rooted at the import path
+/// (`github.com::google::go-cmp::cmp::Path`), which names the workspace
+/// declaration whose qualified name it ends with.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ValueTypeHint {
+    /// A named type (a pointer to it folds to it).
+    Named(String),
+    /// Result `index` of a call to the function at `callee` — or a
+    /// conversion, when `callee` names a type.
+    CallResult { callee: String, index: usize },
+    /// Result `index` of calling `method` on a value of `receiver`.
+    MethodResult {
+        receiver: Box<ValueTypeHint>,
+        method: String,
+        index: usize,
+    },
+    /// The package-scope variable at this path.
+    PackageVar(String),
+    /// Field `field` of a value of `owner`.
+    Field {
+        owner: Box<ValueTypeHint>,
+        field: String,
+    },
 }
 
 impl CallShape {
@@ -649,6 +687,7 @@ mod tests {
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Known(false),
             callee_binding: SyntaxFact::Unknown,
+            receiver_type: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 12,
@@ -693,6 +732,7 @@ mod tests {
     fn callee_binding_reads_only_a_known_binding() {
         let bound = CallShape {
             callee_binding: SyntaxFact::Known(CalleeBinding::External),
+            receiver_type: SyntaxFact::Unknown,
             ..call_shape()
         };
         assert_eq!(bound.callee_binding(), Some(&CalleeBinding::External));
@@ -801,6 +841,7 @@ mod tests {
             arguments: SyntaxFact::Unknown,
             callee_is_locally_bound: SyntaxFact::Unknown,
             callee_binding: SyntaxFact::Unknown,
+            receiver_type: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: Vec::new(),
             line: 1,

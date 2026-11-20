@@ -257,6 +257,7 @@ impl From<CallSite> for CallShape {
             arguments: SyntaxFact::Known(site.arguments),
             callee_is_locally_bound: SyntaxFact::Known(site.callee_is_locally_bound),
             callee_binding: SyntaxFact::Unknown,
+            receiver_type: SyntaxFact::Unknown,
             lexical_resolution: LexicalResolutionStatus::NotAttempted,
             visible_imports: site
                 .visible_aliases

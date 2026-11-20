@@ -539,7 +539,10 @@ mod tests {
             .unwrap();
         let (hits, misses) = scope.index().stats();
         assert_eq!(second.interfaces.len(), 1);
-        assert_eq!(hits, 4, "interfaces join the three base facts as hits");
+        assert_eq!(
+            hits, 5,
+            "interfaces join the three base facts and the Go type facts as hits"
+        );
         assert_eq!(
             misses - misses_before,
             2,

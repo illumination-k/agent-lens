@@ -11,6 +11,7 @@
 //! expansion, cross-crate resolution, runtime timing, or git history
 //! traversal is attempted here.
 
+mod go_types;
 #[cfg(test)]
 mod metamorphic_tests;
 pub(crate) mod model;
@@ -355,6 +356,7 @@ impl CallGraphBuilder {
         let files = attach_macro_generated_methods(files, |f, path_is_test| {
             self.includes_function(f, path_is_test)
         });
+        let files = go_types::bind_go_receiver_calls(files);
         Ok(CallGraph::build(files, self.argument_facts))
     }
 
@@ -450,6 +452,9 @@ impl CallGraphBuilder {
             .then(|| extract_value_references(lang, &source, &module, !self.exclude_tests))
             .transpose()?
             .unwrap_or_default();
+        let go_type_facts = matches!(lang, SourceLang::Go)
+            .then(|| extract_go_type_facts(&source, &module))
+            .transpose()?;
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -464,6 +469,7 @@ impl CallGraphBuilder {
             interfaces,
             macro_facts,
             value_references,
+            go_type_facts,
         })
     }
 
@@ -705,6 +711,23 @@ fn attach_macro_generated_methods(
     files
 }
 
+/// Package-level type facts for one Go file. No other fact has this
+/// value type, so it keeps a typed table of the active index rather than
+/// a table of its own.
+fn extract_go_type_facts(
+    source: &str,
+    module: &str,
+) -> Result<Arc<lens_golang::GoTypeFacts>, AnalyzerError> {
+    let extract = || lens_golang::extract_type_facts_with_module(source, module).map_err(parse_err);
+    let Some(index) = AnalysisIndex::active() else {
+        return extract().map(Arc::new);
+    };
+    index.memoize_typed(
+        (SourceKey::new(SourceLang::Go, source), module.to_owned()),
+        extract,
+    )
+}
+
 /// Interface method sets for one (Go) file. Only collected when the
 /// builder was asked for interface facts.
 fn extract_interfaces(
@@ -799,6 +822,9 @@ pub(crate) struct FileGraphInput {
     /// unless value-reference facts were requested (and the language
     /// extracts them).
     pub(crate) value_references: Arc<Vec<ValueReferenceShape>>,
+    /// Package-level type declarations (Go only), joined across files by
+    /// [`go_types::bind_go_receiver_calls`].
+    pub(crate) go_type_facts: Option<Arc<lens_golang::GoTypeFacts>>,
 }
 
 impl SourceLang {

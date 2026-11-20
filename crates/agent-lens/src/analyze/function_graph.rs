@@ -1208,6 +1208,103 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
         );
     }
 
+    /// A Go package where every receiver call has a same-named method on
+    /// another type, so only the receiver's declared type can pick the
+    /// callee. The root file opens with a block-comment package doc, as
+    /// pflag's `flag.go` does.
+    fn go_typed_receiver_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module github.com/x/proj\n");
+        write_file(
+            dir.path(),
+            "flag.go",
+            concat!(
+                "/*\nPackage pflag ...\n*/\n",
+                "package pflag\n\n",
+                "type FlagSet struct {\n    out  Writer\n    base\n    Hook func()\n}\n\n",
+                "type base struct{}\n\n",
+                "func (b *base) Shared() {}\n",
+                "func (b *base) Hook()   {}\n\n",
+                "type Writer struct{}\n\n",
+                "func (w Writer) Emit() {}\n\n",
+                "type Other struct{}\n\n",
+                "func (o *Other) BoolP()  {}\n",
+                "func (o *Other) Emit()  {}\n",
+                "func (o *Other) Shared() {}\n",
+                "func (o *Other) Parse()  {}\n",
+                "func (o *Other) Hook()   {}\n\n",
+                "type Doer interface{ BoolP() }\n\n",
+                "var CommandLine = NewFlagSet()\n\n",
+                "func NewFlagSet() *FlagSet { return &FlagSet{} }\n\n",
+                "func (f *FlagSet) BoolP() {}\n",
+                "func (f *FlagSet) Parse() {}\n",
+            ),
+        );
+        write_file(
+            dir.path(),
+            "bool.go",
+            concat!(
+                "package pflag\n\n",
+                "import (\n    goflag \"flag\"\n\n    \"github.com/x/proj/sub\"\n)\n\n",
+                "func Bool() { CommandLine.BoolP() }\n\n",
+                "func Local() {\n    fs := NewFlagSet()\n    fs.BoolP()\n}\n\n",
+                "func Receiver(f *FlagSet) { f.Parse() }\n\n",
+                "func Field(f *FlagSet) { f.out.Emit() }\n\n",
+                "func Promoted(f *FlagSet) { f.Shared() }\n\n",
+                "func FuncField(f *FlagSet) { f.Hook() }\n\n",
+                "func Std(g *goflag.FlagSet) { g.Parse() }\n\n",
+                "func Unseen(g *sub.Ghost) { g.Parse() }\n\n",
+                "func Iface(d Doer) { d.BoolP() }\n\n",
+                "func Shadow() {\n",
+                "    v := &Other{}\n    v.Emit()\n",
+                "    if true {\n        v := Writer{}\n        v.Emit()\n    }\n",
+                "}\n",
+            ),
+        );
+        write_file(dir.path(), "sub/sub.go", "package sub\n");
+        dir
+    }
+
+    /// Receiver calls bind through the type their receiver's declaration
+    /// spells, across files: a package variable initialised by a call, a
+    /// local, a parameter, a field, a method promoted from an embedded
+    /// struct (unless a func-typed field of that name shadows it). A
+    /// receiver of a type from outside the workspace reaches no
+    /// workspace method; an interface and a name bound to two types keep
+    /// the name-based resolution.
+    #[rstest]
+    #[case::package_var("pflag::Bool", "BoolP", "resolved", Some("pflag::FlagSet::BoolP"))]
+    #[case::local_from_call("pflag::Local", "BoolP", "resolved", Some("pflag::FlagSet::BoolP"))]
+    #[case::parameter("pflag::Receiver", "Parse", "resolved", Some("pflag::FlagSet::Parse"))]
+    #[case::field("pflag::Field", "Emit", "resolved", Some("pflag::Writer::Emit"))]
+    #[case::promoted("pflag::Promoted", "Shared", "resolved", Some("pflag::base::Shared"))]
+    #[case::func_field_shadows_promoted("pflag::FuncField", "Hook", "ambiguous", None)]
+    #[case::external_type("pflag::Std", "Parse", "unresolved", None)]
+    #[case::unseen_workspace_type("pflag::Unseen", "Parse", "ambiguous", None)]
+    #[case::interface("pflag::Iface", "BoolP", "ambiguous", None)]
+    #[case::two_types_one_name("pflag::Shadow", "Emit", "ambiguous", None)]
+    fn go_receiver_calls_bind_through_declared_types(
+        #[case] caller: &str,
+        #[case] callee: &str,
+        #[case] resolution: &str,
+        #[case] target: Option<&str>,
+    ) {
+        let dir = go_typed_receiver_project();
+        let report = analyze_json(dir.path());
+        let caller_id = node_by_qualified_name(&report, caller)["id"].clone();
+        let edge = report["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["from"] == caller_id && edge["callee_name"] == callee)
+            .unwrap_or_else(|| panic!("no {callee} edge from {caller}"));
+        assert_eq!(edge["resolution"], resolution, "{edge}");
+        assert_eq!(target_qualified_name(&report, edge).as_deref(), target);
+        if target.is_some() {
+            assert_eq!(edge["resolution_method"], "binding");
+        }
+    }
+
     /// The suppression is scoped to the shadowed name: a genuine
     /// cross-package call in the same function still resolves.
     #[test]
