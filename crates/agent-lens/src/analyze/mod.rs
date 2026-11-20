@@ -151,6 +151,7 @@ pub enum SourceLang {
     TypeScript(lens_ts::Dialect),
     Python,
     Go,
+    Quint,
 }
 
 impl SourceLang {
@@ -163,6 +164,9 @@ impl SourceLang {
         }
         if ext == "go" {
             return Some(Self::Go);
+        }
+        if ext == "qnt" {
+            return Some(Self::Quint);
         }
         lens_ts::Dialect::from_extension(ext).map(Self::TypeScript)
     }
@@ -181,6 +185,7 @@ impl SourceLang {
             }
             Self::Python => Box::new(lens_py::PythonParser::new()),
             Self::Go => Box::new(lens_golang::GoParser::new()),
+            Self::Quint => Box::new(lens_quint::QuintParser::new()),
         }
     }
 }
@@ -207,6 +212,8 @@ macro_rules! dispatch_lens {
             $crate::analyze::SourceLang::Python => ::lens_py::$extract($source $(, $arg)*)
                 .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
             $crate::analyze::SourceLang::Go => ::lens_golang::$extract($source $(, $arg)*)
+                .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
+            $crate::analyze::SourceLang::Quint => ::lens_quint::$extract($source $(, $arg)*)
                 .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
         }
     }};
@@ -300,7 +307,7 @@ pub enum CrateAnalyzerError {
     /// The provided path exists but no language backend claims it: not a
     /// crate root, not an entry file, and a directory walk found nothing.
     #[error(
-        "unsupported analysis root {path:?}; pass a Rust crate root (.rs file or a directory containing src/lib.rs or src/main.rs), a TS/JS entry file, a Python file/directory, or a Go file/module directory"
+        "unsupported analysis root {path:?}; pass a Rust crate root (.rs file or a directory containing src/lib.rs or src/main.rs), a TS/JS entry file, a Python file/directory, a Go file/module directory, or a Quint file/directory"
     )]
     UnsupportedRoot { path: PathBuf },
     /// `mod foo;` was declared in a parent file but neither `foo.rs` nor
@@ -363,6 +370,7 @@ mod tests {
         assert_eq!(SourceLang::from_extension("rs"), Some(SourceLang::Rust));
         assert_eq!(SourceLang::from_extension("py"), Some(SourceLang::Python));
         assert_eq!(SourceLang::from_extension("go"), Some(SourceLang::Go));
+        assert_eq!(SourceLang::from_extension("qnt"), Some(SourceLang::Quint));
         assert_eq!(SourceLang::from_extension("md"), None);
     }
 

@@ -1,0 +1,1220 @@
+{
+  "stage": "parsing",
+  "warnings": [],
+  "modules": [
+    {
+      "id": 136,
+      "name": "helpers",
+      "declarations": [
+        {
+          "id": 135,
+          "kind": "def",
+          "name": "inc",
+          "qualifier": "puredef",
+          "expr": {
+            "id": 134,
+            "kind": "lambda",
+            "params": [{ "id": 129, "name": "n", "typeAnnotation": { "id": 128, "kind": "int" } }],
+            "qualifier": "puredef",
+            "expr": {
+              "id": 133,
+              "kind": "app",
+              "opcode": "iadd",
+              "args": [{ "id": 131, "kind": "name", "name": "n" }, { "id": 132, "kind": "int", "value": 1 }]
+            }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 128, "kind": "int" }],
+            "res": { "id": 130, "kind": "int" }
+          }
+        }
+      ]
+    },
+    {
+      "id": 127,
+      "name": "counter",
+      "declarations": [
+        { "kind": "const", "name": "MAX", "typeAnnotation": { "id": 16, "kind": "int" }, "id": 17, "depth": 0 },
+        { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+        {
+          "id": 4,
+          "kind": "typedef",
+          "name": "Msg",
+          "type": {
+            "id": 4,
+            "kind": "sum",
+            "fields": {
+              "kind": "row",
+              "fields": [
+                { "fieldName": "Inc", "fieldType": { "id": 2, "kind": "int" } },
+                {
+                  "fieldName": "Reset",
+                  "fieldType": {
+                    "id": 3,
+                    "kind": "tup",
+                    "fields": { "kind": "row", "fields": [], "other": { "kind": "empty" } }
+                  }
+                }
+              ],
+              "other": { "kind": "empty" }
+            }
+          },
+          "depth": 0
+        },
+        { "id": 1, "kind": "import", "defName": "*", "protoName": "helpers", "fromSource": "./helpers" },
+        {
+          "id": 11,
+          "kind": "def",
+          "name": "Inc",
+          "qualifier": "def",
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 2, "kind": "int" }],
+            "res": { "id": 5, "kind": "const", "name": "Msg" }
+          },
+          "expr": {
+            "id": 10,
+            "kind": "lambda",
+            "params": [{ "id": 7, "name": "__IncParam" }],
+            "qualifier": "def",
+            "expr": {
+              "id": 9,
+              "kind": "app",
+              "opcode": "variant",
+              "args": [{ "id": 6, "kind": "str", "value": "Inc" }, { "kind": "name", "name": "__IncParam", "id": 8 }]
+            }
+          }
+        },
+        {
+          "id": 122,
+          "kind": "def",
+          "name": "inv",
+          "qualifier": "val",
+          "expr": {
+            "id": 121,
+            "kind": "app",
+            "opcode": "ilte",
+            "args": [{ "id": 119, "kind": "name", "name": "x" }, { "id": 120, "kind": "name", "name": "MAX" }]
+          }
+        },
+        {
+          "id": 15,
+          "kind": "def",
+          "name": "Reset",
+          "qualifier": "val",
+          "typeAnnotation": { "id": 5, "kind": "const", "name": "Msg" },
+          "expr": {
+            "id": 14,
+            "kind": "app",
+            "opcode": "variant",
+            "args": [
+              { "id": 12, "kind": "str", "value": "Reset" },
+              { "id": 13, "kind": "app", "opcode": "Tup", "args": [] }
+            ]
+          }
+        },
+        {
+          "doc": "Doubles its input.",
+          "id": 27,
+          "kind": "def",
+          "name": "double",
+          "qualifier": "puredef",
+          "expr": {
+            "id": 26,
+            "kind": "lambda",
+            "params": [{ "id": 21, "name": "n", "typeAnnotation": { "id": 20, "kind": "int" } }],
+            "qualifier": "puredef",
+            "expr": {
+              "id": 25,
+              "kind": "app",
+              "opcode": "imul",
+              "args": [{ "id": 23, "kind": "name", "name": "n" }, { "id": 24, "kind": "int", "value": 2 }]
+            }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 20, "kind": "int" }],
+            "res": { "id": 22, "kind": "int" }
+          }
+        },
+        {
+          "id": 50,
+          "kind": "def",
+          "name": "classify",
+          "qualifier": "puredef",
+          "expr": {
+            "id": 49,
+            "kind": "lambda",
+            "params": [{ "id": 36, "name": "n", "typeAnnotation": { "id": 35, "kind": "int" } }],
+            "qualifier": "puredef",
+            "expr": {
+              "id": 48,
+              "kind": "app",
+              "opcode": "ite",
+              "args": [
+                {
+                  "id": 40,
+                  "kind": "app",
+                  "opcode": "ilt",
+                  "args": [{ "id": 38, "kind": "name", "name": "n" }, { "id": 39, "kind": "int", "value": 0 }]
+                },
+                { "id": 41, "kind": "str", "value": "neg" },
+                {
+                  "id": 47,
+                  "kind": "app",
+                  "opcode": "ite",
+                  "args": [
+                    {
+                      "id": 44,
+                      "kind": "app",
+                      "opcode": "eq",
+                      "args": [{ "id": 42, "kind": "name", "name": "n" }, { "id": 43, "kind": "int", "value": 0 }]
+                    },
+                    { "id": 45, "kind": "str", "value": "zero" },
+                    { "id": 46, "kind": "str", "value": "pos" }
+                  ]
+                }
+              ]
+            }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 35, "kind": "int" }],
+            "res": { "id": 37, "kind": "str" }
+          }
+        },
+        {
+          "id": 66,
+          "kind": "def",
+          "name": "guard",
+          "qualifier": "def",
+          "expr": {
+            "id": 65,
+            "kind": "lambda",
+            "params": [{ "id": 52, "name": "n", "typeAnnotation": { "id": 51, "kind": "int" } }],
+            "qualifier": "def",
+            "expr": {
+              "id": 64,
+              "kind": "app",
+              "opcode": "or",
+              "args": [
+                {
+                  "id": 60,
+                  "kind": "app",
+                  "opcode": "and",
+                  "args": [
+                    {
+                      "id": 56,
+                      "kind": "app",
+                      "opcode": "igt",
+                      "args": [{ "id": 54, "kind": "name", "name": "n" }, { "id": 55, "kind": "int", "value": 0 }]
+                    },
+                    {
+                      "id": 59,
+                      "kind": "app",
+                      "opcode": "ilt",
+                      "args": [{ "id": 57, "kind": "name", "name": "n" }, { "id": 58, "kind": "name", "name": "MAX" }]
+                    }
+                  ]
+                },
+                {
+                  "id": 63,
+                  "kind": "app",
+                  "opcode": "eq",
+                  "args": [{ "id": 61, "kind": "name", "name": "n" }, { "id": 62, "kind": "int", "value": 5 }]
+                }
+              ]
+            }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 51, "kind": "int" }],
+            "res": { "id": 53, "kind": "bool" }
+          }
+        },
+        {
+          "id": 86,
+          "kind": "def",
+          "name": "handle",
+          "qualifier": "def",
+          "expr": {
+            "id": 85,
+            "kind": "lambda",
+            "params": [{ "id": 68, "name": "m", "typeAnnotation": { "id": 67, "kind": "const", "name": "Msg" } }],
+            "qualifier": "def",
+            "expr": {
+              "id": 78,
+              "kind": "app",
+              "opcode": "matchVariant",
+              "args": [
+                { "id": 70, "kind": "name", "name": "m" },
+                { "id": 79, "kind": "str", "value": "Inc" },
+                {
+                  "id": 80,
+                  "kind": "lambda",
+                  "qualifier": "def",
+                  "expr": {
+                    "id": 76,
+                    "kind": "app",
+                    "opcode": "ite",
+                    "args": [
+                      {
+                        "id": 73,
+                        "kind": "app",
+                        "opcode": "igt",
+                        "args": [{ "id": 71, "kind": "name", "name": "k" }, { "id": 72, "kind": "int", "value": 0 }]
+                      },
+                      { "id": 74, "kind": "name", "name": "k" },
+                      { "id": 75, "kind": "int", "value": 0 }
+                    ]
+                  },
+                  "params": [{ "name": "k", "id": 81 }]
+                },
+                { "id": 82, "kind": "str", "value": "Reset" },
+                {
+                  "id": 83,
+                  "kind": "lambda",
+                  "qualifier": "def",
+                  "expr": { "id": 77, "kind": "int", "value": 0 },
+                  "params": [{ "name": "_", "id": 84 }]
+                }
+              ]
+            }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 67, "kind": "const", "name": "Msg" }],
+            "res": { "id": 69, "kind": "int" }
+          }
+        },
+        {
+          "id": 90,
+          "kind": "def",
+          "name": "init",
+          "qualifier": "action",
+          "expr": {
+            "id": 89,
+            "kind": "app",
+            "opcode": "assign",
+            "args": [{ "id": 88, "kind": "name", "name": "x" }, { "id": 87, "kind": "int", "value": 0 }]
+          }
+        },
+        {
+          "id": 34,
+          "kind": "def",
+          "name": "forward",
+          "qualifier": "puredef",
+          "expr": {
+            "id": 33,
+            "kind": "lambda",
+            "params": [{ "id": 29, "name": "n", "typeAnnotation": { "id": 28, "kind": "int" } }],
+            "qualifier": "puredef",
+            "expr": { "id": 32, "kind": "app", "opcode": "double", "args": [{ "id": 31, "kind": "name", "name": "n" }] }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 28, "kind": "int" }],
+            "res": { "id": 30, "kind": "int" }
+          }
+        },
+        {
+          "id": 95,
+          "kind": "def",
+          "name": "bump",
+          "qualifier": "action",
+          "expr": {
+            "id": 94,
+            "kind": "app",
+            "opcode": "assign",
+            "args": [
+              { "id": 93, "kind": "name", "name": "x" },
+              { "id": 92, "kind": "app", "opcode": "inc", "args": [{ "id": 91, "kind": "name", "name": "x" }] }
+            ]
+          }
+        },
+        {
+          "id": 116,
+          "kind": "def",
+          "name": "step",
+          "qualifier": "action",
+          "expr": {
+            "id": 115,
+            "kind": "app",
+            "opcode": "actionAny",
+            "args": [
+              { "id": 96, "kind": "name", "name": "bump" },
+              {
+                "id": 103,
+                "kind": "app",
+                "opcode": "actionAll",
+                "args": [
+                  {
+                    "id": 99,
+                    "kind": "app",
+                    "opcode": "igte",
+                    "args": [{ "id": 97, "kind": "name", "name": "x" }, { "id": 98, "kind": "name", "name": "MAX" }]
+                  },
+                  {
+                    "id": 102,
+                    "kind": "app",
+                    "opcode": "assign",
+                    "args": [{ "id": 101, "kind": "name", "name": "x" }, { "id": 100, "kind": "int", "value": 0 }]
+                  }
+                ]
+              },
+              {
+                "id": 114,
+                "kind": "let",
+                "opdef": {
+                  "id": 108,
+                  "kind": "def",
+                  "name": "v",
+                  "qualifier": "nondet",
+                  "expr": {
+                    "id": 107,
+                    "kind": "app",
+                    "opcode": "oneOf",
+                    "args": [
+                      {
+                        "id": 106,
+                        "kind": "app",
+                        "opcode": "to",
+                        "args": [{ "id": 104, "kind": "int", "value": 1 }, { "id": 105, "kind": "int", "value": 3 }]
+                      }
+                    ]
+                  }
+                },
+                "expr": {
+                  "id": 113,
+                  "kind": "app",
+                  "opcode": "assign",
+                  "args": [
+                    { "id": 112, "kind": "name", "name": "x" },
+                    {
+                      "id": 111,
+                      "kind": "app",
+                      "opcode": "iadd",
+                      "args": [{ "id": 109, "kind": "name", "name": "x" }, { "id": 110, "kind": "name", "name": "v" }]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": 126,
+          "kind": "def",
+          "name": "bumpTest",
+          "qualifier": "run",
+          "expr": {
+            "id": 125,
+            "kind": "app",
+            "opcode": "then",
+            "args": [{ "id": 123, "kind": "name", "name": "init" }, { "id": 124, "kind": "name", "name": "bump" }]
+          }
+        },
+        {
+          "id": 118,
+          "kind": "def",
+          "name": "stepAlias",
+          "qualifier": "action",
+          "expr": { "id": 117, "kind": "name", "name": "step" }
+        }
+      ]
+    },
+    {
+      "id": 146,
+      "name": "extra",
+      "declarations": [
+        { "id": 137, "kind": "import", "defName": "*", "protoName": "helpers" },
+        {
+          "id": 145,
+          "kind": "def",
+          "name": "twice",
+          "qualifier": "puredef",
+          "expr": {
+            "id": 144,
+            "kind": "lambda",
+            "params": [{ "id": 139, "name": "n", "typeAnnotation": { "id": 138, "kind": "int" } }],
+            "qualifier": "puredef",
+            "expr": {
+              "id": 143,
+              "kind": "app",
+              "opcode": "inc",
+              "args": [
+                { "id": 142, "kind": "app", "opcode": "inc", "args": [{ "id": 141, "kind": "name", "name": "n" }] }
+              ]
+            }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 138, "kind": "int" }],
+            "res": { "id": 140, "kind": "int" }
+          }
+        }
+      ]
+    }
+  ],
+  "table": {
+    "5": {
+      "id": 4,
+      "kind": "typedef",
+      "name": "Msg",
+      "type": {
+        "id": 4,
+        "kind": "sum",
+        "fields": {
+          "kind": "row",
+          "fields": [
+            { "fieldName": "Inc", "fieldType": { "id": 2, "kind": "int" } },
+            {
+              "fieldName": "Reset",
+              "fieldType": {
+                "id": 3,
+                "kind": "tup",
+                "fields": { "kind": "row", "fields": [], "other": { "kind": "empty" } }
+              }
+            }
+          ],
+          "other": { "kind": "empty" }
+        }
+      },
+      "depth": 0
+    },
+    "8": { "id": 7, "name": "__IncParam", "kind": "param", "depth": 1 },
+    "11": {
+      "id": 11,
+      "kind": "def",
+      "name": "Inc",
+      "qualifier": "def",
+      "typeAnnotation": {
+        "kind": "oper",
+        "args": [{ "id": 2, "kind": "int" }],
+        "res": { "id": 5, "kind": "const", "name": "Msg" }
+      },
+      "expr": {
+        "id": 10,
+        "kind": "lambda",
+        "params": [{ "id": 7, "name": "__IncParam" }],
+        "qualifier": "def",
+        "expr": {
+          "id": 9,
+          "kind": "app",
+          "opcode": "variant",
+          "args": [{ "id": 6, "kind": "str", "value": "Inc" }, { "kind": "name", "name": "__IncParam", "id": 8 }]
+        }
+      },
+      "depth": 0
+    },
+    "15": {
+      "id": 15,
+      "kind": "def",
+      "name": "Reset",
+      "qualifier": "val",
+      "typeAnnotation": { "id": 5, "kind": "const", "name": "Msg" },
+      "expr": {
+        "id": 14,
+        "kind": "app",
+        "opcode": "variant",
+        "args": [
+          { "id": 12, "kind": "str", "value": "Reset" },
+          { "id": 13, "kind": "app", "opcode": "Tup", "args": [] }
+        ]
+      },
+      "depth": 0
+    },
+    "23": { "id": 21, "name": "n", "typeAnnotation": { "id": 20, "kind": "int" }, "kind": "param", "depth": 1 },
+    "27": {
+      "doc": "Doubles its input.",
+      "id": 27,
+      "kind": "def",
+      "name": "double",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 26,
+        "kind": "lambda",
+        "params": [{ "id": 21, "name": "n", "typeAnnotation": { "id": 20, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 25,
+          "kind": "app",
+          "opcode": "imul",
+          "args": [{ "id": 23, "kind": "name", "name": "n" }, { "id": 24, "kind": "int", "value": 2 }]
+        }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 20, "kind": "int" }], "res": { "id": 22, "kind": "int" } },
+      "depth": 0
+    },
+    "31": {
+      "id": 29,
+      "name": "n",
+      "typeAnnotation": { "id": 28, "kind": "int" },
+      "kind": "param",
+      "depth": 1,
+      "shadowing": false
+    },
+    "32": {
+      "doc": "Doubles its input.",
+      "id": 27,
+      "kind": "def",
+      "name": "double",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 26,
+        "kind": "lambda",
+        "params": [{ "id": 21, "name": "n", "typeAnnotation": { "id": 20, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 25,
+          "kind": "app",
+          "opcode": "imul",
+          "args": [{ "id": 23, "kind": "name", "name": "n" }, { "id": 24, "kind": "int", "value": 2 }]
+        }
+      },
+      "depth": 0
+    },
+    "34": {
+      "id": 34,
+      "kind": "def",
+      "name": "forward",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 33,
+        "kind": "lambda",
+        "params": [{ "id": 29, "name": "n", "typeAnnotation": { "id": 28, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": { "id": 32, "kind": "app", "opcode": "double", "args": [{ "id": 31, "kind": "name", "name": "n" }] }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 28, "kind": "int" }], "res": { "id": 30, "kind": "int" } },
+      "depth": 0
+    },
+    "38": {
+      "id": 36,
+      "name": "n",
+      "typeAnnotation": { "id": 35, "kind": "int" },
+      "kind": "param",
+      "depth": 1,
+      "shadowing": false
+    },
+    "42": {
+      "id": 36,
+      "name": "n",
+      "typeAnnotation": { "id": 35, "kind": "int" },
+      "kind": "param",
+      "depth": 1,
+      "shadowing": false
+    },
+    "50": {
+      "id": 50,
+      "kind": "def",
+      "name": "classify",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 49,
+        "kind": "lambda",
+        "params": [{ "id": 36, "name": "n", "typeAnnotation": { "id": 35, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 48,
+          "kind": "app",
+          "opcode": "ite",
+          "args": [
+            {
+              "id": 40,
+              "kind": "app",
+              "opcode": "ilt",
+              "args": [{ "id": 38, "kind": "name", "name": "n" }, { "id": 39, "kind": "int", "value": 0 }]
+            },
+            { "id": 41, "kind": "str", "value": "neg" },
+            {
+              "id": 47,
+              "kind": "app",
+              "opcode": "ite",
+              "args": [
+                {
+                  "id": 44,
+                  "kind": "app",
+                  "opcode": "eq",
+                  "args": [{ "id": 42, "kind": "name", "name": "n" }, { "id": 43, "kind": "int", "value": 0 }]
+                },
+                { "id": 45, "kind": "str", "value": "zero" },
+                { "id": 46, "kind": "str", "value": "pos" }
+              ]
+            }
+          ]
+        }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 35, "kind": "int" }], "res": { "id": 37, "kind": "str" } },
+      "depth": 0
+    },
+    "54": {
+      "id": 52,
+      "name": "n",
+      "typeAnnotation": { "id": 51, "kind": "int" },
+      "kind": "param",
+      "depth": 1,
+      "shadowing": false
+    },
+    "57": {
+      "id": 52,
+      "name": "n",
+      "typeAnnotation": { "id": 51, "kind": "int" },
+      "kind": "param",
+      "depth": 1,
+      "shadowing": false
+    },
+    "58": { "kind": "const", "name": "MAX", "typeAnnotation": { "id": 16, "kind": "int" }, "id": 17, "depth": 0 },
+    "61": {
+      "id": 52,
+      "name": "n",
+      "typeAnnotation": { "id": 51, "kind": "int" },
+      "kind": "param",
+      "depth": 1,
+      "shadowing": false
+    },
+    "66": {
+      "id": 66,
+      "kind": "def",
+      "name": "guard",
+      "qualifier": "def",
+      "expr": {
+        "id": 65,
+        "kind": "lambda",
+        "params": [{ "id": 52, "name": "n", "typeAnnotation": { "id": 51, "kind": "int" } }],
+        "qualifier": "def",
+        "expr": {
+          "id": 64,
+          "kind": "app",
+          "opcode": "or",
+          "args": [
+            {
+              "id": 60,
+              "kind": "app",
+              "opcode": "and",
+              "args": [
+                {
+                  "id": 56,
+                  "kind": "app",
+                  "opcode": "igt",
+                  "args": [{ "id": 54, "kind": "name", "name": "n" }, { "id": 55, "kind": "int", "value": 0 }]
+                },
+                {
+                  "id": 59,
+                  "kind": "app",
+                  "opcode": "ilt",
+                  "args": [{ "id": 57, "kind": "name", "name": "n" }, { "id": 58, "kind": "name", "name": "MAX" }]
+                }
+              ]
+            },
+            {
+              "id": 63,
+              "kind": "app",
+              "opcode": "eq",
+              "args": [{ "id": 61, "kind": "name", "name": "n" }, { "id": 62, "kind": "int", "value": 5 }]
+            }
+          ]
+        }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 51, "kind": "int" }], "res": { "id": 53, "kind": "bool" } },
+      "depth": 0
+    },
+    "67": {
+      "id": 4,
+      "kind": "typedef",
+      "name": "Msg",
+      "type": {
+        "id": 4,
+        "kind": "sum",
+        "fields": {
+          "kind": "row",
+          "fields": [
+            { "fieldName": "Inc", "fieldType": { "id": 2, "kind": "int" } },
+            {
+              "fieldName": "Reset",
+              "fieldType": {
+                "id": 3,
+                "kind": "tup",
+                "fields": { "kind": "row", "fields": [], "other": { "kind": "empty" } }
+              }
+            }
+          ],
+          "other": { "kind": "empty" }
+        }
+      },
+      "depth": 0
+    },
+    "70": {
+      "id": 68,
+      "name": "m",
+      "typeAnnotation": { "id": 67, "kind": "const", "name": "Msg" },
+      "kind": "param",
+      "depth": 1
+    },
+    "71": { "name": "k", "id": 81, "kind": "param", "depth": 2 },
+    "74": { "name": "k", "id": 81, "kind": "param", "depth": 2 },
+    "86": {
+      "id": 86,
+      "kind": "def",
+      "name": "handle",
+      "qualifier": "def",
+      "expr": {
+        "id": 85,
+        "kind": "lambda",
+        "params": [{ "id": 68, "name": "m", "typeAnnotation": { "id": 67, "kind": "const", "name": "Msg" } }],
+        "qualifier": "def",
+        "expr": {
+          "id": 78,
+          "kind": "app",
+          "opcode": "matchVariant",
+          "args": [
+            { "id": 70, "kind": "name", "name": "m" },
+            { "id": 79, "kind": "str", "value": "Inc" },
+            {
+              "id": 80,
+              "kind": "lambda",
+              "qualifier": "def",
+              "expr": {
+                "id": 76,
+                "kind": "app",
+                "opcode": "ite",
+                "args": [
+                  {
+                    "id": 73,
+                    "kind": "app",
+                    "opcode": "igt",
+                    "args": [{ "id": 71, "kind": "name", "name": "k" }, { "id": 72, "kind": "int", "value": 0 }]
+                  },
+                  { "id": 74, "kind": "name", "name": "k" },
+                  { "id": 75, "kind": "int", "value": 0 }
+                ]
+              },
+              "params": [{ "name": "k", "id": 81 }]
+            },
+            { "id": 82, "kind": "str", "value": "Reset" },
+            {
+              "id": 83,
+              "kind": "lambda",
+              "qualifier": "def",
+              "expr": { "id": 77, "kind": "int", "value": 0 },
+              "params": [{ "name": "_", "id": 84 }]
+            }
+          ]
+        }
+      },
+      "typeAnnotation": {
+        "kind": "oper",
+        "args": [{ "id": 67, "kind": "const", "name": "Msg" }],
+        "res": { "id": 69, "kind": "int" }
+      },
+      "depth": 0
+    },
+    "88": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "90": {
+      "id": 90,
+      "kind": "def",
+      "name": "init",
+      "qualifier": "action",
+      "expr": {
+        "id": 89,
+        "kind": "app",
+        "opcode": "assign",
+        "args": [{ "id": 88, "kind": "name", "name": "x" }, { "id": 87, "kind": "int", "value": 0 }]
+      },
+      "depth": 0
+    },
+    "91": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "92": {
+      "id": 135,
+      "kind": "def",
+      "name": "inc",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 134,
+        "kind": "lambda",
+        "params": [{ "id": 129, "name": "n", "typeAnnotation": { "id": 128, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 133,
+          "kind": "app",
+          "opcode": "iadd",
+          "args": [{ "id": 131, "kind": "name", "name": "n" }, { "id": 132, "kind": "int", "value": 1 }]
+        }
+      },
+      "depth": 0,
+      "importedFrom": { "id": 1, "kind": "import", "defName": "*", "protoName": "helpers", "fromSource": "./helpers" },
+      "hidden": true
+    },
+    "93": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "95": {
+      "id": 95,
+      "kind": "def",
+      "name": "bump",
+      "qualifier": "action",
+      "expr": {
+        "id": 94,
+        "kind": "app",
+        "opcode": "assign",
+        "args": [
+          { "id": 93, "kind": "name", "name": "x" },
+          { "id": 92, "kind": "app", "opcode": "inc", "args": [{ "id": 91, "kind": "name", "name": "x" }] }
+        ]
+      },
+      "depth": 0
+    },
+    "96": {
+      "id": 95,
+      "kind": "def",
+      "name": "bump",
+      "qualifier": "action",
+      "expr": {
+        "id": 94,
+        "kind": "app",
+        "opcode": "assign",
+        "args": [
+          { "id": 93, "kind": "name", "name": "x" },
+          { "id": 92, "kind": "app", "opcode": "inc", "args": [{ "id": 91, "kind": "name", "name": "x" }] }
+        ]
+      },
+      "depth": 0
+    },
+    "97": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "98": { "kind": "const", "name": "MAX", "typeAnnotation": { "id": 16, "kind": "int" }, "id": 17, "depth": 0 },
+    "101": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "108": {
+      "id": 108,
+      "kind": "def",
+      "name": "v",
+      "qualifier": "nondet",
+      "expr": {
+        "id": 107,
+        "kind": "app",
+        "opcode": "oneOf",
+        "args": [
+          {
+            "id": 106,
+            "kind": "app",
+            "opcode": "to",
+            "args": [{ "id": 104, "kind": "int", "value": 1 }, { "id": 105, "kind": "int", "value": 3 }]
+          }
+        ]
+      },
+      "depth": 2
+    },
+    "109": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "110": {
+      "id": 108,
+      "kind": "def",
+      "name": "v",
+      "qualifier": "nondet",
+      "expr": {
+        "id": 107,
+        "kind": "app",
+        "opcode": "oneOf",
+        "args": [
+          {
+            "id": 106,
+            "kind": "app",
+            "opcode": "to",
+            "args": [{ "id": 104, "kind": "int", "value": 1 }, { "id": 105, "kind": "int", "value": 3 }]
+          }
+        ]
+      },
+      "depth": 2
+    },
+    "112": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "116": {
+      "id": 116,
+      "kind": "def",
+      "name": "step",
+      "qualifier": "action",
+      "expr": {
+        "id": 115,
+        "kind": "app",
+        "opcode": "actionAny",
+        "args": [
+          { "id": 96, "kind": "name", "name": "bump" },
+          {
+            "id": 103,
+            "kind": "app",
+            "opcode": "actionAll",
+            "args": [
+              {
+                "id": 99,
+                "kind": "app",
+                "opcode": "igte",
+                "args": [{ "id": 97, "kind": "name", "name": "x" }, { "id": 98, "kind": "name", "name": "MAX" }]
+              },
+              {
+                "id": 102,
+                "kind": "app",
+                "opcode": "assign",
+                "args": [{ "id": 101, "kind": "name", "name": "x" }, { "id": 100, "kind": "int", "value": 0 }]
+              }
+            ]
+          },
+          {
+            "id": 114,
+            "kind": "let",
+            "opdef": {
+              "id": 108,
+              "kind": "def",
+              "name": "v",
+              "qualifier": "nondet",
+              "expr": {
+                "id": 107,
+                "kind": "app",
+                "opcode": "oneOf",
+                "args": [
+                  {
+                    "id": 106,
+                    "kind": "app",
+                    "opcode": "to",
+                    "args": [{ "id": 104, "kind": "int", "value": 1 }, { "id": 105, "kind": "int", "value": 3 }]
+                  }
+                ]
+              }
+            },
+            "expr": {
+              "id": 113,
+              "kind": "app",
+              "opcode": "assign",
+              "args": [
+                { "id": 112, "kind": "name", "name": "x" },
+                {
+                  "id": 111,
+                  "kind": "app",
+                  "opcode": "iadd",
+                  "args": [{ "id": 109, "kind": "name", "name": "x" }, { "id": 110, "kind": "name", "name": "v" }]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "depth": 0
+    },
+    "117": {
+      "id": 116,
+      "kind": "def",
+      "name": "step",
+      "qualifier": "action",
+      "expr": {
+        "id": 115,
+        "kind": "app",
+        "opcode": "actionAny",
+        "args": [
+          { "id": 96, "kind": "name", "name": "bump" },
+          {
+            "id": 103,
+            "kind": "app",
+            "opcode": "actionAll",
+            "args": [
+              {
+                "id": 99,
+                "kind": "app",
+                "opcode": "igte",
+                "args": [{ "id": 97, "kind": "name", "name": "x" }, { "id": 98, "kind": "name", "name": "MAX" }]
+              },
+              {
+                "id": 102,
+                "kind": "app",
+                "opcode": "assign",
+                "args": [{ "id": 101, "kind": "name", "name": "x" }, { "id": 100, "kind": "int", "value": 0 }]
+              }
+            ]
+          },
+          {
+            "id": 114,
+            "kind": "let",
+            "opdef": {
+              "id": 108,
+              "kind": "def",
+              "name": "v",
+              "qualifier": "nondet",
+              "expr": {
+                "id": 107,
+                "kind": "app",
+                "opcode": "oneOf",
+                "args": [
+                  {
+                    "id": 106,
+                    "kind": "app",
+                    "opcode": "to",
+                    "args": [{ "id": 104, "kind": "int", "value": 1 }, { "id": 105, "kind": "int", "value": 3 }]
+                  }
+                ]
+              }
+            },
+            "expr": {
+              "id": 113,
+              "kind": "app",
+              "opcode": "assign",
+              "args": [
+                { "id": 112, "kind": "name", "name": "x" },
+                {
+                  "id": 111,
+                  "kind": "app",
+                  "opcode": "iadd",
+                  "args": [{ "id": 109, "kind": "name", "name": "x" }, { "id": 110, "kind": "name", "name": "v" }]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "depth": 0
+    },
+    "118": {
+      "id": 118,
+      "kind": "def",
+      "name": "stepAlias",
+      "qualifier": "action",
+      "expr": { "id": 117, "kind": "name", "name": "step" },
+      "depth": 0
+    },
+    "119": { "kind": "var", "name": "x", "typeAnnotation": { "id": 18, "kind": "int" }, "id": 19, "depth": 0 },
+    "120": { "kind": "const", "name": "MAX", "typeAnnotation": { "id": 16, "kind": "int" }, "id": 17, "depth": 0 },
+    "122": {
+      "id": 122,
+      "kind": "def",
+      "name": "inv",
+      "qualifier": "val",
+      "expr": {
+        "id": 121,
+        "kind": "app",
+        "opcode": "ilte",
+        "args": [{ "id": 119, "kind": "name", "name": "x" }, { "id": 120, "kind": "name", "name": "MAX" }]
+      },
+      "depth": 0
+    },
+    "123": {
+      "id": 90,
+      "kind": "def",
+      "name": "init",
+      "qualifier": "action",
+      "expr": {
+        "id": 89,
+        "kind": "app",
+        "opcode": "assign",
+        "args": [{ "id": 88, "kind": "name", "name": "x" }, { "id": 87, "kind": "int", "value": 0 }]
+      },
+      "depth": 0
+    },
+    "124": {
+      "id": 95,
+      "kind": "def",
+      "name": "bump",
+      "qualifier": "action",
+      "expr": {
+        "id": 94,
+        "kind": "app",
+        "opcode": "assign",
+        "args": [
+          { "id": 93, "kind": "name", "name": "x" },
+          { "id": 92, "kind": "app", "opcode": "inc", "args": [{ "id": 91, "kind": "name", "name": "x" }] }
+        ]
+      },
+      "depth": 0
+    },
+    "126": {
+      "id": 126,
+      "kind": "def",
+      "name": "bumpTest",
+      "qualifier": "run",
+      "expr": {
+        "id": 125,
+        "kind": "app",
+        "opcode": "then",
+        "args": [{ "id": 123, "kind": "name", "name": "init" }, { "id": 124, "kind": "name", "name": "bump" }]
+      },
+      "depth": 0
+    },
+    "131": { "id": 129, "name": "n", "typeAnnotation": { "id": 128, "kind": "int" }, "kind": "param", "depth": 1 },
+    "135": {
+      "id": 135,
+      "kind": "def",
+      "name": "inc",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 134,
+        "kind": "lambda",
+        "params": [{ "id": 129, "name": "n", "typeAnnotation": { "id": 128, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 133,
+          "kind": "app",
+          "opcode": "iadd",
+          "args": [{ "id": 131, "kind": "name", "name": "n" }, { "id": 132, "kind": "int", "value": 1 }]
+        }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 128, "kind": "int" }], "res": { "id": 130, "kind": "int" } },
+      "depth": 0
+    },
+    "141": { "id": 139, "name": "n", "typeAnnotation": { "id": 138, "kind": "int" }, "kind": "param", "depth": 1 },
+    "142": {
+      "id": 135,
+      "kind": "def",
+      "name": "inc",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 134,
+        "kind": "lambda",
+        "params": [{ "id": 129, "name": "n", "typeAnnotation": { "id": 128, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 133,
+          "kind": "app",
+          "opcode": "iadd",
+          "args": [{ "id": 131, "kind": "name", "name": "n" }, { "id": 132, "kind": "int", "value": 1 }]
+        }
+      },
+      "depth": 0,
+      "importedFrom": { "id": 137, "kind": "import", "defName": "*", "protoName": "helpers" },
+      "hidden": true
+    },
+    "143": {
+      "id": 135,
+      "kind": "def",
+      "name": "inc",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 134,
+        "kind": "lambda",
+        "params": [{ "id": 129, "name": "n", "typeAnnotation": { "id": 128, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 133,
+          "kind": "app",
+          "opcode": "iadd",
+          "args": [{ "id": 131, "kind": "name", "name": "n" }, { "id": 132, "kind": "int", "value": 1 }]
+        }
+      },
+      "depth": 0,
+      "importedFrom": { "id": 137, "kind": "import", "defName": "*", "protoName": "helpers" },
+      "hidden": true
+    },
+    "145": {
+      "id": 145,
+      "kind": "def",
+      "name": "twice",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 144,
+        "kind": "lambda",
+        "params": [{ "id": 139, "name": "n", "typeAnnotation": { "id": 138, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 143,
+          "kind": "app",
+          "opcode": "inc",
+          "args": [{ "id": 142, "kind": "app", "opcode": "inc", "args": [{ "id": 141, "kind": "name", "name": "n" }] }]
+        }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 138, "kind": "int" }], "res": { "id": 140, "kind": "int" } },
+      "depth": 0
+    }
+  },
+  "errors": []
+}

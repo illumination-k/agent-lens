@@ -77,6 +77,7 @@ impl_into_module_file!(
     lens_ts::TsModule,
     lens_py::PythonModule,
     lens_golang::GoPackage,
+    lens_quint::QuintModule,
 );
 
 /// The one axis on which the analyzers disagree about what counts as a
@@ -163,6 +164,7 @@ fn build_graph_uncached(
             SourceLang::TypeScript(_) => build_ts_graph(path),
             SourceLang::Go => build_go_graph(path, policy, filter),
             SourceLang::Python => build_python_graph(path, filter),
+            SourceLang::Quint => build_quint_graph(path, filter),
         };
     }
 
@@ -172,7 +174,12 @@ fn build_graph_uncached(
         }
         return match resolve_crate_root(path) {
             Ok(root) => build_rust_graph(&root),
-            Err(_) => build_python_graph(path, filter),
+            // Neither Python nor Quint has a root marker, so each is tried
+            // by walking: a directory with no `.py` file falls to Quint.
+            Err(_) => match build_python_graph(path, filter) {
+                Err(CrateAnalyzerError::UnsupportedRoot { .. }) => build_quint_graph(path, filter),
+                other => other,
+            },
         };
     }
 
@@ -228,6 +235,25 @@ fn build_python_graph(
     Ok(ModuleGraph::new(
         path.to_path_buf(),
         ModuleLabeler::python(),
+        modules,
+        edges,
+    ))
+}
+
+/// Quint is the last directory fallback, after Python; an empty walk
+/// means the path was never a Quint root either.
+fn build_quint_graph(
+    path: &Path,
+    filter: &AnalyzePathFilter,
+) -> Result<ModuleGraph, CrateAnalyzerError> {
+    let modules = lens_quint::build_module_tree(path, &filter.compile(path)?)?;
+    if modules.is_empty() {
+        return Err(unsupported_root(path));
+    }
+    let edges = lens_quint::extract_edges(&modules);
+    Ok(ModuleGraph::new(
+        path.to_path_buf(),
+        ModuleLabeler::quint(),
         modules,
         edges,
     ))

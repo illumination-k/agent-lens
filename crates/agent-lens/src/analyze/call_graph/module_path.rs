@@ -64,6 +64,7 @@ pub(crate) fn module_path_for(
         SourceLang::TypeScript(_) => ts_module_path_from_relative_file(&file.display_path),
         SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
         SourceLang::Go => go_module_path_from_file(&file.display_path, source),
+        SourceLang::Quint => quint_module_path_from_relative_file(&file.display_path),
     }
 }
 
@@ -154,6 +155,14 @@ fn ts_module_path_from_relative_file(file: &str) -> String {
 
 fn python_module_path_from_relative_file(file: &str) -> String {
     join_or_placeholder(lens_py::module_segments(&normalize_separators(file)))
+}
+
+/// A Quint file is named by its path with the `.qnt` extension dropped;
+/// the `module` blocks inside it qualify their own definitions.
+fn quint_module_path_from_relative_file(file: &str) -> String {
+    join_or_placeholder(lens_domain::path_segments(
+        &normalize_separators(file).with_extension(""),
+    ))
 }
 
 /// Go's compilation unit is a *package* (directory), not a single file,

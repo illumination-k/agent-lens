@@ -169,7 +169,7 @@ min-score = 8
 top = 10
 min-score = 3
 
-# The language front-ends: four parallel implementations of one
+# The language front-ends: five parallel implementations of one
 # interface. Cross-crate similarity is expected in shape and a real
 # finding in body, so this is the profile that catches a fix applied to
 # `lens-rust` and forgotten in `lens-py`.
@@ -180,7 +180,9 @@ min-score = 3
 path = "crates"
 format = "md"
 exclude-tests = true
-exclude = ["agent-lens/**", "agent-hooks/**"]
+# `lens-quint/testdata` holds Quint fixtures, test inputs rather than
+# product code, and reading them needs the `quint` CLI.
+exclude = ["agent-lens/**", "agent-hooks/**", "lens-quint/testdata/**"]
 tools = ["similarity", "complexity", "forwarding", "cohesion"]
 
 [profile.lenses.similarity]

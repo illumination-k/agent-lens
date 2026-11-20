@@ -52,15 +52,16 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// summary across the whole corpus. The summary also carries
     /// cognitive / cyclomatic sums per file and per directory: unlike the
     /// maxima, they do not drop when a function is split into helpers.
-    /// The parser is chosen from each
-    /// file extension (Rust, TypeScript/JavaScript, Python, or Go).
+    /// The parser is chosen from each file extension (Rust,
+    /// TypeScript/JavaScript, Python, Go, or Quint — Quint through the
+    /// `quint` CLI, which must be on `PATH`).
     /// The JSON format is the default machine-readable output;
     /// `--format md` emits a compact summary tuned for LLM context.
     #[command(after_long_help = examples::COMPLEXITY)]
     Complexity(AnalyzeComplexityArgs),
     /// Report module-level coupling metrics for a Rust crate, a
-    /// TypeScript / JavaScript module graph, a Go module, or a Python
-    /// package tree.
+    /// TypeScript / JavaScript module graph, a Go module, a Python
+    /// package tree, or a Quint spec.
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
@@ -73,7 +74,9 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// imports define the module graph, a
     /// `.go` file or Go module directory (containing `go.mod`), or a
     /// `.py` file or package directory whose in-tree imports define the
-    /// module graph. The graph grows outwards from that one entry, so
+    /// module graph, or a `.qnt` file or directory whose Quint `module`s
+    /// are the units (a directory is read as Quint when it holds no
+    /// `.py` file). The graph grows outwards from that one entry, so
     /// unlike the file-walking analyzers this takes exactly one `path`.
     /// JSON is the default and carries every module; `--format md` caps
     /// the module table at `--top` (default 20) and the coupled-pair
@@ -167,7 +170,8 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// surface (Rust and Go), and deprecated functions are exempt from
     /// chains; chains follow resolved edges only, so depths are lower
     /// bounds. The parser is chosen from each file extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go). `--section` picks the
+    /// TypeScript/JavaScript, Python, Go, or Quint for `wrapper` only).
+    /// `--section` picks the
     /// sections (default both); `--diff-only` / `--diff-range` gate
     /// both on the changed lines. JSON nests each section's report under
     /// its key and is the default; `--format md` stacks them and caps
@@ -216,8 +220,9 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// span. Useful as an "onboarding cost" estimate — how many files
     /// an agent must open to reason about a given module. `path` may
     /// be a Rust crate root (or a directory containing one), a
-    /// TypeScript/JavaScript entry file, a Python file/directory, or a
-    /// Go file or module directory (containing `go.mod`). Frameworks
+    /// TypeScript/JavaScript entry file, a Python file/directory, a
+    /// Go file or module directory (containing `go.mod`), or a Quint
+    /// file/directory. Frameworks
     /// with many implicit entries (Next.js App Router, file-routed
     /// Remix / Astro) can pass `--entry-glob` repeatedly to merge
     /// several TS/JS entry trees into one report; in that mode `path`
@@ -331,7 +336,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// Rank files by `commits × cognitive_max` to surface hotspots.
     ///
     /// Walks `path` for supported source files (Rust,
-    /// TypeScript/JavaScript, Python, or Go), asks `git` how many
+    /// TypeScript/JavaScript, Python, Go, or Quint), asks `git` how many
     /// commits each file has been touched in
     /// (optionally scoped by `--since`), and joins the two with
     /// cognitive complexity. The resulting ranking points at
@@ -528,7 +533,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// the word-level overlap of the two doc comments, which separates
     /// "same stated intent" clones from functions that merely share a
     /// shape. The parser is chosen from each file extension
-    /// (Rust, TypeScript/JavaScript, Python, or Go). The JSON format is
+    /// (Rust, TypeScript/JavaScript, Python, Go, or Quint). The JSON format is
     /// the default machine-readable output and always carries the
     /// per-pair components; `--format md` emits a compact summary tuned
     /// for LLM context, with the doc overlap rolled in under

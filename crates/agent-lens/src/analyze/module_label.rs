@@ -83,6 +83,15 @@ impl ModuleLabeler {
         }
     }
 
+    /// Quint modules are named by their `module` declaration, which is
+    /// global to a spec, so the label is that bare name.
+    pub(crate) fn quint() -> Self {
+        Self {
+            root: None,
+            separator: "::",
+        }
+    }
+
     /// Spell `path` the way the analyzed language spells it.
     pub(crate) fn label(&self, path: &ModulePath) -> String {
         let tail = descendant_segments(path.as_str());

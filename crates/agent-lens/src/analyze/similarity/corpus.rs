@@ -225,7 +225,7 @@ fn collect_file(
 fn comment_syntax(lang: SourceLang) -> CommentSyntax {
     match lang {
         SourceLang::Rust => CommentSyntax::Rust,
-        SourceLang::TypeScript(_) | SourceLang::Go => CommentSyntax::CLike,
+        SourceLang::TypeScript(_) | SourceLang::Go | SourceLang::Quint => CommentSyntax::CLike,
         SourceLang::Python => CommentSyntax::Python,
     }
 }

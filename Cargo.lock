@@ -23,6 +23,7 @@ dependencies = [
  "lens-domain",
  "lens-golang",
  "lens-py",
+ "lens-quint",
  "lens-rust",
  "lens-ts",
  "proptest",
@@ -895,6 +896,20 @@ dependencies = [
  "ruff_text_size",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "lens-quint"
+version = "0.10.0"
+dependencies = [
+ "lens-domain",
+ "proptest",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
