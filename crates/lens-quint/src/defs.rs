@@ -226,6 +226,7 @@ mod tests {
         4,
         Some("One.\nTwo.")
     )]
+    #[case::at_file_start("/// Top.\nval x = 1\n", 2, Some("Top."))]
     #[case::plain_comment_is_not_doc("module m {\n  // no\n  val x = 1\n}\n", 3, None)]
     fn doc_comment_reads_the_block_above(
         #[case] source: &str,

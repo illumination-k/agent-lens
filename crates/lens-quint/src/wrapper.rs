@@ -148,6 +148,54 @@ mod tests {
         assert!(!refs.iter().any(|(_, callee)| callee == "x"));
     }
 
+    /// A one-module file holding `def <name>(<params>) = <body>`, with
+    /// the name ids listed in `resolved` pointing at definition `100`.
+    fn file_with(params: &[&str], body: serde_json::Value, resolved: &[u64]) -> ParsedFile {
+        let params: Vec<_> = params
+            .iter()
+            .map(|p| serde_json::json!({"name": p}))
+            .collect();
+        let expr = if params.is_empty() {
+            body
+        } else {
+            serde_json::json!({"id": 9, "kind": "lambda", "params": params, "expr": body})
+        };
+        let module: crate::ir::Module = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "m",
+            "declarations": [{"id": 2, "kind": "def", "name": "w", "qualifier": "def", "expr": expr}],
+        }))
+        .unwrap();
+        let mut file = ParsedFile {
+            modules: vec![module],
+            ..ParsedFile::default()
+        };
+        file.def_module
+            .insert(100, ("m".to_owned(), "target".to_owned()));
+        for id in resolved {
+            file.resolved.insert(*id, 100);
+        }
+        file
+    }
+
+    #[test]
+    fn forwarding_to_a_builtin_is_not_a_wrapper() {
+        let body = serde_json::json!({"id": 3, "kind": "app", "opcode": "size",
+            "args": [{"id": 4, "kind": "name", "name": "s"}]});
+        let file = file_with(&["s"], body, &[]);
+        assert!(found(&file).is_empty());
+        assert!(call_refs_of(&file).is_empty());
+    }
+
+    #[test]
+    fn a_resolved_name_is_an_alias_only_without_parameters() {
+        let body = serde_json::json!({"id": 3, "kind": "name", "name": "target"});
+        assert_eq!(
+            found(&file_with(&[], body.clone(), &[3])),
+            vec![("w".to_owned(), "target".to_owned())]
+        );
+        assert!(found(&file_with(&["a"], body, &[3])).is_empty());
+    }
+
     #[test]
     fn wrapper_records_its_arity_and_lines() {
         let w = wrappers_of(&counter().file).remove(0);

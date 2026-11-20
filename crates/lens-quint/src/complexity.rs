@@ -255,6 +255,60 @@ mod tests {
         assert!(!unit("step").is_test);
     }
 
+    fn score(expr: serde_json::Value) -> (u32, u32, usize) {
+        let expr: Expr = serde_json::from_value(expr).unwrap();
+        let mut visitor = Visitor::default();
+        visitor.visit(&expr);
+        let h = visitor.halstead.counts();
+        (
+            visitor.counters.cyclomatic(),
+            visitor.counters.cognitive(),
+            h.distinct_operators,
+        )
+    }
+
+    fn name(n: &str) -> serde_json::Value {
+        serde_json::json!({"id": 0, "kind": "name", "name": n})
+    }
+
+    fn app(op: &str, args: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({"id": 0, "kind": "app", "opcode": op, "args": args})
+    }
+
+    #[test]
+    fn nested_like_operators_flatten_into_one_run() {
+        // `(a and b) and c`: one run, two operators.
+        let (cyc, cog, _) = score(app(
+            "and",
+            vec![app("and", vec![name("a"), name("b")]), name("c")],
+        ));
+        assert_eq!((cyc, cog), (3, 1));
+        // n-ary `and(a, b, c)` has two operators, not one.
+        let (cyc, cog, _) = score(app("and", vec![name("a"), name("b"), name("c")]));
+        assert_eq!((cyc, cog), (3, 1));
+    }
+
+    #[test]
+    fn an_application_in_the_else_arm_is_a_bare_else() {
+        // `if (c) a else f(b)`: one branch plus a bare-else point.
+        let (cyc, cog, _) = score(app(
+            "ite",
+            vec![name("c"), name("a"), app("f", vec![name("b")])],
+        ));
+        assert_eq!((cyc, cog), (2, 2));
+    }
+
+    #[test]
+    fn user_calls_share_one_call_operator() {
+        // `f(g(x))` reads as two calls through one `()` operator; a
+        // built-in keeps its own opcode as the operator.
+        assert_eq!(score(app("f", vec![app("g", vec![name("x")])])).2, 1);
+        assert_eq!(
+            score(app("iadd", vec![app("f", vec![name("x")]), name("y")])).2,
+            2
+        );
+    }
+
     #[test]
     fn halstead_counts_operators_and_operands() {
         // `n * 2`, with the parameter `n` counted once at the signature.

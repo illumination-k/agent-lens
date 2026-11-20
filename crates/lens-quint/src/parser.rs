@@ -120,6 +120,11 @@ mod tests {
     }
 
     #[test]
+    fn reports_its_language() {
+        assert_eq!(QuintParser::new().language(), "quint");
+    }
+
+    #[test]
     fn multi_module_files_qualify_names() {
         let fixture = helpers();
         let names: Vec<String> = functions_of(&fixture.file, fixture.source)

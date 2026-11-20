@@ -248,6 +248,14 @@ mod tests {
     }
 
     #[rstest]
+    #[case("spec.qnt", "spec")]
+    #[case("specs/bank/ledger.qnt", "specs::bank::ledger")]
+    #[case("", "module")]
+    fn quint_module_paths_drop_the_extension(#[case] file: &str, #[case] expected: &str) {
+        assert_eq!(quint_module_path_from_relative_file(file), expected);
+    }
+
+    #[rstest]
     #[case("lib.rs", "crate")]
     #[case("main.rs", "crate")]
     #[case("src/analyze/function_graph.rs", "crate::analyze::function_graph")]

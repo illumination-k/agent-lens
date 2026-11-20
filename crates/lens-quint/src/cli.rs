@@ -248,6 +248,28 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// The public extractors over a real `quint`, when one is on `PATH`.
+    #[test]
+    fn live_public_extractors_see_the_fixture() {
+        let source = include_str!("../testdata/counter.qnt");
+        let units = match crate::extract_complexity_units(source) {
+            Err(QuintError::NotInstalled { .. }) => return,
+            other => other.unwrap(),
+        };
+        assert!(
+            units
+                .iter()
+                .any(|u| u.name == "classify" && u.cyclomatic == 3)
+        );
+        let wrappers = crate::find_wrappers(source).unwrap();
+        assert!(wrappers.iter().any(|w| w.name == "forward"));
+        let refs = crate::extract_call_refs(source).unwrap();
+        assert!(refs.iter().any(|r| r.callee == "double"));
+        let mut parser = crate::QuintParser::new();
+        let fns = lens_domain::LanguageParser::extract_functions(&mut parser, source).unwrap();
+        assert!(fns.iter().any(|f| f.name == "double"));
+    }
+
     /// Runs against a real `quint` when one is on `PATH`; CI without
     /// Node skips it, the captured fixtures cover the IR handling there.
     #[test]

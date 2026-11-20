@@ -81,6 +81,15 @@ mod tests {
     }
 
     #[test]
+    fn a_nameless_name_reads_nothing_and_nothing_loops() {
+        assert_eq!(
+            QuintVocabulary.role(&TreeNode::new("Name", "")),
+            DependenceRole::Plain
+        );
+        assert!(!QuintVocabulary.is_loop(&TreeNode::leaf("actionAny")));
+    }
+
+    #[test]
     fn lambdas_bind_their_parameters() {
         let lambda = TreeNode::with_children(
             "Lambda",

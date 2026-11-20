@@ -200,6 +200,34 @@ mod tests {
     }
 
     #[test]
+    fn a_file_root_must_be_qnt() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("spec.txt");
+        std::fs::write(&file, "module m {}").unwrap();
+        let err = build_module_tree(&file, &lens_domain::IncludeAll).unwrap_err();
+        assert!(
+            matches!(err, CouplingError::UnsupportedRoot { .. }),
+            "{err}"
+        );
+    }
+
+    /// Runs only where a `quint` CLI is on `PATH`.
+    #[test]
+    fn live_quint_builds_the_testdata_graph() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let modules = match build_module_tree(&dir, &lens_domain::IncludeAll) {
+            Ok(modules) if !modules.is_empty() => modules,
+            // Every file skipped: no quint here.
+            Ok(_) => return,
+            Err(err) => panic!("{err}"),
+        };
+        let edges = extract_edges(&modules);
+        assert!(edges.iter().any(|e| e.from.as_str() == "crate::counter"
+            && e.to.as_str() == "crate::helpers"
+            && e.kind == EdgeKind::Call));
+    }
+
+    #[test]
     fn imported_files_do_not_contribute_modules() {
         // Parsing counter.qnt loads helpers.qnt too; only counter is its own.
         let c = counter();
