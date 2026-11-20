@@ -819,22 +819,29 @@ mod tests {
     }
 
     /// A stable module of traits sits on the main sequence (A = 1,
-    /// I = 0), so it gets a distance of zero and no markdown row, while
-    /// the stable concrete one is listed on the stable+concrete side.
+    /// I = 0), so it gets a distance of zero and no markdown row. The
+    /// stable concrete one is listed on the stable+concrete side, and a
+    /// half-stable module of traits (A = 1, I = 0.5) on the other side —
+    /// a case where `A + I` and `A * I` disagree about the side.
     #[test]
     fn markdown_distance_section_lists_off_sequence_modules_only() {
         let dir = tempfile::tempdir().unwrap();
         let lib = write_file(
             dir.path(),
             "lib.rs",
-            "pub mod port;\npub mod model;\npub mod app;\n",
+            "pub mod port;\npub mod model;\npub mod plug;\npub mod app;\n",
         );
         write_file(dir.path(), "port.rs", "pub trait Store {}\n");
         write_file(dir.path(), "model.rs", "pub struct Row;\n");
         write_file(
             dir.path(),
+            "plug.rs",
+            "use crate::model::Row;\npub trait Plug { fn f(&self, r: Row); }\n",
+        );
+        write_file(
+            dir.path(),
             "app.rs",
-            "use crate::port::Store;\nuse crate::model::Row;\nfn _f(_s: &dyn Store, _r: Row) {}\n",
+            "use crate::port::Store;\nuse crate::model::Row;\nuse crate::plug::Plug;\nfn _f(_s: &dyn Store, _r: Row, _p: &dyn Plug) {}\n",
         );
         let json = CouplingAnalyzer::new()
             .analyze(&lib, OutputFormat::Json)
@@ -854,10 +861,25 @@ mod tests {
             .and_then(|rest| rest.split("\n## ").next())
             .expect("distance section");
         assert!(
-            section.contains("| crate::model | 1 | 0.00 | 0.00 | 1.00 | 0/1 | stable+concrete |"),
+            section.contains("| crate::model | 2 | 0.00 | 0.00 | 1.00 | 0/1 | stable+concrete |"),
+            "got: {md}"
+        );
+        assert!(
+            section.contains("| crate::plug | 1 | 1.00 | 0.50 | 0.50 | 1/0 | unstable+abstract |"),
             "got: {md}"
         );
         assert!(!section.contains("crate::port"), "got: {md}");
+        assert!(!section.contains("not shown"), "got: {md}");
+
+        // `--top 1` keeps the furthest module and counts the other.
+        let md = CouplingAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("_1 module(s) closer to the main sequence not shown"),
+            "got: {md}"
+        );
     }
 
     #[test]
