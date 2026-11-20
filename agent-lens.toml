@@ -35,7 +35,6 @@ tools = [
   "forwarding",
   "coupling",
   "communities",
-  "context-span",
   "cycles",
   "layers",
   "hubs",
@@ -63,9 +62,6 @@ top = 20
 # three-line pairs that are correct as they are.
 threshold = 0.9
 min-lines = 8
-
-[profile.self.context-span]
-top = 15
 
 [profile.self.coupling]
 top = 15
@@ -174,7 +170,7 @@ min-score = 3
 # finding in body, so this is the profile that catches a fix applied to
 # `lens-rust` and forgotten in `lens-py`.
 #
-# `coupling` and `context-span` are absent because both resolve from a
+# `coupling` and `communities` are absent because both resolve from a
 # single crate root, and this path holds several.
 [profile.lenses]
 path = "crates"
@@ -312,8 +308,8 @@ top = 15
 #
 #     agent-lens baseline create baseline --out target/agent-lens/baseline.json
 #
-# It targets the `agent-lens` crate because coupling and context-span
-# work from a single crate root, and that crate is where the analyzers,
+# It targets the `agent-lens` crate because coupling works from a
+# single crate root, and that crate is where the analyzers,
 # hooks, and CLI all live. Tests are excluded: their complexity and
 # cohesion are real but they are not the surface this baseline is meant
 # to hold steady.
@@ -328,7 +324,6 @@ tools = [
   "complexity",
   "cohesion",
   "coupling",
-  "context-span",
   "hotspot",
   "similarity",
 ]

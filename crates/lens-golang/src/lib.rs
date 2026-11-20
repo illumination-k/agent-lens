@@ -20,7 +20,6 @@ mod attrs;
 mod call_index;
 mod cohesion;
 mod complexity;
-mod context_span;
 mod coupling;
 mod dependence;
 mod interfaces;
@@ -44,7 +43,6 @@ pub use call_index::{
 };
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
-pub use context_span::extract_context_spans;
 pub use coupling::{GoPackage, build_module_tree, extract_edges, module_prefix};
 pub use dependence::GoVocabulary;
 pub use interfaces::{extract_interface_decls_with_module, extract_interface_shapes_with_module};
