@@ -27,7 +27,9 @@ use tree_sitter::Node;
 use crate::attrs::name_looks_like_test_function;
 use crate::node_text::node_str;
 use crate::parser::{GoParseError, parse_tree, unquote_go_string_literal};
-use crate::value_types::{PREDECLARED_TYPES, TypeScope};
+use crate::value_types::{
+    GoTypeFacts, ImportAliases, PREDECLARED_TYPES, TypeScope, import_aliases, type_facts_in_tree,
+};
 use crate::walk::{FnSite, walk_top_level_fns};
 
 /// Extract neutral function-shape facts for Go.
@@ -52,6 +54,38 @@ pub fn extract_call_shapes_with_module(
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
     let imports = collect_imports(tree.root_node(), bytes);
+    let aliases = import_aliases(&imports);
+    Ok(call_shapes_in_tree(
+        tree.root_node(),
+        bytes,
+        module,
+        &imports,
+        &aliases,
+    ))
+}
+
+/// The call shapes and the package-level type facts of one Go file, from
+/// one parse: the call graph wants both of every file.
+pub fn extract_call_shapes_and_type_facts_with_module(
+    source: &str,
+    module: &str,
+) -> Result<(Vec<CallShape>, GoTypeFacts), GoParseError> {
+    let tree = parse_tree(source)?;
+    let bytes = source.as_bytes();
+    let imports = collect_imports(tree.root_node(), bytes);
+    let aliases = import_aliases(&imports);
+    let calls = call_shapes_in_tree(tree.root_node(), bytes, module, &imports, &aliases);
+    let facts = type_facts_in_tree(tree.root_node(), bytes, module, &aliases);
+    Ok((calls, facts))
+}
+
+fn call_shapes_in_tree(
+    root: Node<'_>,
+    bytes: &[u8],
+    module: &str,
+    imports: &[ImportShape],
+    aliases: &ImportAliases<'_>,
+) -> Vec<CallShape> {
     let namespace_aliases: HashSet<String> = imports
         .iter()
         .filter_map(|import| {
@@ -63,12 +97,25 @@ pub fn extract_call_shapes_with_module(
             (exported.is_none()).then(|| alias.clone())
         })
         .collect();
-
     let mut out = Vec::new();
-    walk_top_level_fns(tree.root_node(), bytes, &mut |site| {
-        collect_calls_in_function(&site, bytes, module, &imports, &namespace_aliases, &mut out);
+    walk_top_level_fns(root, bytes, &mut |site| {
+        let scope = FileScope {
+            module,
+            imports,
+            aliases,
+            namespace_aliases: &namespace_aliases,
+        };
+        collect_calls_in_function(&site, bytes, &scope, &mut out);
     });
-    Ok(out)
+    out
+}
+
+/// The facts of one file every function's call walk reads.
+struct FileScope<'a> {
+    module: &'a str,
+    imports: &'a [ImportShape],
+    aliases: &'a ImportAliases<'a>,
+    namespace_aliases: &'a HashSet<String>,
 }
 
 fn function_shape(site: &FnSite<'_, '_>, source: &[u8], module: &str) -> FunctionShape {
@@ -144,25 +191,24 @@ fn parameter_signature(node: Node<'_>, source: &[u8]) -> SignatureShape {
 fn collect_calls_in_function(
     site: &FnSite<'_, '_>,
     source: &[u8],
-    module: &str,
-    imports: &[ImportShape],
-    namespace_aliases: &HashSet<String>,
+    file: &FileScope<'_>,
     out: &mut Vec<CallShape>,
 ) {
+    let module = file.module;
     let owner = site.owner.as_deref();
     let caller_qualified = match owner {
         Some(class) => qualify_module(module, &format!("{class}::{}", site.name)),
         None => qualify_module(module, site.name),
     };
     let locally_bound = local_callable_bindings(site, source);
-    let types = TypeScope::for_function(source, module, imports, site.node, site.body);
+    let types = TypeScope::for_function(source, module, file.aliases, site.node, site.body);
     let ctx = CallContext {
         source,
         module,
         caller_qualified_name: &caller_qualified,
         caller_owner: owner.map(ToOwned::to_owned),
-        imports,
-        namespace_aliases,
+        imports: file.imports,
+        namespace_aliases: file.namespace_aliases,
         locally_bound,
         types,
     };

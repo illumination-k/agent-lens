@@ -38,7 +38,10 @@ mod value_types;
 mod walk;
 mod wrapper;
 
-pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};
+pub use call_index::{
+    extract_call_shapes_and_type_facts_with_module, extract_call_shapes_with_module,
+    extract_function_shapes_with_module,
+};
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use context_span::extract_context_spans;

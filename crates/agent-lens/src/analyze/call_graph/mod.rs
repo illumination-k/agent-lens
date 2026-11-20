@@ -426,13 +426,24 @@ impl CallGraphBuilder {
             resolver,
             module_of: &module_of,
         });
-        let calls = extract_call_shapes(
-            lang,
-            &source,
-            &module,
-            !self.exclude_tests,
-            ts_imports.as_ref(),
-        )?;
+        // Go reads the package-level type facts in the same parse as the
+        // calls; every other language has none.
+        let (calls, go_type_facts) = match lang {
+            SourceLang::Go => {
+                let shared = extract_go_calls_and_types(&source, &module)?;
+                (Arc::clone(&shared.0), Some(Arc::clone(&shared.1)))
+            }
+            _ => (
+                extract_call_shapes(
+                    lang,
+                    &source,
+                    &module,
+                    !self.exclude_tests,
+                    ts_imports.as_ref(),
+                )?,
+                None,
+            ),
+        };
         // Complexity (node weights) and wrapper findings (delegation
         // facts) are the same facts `analyze complexity` and `analyze
         // wrapper` report, so both go through the shared index helpers.
@@ -452,9 +463,6 @@ impl CallGraphBuilder {
             .then(|| extract_value_references(lang, &source, &module, !self.exclude_tests))
             .transpose()?
             .unwrap_or_default();
-        let go_type_facts = matches!(lang, SourceLang::Go)
-            .then(|| extract_go_type_facts(&source, &module))
-            .transpose()?;
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
@@ -711,14 +719,18 @@ fn attach_macro_generated_methods(
     files
 }
 
-/// Package-level type facts for one Go file. No other fact has this
-/// value type, so it keeps a typed table of the active index rather than
-/// a table of its own.
-fn extract_go_type_facts(
+/// Call shapes and package-level type facts of one Go file, from one
+/// parse. The pair keeps a typed table of the active index (no other fact
+/// has this value type) instead of the call-shape table.
+fn extract_go_calls_and_types(
     source: &str,
     module: &str,
-) -> Result<Arc<lens_golang::GoTypeFacts>, AnalyzerError> {
-    let extract = || lens_golang::extract_type_facts_with_module(source, module).map_err(parse_err);
+) -> Result<Arc<GoCallsAndTypes>, AnalyzerError> {
+    let extract = || {
+        lens_golang::extract_call_shapes_and_type_facts_with_module(source, module)
+            .map(|(calls, facts)| (Arc::new(calls), Arc::new(facts)))
+            .map_err(parse_err)
+    };
     let Some(index) = AnalysisIndex::active() else {
         return extract().map(Arc::new);
     };
@@ -727,6 +739,8 @@ fn extract_go_type_facts(
         extract,
     )
 }
+
+type GoCallsAndTypes = (Arc<Vec<CallShape>>, Arc<lens_golang::GoTypeFacts>);
 
 /// Interface method sets for one (Go) file. Only collected when the
 /// builder was asked for interface facts.

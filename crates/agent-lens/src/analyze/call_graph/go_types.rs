@@ -62,19 +62,18 @@ pub(crate) fn bind_go_receiver_calls(mut files: Vec<FileGraphInput>) -> Vec<File
     files
 }
 
-/// Set each call's binding, copying the file's call list only when one
-/// of them changes.
+/// Set each call's binding.
 fn apply_bindings(file: &mut FileGraphInput, bindings: Vec<Option<CalleeBinding>>) {
     if bindings.iter().all(Option::is_none) {
         return;
     }
-    let mut calls = file.calls.as_ref().clone();
+    // Copies the calls only when the index shares them.
+    let calls = Arc::make_mut(&mut file.calls);
     for (site, binding) in calls.iter_mut().zip(bindings) {
         if let Some(binding) = binding {
             site.callee_binding = SyntaxFact::Known(binding);
         }
     }
-    file.calls = Arc::new(calls);
 }
 
 /// Declarations keyed by qualified name, looked up either exactly or by

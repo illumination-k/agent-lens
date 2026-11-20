@@ -101,18 +101,32 @@ pub fn extract_type_facts_with_module(
 ) -> Result<GoTypeFacts, GoParseError> {
     let tree = parse_tree(source)?;
     let bytes = source.as_bytes();
-    let root = tree.root_node();
-    let imports = crate::call_index::collect_imports(root, bytes);
+    let imports = crate::call_index::collect_imports(tree.root_node(), bytes);
+    Ok(type_facts_in_tree(
+        tree.root_node(),
+        bytes,
+        module,
+        &import_aliases(&imports),
+    ))
+}
+
+/// [`extract_type_facts_with_module`] over an already parsed file.
+pub(crate) fn type_facts_in_tree(
+    root: Node<'_>,
+    bytes: &[u8],
+    module: &str,
+    aliases: &ImportAliases<'_>,
+) -> GoTypeFacts {
     let mut facts = GoTypeFacts::default();
     let mut cursor = root.walk();
     for decl in root.named_children(&mut cursor) {
         match decl.kind() {
-            "type_declaration" => collect_type_decls(decl, bytes, module, &imports, &mut facts),
+            "type_declaration" => collect_type_decls(decl, bytes, module, aliases, &mut facts),
             "function_declaration" | "method_declaration" => {
-                collect_function_results(decl, bytes, module, &imports, &mut facts);
+                collect_function_results(decl, bytes, module, aliases, &mut facts);
             }
             "var_declaration" => {
-                let scope = TypeScope::new(bytes, module, &imports, HashSet::new());
+                let scope = TypeScope::new(bytes, module, aliases, HashSet::new());
                 let mut bindings = Vec::new();
                 scope.var_declaration_bindings(decl, &mut bindings);
                 facts.package_vars.extend(
@@ -124,14 +138,28 @@ pub fn extract_type_facts_with_module(
             _ => {}
         }
     }
-    Ok(facts)
+    facts
+}
+
+/// Namespace alias → imported module path, for one file.
+pub(crate) type ImportAliases<'a> = HashMap<&'a str, &'a str>;
+
+pub(crate) fn import_aliases(imports: &[ImportShape]) -> ImportAliases<'_> {
+    imports
+        .iter()
+        .filter_map(|import| {
+            let alias = import.local_alias.known_value()?.as_deref()?;
+            let module = import.imported_module.known_value()?;
+            Some((alias, module.as_str()))
+        })
+        .collect()
 }
 
 fn collect_type_decls(
     decl: Node<'_>,
     source: &[u8],
     module: &str,
-    imports: &[ImportShape],
+    aliases: &ImportAliases<'_>,
     facts: &mut GoTypeFacts,
 ) {
     let mut cursor = decl.walk();
@@ -148,7 +176,7 @@ fn collect_type_decls(
         let Some(underlying) = spec.child_by_field_name("type") else {
             continue;
         };
-        let scope = TypeScope::new(source, module, imports, type_parameter_names(spec, source));
+        let scope = TypeScope::new(source, module, aliases, type_parameter_names(spec, source));
         let mut type_decl = GoTypeDecl {
             qualified_name: qualify_module(module, name),
             kind: GoTypeKind::Other,
@@ -176,7 +204,7 @@ fn collect_function_results(
     decl: Node<'_>,
     source: &[u8],
     module: &str,
-    imports: &[ImportShape],
+    aliases: &ImportAliases<'_>,
     facts: &mut GoTypeFacts,
 ) {
     let Some(name) = crate::parser::function_name_text(decl, source) else {
@@ -194,7 +222,7 @@ fn collect_function_results(
     if let Some(receiver) = decl.child_by_field_name("receiver") {
         type_params.extend(receiver_type_parameter_names(receiver, source));
     }
-    let scope = TypeScope::new(source, module, imports, type_params);
+    let scope = TypeScope::new(source, module, aliases, type_params);
     let results = decl
         .child_by_field_name("result")
         .map(|result| scope.result_hints(result))
@@ -267,8 +295,7 @@ type Binding = (String, Option<ValueTypeHint>);
 pub(crate) struct TypeScope<'a> {
     source: &'a [u8],
     module: &'a str,
-    /// Namespace alias → imported module path.
-    aliases: HashMap<&'a str, &'a str>,
+    aliases: &'a ImportAliases<'a>,
     type_params: HashSet<String>,
     locals: LocalTypes,
 }
@@ -277,17 +304,9 @@ impl<'a> TypeScope<'a> {
     pub(crate) fn new(
         source: &'a [u8],
         module: &'a str,
-        imports: &'a [ImportShape],
+        aliases: &'a ImportAliases<'a>,
         type_params: HashSet<String>,
     ) -> Self {
-        let aliases = imports
-            .iter()
-            .filter_map(|import| {
-                let alias = import.local_alias.known_value()?.as_deref()?;
-                let module = import.imported_module.known_value()?;
-                Some((alias, module.as_str()))
-            })
-            .collect();
         Self {
             source,
             module,
@@ -304,7 +323,7 @@ impl<'a> TypeScope<'a> {
     pub(crate) fn for_function(
         source: &'a [u8],
         module: &'a str,
-        imports: &'a [ImportShape],
+        aliases: &'a ImportAliases<'a>,
         decl: Node<'_>,
         body: Node<'_>,
     ) -> Self {
@@ -312,7 +331,7 @@ impl<'a> TypeScope<'a> {
         if let Some(receiver) = decl.child_by_field_name("receiver") {
             type_params.extend(receiver_type_parameter_names(receiver, source));
         }
-        let mut scope = Self::new(source, module, imports, type_params);
+        let mut scope = Self::new(source, module, aliases, type_params);
         let mut bindings = Vec::new();
         for field in ["receiver", "parameters"] {
             if let Some(params) = decl.child_by_field_name(field) {
