@@ -727,6 +727,26 @@ mod tests {
         extract_call_shapes_with_module(src, module).unwrap()
     }
 
+    /// The one-parse extractor the call graph uses gives what the two
+    /// separate extractors give.
+    #[test]
+    fn calls_and_type_facts_come_from_one_parse_unchanged() {
+        let src = concat!(
+            "package m\n\n",
+            "type S struct{ out *S }\n\n",
+            "func New() *S { return &S{} }\n\n",
+            "func (s *S) Run() { s.out.Run(); New().Run() }\n",
+        );
+        let (calls, facts) = extract_call_shapes_and_type_facts_with_module(src, "m").unwrap();
+        assert_eq!(calls, extract_call_shapes_with_module(src, "m").unwrap());
+        assert_eq!(
+            facts,
+            crate::extract_type_facts_with_module(src, "m").unwrap()
+        );
+        assert_eq!(calls.len(), 3);
+        assert_eq!(facts.types.len(), 1);
+    }
+
     /// The non-constant boundary of the classifier: negation of
     /// anything but a literal and a selector on a lowercase local stay
     /// opaque, while parens peel to the value inside.
