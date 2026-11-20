@@ -2093,4 +2093,303 @@ mod tests {
             }
         }
     }
+
+    /// Build the canonical graph and its first Leiden level from named
+    /// weighted edges. Node ids sort as given, so index `i` is `ids[i]`.
+    fn level(ids: &[&str], edges: &[(&str, &str, f64)]) -> (Graph, LevelGraph) {
+        let nodes: Vec<CommunityNode> = ids.iter().map(|id| CommunityNode::new(*id, "g")).collect();
+        let edges: Vec<CommunityEdge> = edges
+            .iter()
+            .map(|&(a, b, w)| CommunityEdge::new(a, b, w))
+            .collect();
+        let graph = Graph::build(&nodes, &edges);
+        let level = LevelGraph::from_graph(&graph);
+        (graph, level)
+    }
+
+    fn context(graph: &Graph, gamma: f64) -> LeidenContext {
+        LeidenContext {
+            gamma,
+            two_m: 2.0 * graph.total_weight,
+            epsilon: MERGE_EPSILON * graph.total_weight,
+        }
+    }
+
+    /// Group node indices by label, so label numbering does not matter.
+    fn groups(labels: &[usize]) -> BTreeSet<BTreeSet<usize>> {
+        let mut by: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        for (node, &label) in labels.iter().enumerate() {
+            by.entry(label).or_default().insert(node);
+        }
+        by.into_values().collect()
+    }
+
+    fn set_of(groups: &[&[usize]]) -> BTreeSet<BTreeSet<usize>> {
+        groups.iter().map(|g| g.iter().copied().collect()).collect()
+    }
+
+    fn barbell_level() -> (Graph, LevelGraph) {
+        level(
+            &["a1", "a2", "a3", "b1", "b2", "b3"],
+            &[
+                ("a1", "a2", 1.0),
+                ("a2", "a3", 1.0),
+                ("a1", "a3", 1.0),
+                ("b1", "b2", 1.0),
+                ("b2", "b3", 1.0),
+                ("b1", "b3", 1.0),
+                ("a3", "b1", 1.0),
+            ],
+        )
+    }
+
+    /// Aggregation keeps every unit of weight: inside a group it becomes
+    /// self weight, across groups an edge, and degrees add up. Groups are
+    /// numbered by first member whatever their labels were.
+    #[test]
+    fn aggregation_preserves_weight_and_renumbers_groups() {
+        let (_, g) = level(
+            &["n0", "n1", "n2", "n3"],
+            &[
+                ("n0", "n1", 2.0),
+                ("n1", "n2", 3.0),
+                ("n2", "n3", 5.0),
+                ("n0", "n3", 1.0),
+            ],
+        );
+        let (agg, new_of) = g.aggregate(&[7, 7, 3, 3]);
+        assert_eq!(new_of, vec![0, 0, 1, 1]);
+        assert_eq!(agg.self_weight, vec![2.0, 5.0]);
+        assert_eq!(agg.degree, vec![8.0, 14.0]);
+        assert_eq!(agg.adjacency, vec![vec![(1, 4.0)], vec![(0, 4.0)]]);
+
+        let (top, top_of) = agg.aggregate(&[0, 0]);
+        assert_eq!(top_of, vec![0, 0]);
+        assert_eq!(top.self_weight, vec![11.0]);
+        assert_eq!(top.degree, vec![22.0]);
+        assert!(top.adjacency[0].is_empty());
+    }
+
+    #[test]
+    fn local_moving_from_singletons_finds_the_barbell_triangles() {
+        let (graph, g) = barbell_level();
+        let mut community: Vec<usize> = (0..6).collect();
+        context(&graph, 1.0).move_nodes(&g, &mut community);
+        assert_eq!(groups(&community), set_of(&[&[0, 1, 2], &[3, 4, 5]]));
+    }
+
+    /// At `γ = 2` node `c` gains nothing in either neighbouring community
+    /// and loses by staying with `a`/`b`, so it moves to an empty
+    /// community — the smallest free label.
+    #[test]
+    fn local_moving_uses_an_empty_community_when_every_other_choice_loses() {
+        let (graph, g) = level(
+            &["a", "b", "c", "d", "e", "f", "g"],
+            &[
+                ("a", "b", 1.0),
+                ("c", "d", 1.0),
+                ("c", "f", 1.0),
+                ("d", "e", 100.0),
+                ("f", "g", 100.0),
+            ],
+        );
+        let mut community = vec![0, 0, 0, 1, 1, 2, 2];
+        context(&graph, 2.0).move_nodes(&g, &mut community);
+        assert_eq!(community, vec![0, 0, 3, 1, 1, 2, 2]);
+    }
+
+    /// Refinement only merges into subsets well connected to the whole
+    /// community. With the barbell held as one community, `{a1, a2}` is
+    /// not (2 units leave it against a bar of 4·10/14), so `a3` takes the
+    /// next best well-connected partner, `b1`, and the triangles come out
+    /// as three pairs.
+    #[test]
+    fn refinement_respects_well_connectedness_inside_the_community() {
+        let (graph, g) = barbell_level();
+        let refined = context(&graph, 1.0).refine(&g, &[0; 6]);
+        assert_eq!(groups(&refined), set_of(&[&[0, 1], &[2, 3], &[4, 5]]));
+    }
+
+    /// `p` is well connected to `{p, q, r}` and would gain most by joining
+    /// `q`, but neither `q` nor `r` is well connected to the community —
+    /// most of their weight leaves it — so `p` stays alone.
+    #[test]
+    fn refinement_only_merges_into_well_connected_subsets() {
+        let (graph, g) = level(
+            &["o", "p", "q", "r"],
+            &[
+                ("p", "q", 1.0),
+                ("q", "o", 1.0),
+                ("p", "r", 2.0),
+                ("r", "o", 9.0),
+            ],
+        );
+        let refined = context(&graph, 1.0).refine(&g, &[1, 0, 0, 0]);
+        assert_eq!(refined, vec![0, 1, 2, 3]);
+    }
+
+    /// A well-connected node joins the sub-community with the best gain:
+    /// `a` takes `c` (4 units) over `b` (1); `b` then prefers the lone `d`
+    /// (gain `1 − 2·6/22`) to the merged `{a, c}`, whose grown degree now
+    /// prices it out (`1 − 2·13/22`).
+    #[test]
+    fn refinement_takes_the_best_gain_and_prices_merged_subsets() {
+        let (graph, g) = level(
+            &["a", "b", "c", "d", "x"],
+            &[
+                ("a", "b", 1.0),
+                ("a", "c", 4.0),
+                ("c", "d", 4.0),
+                ("b", "d", 1.0),
+                ("d", "x", 1.0),
+            ],
+        );
+        let refined = context(&graph, 1.0).refine(&g, &[0, 0, 0, 0, 1]);
+        assert_eq!(groups(&refined), set_of(&[&[0, 2], &[1, 3], &[4]]));
+    }
+
+    /// Pinned on a 12-node weighted graph, so a change to the queue, the
+    /// community totals, or the tie rules shows up as a different
+    /// partition. Fast local moving is Leiden's: nodes already in the
+    /// community a move lands in are not re-queued, so the result is not
+    /// guaranteed node-optimal — the later levels are what improve it.
+    #[test]
+    fn local_moving_is_pinned_on_a_weighted_graph() {
+        let raw = [
+            (0, 0, 1),
+            (10, 1, 3),
+            (10, 8, 1),
+            (7, 6, 1),
+            (10, 1, 1),
+            (9, 0, 3),
+            (2, 4, 2),
+            (6, 10, 3),
+            (8, 0, 3),
+            (10, 1, 2),
+            (6, 10, 3),
+            (1, 3, 1),
+            (1, 3, 5),
+            (10, 3, 1),
+            (6, 2, 4),
+            (0, 3, 4),
+        ];
+        let ids: Vec<String> = (0..12).map(|i| format!("n{i:02}")).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let named: Vec<(&str, &str, f64)> = raw
+            .iter()
+            .map(|&(a, b, w): &(usize, usize, u32)| (id_refs[a], id_refs[b], f64::from(w)))
+            .collect();
+        let (graph, g) = level(&id_refs, &named);
+        let mut community: Vec<usize> = (0..12).collect();
+        context(&graph, 1.0).move_nodes(&g, &mut community);
+        assert_eq!(community, vec![9, 3, 10, 3, 10, 5, 10, 10, 9, 9, 10, 11]);
+    }
+
+    #[test]
+    fn normalized_mutual_information_matches_the_hand_computed_value() {
+        // H(A) = ln 2, H(B) = H(3/4, 1/4), I(A;B) worked out by hand.
+        let pairs = [(0, 0), (0, 0), (1, 0), (1, 1)];
+        let (h_a, h_b) = (
+            2.0_f64.ln(),
+            -(0.75_f64 * 0.75_f64.ln() + 0.25 * 0.25_f64.ln()),
+        );
+        let mutual = 0.5 * (0.5_f64 / (0.5 * 0.75)).ln()
+            + 0.25 * (0.25_f64 / (0.5 * 0.75)).ln()
+            + 0.25 * (0.25_f64 / (0.5 * 0.25)).ln();
+        let expected = 2.0 * mutual / (h_a + h_b);
+        let nmi = normalized_mutual_information(&pairs);
+        assert!((nmi - expected).abs() < 1e-12, "{nmi} != {expected}");
+        assert!((nmi - 0.3437).abs() < 1e-3, "got {nmi}");
+    }
+
+    #[test]
+    fn divergent_rows_carry_the_jaccard_of_their_mate_sets_least_first() {
+        // a: {b, c, d} vs {b} -> 1/3; e: {} vs {f, g} -> 0.
+        let p = partition_of(
+            &[
+                ("a", 0),
+                ("b", 0),
+                ("c", 0),
+                ("d", 0),
+                ("e", 1),
+                ("f", 2),
+                ("g", 3),
+            ],
+            &[],
+        );
+        let q = partition_of(
+            &[
+                ("a", 0),
+                ("b", 0),
+                ("c", 1),
+                ("d", 2),
+                ("e", 3),
+                ("f", 3),
+                ("g", 3),
+            ],
+            &[],
+        );
+        let agreement = compare_partitions(&p, &q);
+        let a = agreement.divergent.iter().find(|d| d.node == "a");
+        assert!(
+            a.is_some_and(|d| (d.jaccard - 1.0 / 3.0).abs() < 1e-12),
+            "got {agreement:?}"
+        );
+        assert_eq!(agreement.divergent[0].jaccard, 0.0, "got {agreement:?}");
+        // Among the zero-overlap rows the widest combined neighbourhood
+        // leads: `c` and `d` have 3 + 0 mates, `e`/`f`/`g` have 0 + 2.
+        let zero: Vec<&str> = agreement
+            .divergent
+            .iter()
+            .take_while(|d| d.jaccard == 0.0)
+            .map(|d| d.node.as_str())
+            .collect();
+        assert_eq!(zero, ["c", "d", "e", "f", "g"], "got {agreement:?}");
+    }
+
+    #[test]
+    fn partition_nodes_reports_every_node_and_its_isolation() {
+        let nodes: Vec<CommunityNode> = ["a", "b", "c", "lone"]
+            .into_iter()
+            .map(|id| CommunityNode::new(id, "g"))
+            .collect();
+        let edges = vec![
+            CommunityEdge::new("a", "b", 1),
+            CommunityEdge::new("b", "c", 1),
+        ];
+        let partition = partition_nodes(&nodes, &edges, CommunityAlgorithm::Leiden, 1.0);
+        assert_eq!(partition.community_of.len(), 4);
+        assert_eq!(
+            partition.isolated,
+            BTreeSet::from(["lone".to_owned()]),
+            "got {partition:?}"
+        );
+        assert_ne!(partition.community_of["lone"], partition.community_of["a"]);
+    }
+
+    proptest! {
+        /// Leiden's partition never scores below the all-singleton one,
+        /// and the reported modularity is the modularity of the reported
+        /// partition.
+        #[test]
+        fn leiden_reports_the_modularity_of_its_own_partition(
+            raw_edges in vec((0_usize..14, 0_usize..14, 1_u32..6), 1..45),
+        ) {
+            let nodes: Vec<CommunityNode> = (0..14)
+                .map(|i| CommunityNode::new(format!("n{i:02}"), format!("g{}", i % 3)))
+                .collect();
+            let edges: Vec<CommunityEdge> = raw_edges
+                .iter()
+                .map(|&(a, b, w)| CommunityEdge::new(format!("n{a:02}"), format!("n{b:02}"), w))
+                .collect();
+            let graph = Graph::build(&nodes, &edges);
+            let partition = Partition::from_labels(leiden(&graph, 1.0));
+            let report = detect_communities(&nodes, &edges, leiden_params(1));
+            let q = graph.modularity(&partition.group_of, partition.count, 1.0);
+            let singletons: Vec<usize> = (0..graph.ids.len()).collect();
+            let q0 = graph.modularity(&singletons, singletons.len(), 1.0);
+            prop_assert!((report.detected_modularity - q).abs() < 1e-12);
+            prop_assert!(q + 1e-12 >= q0, "leiden {} below singletons {}", q, q0);
+        }
+    }
 }

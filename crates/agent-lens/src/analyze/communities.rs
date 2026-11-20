@@ -613,13 +613,16 @@ fn blend(
             .map(|e| CommunityEdge::new(e.a.clone(), e.b.clone(), e.weight * factor))
             .collect::<Vec<_>>()
     };
-    let mut out = Vec::new();
-    if static_share > 0.0 {
-        out.extend(scaled(static_edges, static_share / static_total));
-    }
-    if history_share > 0.0 {
-        out.extend(scaled(history, history_share / history_total));
-    }
+    // A source with no share scales to zero weight, which the detector
+    // drops as uninformative.
+    let mut out = scaled(
+        static_edges,
+        static_share / static_total.max(f64::MIN_POSITIVE),
+    );
+    out.extend(scaled(
+        history,
+        history_share / history_total.max(f64::MIN_POSITIVE),
+    ));
     out
 }
 
@@ -1965,6 +1968,9 @@ mod tests {
         assert!(members.iter().all(|m| m != "crate::a::two"), "got {json:#}");
         assert_eq!(json["weights"], "co-change");
         assert_eq!(json["history"]["co_change_edge_count"], 2, "got {json:#}");
+        // Each crossed pair moved together in all five commits either
+        // file appears in: Jaccard 5 / (5 + 5 - 5) = 1.
+        assert_eq!(json["total_weight"], 2.0, "got {json:#}");
     }
 
     /// Pairs below `--min-support` contribute no edge. The initial commit
@@ -2017,6 +2023,9 @@ mod tests {
             .collect();
         assert!(divergent.contains(&"crate::a::one"), "got {json:#}");
         assert_eq!(json["history"]["co_change_share"], 0.5, "got {json:#}");
+        // Both sources are normalised to one unit and blended.
+        let total = json["total_weight"].as_f64().unwrap();
+        assert!((total - 1.0).abs() < 1e-9, "got {json:#}");
     }
 
     #[test]
@@ -2162,5 +2171,33 @@ mod tests {
     #[case(1.0 / 3.0, "0.333")]
     fn weights_render_as_counts_when_whole(#[case] value: f64, #[case] expected: &str) {
         assert_eq!(weight(value), expected);
+    }
+
+    #[rstest]
+    #[case(Algorithm::Greedy, CommunityAlgorithm::Greedy)]
+    #[case(Algorithm::Leiden, CommunityAlgorithm::Leiden)]
+    fn the_algorithm_flag_selects_the_domain_partitioner(
+        #[case] flag: Algorithm,
+        #[case] expected: CommunityAlgorithm,
+    ) {
+        assert_eq!(flag.domain(), expected);
+    }
+
+    #[test]
+    fn the_since_window_reaches_the_history_options() {
+        let analyzer = CommunitiesAnalyzer::new().with_since_opt(Some("90.days.ago".to_owned()));
+        assert_eq!(analyzer.history.since.as_deref(), Some("90.days.ago"));
+    }
+
+    /// A source with no share contributes only zero-weight edges, which
+    /// the detector ignores.
+    #[test]
+    fn blend_at_full_share_leaves_the_other_source_weightless() {
+        let statics = vec![edge("a", "b", 3.0)];
+        let history = vec![edge("a", "c", 0.2)];
+        let out = blend(&statics, &history, 1.0);
+        let ab = out.iter().find(|e| e.b == "b").map(|e| e.weight);
+        assert_eq!(ab, Some(0.0), "got {out:?}");
+        assert!((total(&out) - 1.0).abs() < 1e-12, "got {out:?}");
     }
 }
