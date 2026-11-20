@@ -1222,7 +1222,7 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
                 "/*\nPackage pflag ...\n*/\n",
                 "package pflag\n\n",
                 "type FlagSet struct {\n    out  Writer\n    base\n    Hook func()\n}\n\n",
-                "type base struct{}\n\n",
+                "type base struct{ inner Writer }\n\n",
                 "func (b *base) Shared() {}\n",
                 "func (b *base) Hook()   {}\n\n",
                 "type Writer struct{}\n\n",
@@ -1238,6 +1238,13 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
                 "func NewFlagSet() *FlagSet { return &FlagSet{} }\n\n",
                 "func (f *FlagSet) BoolP() {}\n",
                 "func (f *FlagSet) Parse() {}\n",
+                "func (f *FlagSet) Self() *FlagSet { return f }\n\n",
+                "var loopA = loopB\n",
+                "var loopB = loopA\n\n",
+                "type AliasA = AliasB\n",
+                "type AliasB = AliasA\n\n",
+                "type EmbedA struct{ *EmbedB }\n",
+                "type EmbedB struct{ *EmbedA }\n",
             ),
         );
         write_file(
@@ -1254,6 +1261,14 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
                 "func FuncField(f *FlagSet) { f.Hook() }\n\n",
                 "func Std(g *goflag.FlagSet) { g.Parse() }\n\n",
                 "func Unseen(g *sub.Ghost) { g.Parse() }\n\n",
+                "func Imported(t *sub.Thing) { t.Parse() }\n\n",
+                "func Chain(f *FlagSet) { f.Self().BoolP() }\n\n",
+                "func Conv(p any) { (*FlagSet)(p).BoolP() }\n\n",
+                "func PromotedField(f *FlagSet) { f.inner.Emit() }\n\n",
+                "func VarCycle() { loopA.BoolP() }\n\n",
+                "func AliasCycle(a AliasA) { a.BoolP() }\n\n",
+                "func EmbedCycle(e EmbedA) { e.BoolP() }\n\n",
+                "func EmbedFieldCycle(e EmbedA) { e.missing.BoolP() }\n\n",
                 "func Iface(d Doer) { d.BoolP() }\n\n",
                 "func Shadow() {\n",
                 "    v := &Other{}\n    v.Emit()\n",
@@ -1261,7 +1276,17 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
                 "}\n",
             ),
         );
-        write_file(dir.path(), "sub/sub.go", "package sub\n");
+        write_file(
+            dir.path(),
+            "sub/sub.go",
+            "package sub\n\ntype Thing struct{}\n\nfunc (t *Thing) Parse() {}\n",
+        );
+        // A build-tagged twin declares the same type again.
+        write_file(
+            dir.path(),
+            "sub/sub_other.go",
+            "//go:build other\n\npackage sub\n\ntype Thing struct{}\n",
+        );
         dir
     }
 
@@ -1280,6 +1305,19 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
     #[case::promoted("pflag::Promoted", "Shared", "resolved", Some("pflag::base::Shared"))]
     #[case::func_field_shadows_promoted("pflag::FuncField", "Hook", "ambiguous", None)]
     #[case::external_type("pflag::Std", "Parse", "unresolved", None)]
+    #[case::imported_type("pflag::Imported", "Parse", "resolved", Some("sub::Thing::Parse"))]
+    #[case::method_result("pflag::Chain", "BoolP", "resolved", Some("pflag::FlagSet::BoolP"))]
+    #[case::conversion("pflag::Conv", "BoolP", "resolved", Some("pflag::FlagSet::BoolP"))]
+    #[case::promoted_field(
+        "pflag::PromotedField",
+        "Emit",
+        "resolved",
+        Some("pflag::Writer::Emit")
+    )]
+    #[case::variable_cycle("pflag::VarCycle", "BoolP", "ambiguous", None)]
+    #[case::alias_cycle("pflag::AliasCycle", "BoolP", "ambiguous", None)]
+    #[case::embedding_cycle("pflag::EmbedCycle", "BoolP", "ambiguous", None)]
+    #[case::embedded_field_cycle("pflag::EmbedFieldCycle", "BoolP", "ambiguous", None)]
     #[case::unseen_workspace_type("pflag::Unseen", "Parse", "ambiguous", None)]
     #[case::interface("pflag::Iface", "BoolP", "ambiguous", None)]
     #[case::two_types_one_name("pflag::Shadow", "Emit", "ambiguous", None)]

@@ -757,6 +757,12 @@ mod tests {
         "func a() { x := New[int](); x.M() }",
         Some(call_result("m::New", 0))
     )]
+    #[case::receiver_type_argument("func (s *Set[K]) a(k K) { k.M() }", None)]
+    #[case::parenthesized("func a() { x := (&T{}); x.M() }", Some(named("m::T")))]
+    #[case::assertion_ok("func a(v any) { _, x := v.(T); x.M() }", None)]
+    #[case::conversion_second_value("func a(p any) { _, x := (*T)(p); x.M() }", None)]
+    #[case::constant("func a() { const x = 1; x.M() }", None)]
+    #[case::type_switch_value("func a(v any) { switch x := v.(type) { default: x.M() } }", None)]
     #[case::imported_call(
         "func a() { x := cmp.New(); x.M() }",
         Some(call_result("x::cmp::New", 0))
