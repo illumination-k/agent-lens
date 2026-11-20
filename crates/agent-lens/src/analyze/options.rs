@@ -177,7 +177,10 @@ pub(crate) use analyzer_options;
 mod tests {
     use crate::analyze::DiffScope;
     use crate::analyze::cohesion::{CohesionAnalyzer, CohesionOptions};
-    use crate::analyze::communities::{CommunitiesAnalyzer, CommunitiesOptions, Granularity};
+    use crate::analyze::communities::{
+        Algorithm as CommunityAlgorithm, CommunitiesAnalyzer, CommunitiesOptions, Granularity,
+        WeightSource,
+    };
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
     use crate::analyze::context_span::{ContextSpanAnalyzer, ContextSpanOptions};
     use crate::analyze::coupling::{CouplingAnalyzer, CouplingOptions};
@@ -322,11 +325,25 @@ mod tests {
             top: Some(3),
             granularity: Granularity::Module,
             min_community: 4,
+            algorithm: CommunityAlgorithm::Leiden,
+            resolution: 1.5,
+            weights: WeightSource::Both,
+            co_change_share: 0.25,
+            since: Some("90.days.ago".to_owned()),
+            min_support: 3,
+            max_commit_files: 20,
         },
         |a| a
             .with_top(Some(3))
             .with_granularity(Granularity::Module)
             .with_min_community(4)
+            .with_algorithm(CommunityAlgorithm::Leiden)
+            .with_resolution(1.5)
+            .with_weights(WeightSource::Both)
+            .with_co_change_share(0.25)
+            .with_since_opt(Some("90.days.ago".to_owned()))
+            .with_min_support(3)
+            .with_max_commit_files(20)
     );
     assert_options_reach_the_analyzer!(
         cohesion_options_reach_the_analyzer: CohesionAnalyzer,

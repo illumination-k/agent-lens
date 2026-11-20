@@ -38,6 +38,30 @@
 //! collapses to a single declared group, which the report says outright
 //! rather than dressing up.
 //!
+//! Three knobs change what is clustered and how:
+//!
+//! * `--algorithm greedy|leiden` — Clauset–Newman–Moore agglomeration
+//!   (the default) or deterministic Leiden, which is faster on large
+//!   graphs, never returns a disconnected community, and usually finds a
+//!   higher `Q`.
+//! * `--resolution γ` — the modularity resolution. Above `1` favours
+//!   smaller communities, below `1` larger ones. Both modularity figures
+//!   are scored at the same `γ`, so the gap stays comparable.
+//! * `--weights static|co-change|both` — what an edge is. `static` is the
+//!   module graph above. `co-change` reads git history and weights each
+//!   file pair by the Jaccard index of the commits touching them
+//!   (`together / (either)`), keeping only pairs with at least
+//!   `--min-support` shared commits. `both` normalises each source to a
+//!   unit of total weight and blends them, `--co-change-share` deciding
+//!   the history half's share.
+//!
+//! Whenever history is read, the report also partitions the static graph
+//! and the co-change graph on their own and compares the two: their
+//! normalised mutual information, and the members whose community-mates
+//! the two sources disagree on most. A member that clusters with one set
+//! of files by its imports and with another by what it is edited
+//! alongside is the place an undeclared contract lives.
+//!
 //! The partition is deterministic by construction — see
 //! [`lens_domain::communities`] for why, and for the property test that
 //! holds it to it. Determinism is not a nicety here: a report an agent
@@ -60,23 +84,27 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use lens_domain::{
-    Community, CommunityEdge, CommunityNode, CommunityReport, DEFAULT_MIN_COMMUNITY, DeclaredShare,
-    MisfiledMember, ModulePath, SpanningCommunity, detect_communities,
+    Community, CommunityAlgorithm, CommunityEdge, CommunityNode, CommunityParams, CommunityReport,
+    DEFAULT_MAX_COMMIT_FILES, DEFAULT_MIN_COMMUNITY, DEFAULT_MIN_SUPPORT, DEFAULT_RESOLUTION,
+    DeclaredShare, MisfiledMember, ModulePath, PartitionAgreement, SpanningCommunity,
+    compare_partitions, detect_communities, partition_nodes, tally_cochange,
 };
 use serde::Serialize;
 
+use super::history::churn::ChurnScope;
+use super::history::error_from::impl_from_churn_error;
 use super::module_graph::{GraphPolicy, ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
-use super::{AnalyzePathFilter, CrateAnalyzerError, OutputFormat};
+use super::{AnalyzePathFilter, AnalyzeRoots, CrateAnalyzerError, OutputFormat, PathFilterError};
 
 /// What the report does and does not license. Carried in the output
 /// because "these files cluster together" is one sentence away from
 /// "move them", and the distance between the two is where an agent would
 /// otherwise over-read the result.
-const NOTE: &str = "Detected communities are what the dependency edges cluster into; the declared \
-     partition is the module each member is filed under. `modularity_gap` is the distance between \
-     the two — near zero means the declared boundaries already are the ones the dependencies \
-     form. A misfiled row is a move candidate, not a defect: it says a member has more edge \
+const NOTE: &str = "Detected communities are what the edges cluster into — static references, \
+     co-change history, or both, per `weights`; the declared partition is the module each member \
+     is filed under. `modularity_gap` is the distance between the two — near zero means the \
+     declared boundaries already are the ones the edges form. A misfiled row is a move candidate, not a defect: it says a member has more edge \
      weight to another declared module than to its own, and nothing about why. Modularity has a \
      resolution limit, so a small genuine cluster can be absorbed into a larger neighbour — read \
      community sizes before trusting a partition. Only resolved references become edges, the same \
@@ -117,6 +145,101 @@ impl Granularity {
     }
 }
 
+/// Which partitioner runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Algorithm {
+    /// Clauset–Newman–Moore greedy agglomeration: take the best single
+    /// merge until none helps.
+    #[default]
+    Greedy,
+    /// Deterministic Leiden: local moving, refinement, aggregation.
+    /// Faster on large graphs, never returns a disconnected community,
+    /// and usually finds a higher modularity.
+    Leiden,
+}
+
+impl Algorithm {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Greedy => "greedy",
+            Self::Leiden => "leiden",
+        }
+    }
+
+    fn domain(self) -> CommunityAlgorithm {
+        match self {
+            Self::Greedy => CommunityAlgorithm::Greedy,
+            Self::Leiden => CommunityAlgorithm::Leiden,
+        }
+    }
+}
+
+/// What an edge between two members is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeightSource {
+    /// Resolved static references from the module graph, one unit per
+    /// distinct reference.
+    #[default]
+    Static,
+    /// Git co-change: the Jaccard index of the commits touching each
+    /// file pair. Needs a git working tree.
+    CoChange,
+    /// Both, each normalised to one unit of total weight and blended by
+    /// `--co-change-share`.
+    Both,
+}
+
+impl WeightSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::CoChange => "co-change",
+            Self::Both => "both",
+        }
+    }
+
+    fn reads_history(self) -> bool {
+        !matches!(self, Self::Static)
+    }
+}
+
+/// Default share of total edge weight the co-change half carries under
+/// `--weights both`.
+pub const DEFAULT_CO_CHANGE_SHARE: f64 = 0.5;
+
+/// Errors raised by `analyze communities`.
+#[derive(Debug, thiserror::Error)]
+pub enum CommunitiesError {
+    #[error(transparent)]
+    Graph(#[from] CrateAnalyzerError),
+    #[error("failed to read {path:?}: {source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// `git` is missing or returned a non-zero exit status.
+    #[error("git failed: {}", stderr.trim_end())]
+    Git { stderr: String },
+    /// Co-change weights were asked for outside a git working tree.
+    #[error("{path:?} is not inside a git working tree; co-change weights need history")]
+    NotInGitRepo { path: std::path::PathBuf },
+    /// `γ` scales the null-model term; zero or below inverts what a
+    /// community is, and a non-finite value scores nothing.
+    #[error("--resolution must be a finite number above 0; got {value}")]
+    ResolutionOutOfRange { value: f64 },
+    #[error("--co-change-share must be within [0.0, 1.0]; got {value}")]
+    CoChangeShareOutOfRange { value: f64 },
+    #[error("failed to serialize report: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathFilter(#[from] PathFilterError),
+}
+
+impl_from_churn_error!(CommunitiesError);
+
 /// `analyze communities` flags, and the `[profile.<name>.communities]`
 /// table.
 ///
@@ -140,6 +263,35 @@ pub struct CommunitiesOptions {
     /// therefore both modularity figures — is unaffected.
     #[arg(long, default_value_t = DEFAULT_MIN_COMMUNITY)]
     pub min_community: usize,
+    /// Partitioner: greedy agglomeration (`greedy`) or deterministic
+    /// Leiden (`leiden`).
+    #[arg(long, value_enum, default_value_t = Algorithm::Greedy)]
+    pub algorithm: Algorithm,
+    /// Modularity resolution `γ`. Above 1 favours smaller communities,
+    /// below 1 larger ones; both modularity figures are scored at it.
+    #[arg(long, default_value_t = DEFAULT_RESOLUTION)]
+    pub resolution: f64,
+    /// What an edge is: static references (`static`), git co-change
+    /// (`co-change`), or a normalised blend of the two (`both`).
+    #[arg(long, value_enum, default_value_t = WeightSource::Static)]
+    pub weights: WeightSource,
+    /// Under `--weights both`, the share of total edge weight carried by
+    /// co-change; the static graph carries the rest.
+    #[arg(long, default_value_t = DEFAULT_CO_CHANGE_SHARE)]
+    pub co_change_share: f64,
+    /// Restrict history to commits in this `--since=` window (git
+    /// approxidate, e.g. `90.days.ago`). Only read with co-change
+    /// weights.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Fewest shared commits for a file pair to become a co-change edge.
+    /// One shared commit is coincidence, not a pattern.
+    #[arg(long, default_value_t = DEFAULT_MIN_SUPPORT)]
+    pub min_support: u32,
+    /// Commits touching more files than this are dropped whole, so a
+    /// repo-wide rename does not couple everything to everything.
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMIT_FILES)]
+    pub max_commit_files: usize,
 }
 
 impl Default for CommunitiesOptions {
@@ -148,6 +300,33 @@ impl Default for CommunitiesOptions {
             top: None,
             granularity: Granularity::default(),
             min_community: DEFAULT_MIN_COMMUNITY,
+            algorithm: Algorithm::default(),
+            resolution: DEFAULT_RESOLUTION,
+            weights: WeightSource::default(),
+            co_change_share: DEFAULT_CO_CHANGE_SHARE,
+            since: None,
+            min_support: DEFAULT_MIN_SUPPORT,
+            max_commit_files: DEFAULT_MAX_COMMIT_FILES,
+        }
+    }
+}
+
+/// How the history half is read, when it is.
+#[derive(Debug, Clone, PartialEq)]
+struct HistoryOptions {
+    since: Option<String>,
+    min_support: u32,
+    max_commit_files: usize,
+    co_change_share: f64,
+}
+
+impl Default for HistoryOptions {
+    fn default() -> Self {
+        Self {
+            since: None,
+            min_support: DEFAULT_MIN_SUPPORT,
+            max_commit_files: DEFAULT_MAX_COMMIT_FILES,
+            co_change_share: DEFAULT_CO_CHANGE_SHARE,
         }
     }
 }
@@ -159,6 +338,10 @@ pub struct CommunitiesAnalyzer {
     top: Option<usize>,
     granularity: Granularity,
     min_community: usize,
+    algorithm: Algorithm,
+    resolution: f64,
+    weights: WeightSource,
+    history: HistoryOptions,
 }
 
 impl Default for CommunitiesAnalyzer {
@@ -168,6 +351,10 @@ impl Default for CommunitiesAnalyzer {
             top: None,
             granularity: Granularity::default(),
             min_community: DEFAULT_MIN_COMMUNITY,
+            algorithm: Algorithm::default(),
+            resolution: DEFAULT_RESOLUTION,
+            weights: WeightSource::default(),
+            history: HistoryOptions::default(),
         }
     }
 }
@@ -184,6 +371,13 @@ impl CommunitiesAnalyzer {
         self.with_top(opts.top)
             .with_granularity(opts.granularity)
             .with_min_community(opts.min_community)
+            .with_algorithm(opts.algorithm)
+            .with_resolution(opts.resolution)
+            .with_weights(opts.weights)
+            .with_co_change_share(opts.co_change_share)
+            .with_since_opt(opts.since)
+            .with_min_support(opts.min_support)
+            .with_max_commit_files(opts.max_commit_files)
     }
 
     /// Cap the markdown listings to the top-N rows. JSON output always
@@ -203,6 +397,42 @@ impl CommunitiesAnalyzer {
         self
     }
 
+    pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
+
+    pub fn with_resolution(mut self, resolution: f64) -> Self {
+        self.resolution = resolution;
+        self
+    }
+
+    pub fn with_weights(mut self, weights: WeightSource) -> Self {
+        self.weights = weights;
+        self
+    }
+
+    pub fn with_co_change_share(mut self, share: f64) -> Self {
+        self.history.co_change_share = share;
+        self
+    }
+
+    pub fn with_min_support(mut self, min_support: u32) -> Self {
+        self.history.min_support = min_support;
+        self
+    }
+
+    /// Restrict the history half to a `--since=` window.
+    pub fn with_since_opt(mut self, since: Option<String>) -> Self {
+        self.history.since = since;
+        self
+    }
+
+    pub fn with_max_commit_files(mut self, max_commit_files: usize) -> Self {
+        self.history.max_commit_files = max_commit_files;
+        self
+    }
+
     pub fn with_only_tests(mut self, only_tests: bool) -> Self {
         self.path_filter = self.path_filter.with_only_tests(only_tests);
         self
@@ -218,14 +448,18 @@ impl CommunitiesAnalyzer {
         self
     }
 
-    /// Resolve `path`, build the language-specific module graph, detect
-    /// its communities, and score them against the declared grouping.
+    /// Resolve `path`, build the language-specific module graph, read
+    /// history when the weights ask for it, detect communities, and
+    /// score them against the declared grouping.
     pub fn analyze(
         &self,
         path: impl AsRef<Path>,
         format: OutputFormat,
-    ) -> Result<String, CrateAnalyzerError> {
-        let mut graph = build_graph(path.as_ref(), GraphPolicy::COUPLING, &self.path_filter)?;
+    ) -> Result<String, CommunitiesError> {
+        self.validate()?;
+        let path = path.as_ref();
+        let mut graph = build_graph(path, GraphPolicy::COUPLING, &self.path_filter)
+            .map_err(CommunitiesError::Graph)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: BTreeSet<&ModulePath> = graph.modules.iter().map(|m| &m.path).collect();
@@ -233,40 +467,174 @@ impl CommunitiesAnalyzer {
             .edges
             .retain(|e| kept.contains(&e.from) && kept.contains(&e.to));
 
-        let (nodes, edges) = graph_input(&graph, self.granularity);
-        let report = detect_communities(&nodes, &edges, self.min_community);
-        let view = ReportView::new(&graph, self.granularity, self.min_community, &report);
+        let member = Membership::new(&graph, self.granularity);
+        let nodes = member_nodes(&graph, &member);
+        let static_edges = static_edges(&graph, &member);
+        let history = if self.weights.reads_history() {
+            Some(self.read_history(path, &graph, &member)?)
+        } else {
+            None
+        };
+        let edges = match (&history, self.weights) {
+            (Some(h), WeightSource::CoChange) => h.edges.clone(),
+            (Some(h), WeightSource::Both) => {
+                blend(&static_edges, &h.edges, self.history.co_change_share)
+            }
+            _ => static_edges.clone(),
+        };
+        let params = CommunityParams {
+            algorithm: self.algorithm.domain(),
+            resolution: self.resolution,
+            min_community: self.min_community,
+        };
+        let report = detect_communities(&nodes, &edges, params);
+        let agreement = history.as_ref().map(|h| {
+            let algorithm = self.algorithm.domain();
+            compare_partitions(
+                &partition_nodes(&nodes, &static_edges, algorithm, self.resolution),
+                &partition_nodes(&nodes, &h.edges, algorithm, self.resolution),
+            )
+        });
+        let view = ReportView::new(&graph, self, &report, history.as_ref(), agreement.as_ref());
         match format {
             OutputFormat::Json => {
-                serde_json::to_string_pretty(&view).map_err(CrateAnalyzerError::Serialize)
+                serde_json::to_string_pretty(&view).map_err(CommunitiesError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&view, self.top)),
         }
     }
+
+    fn validate(&self) -> Result<(), CommunitiesError> {
+        if !(self.resolution.is_finite() && self.resolution > 0.0) {
+            return Err(CommunitiesError::ResolutionOutOfRange {
+                value: self.resolution,
+            });
+        }
+        let share = self.history.co_change_share;
+        if !(0.0..=1.0).contains(&share) {
+            return Err(CommunitiesError::CoChangeShareOutOfRange { value: share });
+        }
+        Ok(())
+    }
+
+    /// Read the commit window and turn every co-changing file pair that
+    /// lands on two distinct members into a Jaccard-weighted edge.
+    fn read_history(
+        &self,
+        path: &Path,
+        graph: &ModuleGraph,
+        member: &Membership,
+    ) -> Result<History, CommunitiesError> {
+        // A crate root or entry file names the graph, not the history:
+        // every file the graph read sits under its directory.
+        let history_root = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        let scope = ChurnScope::resolve(&AnalyzeRoots::from(history_root))?;
+        let shallow = scope.warn_if_shallow(
+            "co-change weights are \
+             lower bounds and pairs whose evidence predates the graft are missing. Fetch the \
+             full history (`git fetch --unshallow`) for a usable clustering.",
+        );
+        let commits = scope.collect_commits(self.history.since.as_deref())?;
+        let counts = tally_cochange(&commits, self.history.max_commit_files);
+        let member_of_file: BTreeMap<String, String> = graph
+            .modules
+            .iter()
+            .map(|m| {
+                (
+                    scope.key_for_absolute(&m.file),
+                    member.of(&m.path).to_string(),
+                )
+            })
+            .collect();
+        let mut edges = Vec::new();
+        for (a, b, together) in counts.pairs() {
+            if together < self.history.min_support {
+                continue;
+            }
+            let (Some(ma), Some(mb)) = (member_of_file.get(a), member_of_file.get(b)) else {
+                continue;
+            };
+            if ma == mb {
+                continue;
+            }
+            let either = counts.commits_for(a) + counts.commits_for(b) - together;
+            edges.push(CommunityEdge::new(
+                ma.clone(),
+                mb.clone(),
+                f64::from(together) / f64::from(either.max(1)),
+            ));
+        }
+        let totals = counts.totals();
+        Ok(History {
+            edges,
+            commit_count: totals.commit_count,
+            skipped_commit_count: totals.skipped_commit_count,
+            shallow,
+        })
+    }
 }
 
-/// Turn the module graph into the node and edge lists the detector
-/// takes, at the requested granularity.
+/// The co-change half of the input, and the window it was read from.
+struct History {
+    edges: Vec<CommunityEdge>,
+    commit_count: usize,
+    skipped_commit_count: usize,
+    shallow: bool,
+}
+
+/// Scale each source to one unit of total weight and blend them, the
+/// co-change half carrying `share` of the result. A source with no
+/// weight at all contributes nothing and leaves the other at full
+/// strength, so an empty history does not halve every static edge.
+fn blend(
+    static_edges: &[CommunityEdge],
+    history: &[CommunityEdge],
+    share: f64,
+) -> Vec<CommunityEdge> {
+    let total = |edges: &[CommunityEdge]| -> f64 {
+        let mut weights: Vec<f64> = edges.iter().map(|e| e.weight).collect();
+        weights.sort_by(f64::total_cmp);
+        weights.into_iter().sum()
+    };
+    let (static_total, history_total) = (total(static_edges), total(history));
+    let (static_share, history_share) = match (static_total > 0.0, history_total > 0.0) {
+        (true, true) => (1.0 - share, share),
+        (true, false) => (1.0, 0.0),
+        (false, true) => (0.0, 1.0),
+        (false, false) => (0.0, 0.0),
+    };
+    let scaled = |edges: &[CommunityEdge], factor: f64| -> Vec<CommunityEdge> {
+        edges
+            .iter()
+            .map(|e| CommunityEdge::new(e.a.clone(), e.b.clone(), e.weight * factor))
+            .collect::<Vec<_>>()
+    };
+    // A source with no share scales to zero weight, which the detector
+    // drops as uninformative.
+    let mut out = scaled(
+        static_edges,
+        static_share / static_total.max(f64::MIN_POSITIVE),
+    );
+    out.extend(scaled(
+        history,
+        history_share / history_total.max(f64::MIN_POSITIVE),
+    ));
+    out
+}
+
+/// Turn the module graph's references into static edges at the
+/// requested granularity.
 ///
 /// Edge weight is the number of *distinct* cross-module references, so
 /// ten `use` lines naming the same symbol do not outweigh ten naming
 /// different ones. The dedup key is the whole edge, which is the same
 /// unit `coupling` counts as its Number of Couplings.
-fn graph_input(
-    graph: &ModuleGraph,
-    granularity: Granularity,
-) -> (Vec<CommunityNode>, Vec<CommunityEdge>) {
-    let member = Membership::new(graph, granularity);
-    let nodes: BTreeMap<String, String> = graph
-        .modules
-        .iter()
-        .map(|m| {
-            let id = member.of(&m.path);
-            let declared = member.declared(&id);
-            (id.to_string(), declared.to_string())
-        })
-        .collect();
-    let edges = graph
+fn static_edges(graph: &ModuleGraph, member: &Membership) -> Vec<CommunityEdge> {
+    graph
         .edges
         .iter()
         .collect::<BTreeSet<_>>()
@@ -278,14 +646,23 @@ fn graph_input(
                 1,
             )
         })
-        .collect();
-    (
-        nodes
-            .into_iter()
-            .map(|(id, declared)| CommunityNode::new(id, declared))
-            .collect(),
-        edges,
-    )
+        .collect()
+}
+
+/// The member population, each with the group it is declared in.
+fn member_nodes(graph: &ModuleGraph, member: &Membership) -> Vec<CommunityNode> {
+    graph
+        .modules
+        .iter()
+        .map(|m| {
+            let id = member.of(&m.path);
+            let declared = member.declared(&id);
+            (id.to_string(), declared.to_string())
+        })
+        .collect::<BTreeMap<String, String>>()
+        .into_iter()
+        .map(|(id, declared)| CommunityNode::new(id, declared))
+        .collect()
 }
 
 /// Which member a module path belongs to, and which group that member is
@@ -386,14 +763,21 @@ impl Membership {
 struct ReportView {
     crate_root: String,
     granularity: &'static str,
+    algorithm: &'static str,
+    resolution: f64,
+    weights: &'static str,
     note: &'static str,
+    /// The commit window co-change weights were read from, when they
+    /// were.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history: Option<HistoryView>,
     /// Module-graph nodes read before members were folded out of them.
     /// Above `node_count` whenever a language puts several modules in
     /// one file, which for Rust is every `#[cfg(test)] mod tests`.
     module_count: usize,
     node_count: usize,
     edge_count: usize,
-    total_weight: u64,
+    total_weight: f64,
     /// Members with no resolved reference either way. They cannot be
     /// clustered, so they argue neither for nor against a boundary.
     isolated_node_count: usize,
@@ -405,20 +789,38 @@ struct ReportView {
     communities: Vec<CommunityView>,
     misfiled: Vec<MisfiledView>,
     spanning: Vec<SpanningView>,
+    /// Static-only against co-change-only partition, when history was
+    /// read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agreement: Option<AgreementView>,
 }
 
 impl ReportView {
     fn new(
         graph: &ModuleGraph,
-        granularity: Granularity,
-        min_community: usize,
+        analyzer: &CommunitiesAnalyzer,
         report: &CommunityReport,
+        history: Option<&History>,
+        agreement: Option<&PartitionAgreement>,
     ) -> Self {
         let labeler = &graph.labeler;
         Self {
             crate_root: graph.root.display().to_string(),
-            granularity: granularity.as_str(),
+            granularity: analyzer.granularity.as_str(),
+            algorithm: analyzer.algorithm.as_str(),
+            resolution: analyzer.resolution,
+            weights: analyzer.weights.as_str(),
             note: NOTE,
+            history: history.map(|h| HistoryView {
+                since: analyzer.history.since.clone(),
+                commit_count: h.commit_count,
+                skipped_commit_count: h.skipped_commit_count,
+                co_change_edge_count: h.edges.len(),
+                min_support: analyzer.history.min_support,
+                co_change_share: (analyzer.weights == WeightSource::Both)
+                    .then_some(analyzer.history.co_change_share),
+                shallow_clone: h.shallow,
+            }),
             module_count: graph.modules.len(),
             node_count: report.node_count,
             edge_count: report.edge_count,
@@ -427,7 +829,7 @@ impl ReportView {
             community_count: report.community_count,
             declared_group_count: report.declared_group_count,
             largest_community: report.largest_community,
-            min_community,
+            min_community: analyzer.min_community,
             modularity: ModularityView {
                 detected: report.detected_modularity,
                 declared: report.declared_modularity,
@@ -449,15 +851,74 @@ impl ReportView {
                 .iter()
                 .map(|s| SpanningView::new(s, labeler))
                 .collect(),
+            agreement: agreement.map(|a| AgreementView::new(a, labeler)),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct HistoryView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    commit_count: usize,
+    skipped_commit_count: usize,
+    /// Member pairs the history contributed an edge for.
+    co_change_edge_count: usize,
+    min_support: u32,
+    /// Share of total weight carried by co-change under `both`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    co_change_share: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    shallow_clone: bool,
+}
+
+/// The static-only partition against the co-change-only one.
+#[derive(Debug, Serialize)]
+struct AgreementView {
+    /// Members placed by both sources (non-isolated in each).
+    compared: usize,
+    /// Normalised mutual information; `1.0` for identical groupings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nmi: Option<f64>,
+    /// Members whose community-mates overlap below half between the two
+    /// sources, least overlap first.
+    divergent: Vec<DivergentView>,
+}
+
+#[derive(Debug, Serialize)]
+struct DivergentView {
+    member: String,
+    static_mates: usize,
+    co_change_mates: usize,
+    shared_mates: usize,
+    jaccard: f64,
+}
+
+impl AgreementView {
+    fn new(agreement: &PartitionAgreement, labeler: &ModuleLabeler) -> Self {
+        Self {
+            compared: agreement.compared,
+            nmi: agreement.nmi,
+            divergent: agreement
+                .divergent
+                .iter()
+                .map(|d| DivergentView {
+                    member: label(&d.node, labeler),
+                    static_mates: d.first_mates,
+                    co_change_mates: d.second_mates,
+                    shared_mates: d.shared_mates,
+                    jaccard: d.jaccard,
+                })
+                .collect(),
         }
     }
 }
 
 #[derive(Debug, Serialize)]
 struct ModularityView {
-    /// Newman `Q` for the partition the edges support.
+    /// `Q_γ` for the partition the edges support.
     detected: f64,
-    /// Newman `Q` for the declared partition, computed over the same
+    /// `Q_γ` for the declared partition, computed over the same
     /// graph so the two are comparable.
     declared: f64,
     /// `detected - declared`. Zero means the declared boundaries already
@@ -465,8 +926,8 @@ struct ModularityView {
     gap: f64,
     /// `declared / detected`, omitted when the graph has no community
     /// structure to compare against. Above `1.0` when the declared
-    /// grouping beats the one the search found, which greedy
-    /// agglomeration allows — it finds a good partition, not the
+    /// grouping beats the one the search found, which neither
+    /// partitioner rules out — each finds a good partition, not the
     /// optimal one.
     #[serde(skip_serializing_if = "Option::is_none")]
     declared_quality: Option<f64>,
@@ -496,8 +957,8 @@ struct CommunityView {
     size: usize,
     dominant_declared: String,
     declared_group_count: usize,
-    internal_weight: u64,
-    external_weight: u64,
+    internal_weight: f64,
+    external_weight: f64,
     breakdown: Vec<ShareView>,
     members: Vec<String>,
 }
@@ -527,9 +988,9 @@ struct MisfiledView {
     declared: String,
     suggested: String,
     community: usize,
-    weight_to_declared: u64,
-    weight_to_suggested: u64,
-    evidence: u64,
+    weight_to_declared: f64,
+    weight_to_suggested: f64,
+    evidence: f64,
 }
 
 impl MisfiledView {
@@ -578,6 +1039,16 @@ fn format_markdown(view: &ReportView, top: Option<usize>) -> String {
         "# Communities report: {} ({} member(s), {} edge(s), {} communit(ies) at {} granularity)\n",
         view.crate_root, view.node_count, view.edge_count, view.community_count, view.granularity,
     );
+    let _ = writeln!(
+        &mut out,
+        "\nalgorithm: {}, resolution: {}, weights: {}",
+        view.algorithm,
+        weight(view.resolution),
+        view.weights,
+    );
+    if let Some(history) = &view.history {
+        render_history(&mut out, history);
+    }
     let _ = writeln!(&mut out, "\n{}", view.note);
     if view.node_count == 0 {
         out.push_str("\n_No modules discovered._\n");
@@ -587,7 +1058,80 @@ fn format_markdown(view: &ReportView, top: Option<usize>) -> String {
     render_misfiled(&mut out, &view.misfiled, limit);
     render_communities(&mut out, view, limit);
     render_spanning(&mut out, &view.spanning, limit);
+    if let Some(agreement) = &view.agreement {
+        render_agreement(&mut out, agreement, limit);
+    }
     out
+}
+
+/// A weight rendered as an integer when it is one — static counts stay
+/// counts — and to three decimals otherwise.
+fn weight(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+fn render_history(out: &mut String, history: &HistoryView) {
+    let mut line = format!(
+        "history: {} commit(s) ({} skipped as oversized), {} co-change edge(s) at min-support {}",
+        history.commit_count,
+        history.skipped_commit_count,
+        history.co_change_edge_count,
+        history.min_support,
+    );
+    if let Some(since) = &history.since {
+        let _ = write!(line, ", since {since}");
+    }
+    if let Some(share) = history.co_change_share {
+        let _ = write!(line, ", co-change share {share:.2}");
+    }
+    if history.shallow_clone {
+        line.push_str(", shallow clone: counts are lower bounds");
+    }
+    let _ = writeln!(out, "{line}");
+}
+
+fn render_agreement(out: &mut String, agreement: &AgreementView, limit: usize) {
+    let _ = writeln!(out, "\n## Static vs co-change partitions\n");
+    match agreement.nmi {
+        Some(nmi) => {
+            let _ = writeln!(
+                out,
+                "- NMI {nmi:.3} over {} member(s) both sources place",
+                agreement.compared,
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "- {} member(s) placed by both sources: too few to compare",
+                agreement.compared,
+            );
+            return;
+        }
+    }
+    if agreement.divergent.is_empty() {
+        out.push_str(
+            "\n_No member's community-mates differ by more than half between the two sources._\n",
+        );
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n| member | static mates | co-change mates | shared | jaccard |"
+    );
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
+    for row in agreement.divergent.iter().take(limit) {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {:.2} |",
+            row.member, row.static_mates, row.co_change_mates, row.shared_mates, row.jaccard,
+        );
+    }
+    render_overflow(out, agreement.divergent.len(), limit, "divergent member");
 }
 
 fn render_modularity(out: &mut String, view: &ReportView) {
@@ -670,9 +1214,9 @@ fn render_misfiled(out: &mut String, rows: &[MisfiledView], limit: usize) {
             row.member,
             row.declared,
             row.suggested,
-            row.weight_to_suggested,
-            row.weight_to_declared,
-            row.evidence,
+            weight(row.weight_to_suggested),
+            weight(row.weight_to_declared),
+            weight(row.evidence),
         );
     }
     render_overflow(out, rows.len(), limit, "misfiled member");
@@ -700,8 +1244,8 @@ fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
             c.size,
             c.dominant_declared,
             c.declared_group_count,
-            c.internal_weight,
-            c.external_weight,
+            weight(c.internal_weight),
+            weight(c.external_weight),
             members_cell(&c.members),
         );
     }
@@ -757,7 +1301,7 @@ fn render_overflow(out: &mut String, total: usize, limit: usize, unit: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::write_file;
+    use crate::test_support::{run_git, write_file};
     use rstest::rstest;
     use std::path::PathBuf;
 
@@ -812,11 +1356,11 @@ mod tests {
         assert_eq!(stray["declared"], "crate::a", "got {json:#}");
         assert_eq!(stray["suggested"], "crate::b", "got {json:#}");
         assert!(
-            stray["weight_to_suggested"].as_u64().unwrap()
-                > stray["weight_to_declared"].as_u64().unwrap(),
+            stray["weight_to_suggested"].as_f64().unwrap()
+                > stray["weight_to_declared"].as_f64().unwrap(),
             "got {json:#}",
         );
-        assert!(stray["evidence"].as_u64().unwrap() >= 1, "got {json:#}");
+        assert!(stray["evidence"].as_f64().unwrap() >= 1.0, "got {json:#}");
     }
 
     /// The modules that keep to their own subtree must not be reported:
@@ -1129,7 +1673,7 @@ mod tests {
             module().with_exclude_patterns(vec!["b/p.rs".to_owned()]),
         );
         assert!(
-            filtered["total_weight"].as_u64().unwrap() < full["total_weight"].as_u64().unwrap(),
+            filtered["total_weight"].as_f64().unwrap() < full["total_weight"].as_f64().unwrap(),
             "weight from an excluded file leaked into its parent: {filtered:#} vs {full:#}",
         );
     }
@@ -1333,5 +1877,327 @@ mod tests {
         assert_eq!(opts.min_community, DEFAULT_MIN_COMMUNITY);
         assert_eq!(opts.granularity, Granularity::File);
         assert_eq!(opts.top, None);
+    }
+
+    fn init_repo(dir: &Path) {
+        run_git(dir, &["init", "-q", "-b", "main"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+    }
+
+    fn commit(dir: &Path, message: &str, files: &[(&str, &str)]) {
+        for (path, contents) in files {
+            write_file(dir, path, contents);
+        }
+        run_git(dir, &["add", "-A"]);
+        run_git(dir, &["commit", "-q", "-m", message]);
+    }
+
+    /// Static edges pair `a::one`–`a::two` and `b::p`–`b::q`; history
+    /// pairs them the other way round: `a::one` is always edited with
+    /// `b::p`, and `a::two` with `b::q`.
+    fn crossed_history(dir: &Path) -> PathBuf {
+        init_repo(dir);
+        commit(
+            dir,
+            "init",
+            &[
+                ("lib.rs", "pub mod a;\npub mod b;\n"),
+                ("a/mod.rs", "pub mod one;\npub mod two;\n"),
+                ("a/one.rs", "pub fn one() -> u8 { 0 }\n"),
+                (
+                    "a/two.rs",
+                    "pub fn two() -> u8 { crate::a::one::one() + 0 }\n",
+                ),
+                ("b/mod.rs", "pub mod p;\npub mod q;\n"),
+                ("b/p.rs", "pub fn p() -> u8 { 0 }\n"),
+                ("b/q.rs", "pub fn q() -> u8 { crate::b::p::p() + 0 }\n"),
+            ],
+        );
+        for i in 1..=4 {
+            commit(
+                dir,
+                &format!("one+p {i}"),
+                &[
+                    ("a/one.rs", &format!("pub fn one() -> u8 {{ {i} }}\n")),
+                    ("b/p.rs", &format!("pub fn p() -> u8 {{ {i} }}\n")),
+                ],
+            );
+            commit(
+                dir,
+                &format!("two+q {i}"),
+                &[
+                    (
+                        "a/two.rs",
+                        &format!("pub fn two() -> u8 {{ crate::a::one::one() + {i} }}\n"),
+                    ),
+                    (
+                        "b/q.rs",
+                        &format!("pub fn q() -> u8 {{ crate::b::p::p() + {i} }}\n"),
+                    ),
+                ],
+            );
+        }
+        dir.join("lib.rs")
+    }
+
+    fn community_of<'a>(json: &'a serde_json::Value, member: &str) -> &'a serde_json::Value {
+        json["communities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["members"].as_array().unwrap().iter().any(|m| m == member))
+            .unwrap_or_else(|| panic!("no community holds {member} in {json:#}"))
+    }
+
+    #[rstest]
+    #[case::greedy(Algorithm::Greedy)]
+    #[case::leiden(Algorithm::Leiden)]
+    fn co_change_weights_cluster_what_is_edited_together(#[case] algorithm: Algorithm) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = crossed_history(dir.path());
+        let json = report(
+            &lib,
+            CommunitiesAnalyzer::new()
+                .with_weights(WeightSource::CoChange)
+                .with_algorithm(algorithm),
+        );
+        let holding_one = community_of(&json, "crate::a::one");
+        let members = holding_one["members"].as_array().unwrap();
+        assert!(members.iter().any(|m| m == "crate::b::p"), "got {json:#}");
+        assert!(members.iter().all(|m| m != "crate::a::two"), "got {json:#}");
+        assert_eq!(json["weights"], "co-change");
+        assert_eq!(json["history"]["co_change_edge_count"], 2, "got {json:#}");
+        // Each crossed pair moved together in all five commits either
+        // file appears in: Jaccard 5 / (5 + 5 - 5) = 1.
+        assert_eq!(json["total_weight"], 2.0, "got {json:#}");
+    }
+
+    /// Pairs below `--min-support` contribute no edge. The initial commit
+    /// touches every file once, so at 1 it pairs everything; the crossed
+    /// pairs co-change five times, so at 6 nothing survives.
+    #[test]
+    fn co_change_pairs_below_min_support_contribute_no_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = crossed_history(dir.path());
+        let json = report(
+            &lib,
+            CommunitiesAnalyzer::new()
+                .with_weights(WeightSource::CoChange)
+                .with_min_support(1),
+        );
+        assert!(
+            json["history"]["co_change_edge_count"].as_u64().unwrap() > 2,
+            "got {json:#}",
+        );
+        let strict = report(
+            &lib,
+            CommunitiesAnalyzer::new()
+                .with_weights(WeightSource::CoChange)
+                .with_min_support(6),
+        );
+        assert_eq!(
+            strict["history"]["co_change_edge_count"], 0,
+            "got {strict:#}"
+        );
+    }
+
+    /// Static and co-change disagree completely on this history, and the
+    /// agreement section says so member by member.
+    #[test]
+    fn crossed_sources_are_reported_as_divergent() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = crossed_history(dir.path());
+        let json = report(
+            &lib,
+            CommunitiesAnalyzer::new().with_weights(WeightSource::Both),
+        );
+        let agreement = &json["agreement"];
+        assert_eq!(agreement["compared"], 4, "got {json:#}");
+        assert!(agreement["nmi"].as_f64().unwrap() < 0.5, "got {json:#}");
+        let divergent: Vec<&str> = agreement["divergent"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["member"].as_str().unwrap())
+            .collect();
+        assert!(divergent.contains(&"crate::a::one"), "got {json:#}");
+        assert_eq!(json["history"]["co_change_share"], 0.5, "got {json:#}");
+        // Both sources are normalised to one unit and blended.
+        let total = json["total_weight"].as_f64().unwrap();
+        assert!((total - 1.0).abs() < 1e-9, "got {json:#}");
+    }
+
+    #[test]
+    fn static_weights_read_no_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let json = report(&lib, CommunitiesAnalyzer::new());
+        assert!(json.get("history").is_none(), "got {json:#}");
+        assert!(json.get("agreement").is_none(), "got {json:#}");
+        assert_eq!(json["weights"], "static");
+        assert_eq!(json["algorithm"], "greedy");
+    }
+
+    #[test]
+    fn co_change_weights_outside_a_repository_are_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let err = CommunitiesAnalyzer::new()
+            .with_weights(WeightSource::CoChange)
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap_err();
+        assert!(
+            matches!(err, CommunitiesError::NotInGitRepo { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[rstest]
+    #[case(0.0)]
+    #[case(-1.0)]
+    #[case(f64::NAN)]
+    #[case(f64::INFINITY)]
+    fn a_resolution_outside_the_positive_reals_is_rejected(#[case] resolution: f64) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let err = CommunitiesAnalyzer::new()
+            .with_resolution(resolution)
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap_err();
+        assert!(
+            matches!(err, CommunitiesError::ResolutionOutOfRange { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[rstest]
+    #[case(-0.1)]
+    #[case(1.5)]
+    fn a_co_change_share_outside_the_unit_interval_is_rejected(#[case] share: f64) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let err = CommunitiesAnalyzer::new()
+            .with_co_change_share(share)
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap_err();
+        assert!(
+            matches!(err, CommunitiesError::CoChangeShareOutOfRange { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn leiden_reports_the_planted_misfile_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = planted_crate(dir.path());
+        let json = report(
+            &lib,
+            CommunitiesAnalyzer::new().with_algorithm(Algorithm::Leiden),
+        );
+        assert_eq!(json["algorithm"], "leiden");
+        let rows = json["misfiled"].as_array().unwrap();
+        assert!(
+            rows.iter().any(|r| r["member"] == "crate::a::stray"),
+            "got {json:#}",
+        );
+    }
+
+    #[test]
+    fn markdown_carries_the_run_settings_and_the_agreement() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = crossed_history(dir.path());
+        let md = CommunitiesAnalyzer::new()
+            .with_weights(WeightSource::Both)
+            .with_algorithm(Algorithm::Leiden)
+            .with_resolution(1.5)
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("algorithm: leiden, resolution: 1.500, weights: both"),
+            "got {md}"
+        );
+        assert!(md.contains("history: 9 commit(s)"), "got {md}");
+        assert!(md.contains("co-change share 0.50"), "got {md}");
+        assert!(md.contains("## Static vs co-change partitions"), "got {md}");
+        assert!(md.contains("| crate::a::one |"), "got {md}");
+    }
+
+    fn edge(a: &str, b: &str, w: f64) -> CommunityEdge {
+        CommunityEdge::new(a, b, w)
+    }
+
+    fn total(edges: &[CommunityEdge]) -> f64 {
+        edges.iter().map(|e| e.weight).sum()
+    }
+
+    /// Each source is scaled to its share of one unit of weight, so the
+    /// blend does not depend on how big either source's raw numbers are.
+    #[test]
+    fn blend_gives_each_source_its_share_of_one_unit() {
+        let statics = vec![edge("a", "b", 3.0), edge("b", "c", 1.0)];
+        let history = vec![edge("a", "c", 0.2)];
+        let out = blend(&statics, &history, 0.25);
+        assert!((total(&out) - 1.0).abs() < 1e-12, "got {out:?}");
+        let ac = out.iter().find(|e| e.a == "a" && e.b == "c").unwrap();
+        assert!((ac.weight - 0.25).abs() < 1e-12, "got {out:?}");
+        let ab = out.iter().find(|e| e.a == "a" && e.b == "b").unwrap();
+        assert!((ab.weight - 0.75 * 0.75).abs() < 1e-12, "got {out:?}");
+    }
+
+    /// An empty source leaves the other at full strength rather than
+    /// scaling it down to its share.
+    #[rstest]
+    #[case::no_history(vec![edge("a", "b", 2.0)], vec![])]
+    #[case::no_static(vec![], vec![edge("a", "b", 0.4)])]
+    fn blend_with_one_empty_source_keeps_the_other_whole(
+        #[case] statics: Vec<CommunityEdge>,
+        #[case] history: Vec<CommunityEdge>,
+    ) {
+        let out = blend(&statics, &history, 0.5);
+        assert_eq!(out.len(), 1);
+        assert!((total(&out) - 1.0).abs() < 1e-12, "got {out:?}");
+    }
+
+    #[test]
+    fn blend_of_nothing_is_nothing() {
+        assert!(blend(&[], &[], 0.5).is_empty());
+    }
+
+    #[rstest]
+    #[case(3.0, "3")]
+    #[case(0.0, "0")]
+    #[case(0.25, "0.250")]
+    #[case(1.0 / 3.0, "0.333")]
+    fn weights_render_as_counts_when_whole(#[case] value: f64, #[case] expected: &str) {
+        assert_eq!(weight(value), expected);
+    }
+
+    #[rstest]
+    #[case(Algorithm::Greedy, CommunityAlgorithm::Greedy)]
+    #[case(Algorithm::Leiden, CommunityAlgorithm::Leiden)]
+    fn the_algorithm_flag_selects_the_domain_partitioner(
+        #[case] flag: Algorithm,
+        #[case] expected: CommunityAlgorithm,
+    ) {
+        assert_eq!(flag.domain(), expected);
+    }
+
+    #[test]
+    fn the_since_window_reaches_the_history_options() {
+        let analyzer = CommunitiesAnalyzer::new().with_since_opt(Some("90.days.ago".to_owned()));
+        assert_eq!(analyzer.history.since.as_deref(), Some("90.days.ago"));
+    }
+
+    /// A source with no share contributes only zero-weight edges, which
+    /// the detector ignores.
+    #[test]
+    fn blend_at_full_share_leaves_the_other_source_weightless() {
+        let statics = vec![edge("a", "b", 3.0)];
+        let history = vec![edge("a", "c", 0.2)];
+        let out = blend(&statics, &history, 1.0);
+        let ab = out.iter().find(|e| e.b == "b").map(|e| e.weight);
+        assert_eq!(ab, Some(0.0), "got {out:?}");
+        assert!((total(&out) - 1.0).abs() < 1e-12, "got {out:?}");
     }
 }

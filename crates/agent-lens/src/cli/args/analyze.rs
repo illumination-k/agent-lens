@@ -101,14 +101,26 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// `--granularity file` (default) makes one module-graph node one
     /// member, so a finding names a file; `--granularity module`
     /// collapses files into their containing module first, so a finding
-    /// names a directory. The partition is deterministic: greedy
-    /// modularity agglomeration over a canonically ordered graph, with
-    /// merge ties broken by node id, so the same tree always produces the
-    /// same report. Modularity has a resolution limit — a small genuine
-    /// cluster can be absorbed into a larger neighbour, which is why
-    /// every community reports its size — and on a small or densely
-    /// connected tree everything lands in one community, which is said
-    /// outright rather than split into noise. `path` is a single entry
+    /// names a directory. `--algorithm greedy` (default) runs greedy
+    /// modularity agglomeration; `--algorithm leiden` runs a
+    /// deterministic Leiden (local moving, refinement, aggregation),
+    /// faster on large graphs and never returning a disconnected
+    /// community. Both work over a canonically ordered graph with ties
+    /// broken by node id, so the same tree always produces the same
+    /// report. `--resolution` sets the modularity resolution γ (above 1
+    /// favours smaller communities). `--weights static` (default) uses
+    /// resolved references; `--weights co-change` reads git history and
+    /// weights each file pair by the Jaccard index of the commits
+    /// touching them (pairs below `--min-support` dropped); `--weights
+    /// both` normalises the two and blends them by `--co-change-share`.
+    /// Whenever history is read, the report also compares the
+    /// static-only and co-change-only partitions: their NMI, and the
+    /// members whose community-mates the two disagree on. Modularity has
+    /// a resolution limit — a small genuine cluster can be absorbed into
+    /// a larger neighbour, which is why every community reports its size
+    /// — and on a small or densely connected tree everything lands in
+    /// one community, which is said outright rather than split into
+    /// noise. `path` is a single entry
     /// point, the same one `coupling` takes. JSON is the default;
     /// `--format md` caps each listing at `--top` (default 20).
     #[command(after_long_help = examples::COMMUNITIES)]

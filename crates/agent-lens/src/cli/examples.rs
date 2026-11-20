@@ -300,13 +300,18 @@ Examples:
 pub const COMMUNITIES: &str = "\
 Read the two modularity scores first: a declared score close to the detected
 one means the directory structure already is the clustering, and the misfiled
-rows below it are noise. A wide gap is what makes them worth reading.
+rows below it are noise. A wide gap is what makes them worth reading. With
+`--weights co-change` or `both`, read the static-vs-co-change section next: a
+member that clusters one way by imports and another by edit history is where an
+undeclared contract lives.
 
 Examples:
 
     agent-lens analyze communities crates/agent-lens --format md
     agent-lens analyze communities crates/agent-lens --granularity module --format md
     agent-lens analyze communities src/index.ts --min-community 3 --top 10
+    agent-lens analyze communities crates/agent-lens --algorithm leiden --resolution 1.5
+    agent-lens analyze communities crates/agent-lens --weights both --since 180.days.ago --format md
 ";
 
 pub const HIDDEN_COUPLING: &str = "\

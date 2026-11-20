@@ -9,6 +9,7 @@
 
 mod support;
 
+use agent_lens::analyze::communities::Algorithm;
 use agent_lens::analyze::{
     CohesionAnalyzer, CommunitiesAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer,
     CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer, HubsAnalyzer, LayersAnalyzer,
@@ -58,6 +59,10 @@ fn bench_rust_analyzers(c: &mut Criterion) {
     let communities = CommunitiesAnalyzer::new();
     group.bench_function("communities", |b| {
         b.iter(|| support::consume(communities.analyze(root, JSON)));
+    });
+    let communities_leiden = CommunitiesAnalyzer::new().with_algorithm(Algorithm::Leiden);
+    group.bench_function("communities_leiden", |b| {
+        b.iter(|| support::consume(communities_leiden.analyze(root, JSON)));
     });
     let context_span = ContextSpanAnalyzer::new();
     group.bench_function("context_span", |b| {
