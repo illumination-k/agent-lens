@@ -16,7 +16,7 @@
 //! outside the workspace, an interface, an unknown declaration) changes
 //! nothing, so the call keeps the name-based resolution it had.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use lens_domain::{CallShape, CalleeBinding, SyntaxFact, ValueTypeHint};
@@ -83,7 +83,7 @@ fn apply_bindings(file: &mut FileGraphInput, bindings: Vec<Option<CalleeBinding>
 /// Go import.
 struct SuffixMap<V> {
     entries: HashMap<String, V>,
-    by_last_segment: HashMap<String, Vec<String>>,
+    by_last_segment: HashMap<String, BTreeSet<String>>,
 }
 
 impl<V> SuffixMap<V> {
@@ -95,12 +95,10 @@ impl<V> SuffixMap<V> {
     }
 
     fn insert(&mut self, key: String, value: V) {
-        if !self.entries.contains_key(&key) {
-            self.by_last_segment
-                .entry(last_segment(&key).to_owned())
-                .or_default()
-                .push(key.clone());
-        }
+        self.by_last_segment
+            .entry(last_segment(&key).to_owned())
+            .or_default()
+            .insert(key.clone());
         self.entries.insert(key, value);
     }
 
