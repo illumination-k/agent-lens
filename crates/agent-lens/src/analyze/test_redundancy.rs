@@ -1195,6 +1195,85 @@ mod tests {
         assert_eq!(via_similarity, direct);
     }
 
+    /// The path filters reach the test-suite run through `similarity`:
+    /// each exclusion changes which copies are in scope, and the merged
+    /// entry point sees exactly what a direct run sees.
+    #[rstest]
+    #[case::unfiltered(false, false, &[])]
+    #[case::only_tests(true, false, &[])]
+    #[case::exclude_tests(false, true, &[])]
+    #[case::exclude_glob(false, false, &["tests/**"])]
+    fn similarity_target_tests_forwards_its_path_filters(
+        #[case] only_tests: bool,
+        #[case] exclude_tests: bool,
+        #[case] exclude: &[&str],
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &one_target_source());
+        let mut it = String::new();
+        for (name, seed) in [("delta", 4u32), ("epsilon", 5), ("zeta", 6), ("eta", 7)] {
+            it.push_str(&format!(
+                "#[test]\nfn {name}() {{\n{}}}\n",
+                test_body("shared", seed)
+            ));
+        }
+        write_file(dir.path(), "tests/it.rs", &it);
+        let exclude: Vec<String> = exclude.iter().map(|g| (*g).to_owned()).collect();
+
+        let run = |only_tests: bool, exclude_tests: bool, exclude: Vec<String>| {
+            let via_similarity = SimilarityAnalyzer::new()
+                .with_target(super::super::SimilarityTarget::Tests)
+                .with_reach_guard(false)
+                .with_only_tests(only_tests)
+                .with_exclude_tests(exclude_tests)
+                .with_exclude_patterns(exclude.clone())
+                .analyze(dir.path().to_path_buf(), OutputFormat::Json)
+                .unwrap();
+            let direct = TestRedundancyAnalyzer::new()
+                .with_reach_guard(false)
+                .with_only_tests(only_tests)
+                .with_exclude_tests(exclude_tests)
+                .with_exclude_patterns(exclude)
+                .analyze(dir.path().to_path_buf(), OutputFormat::Json)
+                .unwrap();
+            assert_eq!(via_similarity, direct);
+            let report: Value = serde_json::from_str(&direct).unwrap();
+            report["groups"].clone()
+        };
+        let filtered = run(only_tests, exclude_tests, exclude.clone());
+        let unfiltered = run(false, false, Vec::new());
+        // `only-tests` is forwarded too, but the corpus is test functions
+        // already: narrowing the walk to test-like paths keeps the same
+        // files, so it is checked for parity only.
+        let excludes_something = exclude_tests || !exclude.is_empty();
+        assert_eq!(
+            filtered != unfiltered,
+            excludes_something,
+            "{filtered} vs {unfiltered}"
+        );
+    }
+
+    /// The corpus is test functions only: production near-copies, however
+    /// alike, never form a group.
+    #[test]
+    fn production_near_copies_are_not_test_redundancy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = String::from("pub fn shared(a: u32, b: u32) -> u32 { a + b }\n");
+        for (name, seed) in [("one", 1u32), ("two", 2), ("three", 3)] {
+            src.push_str(&format!(
+                "pub fn {name}() {{\n{}}}\n",
+                test_body("shared", seed)
+            ));
+        }
+        write_file(dir.path(), "src/lib.rs", &src);
+
+        let report = analyze_json(
+            dir.path(),
+            TestRedundancyAnalyzer::new().with_reach_guard(false),
+        );
+        assert_eq!(report["summary"]["group_count"], 0, "got {report}");
+    }
+
     /// Each target rejects the options only the other side reads, rather
     /// than ignoring them.
     #[rstest]

@@ -196,6 +196,18 @@ mod tests {
         GraphOptions { limit: Some(3), ..GraphOptions::default() },
         "only apply with `query`",
     )]
+    #[case::to_without_query(
+        GraphOptions { to: Some("sink".to_owned()), ..GraphOptions::default() },
+        "only apply with `query`",
+    )]
+    #[case::depth_without_query(
+        GraphOptions { depth: Some(2), ..GraphOptions::default() },
+        "only apply with `query`",
+    )]
+    #[case::direction_without_query(
+        GraphOptions { direction: Some(GraphDirection::In), ..GraphOptions::default() },
+        "only apply with `query`",
+    )]
     fn options_that_cannot_run_are_rejected(#[case] opts: GraphOptions, #[case] expected: &str) {
         assert!(opts.problem().is_some_and(|m| m.contains(expected)));
         let dir = tempfile::tempdir().unwrap();
