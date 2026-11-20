@@ -200,11 +200,7 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.narrowable.is_some(), config::ToolName::Narrowable),
         (profile.ownership.is_some(), config::ToolName::Ownership),
         (profile.reach.is_some(), config::ToolName::Reach),
-        (
-            profile.test_redundancy.is_some(),
-            config::ToolName::TestRedundancy,
-        ),
-        (profile.graph_query.is_some(), config::ToolName::GraphQuery),
+        (profile.graph.is_some(), config::ToolName::Graph),
         (
             profile.context_span.is_some(),
             config::ToolName::ContextSpan,

@@ -26,15 +26,14 @@ use clap::{Arg, ArgAction, Args, Command};
 use crate::config::{
     CONFIG_FILE_NAME, ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
     ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions, ForwardingOptions,
-    GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions,
-    NarrowableOptions, OwnershipOptions, ReachOptions, RiskOptions, SearchOptions,
-    SimilarityOptions, TestRedundancyOptions, ToolName,
+    GraphOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, NarrowableOptions,
+    OwnershipOptions, ReachOptions, RiskOptions, SearchOptions, SimilarityOptions, ToolName,
 };
 
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 24] = [
+const TOOL_ORDER: [ToolName; 22] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -51,13 +50,11 @@ const TOOL_ORDER: [ToolName; 24] = [
     ToolName::Layers,
     ToolName::Reach,
     ToolName::Narrowable,
-    ToolName::TestRedundancy,
     ToolName::Forwarding,
-    ToolName::GraphQuery,
+    ToolName::Graph,
     ToolName::ContextSpan,
     ToolName::Coupling,
     ToolName::Communities,
-    ToolName::FunctionGraph,
     ToolName::Cycles,
 ];
 
@@ -87,7 +84,7 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, ownership, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, graph, hidden-coupling, hotspot, hubs, impact, layers, narrowable, ownership, reach, risk, search, similarity. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding; test-redundancy is similarity with `target = \"tests\"`; function-graph is graph, and graph-query is graph with `query` and `symbol`.",
     },
     Field {
         key: "format",
@@ -165,14 +162,13 @@ fn tool_command(tool: ToolName) -> Option<Command> {
         ToolName::Layers => of::<LayersOptions>("layers"),
         ToolName::Reach => of::<ReachOptions>("reach"),
         ToolName::Narrowable => of::<NarrowableOptions>("narrowable"),
-        ToolName::TestRedundancy => of::<TestRedundancyOptions>("test-redundancy"),
         ToolName::Forwarding => of::<ForwardingOptions>("forwarding"),
-        ToolName::GraphQuery => of::<GraphQueryOptions>("graph-query"),
+        ToolName::Graph => of::<GraphOptions>("graph"),
         ToolName::ContextSpan => of::<ContextSpanOptions>("context-span"),
         ToolName::Coupling => of::<CouplingOptions>("coupling"),
         ToolName::Communities => of::<CommunitiesOptions>("communities"),
         // Declaring a `[profile.<name>.cycles]` table is a parse error.
-        ToolName::Cycles | ToolName::FunctionGraph => None,
+        ToolName::Cycles => None,
     }
 }
 
@@ -187,7 +183,7 @@ const RUNTIME_DEFAULTS: &[(ToolName, &str, &str)] = &[
     (
         ToolName::Similarity,
         "min-lines",
-        "5 (functions) / 3 (types)",
+        "5 (functions, blocks, tests) / 3 (types)",
     ),
     (ToolName::Ownership, "bot-pattern", "[\"*\\\\[bot\\\\]*\"]"),
     (ToolName::Impact, "depth", "5"),
@@ -198,13 +194,12 @@ const RUNTIME_DEFAULTS: &[(ToolName, &str, &str)] = &[
     (ToolName::Narrowable, "max-loc", "30"),
     (ToolName::Narrowable, "max-cyclomatic", "6"),
     (ToolName::Narrowable, "min-call-sites", "2"),
-    (ToolName::TestRedundancy, "min-lines", "5"),
-    (ToolName::TestRedundancy, "min-body-nodes", "8"),
+    (ToolName::Similarity, "min-body-nodes", "8"),
     (ToolName::Forwarding, "top", "20"),
     (ToolName::Forwarding, "section", "both"),
-    (ToolName::GraphQuery, "depth", "1 (path: unbounded)"),
-    (ToolName::GraphQuery, "direction", "both"),
-    (ToolName::GraphQuery, "limit", "50"),
+    (ToolName::Graph, "depth", "1 (path: unbounded)"),
+    (ToolName::Graph, "direction", "both"),
+    (ToolName::Graph, "limit", "50"),
     (ToolName::Coupling, "top", "20"),
 ];
 
@@ -492,9 +487,9 @@ mod tests {
     use crate::config::{
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
         ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions,
-        ForwardingOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
-        LayersOptions, NarrowableOptions, OwnershipOptions, Profile, ReachOptions, RiskOptions,
-        SearchOptions, SimilarityOptions, TestRedundancyOptions,
+        ForwardingOptions, GraphOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions,
+        NarrowableOptions, OwnershipOptions, Profile, ReachOptions, RiskOptions, SearchOptions,
+        SimilarityOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -532,9 +527,8 @@ mod tests {
         assert_tool_parity::<LayersOptions>(ToolName::Layers);
         assert_tool_parity::<ReachOptions>(ToolName::Reach);
         assert_tool_parity::<NarrowableOptions>(ToolName::Narrowable);
-        assert_tool_parity::<TestRedundancyOptions>(ToolName::TestRedundancy);
         assert_tool_parity::<ForwardingOptions>(ToolName::Forwarding);
-        assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
+        assert_tool_parity::<GraphOptions>(ToolName::Graph);
         assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<CouplingOptions>(ToolName::Coupling);
     }
@@ -615,7 +609,7 @@ mod tests {
     fn tool_table_marks_only_cycles_and_function_graph_as_optionless() {
         for tool in TOOL_ORDER {
             let has_table = tool_command(tool).is_some();
-            let expect_table = !matches!(tool, ToolName::Cycles | ToolName::FunctionGraph);
+            let expect_table = !matches!(tool, ToolName::Cycles);
             assert_eq!(has_table, expect_table, "mismatch for {tool:?}");
         }
     }
@@ -670,16 +664,16 @@ mod tests {
     /// The generated rows read the options struct, so a value enum lists
     /// every variant — the hand-written table once omitted `blocks`.
     #[rstest::rstest]
-    #[case("| `target` | \"functions\", \"types\" or \"blocks\" | default: functions |")]
+    #[case("| `target` | \"functions\", \"types\", \"blocks\" or \"tests\" | default: functions |")]
     #[case("| `weights` | \"static\", \"co-change\" or \"both\" | default: static |")]
     #[case("| `diff-only` | bool | default: false |")]
     #[case("| `limit` | int | default: 20 |")]
-    // `graph-query` has its own `limit`: a runtime default belongs to one
+    // `graph` has its own `limit`: a runtime default belongs to one
     // tool, not to every key spelled the same.
     #[case("| `limit` | int | default: 50 |")]
     #[case("| `sweep` | array<float> | default: [] |")]
     #[case("| `bot-pattern` | array<string> | default: [\"*\\\\[bot\\\\]*\"] |")]
-    #[case("| `query` | \"callers\", \"callees\", \"neighborhood\" or \"path\" | required |")]
+    #[case("| `query` | \"callers\", \"callees\", \"neighborhood\" or \"path\" | optional |")]
     fn rows_are_generated_from_the_options_structs(#[case] row: &str) {
         let md = render();
         assert!(md.contains(row), "missing `{row}` in:\n{md}");

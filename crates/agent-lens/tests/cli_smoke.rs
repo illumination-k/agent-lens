@@ -663,7 +663,7 @@ fn exclude_prunes_a_directory_however_it_is_spelled(
 #[case("coupling")]
 #[case("communities")]
 #[case("context-span")]
-#[case("function-graph")]
+#[case("graph")]
 fn a_walked_undecodable_file_is_warned_about_and_skipped(#[case] analyzer: &str) {
     let dir = tempfile::tempdir().unwrap();
     write_undecodable_vendor_fixture(dir.path());
@@ -1219,14 +1219,14 @@ fn run_profile_drives_graph_query_end_to_end() {
     );
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.trace]\npath = \"src\"\ntools = [\"graph-query\"]\n\n\
-         [profile.trace.graph-query]\nquery = \"callers\"\nsymbol = \"sink\"\n",
+        "[profile.trace]\npath = \"src\"\ntools = [\"graph\"]\n\n\
+         [profile.trace.graph]\nquery = \"callers\"\nsymbol = \"sink\"\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "trace"], dir.path(), None);
     let json = stdout_json(&output);
-    assert_eq!(json["results"][0]["tool"], "graph-query");
+    assert_eq!(json["results"][0]["tool"], "graph");
     let report = &json["results"][0]["report"];
     assert_eq!(report["status"], "ok");
     assert_eq!(report["results"][0]["qualified_name"], "crate::caller");
@@ -1499,19 +1499,44 @@ pub mod db {
 }
 
 #[test]
-fn run_profile_rejects_graph_query_without_options_table() {
+fn run_profile_rejects_graph_query_without_symbol() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "src/lib.rs", BRANCHY_RS);
     std::fs::write(
         dir.path().join("agent-lens.toml"),
-        "[profile.trace]\npath = \"src\"\ntools = [\"graph-query\"]\n",
+        "[profile.trace]\npath = \"src\"\ntools = [\"graph\"]\n\n\
+         [profile.trace.graph]\nquery = \"callers\"\n",
     )
     .unwrap();
 
     let output = agent_lens(&["run", "trace"], dir.path(), None);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("graph-query"), "got: {stderr}");
+    assert!(stderr.contains("requires `symbol`"), "got: {stderr}");
+}
+
+/// The removed names still fail usefully on the command line, naming
+/// the analyzer and flags that carry their report now.
+#[rstest]
+#[case(
+    "untested",
+    "`analyze untested` is now `analyze reach --section untested`"
+)]
+#[case("function-graph", "`analyze function-graph` is now `analyze graph`")]
+#[case(
+    "graph-query",
+    "`analyze graph-query` is now `analyze graph --query <verb> --symbol <fn>`"
+)]
+#[case(
+    "test-redundancy",
+    "`analyze test-redundancy` is now `analyze similarity --target tests`"
+)]
+fn a_merged_analyzer_name_says_where_it_went(#[case] old: &str, #[case] expected: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let output = agent_lens(&["analyze", old, "."], dir.path(), None);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(expected), "got: {stderr}");
 }
 
 /// The mistake this catches is writing the profile path relative to the
@@ -2440,21 +2465,5 @@ fn skills_install_reports_conflict_until_forced() {
         std::fs::read_to_string(&target)
             .unwrap()
             .contains("name: agent-lens")
-    );
-}
-
-#[test]
-fn a_merged_analyzer_name_points_at_its_new_home() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_agent-lens"))
-        .args(["analyze", "untested", "."])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("`analyze untested` is now `analyze reach --section untested`"),
-        "got: {stderr}",
     );
 }

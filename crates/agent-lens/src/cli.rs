@@ -60,7 +60,7 @@ pub fn main() -> ExitCode {
 }
 
 /// A merged analyzer's old subcommand is not just unrecognised: say
-/// which analyzer and section carry it now, so a stale skill or script
+/// which analyzer and flags carry it now, so a stale skill or script
 /// can fix itself from the error alone.
 fn merged_subcommand_hint(err: &clap::Error) -> Option<String> {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -70,12 +70,10 @@ fn merged_subcommand_hint(err: &clap::Error) -> Option<String> {
     let Some(ContextValue::String(name)) = err.get(ContextKind::InvalidSubcommand) else {
         return None;
     };
-    let (_, tool, section) = agent_lens::config::MERGED_TOOLS
+    let merged = agent_lens::config::MERGED_TOOLS
         .iter()
-        .find(|(old, ..)| old == name)?;
-    Some(format!(
-        "`analyze {name}` is now `analyze {tool} --section {section}`"
-    ))
+        .find(|merged| merged.old == name)?;
+    Some(format!("`analyze {name}` is now `{}`", merged.command()))
 }
 
 fn init_tracing() {
@@ -210,6 +208,10 @@ mod tests {
     #[case(
         "visibility",
         "`analyze visibility` is now `analyze narrowable --section visibility`"
+    )]
+    #[case(
+        "test-redundancy",
+        "`analyze test-redundancy` is now `analyze similarity --target tests`"
     )]
     fn a_merged_subcommand_names_its_new_home(#[case] name: &str, #[case] expected: &str) {
         let err = Cli::try_parse_from(["agent-lens", "analyze", name, "."]).unwrap_err();

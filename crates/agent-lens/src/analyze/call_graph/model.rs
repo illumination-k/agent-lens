@@ -4,7 +4,7 @@
 //! builder ([`super::CallGraph`]), the symbol resolver
 //! ([`super::resolve::Resolver`]), and every analyzer that consumes
 //! the graph. They double as the serialized report shapes for
-//! `analyze function-graph`, so field names and ordering here are
+//! `analyze graph`, so field names and ordering here are
 //! part of the JSON schema.
 
 use lens_domain::{

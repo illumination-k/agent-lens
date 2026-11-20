@@ -43,7 +43,7 @@
 ///
 /// The generated type derives `Default`, which `#[serde(default)]` uses to
 /// fill an absent table. An analyzer whose flags carry non-trivial clap
-/// defaults (`similarity`) or required keys (`graph-query`) is written out
+/// defaults (`similarity`) or required keys (`search`) is written out
 /// by hand instead, so its `Default` and its `default_value_t` cannot
 /// disagree.
 macro_rules! analyzer_options {
@@ -186,9 +186,6 @@ mod tests {
     use crate::analyze::coupling::{CouplingAnalyzer, CouplingOptions};
     use crate::analyze::delegation::{DelegationAnalyzer, DelegationOptions};
     use crate::analyze::footprint::{FootprintAnalyzer, FootprintOptions};
-    use crate::analyze::graph_query::{
-        GraphDirection, GraphQueryAnalyzer, GraphQueryKind, GraphQueryOptions,
-    };
     use crate::analyze::history::change_entropy::{
         ChangeEntropyAnalyzer, ChangeEntropyOptions, Period,
     };
@@ -205,7 +202,6 @@ mod tests {
     use crate::analyze::single_impl::{SingleImplAnalyzer, SingleImplOptions};
     use crate::analyze::single_use::{SingleUseAnalyzer, SingleUseOptions};
     use crate::analyze::test_only::{TestOnlyAnalyzer, TestOnlyOptions};
-    use crate::analyze::test_redundancy::{TestRedundancyAnalyzer, TestRedundancyOptions};
     use crate::analyze::unreachable::{Tier, UnreachableAnalyzer, UnreachableOptions};
     use crate::analyze::untested::{UntestedAnalyzer, UntestedOptions};
     use crate::analyze::visibility::{VisibilityAnalyzer, VisibilityOptions};
@@ -563,6 +559,8 @@ mod tests {
             method: crate::analyze::SimilarityMethod::Token,
             idf: true,
             doc_overlap: true,
+            min_body_nodes: Some(12),
+            no_reach_guard: true,
         };
         let via_options = SimilarityAnalyzer::new().with_options(opts);
         let via_builders = SimilarityAnalyzer::new()
@@ -576,39 +574,13 @@ mod tests {
             .with_doc_overlap(true)
             .with_paired_by(None)
             .with_drift_floor(0.4)
-            .with_top(Some(3));
-        assert_eq!(format!("{via_options:?}"), format!("{via_builders:?}"));
-        assert_ne!(
-            format!("{via_options:?}"),
-            format!("{:?}", SimilarityAnalyzer::new()),
-        );
-    }
-
-    /// `test-redundancy` hand-writes its options for the same reason
-    /// similarity does, so it needs the same guard that every field
-    /// still reaches the builder.
-    #[test]
-    fn test_redundancy_options_reach_the_analyzer() {
-        let opts = TestRedundancyOptions {
-            top: Some(3),
-            threshold: 0.6,
-            method: crate::analyze::SimilarityMethod::Pdg,
-            min_lines: Some(9),
-            min_body_nodes: Some(12),
-            no_reach_guard: true,
-        };
-        let via_options = TestRedundancyAnalyzer::new().with_options(opts);
-        let via_builders = TestRedundancyAnalyzer::new()
-            .with_threshold(0.6)
-            .with_method(crate::analyze::SimilarityMethod::Pdg)
-            .with_min_lines_opt(Some(9))
             .with_min_body_nodes_opt(Some(12))
             .with_reach_guard(false)
             .with_top(Some(3));
         assert_eq!(format!("{via_options:?}"), format!("{via_builders:?}"));
         assert_ne!(
             format!("{via_options:?}"),
-            format!("{:?}", TestRedundancyAnalyzer::new()),
+            format!("{:?}", SimilarityAnalyzer::new()),
         );
     }
 
@@ -618,33 +590,5 @@ mod tests {
         let via_options = SimilarityAnalyzer::new().with_options(SimilarityOptions::default());
         let via_builders = SimilarityAnalyzer::new().with_sweep(None);
         assert_eq!(format!("{via_options:?}"), format!("{via_builders:?}"));
-    }
-
-    /// `graph-query` constructs rather than configures: its `query` and
-    /// `symbol` are required, so it has `from_options` instead.
-    #[test]
-    fn graph_query_options_reach_the_analyzer() {
-        let opts = GraphQueryOptions {
-            query: GraphQueryKind::Path,
-            symbol: "handler".to_owned(),
-            to: Some("db_write".to_owned()),
-            depth: Some(3),
-            direction: Some(GraphDirection::In),
-            limit: Some(10),
-        };
-        let via_options = GraphQueryAnalyzer::from_options(opts);
-        let via_builders = GraphQueryAnalyzer::new(GraphQueryKind::Path, "handler")
-            .with_to(Some("db_write".to_owned()))
-            .with_depth(Some(3))
-            .with_direction(Some(GraphDirection::In))
-            .with_limit(Some(10));
-        assert_eq!(format!("{via_options:?}"), format!("{via_builders:?}"));
-        assert_ne!(
-            format!("{via_options:?}"),
-            format!(
-                "{:?}",
-                GraphQueryAnalyzer::new(GraphQueryKind::Path, "handler")
-            ),
-        );
     }
 }

@@ -6,21 +6,19 @@ use std::path::PathBuf;
 use agent_lens::analyze::{
     ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer,
     ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, FootprintAnalyzer,
-    ForwardingAnalyzer, FunctionGraphAnalyzer, FunctionSelection, GraphQueryAnalyzer,
-    HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer,
-    NarrowableAnalyzer, OutputFormat, OwnershipAnalyzer, ReachAnalyzer, RiskAnalyzer,
-    SearchAnalyzer, SimilarityAnalyzer, TestRedundancyAnalyzer,
+    ForwardingAnalyzer, FunctionSelection, GraphAnalyzer, HiddenCouplingAnalyzer, HotspotAnalyzer,
+    HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, NarrowableAnalyzer, OutputFormat,
+    OwnershipAnalyzer, ReachAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeChangeEntropyArgs, AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand,
     AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
-    AnalyzeCouplingArgs, AnalyzeFootprintArgs, AnalyzeForwardingArgs, AnalyzeGraphQueryArgs,
+    AnalyzeCouplingArgs, AnalyzeFootprintArgs, AnalyzeForwardingArgs, AnalyzeGraphArgs,
     AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
     AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzeOwnershipArgs, AnalyzePathArgs,
     AnalyzeReachArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
-    AnalyzeTestRedundancyArgs,
 };
 use super::output::write_stdout_line;
 
@@ -39,10 +37,10 @@ pub(super) fn run_analyze(cmd: AnalyzeCommand) -> Result<(), Box<dyn std::error:
 /// Each analyzer's options table *is* its clap flag group, so a present
 /// table drops straight into the command with no field-by-field copy. An
 /// absent table means "run with the analyzer's CLI defaults", which is
-/// exactly its `Default`. `graph-query` is the one tool with no defaults
-/// to fall back to (its `query` and `symbol` are required), so a missing
-/// table is an error — [`config::load`] already rejects such profiles,
-/// this is the seam-level guard.
+/// exactly its `Default`. `search` is the one tool with no defaults to
+/// fall back to (its `query` is required), so a missing table is an
+/// error — [`config::load`] already rejects such profiles, this is the
+/// seam-level guard.
 pub(super) fn build_analyze_command(
     tool: config::ToolName,
     profile: &config::Profile,
@@ -133,12 +131,6 @@ pub(super) fn build_analyze_command(
             common,
             opts: profile.forwarding.clone().unwrap_or_default(),
         }),
-        config::ToolName::TestRedundancy => {
-            AnalyzeCommand::TestRedundancy(AnalyzeTestRedundancyArgs {
-                common,
-                opts: profile.test_redundancy.clone().unwrap_or_default(),
-            })
-        }
         config::ToolName::Layers => AnalyzeCommand::Layers(AnalyzeLayersArgs {
             common,
             opts: profile.layers.clone().unwrap_or_default(),
@@ -172,18 +164,12 @@ pub(super) fn build_analyze_command(
                     tool: config::ToolName::Search.as_str(),
                 })?,
         }),
-        config::ToolName::GraphQuery => AnalyzeCommand::GraphQuery(AnalyzeGraphQueryArgs {
+        config::ToolName::Graph => AnalyzeCommand::Graph(AnalyzeGraphArgs {
             common,
-            opts: profile
-                .graph_query
-                .clone()
-                .ok_or(ConfigError::MissingToolOptions {
-                    tool: config::ToolName::GraphQuery.as_str(),
-                })?,
+            opts: profile.graph.clone().unwrap_or_default(),
         }),
         // Analyzers with no options beyond the shared path/format args.
         config::ToolName::Cycles => AnalyzeCommand::Cycles(common),
-        config::ToolName::FunctionGraph => AnalyzeCommand::FunctionGraph(common),
     })
 }
 
@@ -228,8 +214,7 @@ impl_with_analyze_path_args!(
     CommunitiesAnalyzer,
     CouplingAnalyzer,
     CyclesAnalyzer,
-    FunctionGraphAnalyzer,
-    GraphQueryAnalyzer,
+    GraphAnalyzer,
     ContextSpanAnalyzer,
     HiddenCouplingAnalyzer,
     HotspotAnalyzer,
@@ -242,7 +227,6 @@ impl_with_analyze_path_args!(
     OwnershipAnalyzer,
     ReachAnalyzer,
     RiskAnalyzer,
-    TestRedundancyAnalyzer,
 );
 
 // Complexity, similarity, and search all need the same `(only_tests,
@@ -331,6 +315,7 @@ impl AnalyzeCommand {
                 Hubs => HubsAnalyzer,
                 Footprint => FootprintAnalyzer,
                 Forwarding => ForwardingAnalyzer,
+                Graph => GraphAnalyzer,
                 Impact => ImpactAnalyzer,
                 Layers => LayersAnalyzer,
                 Narrowable => NarrowableAnalyzer,
@@ -338,15 +323,12 @@ impl AnalyzeCommand {
                 Reach => ReachAnalyzer,
                 Risk => RiskAnalyzer,
                 Similarity => SimilarityAnalyzer,
-                TestRedundancy => TestRedundancyAnalyzer,
             }
             from_options {
-                GraphQuery => GraphQueryAnalyzer,
                 Search => SearchAnalyzer,
             }
             no_options {
                 Cycles => CyclesAnalyzer,
-                FunctionGraph => FunctionGraphAnalyzer,
             }
         })
     }
@@ -766,25 +748,25 @@ fn dispatch(n: i32) -> i32 {
     }
 
     #[test]
-    fn build_analyze_command_maps_graph_query_options() {
+    fn build_analyze_command_maps_graph_options() {
         let profile: config::Profile = toml::from_str(
-            "path = \"crates\"\ntools = [\"graph-query\"]\n\n\
-             [graph-query]\nquery = \"path\"\nsymbol = \"handler\"\nto = \"db_write\"\n\
+            "path = \"crates\"\ntools = [\"graph\"]\n\n\
+             [graph]\nquery = \"path\"\nsymbol = \"handler\"\nto = \"db_write\"\n\
              depth = 3\nlimit = 10\n",
         )
         .unwrap();
         let cmd = build_analyze_command(
-            config::ToolName::GraphQuery,
+            config::ToolName::Graph,
             &profile,
             &[PathBuf::from("crates")],
             OutputFormat::Md,
         )
         .unwrap();
-        let AnalyzeCommand::GraphQuery(args) = cmd else {
-            panic!("expected analyze graph-query");
+        let AnalyzeCommand::Graph(args) = cmd else {
+            panic!("expected analyze graph");
         };
-        assert_eq!(args.opts.query, GraphQueryKind::Path);
-        assert_eq!(args.opts.symbol, "handler");
+        assert_eq!(args.opts.query, Some(GraphQueryKind::Path));
+        assert_eq!(args.opts.symbol.as_deref(), Some("handler"));
         assert_eq!(args.opts.to.as_deref(), Some("db_write"));
         assert_eq!(args.opts.depth, Some(3));
         assert_eq!(args.opts.direction, None);
@@ -792,28 +774,23 @@ fn dispatch(n: i32) -> i32 {
         assert_eq!(args.common.format, OutputFormat::Md);
     }
 
+    /// No table is the whole-graph dump, not an error.
     #[test]
-    fn build_analyze_command_rejects_graph_query_without_table() {
-        // `toml::from_str` skips `Config::validate`, so the seam-level
-        // guard in `build_analyze_command` is what stands here.
+    fn build_analyze_command_maps_graph_without_table_to_the_dump() {
         let profile: config::Profile =
-            toml::from_str("path = \"crates\"\ntools = [\"graph-query\"]\n").unwrap();
-        let err = build_analyze_command(
-            config::ToolName::GraphQuery,
+            toml::from_str("path = \"crates\"\ntools = [\"graph\"]\n").unwrap();
+        let cmd = build_analyze_command(
+            config::ToolName::Graph,
             &profile,
             &[PathBuf::from("crates")],
             OutputFormat::Json,
         )
-        .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ConfigError::MissingToolOptions {
-                    tool: "graph-query"
-                }
-            ),
-            "got: {err:?}",
-        );
+        .unwrap();
+        let AnalyzeCommand::Graph(args) = cmd else {
+            panic!("expected analyze graph");
+        };
+        assert_eq!(args.opts.query, None);
+        assert_eq!(args.opts.symbol, None);
     }
 
     #[test]

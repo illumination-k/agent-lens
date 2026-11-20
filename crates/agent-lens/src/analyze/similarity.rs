@@ -22,6 +22,7 @@ use rayon::prelude::*;
 use tracing::debug;
 
 use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::test_redundancy::TestRedundancyAnalyzer;
 use super::{
     AnalyzeRoots, AnalyzerError, DiffScope, FunctionSelection, LineRange, OutputFormat,
     changed_line_ranges,
@@ -98,6 +99,8 @@ pub struct SimilarityAnalyzer {
     doc_overlap: bool,
     paired_by: Option<PairKey>,
     drift_floor: f64,
+    min_body_nodes: Option<usize>,
+    reach_guard: bool,
 }
 
 impl SimilarityAnalyzer {
@@ -116,6 +119,8 @@ impl SimilarityAnalyzer {
             doc_overlap: false,
             paired_by: None,
             drift_floor: DEFAULT_DRIFT_FLOOR,
+            min_body_nodes: None,
+            reach_guard: true,
         }
     }
 
@@ -146,7 +151,23 @@ impl SimilarityAnalyzer {
             .with_doc_overlap(opts.doc_overlap)
             .with_paired_by(opts.paired_by)
             .with_drift_floor(opts.drift_floor)
+            .with_min_body_nodes_opt(opts.min_body_nodes)
+            .with_reach_guard(!opts.no_reach_guard)
             .with_top(opts.top)
+    }
+
+    /// `--target tests` only: skip tests whose body tree is smaller than
+    /// this. `None` keeps the test-suite default.
+    pub fn with_min_body_nodes_opt(mut self, min_body_nodes: Option<usize>) -> Self {
+        self.min_body_nodes = min_body_nodes;
+        self
+    }
+
+    /// `--target tests` only: whether fold candidates are checked
+    /// against the call graph. On by default.
+    pub fn with_reach_guard(mut self, reach_guard: bool) -> Self {
+        self.reach_guard = reach_guard;
+        self
     }
 
     /// Function-level test filter. Path-level test filtering is set
@@ -262,7 +283,7 @@ impl SimilarityAnalyzer {
     /// otherwise the target's default.
     fn resolved_min_lines(&self) -> usize {
         self.min_lines.unwrap_or(match self.target {
-            SimilarityTarget::Functions => DEFAULT_MIN_LINES,
+            SimilarityTarget::Functions | SimilarityTarget::Tests => DEFAULT_MIN_LINES,
             SimilarityTarget::Types => DEFAULT_TYPE_MIN_LINES,
             SimilarityTarget::Blocks => DEFAULT_BLOCK_MIN_LINES,
         })
@@ -308,6 +329,53 @@ impl SimilarityAnalyzer {
     /// Accepts a single path or several — see [`AnalyzeRoots`]; clusters
     /// are found across the whole set, which is what a per-root run
     /// cannot do.
+    /// Reject an option the selected target has no meaning for, rather
+    /// than silently ignoring it. `--target tests` replaces clustering
+    /// with its own keep/fold selection, so the clustering knobs do not
+    /// apply to it, and the test-suite knobs apply to nothing else.
+    fn validate_target_options(&self) -> Result<(), AnalyzerError> {
+        let tests = self.target == SimilarityTarget::Tests;
+        let offending: &[(&'static str, bool)] = if tests {
+            &[
+                ("--sweep", self.sweep.is_some()),
+                ("--paired-by", self.paired_by.is_some()),
+                ("--doc-overlap", self.doc_overlap),
+                (
+                    "--diff-only / --diff-range",
+                    self.filter.diff_scope().is_enabled(),
+                ),
+            ]
+        } else {
+            &[
+                ("--min-body-nodes", self.min_body_nodes.is_some()),
+                ("--no-reach-guard", !self.reach_guard),
+            ]
+        };
+        match offending.iter().find(|(_, set)| *set) {
+            Some((flag, _)) => Err(AnalyzerError::SimilarityTargetOption {
+                flag,
+                target: self.target.as_str(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// The test-suite run behind `--target tests`: the same score cuts
+    /// and path filters, handed to the keep/fold selection.
+    fn test_suite(&self) -> TestRedundancyAnalyzer {
+        TestRedundancyAnalyzer::new()
+            .with_threshold(self.threshold)
+            .with_method(self.method)
+            .with_idf(self.idf)
+            .with_min_lines_opt(self.min_lines)
+            .with_min_body_nodes_opt(self.min_body_nodes)
+            .with_reach_guard(self.reach_guard)
+            .with_top(self.top)
+            .with_only_tests(self.filter.only_tests())
+            .with_exclude_tests(self.filter.exclude_tests())
+            .with_exclude_patterns(self.filter.exclude().to_vec())
+    }
+
     pub fn analyze(
         &self,
         roots: impl Into<AnalyzeRoots>,
@@ -315,6 +383,10 @@ impl SimilarityAnalyzer {
     ) -> Result<String, AnalyzerError> {
         let roots = roots.into();
         self.validate_score_cuts()?;
+        self.validate_target_options()?;
+        if self.target == SimilarityTarget::Tests {
+            return self.test_suite().analyze(roots, format);
+        }
         if self.target == SimilarityTarget::Types && self.paired_by == Some(PairKey::Method) {
             return Err(AnalyzerError::TypeTargetPairedByMethod);
         }
@@ -672,7 +744,7 @@ impl SimilarityAnalyzer {
     /// handing back the units and every pair that cleared the
     /// threshold.
     ///
-    /// The seam exists for `analyze test-redundancy`, which needs the
+    /// The seam exists for `--target tests` (`test_redundancy`), which needs the
     /// same scored graph but replaces clustering with its own selection
     /// pass. Everything up to and including scoring is identical to
     /// [`Self::find_clusters`]; the diff gate is not applied, because

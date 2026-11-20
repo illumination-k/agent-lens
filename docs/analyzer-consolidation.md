@@ -9,13 +9,14 @@ down to 17, with an optional further step to 15.
 
 The project is pre-alpha, so old names are removed rather than kept as
 aliases. A removed name still fails usefully: `analyze <old>` exits 2 with
-`` `analyze <old>` is now `analyze <new> --section <old>` ``, and a profile
-listing it fails to load with the analyzer and section that carry it now
+`` `analyze <old>` is now `analyze <new> <flags>` `` (`--section <old>` for a
+bundle, `--target tests`, `--query …`), and a profile listing it fails to
+load with the analyzer and the table key that select it now
 (`config::MERGED_TOOLS` is the one table both read). A stale skill or
 `agent-lens.toml` then says how to fix itself.
 
-Status: `reach`, `narrowable` and `forwarding` are done (29 → 23). The rest
-of this plan is still open.
+Status: `reach`, `narrowable`, `forwarding`, `similarity --target tests` and
+`graph` are done (29 → 21). The rest of this plan is still open.
 
 ## Target surface
 
@@ -83,8 +84,8 @@ Order is cheapest-first: phases 1–2 merge analyzers whose code already calls
 into each other, so they are mostly CLI, config and output-schema work.
 
 1. **Thin merges** (one PR each, independent):
-   `test-redundancy` → `similarity --target tests`;
-   `function-graph` + `graph-query` → `graph`;
+   `test-redundancy` → `similarity --target tests` — done;
+   `function-graph` + `graph-query` → `graph` — done;
    `risk` → `hotspot --by blast`;
    `hidden-coupling` → `co-change --against-code`;
    `context-span` → `coupling`.
@@ -123,7 +124,6 @@ should show it.
 
 ## Open questions
 
-- Names: `graph` is a proposal.
 - Whether hook ids (`post-tool-use:wrapper`) follow the analyzer rename. This
   plan keeps them, since renaming breaks every installed `settings.json`.
 - Whether to take the optional step to 15.

@@ -72,11 +72,11 @@ A high `fan_in` on the hotspot module means changes ripple. A wide `context-span
 
 ### 5. Map blast radius at the function level
 
-Module-level coupling tells you which modules depend on the hotspot. To answer "which functions specifically call the function I'm about to change?" use `function-graph`:
+Module-level coupling tells you which modules depend on the hotspot. To answer "which functions specifically call the function I'm about to change?" use `graph`:
 
 ```bash
-agent-lens analyze function-graph crates/<name>/src --format md   # sanity counts
-agent-lens analyze function-graph crates/<name>/src \
+agent-lens analyze graph crates/<name>/src --format md   # sanity counts
+agent-lens analyze graph crates/<name>/src \
   | jq --arg fn "Coupling::collect" '
       .edges[] | select(.callee_name == ($fn | split("::") | last))
                  | {from, callee_name, call_lines}'
@@ -88,7 +88,7 @@ Useful patterns:
 - **Callees / blast radius**: filter edges by `from == "<node id>"` to see what the function depends on. A high `outgoing_call_count` warns that extraction will fan out into many helpers.
 - **Apparently-dead code**: nodes with `incoming_call_count == 0` outside tests / public API / hooks are candidates to delete after the refactor lands.
 
-The graph is heuristic — `unresolved` and `ambiguous` edges are normal (trait dispatch, dynamic calls, external imports). Treat `function-graph` as a "where might this break?" prompt, not a verifier.
+The graph is heuristic — `unresolved` and `ambiguous` edges are normal (trait dispatch, dynamic calls, external imports). Treat `graph` as a "where might this break?" prompt, not a verifier.
 
 ## Reading the metrics
 

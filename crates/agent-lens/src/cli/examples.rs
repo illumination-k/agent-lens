@@ -32,7 +32,7 @@ Pick an analyzer by question:
     is this body just a forwarder?        analyze forwarding --section wrapper
     is one caller all this function has?  analyze narrowable --section single-use
     is one value all this param gets?     analyze narrowable --section parameters
-    did I write this test twice?          analyze test-redundancy
+    did I write this test twice?          analyze similarity --target tests
     is one impl all this trait has?       analyze narrowable --section single-impl
     how many hops before real work?       analyze forwarding --section delegation
     does this type do too many things?    analyze cohesion
@@ -47,8 +47,8 @@ Pick an analyzer by question:
     what do only tests keep alive?        analyze reach --section test-only
     can anything still reach this code?   analyze reach --section unreachable
     is this `pub` wider than it needs?    analyze narrowable --section visibility
-    who calls this / how do I get there?  analyze graph-query
-    give me the raw call graph            analyze function-graph
+    who calls this / how do I get there?  analyze graph --query
+    give me the raw call graph            analyze graph
 "
     };
 }
@@ -142,23 +142,18 @@ Examples:
     agent-lens analyze cycles src/ --exclude-tests --format md
 ";
 
-pub const FUNCTION_GRAPH: &str = "\
+pub const GRAPH: &str = "\
 Examples:
 
-    agent-lens analyze function-graph src/ --format md
-    agent-lens analyze function-graph src/ > graph.json
-";
-
-pub const GRAPH_QUERY: &str = "\
-Examples:
-
-    agent-lens analyze graph-query src/ --query callers \\
+    agent-lens analyze graph src/ --format md
+    agent-lens analyze graph src/ > graph.json
+    agent-lens analyze graph src/ --query callers \\
       --symbol Resolver::resolve --format md
-    agent-lens analyze graph-query src/ --query callees \\
+    agent-lens analyze graph src/ --query callees \\
       --symbol main --depth 2 --format md
-    agent-lens analyze graph-query src/ --query neighborhood \\
+    agent-lens analyze graph src/ --query neighborhood \\
       --symbol parse --direction both --depth 2 --format md
-    agent-lens analyze graph-query src/ --query path \\
+    agent-lens analyze graph src/ --query path \\
       --symbol main --to write_stdout_json --format md
 ";
 
@@ -183,14 +178,6 @@ Examples:
     agent-lens analyze footprint . --format md
     agent-lens analyze footprint crates/ --diff-range main...HEAD --format md
     agent-lens analyze footprint . --depth 3 --exclude-tests
-";
-
-pub const TEST_REDUNDANCY: &str = "\
-Examples:
-
-    agent-lens analyze test-redundancy crates/ --format md
-    agent-lens analyze test-redundancy crates/ --threshold 0.9 --top 10 --format md
-    agent-lens analyze test-redundancy crates/ --method pdg --no-reach-guard
 ";
 
 pub const IMPACT: &str = "\
@@ -353,6 +340,8 @@ Examples:
     agent-lens analyze similarity . --paired-by name --format md
     agent-lens analyze similarity src/ --target types --format md
     agent-lens analyze similarity . --target types --paired-by name --format md
+    agent-lens analyze similarity crates/ --target tests --format md
+    agent-lens analyze similarity crates/ --target tests --method pdg --no-reach-guard
 ";
 
 pub const RUN: &str = "\

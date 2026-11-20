@@ -9,7 +9,7 @@ use agent_lens::analyze::context_span::ContextSpanOptions;
 use agent_lens::analyze::coupling::CouplingOptions;
 use agent_lens::analyze::footprint::FootprintOptions;
 use agent_lens::analyze::forwarding::ForwardingOptions;
-use agent_lens::analyze::graph_query::GraphQueryOptions;
+use agent_lens::analyze::graph::GraphOptions;
 use agent_lens::analyze::history::change_entropy::ChangeEntropyOptions;
 use agent_lens::analyze::history::co_change::CoChangeOptions;
 use agent_lens::analyze::history::ownership::OwnershipOptions;
@@ -22,7 +22,6 @@ use agent_lens::analyze::reach::ReachOptions;
 use agent_lens::analyze::risk::RiskOptions;
 use agent_lens::analyze::search::SearchOptions;
 use agent_lens::analyze::similarity::SimilarityOptions;
-use agent_lens::analyze::test_redundancy::TestRedundancyOptions;
 use agent_lens::analyze::{AnalyzeRoots, OutputFormat};
 use clap::{Args, Subcommand};
 
@@ -130,7 +129,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// cheapest-cut suggestions for breaking each group.
     ///
     /// Builds the same heuristic static call graph as `analyze
-    /// function-graph` and reports its strongly connected components
+    /// graph` and reports its strongly connected components
     /// over resolved call edges only. Each tangle lists its members
     /// with file:line, whether it stays inside one file (likely
     /// intentional mutual recursion — parsers, tree walkers — and
@@ -156,7 +155,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// reuse counts when a directory is walked; Go wrappers that satisfy
     /// an interface are annotated, since deleting them is not the fix.
     /// `delegation`: builds the same heuristic call graph as `analyze
-    /// function-graph` and walks the functions that add nothing of their
+    /// graph` and walks the functions that add nothing of their
     /// own — exactly one resolved outgoing target, at most three body
     /// statements, `cyclomatic == 1` — into chains such as `api::save ->
     /// service::save -> repo::save -> db::insert`, with the terminus
@@ -174,39 +173,32 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// each listing at `--top` (default 20).
     #[command(after_long_help = examples::FORWARDING)]
     Forwarding(AnalyzeForwardingArgs),
-    /// Emit a static function call graph as visualization-ready data.
+    /// Emit the static function call graph, or run one canned traversal
+    /// over it: callers, callees, neighborhood, or path.
     ///
-    /// The graph is heuristic and current-source only: nodes are functions,
-    /// edges are syntactic call sites, and callee resolution is limited to
-    /// exact extracted names or unique last-segment matches. The parser is
-    /// chosen from each file extension (Rust, TypeScript/JavaScript,
-    /// Python, or Go); other extensions are ignored silently. JSON is the
-    /// default; `--format md` emits a compact sanity summary.
-    #[command(after_long_help = examples::FUNCTION_GRAPH)]
-    FunctionGraph(AnalyzeCommonArgs),
-    /// Run one canned traversal on the static function call graph:
-    /// callers, callees, neighborhood, or path.
-    ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
-    /// and answers one structural question per invocation. `--query
-    /// callers|callees|neighborhood` walks resolved call edges from the
-    /// function named by `--symbol` up to `--depth` (default 1;
-    /// `--direction in|out|both` picks the neighborhood orientation).
-    /// `--query path` reports the shortest call chain from `--symbol`
-    /// to `--to`, with the call lines of every hop as evidence.
-    /// Symbols match by `::`-segment suffix on the qualified name
-    /// (e.g. `Resolver::resolve`) or an exact node id; ambiguous
-    /// matches are listed, never guessed. Traversal follows resolved
-    /// edges only, so results are lower bounds — every row carries the
-    /// node's unresolved/ambiguous outgoing call-site counts — and the
-    /// result set is capped by node count (`--limit`, default 50). The
-    /// parser is chosen from each file extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go); other extensions are
-    /// ignored silently. JSON is the default; `--format md` renders
-    /// span and module detail for small result sets and compact id
-    /// rows for larger ones.
-    #[command(after_long_help = examples::GRAPH_QUERY)]
-    GraphQuery(AnalyzeGraphQueryArgs),
+    /// The graph is heuristic and current-source only: nodes are
+    /// functions, edges are syntactic call sites, and callee resolution
+    /// is limited to exact extracted names or unique last-segment
+    /// matches. Without `--query` the whole graph is emitted as
+    /// visualization-ready JSON (`--format md` emits a compact sanity
+    /// summary). With `--query` the run answers one structural question
+    /// instead: `callers|callees|neighborhood` walks resolved call edges
+    /// from the function named by `--symbol` up to `--depth` (default 1;
+    /// `--direction in|out|both` picks the neighborhood orientation), and
+    /// `path` reports the shortest call chain from `--symbol` to `--to`,
+    /// with the call lines of every hop as evidence. Symbols match by
+    /// `::`-segment suffix on the qualified name (e.g.
+    /// `Resolver::resolve`) or an exact node id; ambiguous matches are
+    /// listed, never guessed. Traversal follows resolved edges only, so
+    /// results are lower bounds — every row carries the node's
+    /// unresolved/ambiguous outgoing call-site counts — and the result
+    /// set is capped by node count (`--limit`, default 50); markdown
+    /// renders span and module detail for small result sets and compact
+    /// id rows for larger ones. The parser is chosen from each file
+    /// extension (Rust, TypeScript/JavaScript, Python, or Go); other
+    /// extensions are ignored silently. JSON is the default.
+    #[command(after_long_help = examples::GRAPH)]
+    Graph(AnalyzeGraphArgs),
     /// Report each module's transitive outgoing dependency closure
     /// (its "context span").
     ///
@@ -229,7 +221,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// functions, load-bearing utilities, bottlenecks, and misplaced
     /// functions.
     ///
-    /// Builds the same call graph as `function-graph` and flags, per
+    /// Builds the same call graph as `graph` and flags, per
     /// function: outlier fan-out (god functions, defect-prone), outlier
     /// fan-in (load-bearing blast-radius signal — check callers before
     /// editing, not a defect), Henry-Kafura information-flow spikes
@@ -250,7 +242,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// transitively call the changed ones, which tests reach them, and
     /// where the impact concentrates.
     ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// Builds the same heuristic call graph as `analyze graph`
     /// and walks callers backwards from each seed over resolved call
     /// edges, on the SCC condensation (a call cycle counts as one hop),
     /// up to `--depth` hops (default 5). Seeds default to the functions
@@ -297,7 +289,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// sits on, which modules are mutually dependent, and which
     /// cross-module calls skip a level.
     ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// Builds the same heuristic call graph as `analyze graph`
     /// and levelizes it Lakos-style over resolved call edges, at two
     /// granularities. A function level (`L`) is
     /// `1 + max(level of its callees)`, computed on the SCC condensation
@@ -533,13 +525,29 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// per-pair components; `--format md` emits a compact summary tuned
     /// for LLM context, with the doc overlap rolled in under
     /// `--doc-overlap`.
+    ///
+    /// `--target tests` reads the test functions as a suite instead:
+    /// the same pair scores, then a greedy dominating-set pass picks, for
+    /// each set of near-copies, the test to keep and the ones it makes
+    /// redundant (modelled on similarity-based test-suite minimization,
+    /// without embeddings or genetic search). Each group's verdict is
+    /// `duplicate` when nothing the parser can see separates the copies,
+    /// or `parameterize` when they share a shape but name different
+    /// things — one table test rather than a deletion. The call graph
+    /// subtracts what it can disprove: a pair whose tests reach no
+    /// production function in common is not a pair, and a test that is
+    /// the sole static caller of something is never offered as foldable
+    /// (`--no-reach-guard` skips the graph build and both checks). A body
+    /// smaller than `--min-body-nodes` is skipped outright. Structural,
+    /// not behavioural: the report names candidates and never blesses a
+    /// deletion.
     #[command(after_long_help = examples::SIMILARITY)]
     Similarity(AnalyzeSimilarityArgs),
     /// Report declarations wider than their uses: single-use functions,
     /// single-impl abstractions, constant or dead parameters, and
     /// over-exposed visibility.
     ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// Builds the same heuristic call graph as `analyze graph`
     /// and reports four kinds of candidate edit, each a section and a
     /// full report with its own caveats. `single-use`: a non-test
     /// function exactly one resolved caller needs, small and simple
@@ -571,7 +579,7 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// Report who reaches each production function: untested,
     /// test-only, and unreachable code.
     ///
-    /// Builds the same heuristic call graph as `analyze function-graph`
+    /// Builds the same heuristic call graph as `analyze graph`
     /// and places every production function in one cell of
     /// reached-from-entries × reached-from-tests, where entries are
     /// `main`, Go `init`, `pub` / exported declarations, and anything
@@ -601,35 +609,6 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// up (`--tier` widens it).
     #[command(after_long_help = examples::REACH)]
     Reach(AnalyzeReachArgs),
-    /// Report tests that are near-copies of each other, and which one
-    /// of each set to keep.
-    ///
-    /// Scores test bodies against each other exactly as `analyze
-    /// similarity` does, then runs a greedy dominating-set pass over
-    /// the result: the test that makes the most others redundant is the
-    /// one to keep, and the rest are its near-copies. Modelled on
-    /// similarity-based test-suite minimization (LTM), without the
-    /// language-model embeddings or the genetic search — candidate
-    /// generation already hands the selection a sparse graph, where
-    /// greedy is both cheaper and deterministic. Each group carries a
-    /// verdict from how far the bodies agree once each node's recorded
-    /// value counts and not just its label: `duplicate` when nothing
-    /// the parser can see separates the copies, `parameterize` when
-    /// they share a shape but name different things, which is one table
-    /// test rather than a deletion. The call graph then subtracts what
-    /// it can disprove, in two directions — a pair whose tests reach no
-    /// production function in common is not a pair, and a test that is
-    /// the sole static caller of something is never offered as
-    /// foldable; `--no-reach-guard` skips the graph build and both
-    /// checks. A body smaller than `--min-body-nodes` is skipped
-    /// outright, because a Rust test that is one unexpanded
-    /// `assert_eq!` has the same two-node body as every other such
-    /// test. Structural, not behavioural: matching bodies are not
-    /// matching assertions, so the report names candidates and never
-    /// blesses a deletion. JSON is the default; `--format md` caps the
-    /// group list at `--top` (default 20).
-    #[command(name = "test-redundancy", after_long_help = examples::TEST_REDUNDANCY)]
-    TestRedundancy(AnalyzeTestRedundancyArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -726,11 +705,11 @@ pub(in crate::cli) struct AnalyzeCommunitiesArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeGraphQueryArgs {
+pub(in crate::cli) struct AnalyzeGraphArgs {
     #[command(flatten)]
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
-    pub(in crate::cli) opts: GraphQueryOptions,
+    pub(in crate::cli) opts: GraphOptions,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -830,14 +809,6 @@ pub(in crate::cli) struct AnalyzeSimilarityArgs {
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(in crate::cli) opts: SimilarityOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeTestRedundancyArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeCommonArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: TestRedundancyOptions,
 }
 
 #[derive(Debug, Clone, Args)]
