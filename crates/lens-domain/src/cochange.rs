@@ -221,6 +221,15 @@ impl CoChangeCounts {
         self.per_file.get(file).copied().unwrap_or(0)
     }
 
+    /// Every pair that co-changed at least once, `a < b`, ascending,
+    /// with its co-change count — the unfiltered population a caller
+    /// turns into weights rather than a ranking.
+    pub fn pairs(&self) -> impl Iterator<Item = (&str, &str, u32)> {
+        self.pairs
+            .iter()
+            .map(|((a, b), acc)| (a.as_str(), b.as_str(), acc.cochanges))
+    }
+
     /// Raw support for a pair in either spelling, or `None` when the two
     /// never moved together inside the window.
     pub fn support(&self, a: &str, b: &str) -> Option<PairSupport<'_>> {
@@ -427,6 +436,18 @@ mod tests {
             .iter()
             .find(|p| p.a == a && p.b == b)
             .unwrap_or_else(|| panic!("no {a}/{b} pair in {report:?}"))
+    }
+
+    #[test]
+    fn pairs_lists_every_co_changing_pair_once_in_key_order() {
+        let commits = vec![
+            commit("2026-05-03", &["b", "a"]),
+            commit("2026-05-02", &["a", "b", "c"]),
+            commit("2026-05-01", &["c"]),
+        ];
+        let counts = tally_cochange(&commits, 50);
+        let pairs: Vec<(&str, &str, u32)> = counts.pairs().collect();
+        assert_eq!(pairs, vec![("a", "b", 2), ("a", "c", 1), ("b", "c", 1)]);
     }
 
     #[test]

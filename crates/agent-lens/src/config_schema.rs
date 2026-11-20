@@ -273,10 +273,28 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
         ],
         ToolName::Communities => &[
             Field {
+                key: "algorithm",
+                ty: "\"greedy\" or \"leiden\"",
+                presence: "default: greedy",
+                desc: "Partitioner: greedy modularity agglomeration, or deterministic Leiden (faster on large graphs, never returns a disconnected community).",
+            },
+            Field {
+                key: "co-change-share",
+                ty: "float",
+                presence: "default: 0.5",
+                desc: "Under weights = \"both\", the share of total edge weight carried by co-change; the static graph carries the rest. Within [0.0, 1.0].",
+            },
+            Field {
                 key: "granularity",
                 ty: "\"file\" or \"module\"",
                 presence: "default: file",
                 desc: "What a community member is: one module-graph node (file), or the containing module those nodes collapse into (module).",
+            },
+            Field {
+                key: "max-commit-files",
+                ty: "int",
+                presence: "default: 50",
+                desc: "Commits touching more files than this are dropped from the co-change half.",
             },
             Field {
                 key: "min-community",
@@ -285,10 +303,34 @@ fn tool_table(tool: ToolName) -> Option<ToolTable> {
                 desc: "Smallest community that gets reported. The partition, and therefore both modularity figures, is unaffected.",
             },
             Field {
+                key: "min-support",
+                ty: "int",
+                presence: "default: 3",
+                desc: "Fewest shared commits for a file pair to become a co-change edge.",
+            },
+            Field {
+                key: "resolution",
+                ty: "float",
+                presence: "default: 1.0",
+                desc: "Modularity resolution γ. Above 1 favours smaller communities, below 1 larger ones; both modularity figures are scored at it. Must be above 0.",
+            },
+            Field {
+                key: "since",
+                ty: "string",
+                presence: "optional",
+                desc: "Git revision window for the co-change half, e.g. \"180.days.ago\". Only read when weights is co-change or both.",
+            },
+            Field {
                 key: "top",
                 ty: "int",
                 presence: "optional",
                 desc: "Cap each markdown listing to the top N rows.",
+            },
+            Field {
+                key: "weights",
+                ty: "\"static\", \"co-change\" or \"both\"",
+                presence: "default: static",
+                desc: "What an edge is: resolved static references, git co-change (Jaccard over commits), or both normalised and blended. co-change and both need a git working tree and add a static-vs-co-change partition comparison.",
             },
         ],
         ToolName::CoChange => &[

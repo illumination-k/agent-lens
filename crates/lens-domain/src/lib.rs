@@ -29,9 +29,9 @@
 //!   comparison units lives here so every language sees the same rule.
 //! * [`cohesion`] — LCOM4-style cohesion metric over method graphs that the
 //!   language adapters (e.g. `lens-rust`) populate.
-//! * [`communities`] — deterministic community detection over a module
-//!   dependency graph, scored against the grouping the repository
-//!   declares. Answers whether the directory structure matches the
+//! * [`communities`] — deterministic community detection (greedy CNM or
+//!   Leiden) over a weighted module graph, scored against the grouping
+//!   the repository declares, plus partition-agreement scoring. Answers whether the directory structure matches the
 //!   clustering the dependencies actually form.
 //! * [`complexity`] — per-function Cyclomatic / Cognitive / Nesting / Halstead
 //!   counts, plus derived Maintainability Index. Adapters fill in the counts;
@@ -147,8 +147,10 @@ pub use cohesion::{
     CohesionUnit, CohesionUnitKind, MethodCohesion, compute_components, compute_lcom96,
 };
 pub use communities::{
-    Community, CommunityEdge, CommunityNode, CommunityReport, DEFAULT_MIN_COMMUNITY, DeclaredShare,
-    MisfiledMember, SpanningCommunity, detect_communities,
+    Community, CommunityAlgorithm, CommunityEdge, CommunityNode, CommunityParams, CommunityReport,
+    DEFAULT_MIN_COMMUNITY, DEFAULT_RESOLUTION, DIVERGENT_BELOW, DeclaredShare, DivergentMember,
+    MisfiledMember, NodePartition, PartitionAgreement, SpanningCommunity, compare_partitions,
+    detect_communities, partition_nodes,
 };
 pub use complexity::{ComplexityCounters, FunctionComplexity, HalsteadAcc, HalsteadCounts};
 pub use context_span::{ContextSpanReport, ModuleContextSpan, compute_context_spans};

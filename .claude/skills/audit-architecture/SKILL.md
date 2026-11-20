@@ -10,7 +10,7 @@ Five analyzers cover the architecture question:
 - `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), Go modules (package-granular), and Python package trees (file-granular, in-tree imports only).
 - `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, Python, and Go. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
 - `layers` — inferred Lakos levelization of the call graph: a level per function and per module, the entry-point set, the module cycles that make levelization impossible (with the concrete call sites), and downward calls skipping a level. Needs no crate root or entry file — it walks any directory of Rust, TS/JS, Python, or Go.
-- `communities` — the clusters the dependency graph forms, scored against the module boundaries the repository declares. Newman modularity `Q` for both partitions over one graph, plus the members filed in one module but wired into another. Same entry-point rule as `coupling`.
+- `communities` — the clusters the dependency graph forms, scored against the module boundaries the repository declares. Modularity `Q` for both partitions over one graph, plus the members filed in one module but wired into another. Greedy or Leiden (`--algorithm`), tunable resolution, and optional git co-change edge weights (`--weights co-change|both`, which also compares the static and co-change clusterings). Same entry-point rule as `coupling`.
 - `cohesion` — per-`impl` (Rust) / per-class (TS, Python, Go) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
 
 ## Workflow
@@ -68,6 +68,9 @@ agent-lens analyze communities crates/agent-lens --format md --top 15
 
 # Directories rather than files, for "is this subtree under the right parent?"
 agent-lens analyze communities crates/agent-lens --granularity module --format md
+
+# Leiden, with git co-change blended into the edge weights
+agent-lens analyze communities crates/agent-lens --algorithm leiden --weights both --since 180.days.ago --format md
 ```
 
 Read it top-down and stop early when you can:
@@ -75,6 +78,9 @@ Read it top-down and stop early when you can:
 1. **The two `Q` values.** A declared score close to the detected one means the declared boundaries already are the clustering — the architecture matches reality, and everything below is noise. A wide gap is what makes the listings worth reading.
 2. **Misfiled members.** Each row is a move candidate with its evidence: edge weight to the module its community is named after, against edge weight to the module it is filed under. Rank order is that gap, so the top row is the best-evidenced move, not the biggest cluster.
 3. **Spanning communities.** A cluster no declared module owns a majority of is a feature smeared across modules — the case for a new module rather than a move.
+4. **Static vs co-change partitions** (only with `--weights co-change` or `both`). NMI near 1 means imports and edit history agree on the grouping. A divergent member clusters with one set of files by its references and another by what it is edited alongside — the undeclared-contract shape `hidden-coupling` lists pair by pair.
+
+`--algorithm leiden` is the better partitioner on large graphs (faster, never a disconnected community, usually higher `Q`); `--resolution` above 1 splits large communities when the resolution limit has merged clusters you know are separate. Changing either changes the partition, so compare runs at the same settings.
 
 Two things to discount before acting. Only resolved references become edges, so a module whose imports the extractor cannot resolve looks under-connected to its own neighbours — check the file before believing a row with `→declared 0`. And modularity has a resolution limit: a small genuine cluster can be absorbed into a larger neighbour, which is why every community reports its size.
 
