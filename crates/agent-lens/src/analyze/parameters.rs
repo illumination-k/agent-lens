@@ -42,6 +42,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use super::call_graph::model::{
     CallGraphEdge, CallGraphNode, CallSiteFacts, GraphLanguage, ModuleResolutionSummary,
@@ -49,11 +50,12 @@ use super::call_graph::model::{
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::{end_row_with_caveats, render_module_confidence};
+use super::format::{end_row_with_caveats, render_module_confidence, render_overflow_in};
 use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
+use super::jsonl::JsonlSink;
 use super::options::analyzer_options;
 use super::raw_references::{RawTarget, identifiers_by_line};
-use super::runner::render_report;
+use super::runner::render_report_jsonl;
 use super::signature_owner::{SignatureOwner, SignatureOwnerCounts};
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use lens_domain::ArgumentShape;
@@ -165,7 +167,12 @@ impl ParametersAnalyzer {
             &collected.raw_targets,
         )?;
         let report = Report::build(&roots, &graph, collected, &scan, min_call_sites);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top),
+            Some(("narrowable", &records)),
+        )
     }
 }
 
@@ -1116,6 +1123,14 @@ fn render_constant_entries(out: &mut String, entries: &[ConstantArgumentEntry], 
         }
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
+    let shown = entries.len().min(limit);
+    render_overflow_in(
+        out,
+        entries.len(),
+        shown,
+        "parameter(s)",
+        entries[shown..].iter().map(|e| e.file.as_str()),
+    );
 }
 
 fn render_dead_entries(out: &mut String, entries: &[DeadParameterEntry], limit: usize) {
@@ -1133,6 +1148,28 @@ fn render_dead_entries(out: &mut String, entries: &[DeadParameterEntry], limit: 
         );
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
+    let shown = entries.len().min(limit);
+    render_overflow_in(
+        out,
+        entries.len(),
+        shown,
+        "parameter(s)",
+        entries[shown..].iter().map(|e| e.file.as_str()),
+    );
+}
+
+/// JSONL records for `narrowable`'s `parameters` section: one
+/// `constant-argument` per one-value parameter, one `dead-parameter` per
+/// parameter the body never reads.
+fn records(report: &Value, sink: &mut JsonlSink) -> Result<(), AnalyzerError> {
+    let section = [("section", Value::from("parameters"))];
+    sink.push_all(
+        "constant-argument",
+        None,
+        &report["constant_arguments"],
+        &section,
+    )?;
+    sink.push_all("dead-parameter", None, &report["dead_parameters"], &section)
 }
 
 #[cfg(test)]
@@ -1202,6 +1239,44 @@ mod tests {
         assert_eq!(report["calibration"]["measured_parameter_count"], 2);
         assert_eq!(report["calibration"]["one_value_count"], 1);
         assert_eq!(report["calibration"]["varying_count"], 1);
+    }
+
+    /// JSONL flattens both listings: one record per one-value parameter
+    /// and per dead parameter, each with its own kind and location.
+    #[test]
+    fn jsonl_emits_a_record_per_constant_and_dead_parameter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn emit(level: u32, unused: u32) { let _ = level; }\n\
+             pub fn a() { emit(3, 1); }\n\
+             pub fn b() { emit(3, 2); }\n",
+        );
+        let out = ParametersAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Jsonl)
+            .unwrap();
+        let records: Vec<Value> = out
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let kinds: Vec<&str> = records
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["constant-argument", "dead-parameter"], "got: {out}");
+        for record in &records {
+            assert_eq!(record["analyzer"], "narrowable");
+            assert_eq!(record["section"], "parameters");
+            assert_eq!(record["file"], "src/lib.rs");
+            assert_eq!(record["line"], 1);
+            assert!(
+                record["name"].as_str().unwrap().ends_with("::emit"),
+                "got: {record}"
+            );
+        }
+        assert_eq!(records[0]["value"], "3");
+        assert_eq!(records[1]["parameter"]["name"], "unused");
     }
 
     #[test]

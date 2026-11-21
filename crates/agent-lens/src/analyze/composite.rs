@@ -99,6 +99,9 @@ fn render_sections(
     match format {
         OutputFormat::Json => render_json(sections),
         OutputFormat::Md => Ok(render_markdown(title, note, &sections)),
+        // Every record already names its analyzer and kind, so the
+        // bundle is the sections' records back to back.
+        OutputFormat::Jsonl => Ok(sections.into_iter().map(|s| s.body).collect()),
     }
 }
 
@@ -265,5 +268,17 @@ mod tests {
                 std::ptr::from_ref(outer.index())
             );
         });
+    }
+
+    #[test]
+    fn jsonl_concatenates_the_section_records_in_order() {
+        let out = render_sections(
+            "Bundle",
+            "n",
+            vec![section("b", "{\"x\":1}\n"), section("a", "{\"y\":2}\n")],
+            OutputFormat::Jsonl,
+        )
+        .unwrap();
+        assert_eq!(out, "{\"x\":1}\n{\"y\":2}\n");
     }
 }

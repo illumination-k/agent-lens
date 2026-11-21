@@ -14,9 +14,11 @@ use std::fmt::Write as _;
 use lens_domain::{CohesionUnit, CohesionUnitKind};
 use serde::Serialize;
 
+use super::format::render_overflow_in;
 use super::options::analyzer_options;
 use super::runner::{
-    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
+    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, per_file_records,
+    render_report_jsonl,
 };
 use super::{
     AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, SourceLang, format_optional_f64,
@@ -89,9 +91,12 @@ impl CohesionAnalyzer {
             .filter
             .collect_per_file(&roots, |sf| self.analyze_file(sf))?;
         let report = build_report(&roots, scan.scanned_file_count, &scan.reports);
-        render_report(&report, format, || {
-            format_markdown(&report, self.top, self.min_score)
-        })
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top, self.min_score),
+            Some(("cohesion", &per_file_records::<CohesionShape>("unit"))),
+        )
     }
 
     /// Analyze a single file. Returns `None` when the file has no
@@ -338,6 +343,14 @@ fn render_ranked_units(
     for row in rows.iter().take(limit) {
         render_unit(out, row.file, row.unit);
     }
+    let shown = rows.len().min(limit);
+    render_overflow_in(
+        out,
+        rows.len(),
+        shown,
+        "unit(s)",
+        rows[shown..].iter().map(|row| row.file),
+    );
 }
 
 /// Descending compare on `Option<f64>` LCOM96 scores, with `None`

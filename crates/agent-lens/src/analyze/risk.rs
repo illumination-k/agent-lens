@@ -50,7 +50,7 @@ use serde::Serialize;
 
 use super::call_graph::model::{CallGraphNode, ModuleResolutionSummary, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::render_module_confidence;
+use super::format::{render_module_confidence, render_overflow_in};
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
@@ -588,6 +588,14 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
             f.hottest_cell(),
         );
     }
+    let shown = report.files.len().min(limit);
+    render_overflow_in(
+        &mut out,
+        report.files.len(),
+        shown,
+        "file(s)",
+        report.files[shown..].iter().map(|f| f.path.as_str()),
+    );
 
     render_module_confidence(
         &mut out,

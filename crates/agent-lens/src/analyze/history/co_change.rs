@@ -90,6 +90,8 @@ pub enum CoChangeError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error(transparent)]
+    UnsupportedFormat(#[from] crate::analyze::jsonl::UnsupportedFormat),
 }
 
 impl_from_churn_error!(CoChangeError);
@@ -262,6 +264,7 @@ impl CoChangeAnalyzer {
                 serde_json::to_string_pretty(&view).map_err(CoChangeError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&view, self.top)),
+            OutputFormat::Jsonl => Err(crate::analyze::jsonl::UnsupportedFormat.into()),
         }
     }
 }

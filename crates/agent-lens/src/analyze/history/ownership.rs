@@ -116,6 +116,8 @@ pub enum OwnershipError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error(transparent)]
+    UnsupportedFormat(#[from] crate::analyze::jsonl::UnsupportedFormat),
 }
 
 impl_from_churn_error!(OwnershipError);
@@ -298,6 +300,7 @@ impl OwnershipAnalyzer {
                 serde_json::to_string_pretty(&view).map_err(OwnershipError::Serialize)
             }
             OutputFormat::Md => Ok(format_md(&view, self.top)),
+            OutputFormat::Jsonl => Err(crate::analyze::jsonl::UnsupportedFormat.into()),
         }
     }
 

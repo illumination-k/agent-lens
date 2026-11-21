@@ -61,6 +61,7 @@ use lens_domain::{
 };
 use serde::Serialize;
 
+use super::format::render_overflow;
 use super::module_graph::{ModuleFile, build_graph, build_ts_graph_from_entry_globs, module_paths};
 use super::module_label::ModuleLabeler;
 use super::options::analyzer_options;
@@ -178,6 +179,7 @@ impl CouplingAnalyzer {
                 serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&view, self.top)),
+            OutputFormat::Jsonl => Err(super::jsonl::UnsupportedFormat.into()),
         }
     }
 }
@@ -438,13 +440,12 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView], limit: usize) 
             m.files,
         );
     }
-    let omitted = sorted.len().saturating_sub(limit);
-    if omitted > 0 {
-        let _ = writeln!(
-            out,
-            "\n_{omitted} lower-IFC module(s) not shown; raise --top or use --format json._",
-        );
-    }
+    render_overflow(
+        out,
+        sorted.len(),
+        sorted.len().min(limit),
+        "lower-IFC module(s)",
+    );
 }
 
 fn render_cycles(out: &mut String, cycles: &[CycleView]) {
@@ -465,6 +466,7 @@ fn render_pairs(out: &mut String, pairs: &[PairView], limit: usize) {
     for p in pairs.iter().take(limit) {
         let _ = writeln!(out, "- {} ↔ {} ({} symbol(s))", p.a, p.b, p.shared_symbols);
     }
+    render_overflow(out, pairs.len(), pairs.len().min(limit), "pair(s)");
 }
 
 #[cfg(test)]
@@ -582,7 +584,10 @@ mod tests {
         // Three modules exist (crate, crate::a, crate::b); one row of
         // the table survives and the other two are accounted for.
         assert_eq!(md.matches("| crate").count(), 1, "got: {md}");
-        assert!(md.contains("_2 lower-IFC module(s) not shown"), "got: {md}",);
+        assert!(
+            md.contains("+2 more lower-IFC module(s) not shown. Narrow the path or filters"),
+            "got: {md}",
+        );
 
         // Above the module count the note disappears entirely.
         let md = CouplingAnalyzer::new()

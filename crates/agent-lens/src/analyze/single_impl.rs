@@ -49,14 +49,16 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use lens_domain::{SyntaxFact, TraitDeclShape, TraitImplShape, VisibilityShape};
 
 use super::call_graph::model::{GraphLanguage, NodeVisibility};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::end_row_with_caveats;
+use super::format::{end_row_with_caveats, render_overflow_in};
+use super::jsonl::JsonlSink;
 use super::options::analyzer_options;
-use super::runner::render_report;
+use super::runner::render_report_jsonl;
 use super::span_references::{AllowedSpan, FileSpans, SpanReferenceIndex};
 use super::unreachable::identifiers;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat, SourceLang};
@@ -139,7 +141,12 @@ impl SingleImplAnalyzer {
         let inventory = Inventory::collect(&self.builder, &roots, &graph)?;
         let scan = UsageScan::run(&self.builder, &roots, &inventory)?;
         let report = Report::build(&roots, &graph, inventory, &scan);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top),
+            Some(("narrowable", &records)),
+        )
     }
 }
 
@@ -814,6 +821,21 @@ fn render_entries(out: &mut String, entries: &[&AbstractionEntry], limit: usize)
         }
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
+    let shown = entries.len().min(limit);
+    render_overflow_in(
+        out,
+        entries.len(),
+        shown,
+        "abstraction(s)",
+        entries[shown..].iter().map(|e| e.file.as_str()),
+    );
+}
+
+/// JSONL records for `narrowable`'s `single-impl` section: one
+/// `single-impl` per abstraction with one production implementor.
+fn records(report: &Value, sink: &mut JsonlSink) -> Result<(), AnalyzerError> {
+    let section = [("section", Value::from("single-impl"))];
+    sink.push_all("single-impl", None, &report["findings"], &section)
 }
 
 #[cfg(test)]
@@ -866,6 +888,33 @@ mod tests {
         assert_eq!(entry["method_count"], 1);
         assert_eq!(entry["caveats"], serde_json::json!([]));
         assert_eq!(report["distribution"]["one"], 1);
+    }
+
+    #[test]
+    fn jsonl_emits_one_record_per_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "trait Store { fn get(&self) -> usize; }\n\
+             struct Memory;\n\
+             impl Store for Memory { fn get(&self) -> usize { 1 } }\n\
+             pub fn api(s: Memory) -> usize { s.get() }\n",
+        );
+        let out = SingleImplAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Jsonl)
+            .unwrap();
+        let record: Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(record["analyzer"], "narrowable");
+        assert_eq!(record["kind"], "single-impl");
+        assert_eq!(record["section"], "single-impl");
+        assert_eq!(record["item_kind"], "trait");
+        assert_eq!(record["file"], "src/lib.rs");
+        assert_eq!(record["line"], 1);
+        assert!(
+            record["name"].as_str().unwrap().ends_with("Store"),
+            "got: {record}"
+        );
     }
 
     #[test]

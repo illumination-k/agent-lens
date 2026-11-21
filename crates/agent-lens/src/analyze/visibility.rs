@@ -85,6 +85,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use super::call_graph::model::{
     CallGraphEdge, CallGraphNode, ModuleResolutionSummary, NodeVisibility, Resolution,
@@ -95,8 +96,9 @@ use super::export_lang::{ExportLang, InterfaceIndex};
 use super::format::{
     ModuleSection, render_backticked_list, render_module_confidence, render_module_sections,
 };
+use super::jsonl::JsonlSink;
 use super::options::analyzer_options;
-use super::runner::render_report;
+use super::runner::render_report_jsonl;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 use lens_rust::ReExportScope;
 
@@ -217,7 +219,12 @@ impl VisibilityAnalyzer {
             .with_value_reference_facts(true)
             .build(&roots)?;
         let report = Report::build(&roots, &graph);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top),
+            Some(("narrowable", &records)),
+        )
     }
 }
 
@@ -1360,6 +1367,17 @@ fn render_caller_modules(modules: &[String]) -> String {
     render_backticked_list(modules, CALLER_MODULES_PER_ROW)
 }
 
+/// JSONL records for `narrowable`'s `visibility` section: one
+/// `visibility` per over-exposed declaration, flattened out of its
+/// module group.
+fn records(report: &Value, sink: &mut JsonlSink) -> Result<(), AnalyzerError> {
+    let section = [("section", Value::from("visibility"))];
+    for module in report["modules"].as_array().into_iter().flatten() {
+        sink.push_all("visibility", None, &module["findings"], &section)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1526,6 +1544,38 @@ mod tests {
 
     /// The parent module is spelled `pub(super)` rather than the
     /// equivalent `pub(in …)` path.
+    /// JSONL flattens the module groups: one record per finding, the
+    /// same findings the JSON lists under `modules[].findings[]`.
+    #[test]
+    fn jsonl_emits_one_record_per_finding_across_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        write_narrowing_crate(dir.path());
+        let json = analyze_json(dir.path());
+        let mut expected: Vec<String> = json["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["findings"].as_array().unwrap())
+            .map(|f| f["qualified_name"].as_str().unwrap().to_owned())
+            .collect();
+        let out = VisibilityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Jsonl)
+            .unwrap();
+        let mut names: Vec<String> = out
+            .lines()
+            .map(|line| {
+                let record: Value = serde_json::from_str(line).unwrap();
+                assert_eq!(record["kind"], "visibility");
+                assert!(record["file"].is_string() && record["line"].is_number());
+                record["name"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        expected.sort();
+        names.sort();
+        assert!(!names.is_empty());
+        assert_eq!(names, expected);
+    }
+
     #[test]
     fn a_parent_module_caller_is_reported_as_pub_super() {
         let dir = tempfile::tempdir().unwrap();

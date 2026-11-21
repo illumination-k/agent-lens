@@ -218,17 +218,74 @@ pub(crate) fn render_module_sections<G: ModuleSection>(
     render_overflow(out, groups.len(), shown, "module(s)");
 }
 
-/// Close a capped table, naming what was left out. Nothing is written
-/// when nothing was capped: "+0 more" reads as truncation that never
-/// happened.
+/// Close a capped table, naming what was left out and the concrete
+/// narrower command that reaches it. Nothing is written when nothing
+/// was capped: "+0 more" reads as truncation that never happened.
 pub(crate) fn render_overflow(out: &mut String, total: usize, shown: usize, unit: &str) {
+    render_overflow_in(out, total, shown, unit, std::iter::empty());
+}
+
+/// [`render_overflow`] for a table whose rows each live in a file.
+///
+/// `omitted_files` are the files of the rows past the cap, in any order.
+/// When two or more of them share a directory below the report root,
+/// the note names the directory holding most of them, so the agent can
+/// re-run on that path instead of paging through the whole corpus.
+///
+/// `--top <total>` is offered only while it would at most double the
+/// listing: past that, showing everything is the context bloat the cap
+/// exists to prevent, and the narrower path (or the JSON) is the way in.
+pub(crate) fn render_overflow_in<'f>(
+    out: &mut String,
+    total: usize,
+    shown: usize,
+    unit: &str,
+    omitted_files: impl Iterator<Item = &'f str>,
+) {
     let overflow = total.saturating_sub(shown);
-    if overflow > 0 {
-        let _ = writeln!(
-            out,
-            "\n+{overflow} more {unit} not shown (raise `--top`; JSON carries every row)."
-        );
+    if overflow == 0 {
+        return;
     }
+    let _ = write!(out, "\n+{overflow} more {unit} not shown");
+    let raise_top = overflow <= shown;
+    match (densest_directory(omitted_files), raise_top) {
+        (Some((dir, count)), true) => {
+            let _ = write!(
+                out,
+                "; {count} of them under `{dir}`. Re-run on that path, or with `--top {total}` \
+                 for every row"
+            );
+        }
+        (Some((dir, count)), false) => {
+            let _ = write!(
+                out,
+                "; {count} of them under `{dir}`. Re-run on that path to see them"
+            );
+        }
+        (None, true) => {
+            let _ = write!(out, ". Re-run with `--top {total}` for every row");
+        }
+        (None, false) => out.push_str(". Narrow the path or filters to see them"),
+    }
+    out.push_str(" (JSON carries every row).\n");
+}
+
+/// The directory holding the most of `files`, with its count. `None`
+/// when no directory holds two or more — one row is no concentration —
+/// or when the densest is the report root itself, which re-running on
+/// would not narrow. Ties go to the lexically first directory, so the
+/// note is stable.
+fn densest_directory<'f>(files: impl Iterator<Item = &'f str>) -> Option<(&'f str, usize)> {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for file in files {
+        let dir = file.rsplit_once('/').map_or(".", |(dir, _)| dir);
+        *counts.entry(dir).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|&(dir, count)| count >= 2 && dir != ".")
+        // Most rows first; on a tie the lexically first directory wins.
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
 }
 
 #[cfg(test)]
@@ -484,7 +541,7 @@ mod tests {
         );
         assert!(!out.contains("`c`"), "got: {out}");
         assert!(
-            out.contains("+1 more module(s) not shown (raise `--top`"),
+            out.contains("+1 more module(s) not shown. Re-run with `--top 3` for every row"),
             "got: {out}",
         );
     }
@@ -524,5 +581,64 @@ mod tests {
     fn an_empty_group_list_still_states_the_zero() {
         let out = sections(&[], 10, 10);
         assert_eq!(out, "\n## Heading (note; 0 of 0 module(s))\n");
+    }
+
+    fn overflow_in(total: usize, shown: usize, files: &[&str]) -> String {
+        let mut out = String::new();
+        render_overflow_in(&mut out, total, shown, "row(s)", files.iter().copied());
+        out
+    }
+
+    #[test]
+    fn no_overflow_writes_nothing() {
+        assert_eq!(overflow_in(3, 3, &["a/x.rs", "a/y.rs"]), "");
+        assert_eq!(overflow_in(2, 5, &[]), "");
+    }
+
+    const CONCENTRATED: &[&str] = &["crates/a/src/x.rs", "crates/b/y.rs", "crates/a/src/z.rs"];
+    const SCATTERED: &[&str] = &["a/x.rs", "b/y.rs", "c/z.rs"];
+    const AT_ROOT: &[&str] = &["x.rs", "y.rs", "z/w.rs"];
+
+    #[rstest]
+    #[case::concentrated_small(
+        6,
+        CONCENTRATED,
+        "\n+3 more row(s) not shown; 2 of them under `crates/a/src`. Re-run on that path, \
+         or with `--top 6` for every row (JSON carries every row).\n"
+    )]
+    #[case::concentrated_large(
+        10,
+        CONCENTRATED,
+        "\n+7 more row(s) not shown; 2 of them under `crates/a/src`. Re-run on that path \
+         to see them (JSON carries every row).\n"
+    )]
+    #[case::scattered_small(
+        6,
+        SCATTERED,
+        "\n+3 more row(s) not shown. Re-run with `--top 6` for every row (JSON carries every row).\n"
+    )]
+    #[case::scattered_large(
+        10,
+        SCATTERED,
+        "\n+7 more row(s) not shown. Narrow the path or filters to see them \
+         (JSON carries every row).\n"
+    )]
+    #[case::the_root_is_no_narrowing(
+        6,
+        AT_ROOT,
+        "\n+3 more row(s) not shown. Re-run with `--top 6` for every row (JSON carries every row).\n"
+    )]
+    fn overflow_steers_to_the_densest_directory_and_a_bounded_top(
+        #[case] total: usize,
+        #[case] files: &[&str],
+        #[case] expected: &str,
+    ) {
+        assert_eq!(overflow_in(total, 3, files), expected);
+    }
+
+    #[test]
+    fn densest_directory_breaks_ties_lexically() {
+        let files = ["b/1.rs", "a/1.rs", "b/2.rs", "a/2.rs"];
+        assert_eq!(densest_directory(files.into_iter()), Some(("a", 2)));
     }
 }

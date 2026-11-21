@@ -26,6 +26,7 @@ use lens_domain::{FileComplexity, FunctionComplexity, HotspotEntry, compute_hots
 use serde::Serialize;
 use tracing::warn;
 
+use super::format::render_overflow_in;
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
 use super::options::analyzer_options;
@@ -54,6 +55,8 @@ pub enum HotspotError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error(transparent)]
+    UnsupportedFormat(#[from] super::jsonl::UnsupportedFormat),
 }
 
 impl_from_churn_error!(HotspotError);
@@ -153,6 +156,7 @@ impl HotspotAnalyzer {
                 serde_json::to_string_pretty(&view).map_err(HotspotError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&view, self.top)),
+            OutputFormat::Jsonl => Err(super::jsonl::UnsupportedFormat.into()),
         }
     }
 }
@@ -337,6 +341,14 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
             f.path, f.score, f.commits, f.cognitive_max, f.cyclomatic_max, f.loc, f.function_count,
         );
     }
+    let shown = view.files.len().min(limit);
+    render_overflow_in(
+        &mut out,
+        view.files.len(),
+        shown,
+        "file(s)",
+        view.files[shown..].iter().map(|f| f.path),
+    );
     out
 }
 

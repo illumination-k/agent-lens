@@ -53,17 +53,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use super::call_graph::model::{
     CallGraphEdge, CallGraphNode, ModuleResolutionSummary, NodeVisibility,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::{end_row_with_caveats, render_module_confidence};
+use super::format::{end_row_with_caveats, render_module_confidence, render_overflow_in};
 use super::inbound_edges::{InboundEdge, is_fallback_resolved, visit_inbound_edges};
+use super::jsonl::{JsonlSink, lifted};
 use super::options::analyzer_options;
 use super::raw_references::{RawTarget, identifiers_by_line};
-use super::runner::render_report;
+use super::runner::render_report_jsonl;
 use super::signature_owner::{SignatureOwner, SignatureOwnerCounts};
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
 
@@ -200,7 +202,12 @@ impl SingleUseAnalyzer {
         let collected = SingleCallers::collect(&graph, self.only_tests);
         let raw = RawReferences::run(&self.builder, &roots, &collected.targets)?;
         let report = Report::build(&roots, &graph, collected, &raw, thresholds);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top),
+            Some(("narrowable", &records)),
+        )
     }
 }
 
@@ -942,6 +949,14 @@ fn render_entries(out: &mut String, entries: &[&CandidateEntry], limit: usize) {
         }
         end_row_with_caveats(out, entry.caveats.iter().map(|c| c.as_str()));
     }
+    let shown = entries.len().min(limit);
+    render_overflow_in(
+        out,
+        entries.len(),
+        shown,
+        "function(s)",
+        entries[shown..].iter().map(|e| e.file.as_str()),
+    );
 }
 
 fn render_distribution(out: &mut String, label: &str, distribution: Option<&MetricDistribution>) {
@@ -957,6 +972,18 @@ fn render_distribution(out: &mut String, label: &str, distribution: Option<&Metr
             let _ = writeln!(out, "- {label}: no values observed");
         }
     }
+}
+
+/// JSONL records for `narrowable`'s `single-use` section: one
+/// `single-use` per candidate, and one `single-use-chain` per
+/// collapsible chain, located at its sink.
+fn records(report: &Value, sink: &mut JsonlSink) -> Result<(), AnalyzerError> {
+    let section = [("section", Value::from("single-use"))];
+    sink.push_all("single-use", None, &report["candidates"], &section)?;
+    for chain in report["chains"].as_array().into_iter().flatten() {
+        sink.push("single-use-chain", None, &lifted(chain, "sink"), &section)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

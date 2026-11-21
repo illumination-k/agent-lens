@@ -51,12 +51,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use lens_domain::graph_algo::bfs;
 use std::sync::Arc;
 
 use super::call_graph::{CallGraph, CallGraphBuilder};
-use super::runner::render_report;
+use super::format::render_overflow_in;
+use super::jsonl::JsonlSink;
+use super::runner::render_report_jsonl;
 use super::similarity::{ScoredCorpus, ScoredUnit, SimilarityAnalyzer, SimilarityMethod};
 use super::{AnalyzeRoots, AnalyzerError, FunctionSelection, OutputFormat};
 
@@ -323,7 +326,12 @@ impl TestRedundancyAnalyzer {
             unrelated_pair_count,
             opaque_body_test_count,
         });
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top),
+            Some(("test-redundancy", &group_records)),
+        )
     }
 
     /// The similarity run behind the corpus: the same analyzer, pinned
@@ -1049,6 +1057,15 @@ fn format_markdown(report: &Report, top: Option<usize>) -> String {
             let _ = writeln!(out, "  - {}", member_line(member));
         }
     }
+    render_overflow_in(
+        &mut out,
+        report.groups.len(),
+        limit,
+        "group(s)",
+        report.groups[limit..]
+            .iter()
+            .map(|group| group.representative.file.as_str()),
+    );
     out
 }
 
@@ -1131,6 +1148,28 @@ fn counted_functions(count: usize) -> String {
     }
 }
 
+/// JSONL records: per group, one `representative` (the test to keep)
+/// and one `member` per near-copy, each tagged with the group's index,
+/// verdict, and representative, so a member line says what it folds into.
+fn group_records(report: &Value, sink: &mut JsonlSink) -> Result<(), AnalyzerError> {
+    for (index, group) in report["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let tags = [
+            ("group", Value::from(index)),
+            ("verdict", group["verdict"].clone()),
+        ];
+        sink.push("representative", None, &group["representative"], &tags)?;
+        let mut member_tags = tags.to_vec();
+        member_tags.push(("representative", group["representative"]["name"].clone()));
+        sink.push_all("member", None, &group["members"], &member_tags)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -1188,6 +1227,34 @@ mod tests {
         );
         src.push_str("}\n");
         src
+    }
+
+    /// JSONL: per group, the test to keep and each near-copy, the copies
+    /// naming the representative they fold into.
+    #[test]
+    fn jsonl_emits_the_representative_and_each_member() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &one_target_source());
+        let out = TestRedundancyAnalyzer::new()
+            .analyze(dir.path().to_path_buf(), OutputFormat::Jsonl)
+            .unwrap();
+        let records: Vec<Value> = out
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 3, "got: {out}");
+        assert_eq!(records[0]["kind"], "representative");
+        assert_eq!(records[0]["name"], "alpha");
+        for member in &records[1..] {
+            assert_eq!(member["kind"], "member");
+            assert_eq!(member["representative"], "alpha");
+            assert_eq!(member["group"], 0);
+        }
+        for record in &records {
+            assert_eq!(record["analyzer"], "test-redundancy");
+            assert_eq!(record["file"], "src/lib.rs");
+            assert!(record["line"].is_number(), "got: {record}");
+        }
     }
 
     #[test]
