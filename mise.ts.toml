@@ -1,6 +1,6 @@
 [tools]
 node = "25.9.0"
-pnpm = "11.0.1"
+"aqua:pnpm/pnpm" = "11.28.13"
 
 # Every other web task depends on this: on a fresh checkout `web/node_modules`
 # does not exist yet, and `pnpm exec oxlint` would fail before linting anything.
