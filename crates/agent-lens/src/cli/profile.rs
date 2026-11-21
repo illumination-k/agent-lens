@@ -201,10 +201,6 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
         (profile.ownership.is_some(), config::ToolName::Ownership),
         (profile.reach.is_some(), config::ToolName::Reach),
         (profile.graph.is_some(), config::ToolName::Graph),
-        (
-            profile.context_span.is_some(),
-            config::ToolName::ContextSpan,
-        ),
         (profile.forwarding.is_some(), config::ToolName::Forwarding),
     ]
     .into_iter()

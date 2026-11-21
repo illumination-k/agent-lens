@@ -273,14 +273,14 @@ mod tests {
     }
 
     #[test]
-    fn context_span_help_lists_non_rust_entry_shapes() {
-        let help = help_for(&["agent-lens", "analyze", "context-span"]);
+    fn coupling_help_lists_the_span_columns_and_entry_globs() {
+        let help = help_for(&["agent-lens", "analyze", "coupling"]);
         assert!(
-            help.contains("TypeScript/JavaScript entry file"),
+            help.contains("TypeScript / JavaScript entry file"),
             "got: {help}"
         );
-        assert!(help.contains("Python file/directory"), "got: {help}");
-        assert!(help.contains("Go file or module directory"), "got: {help}");
+        assert!(help.contains("Go module directory"), "got: {help}");
+        assert!(help.contains("`transitive`"), "got: {help}");
         assert!(help.contains("--entry-glob"), "got: {help}");
     }
 
@@ -1284,7 +1284,7 @@ mod tests {
     /// silently ignored argument.
     #[rstest]
     #[case::coupling("coupling")]
-    #[case::context_span("context-span")]
+    #[case::communities("communities")]
     fn graph_rooted_analyzers_take_exactly_one_path(#[case] tool: &str) {
         let err = Cli::try_parse_from(["agent-lens", "analyze", tool, "packages", "cli"])
             .expect_err("a second path is not an entry point");
@@ -1386,30 +1386,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_analyze_context_span_with_md_format() {
+    fn parses_analyze_coupling_with_entry_globs() {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "context-span",
-            "src/lib.rs",
-            "--format",
-            "md",
-        ])
-        .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::ContextSpan(args)) = cli.command else {
-            panic!("expected analyze context-span");
-        };
-        assert_eq!(args.common.path, PathBuf::from("src/lib.rs"));
-        assert_eq!(args.common.format, OutputFormat::Md);
-        assert!(args.opts.entry_glob.is_empty());
-    }
-
-    #[test]
-    fn parses_analyze_context_span_with_entry_globs() {
-        let cli = Cli::try_parse_from([
-            "agent-lens",
-            "analyze",
-            "context-span",
+            "coupling",
             "web",
             "--entry-glob",
             "app/**/page.tsx",
@@ -1417,8 +1398,8 @@ mod tests {
             "app/**/route.ts",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::ContextSpan(args)) = cli.command else {
-            panic!("expected analyze context-span");
+        let Command::Analyze(AnalyzeCommand::Coupling(args)) = cli.command else {
+            panic!("expected analyze coupling");
         };
         assert_eq!(args.common.path, PathBuf::from("web"));
         assert_eq!(

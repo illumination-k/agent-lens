@@ -37,8 +37,8 @@ Pick an analyzer by question:
     how many hops before real work?       analyze forwarding --section delegation
     does this type do too many things?    analyze cohesion
     which modules are entangled?          analyze coupling
+    how much must I read to edit this?    analyze coupling
     which functions recurse mutually?     analyze cycles
-    how much must I read to edit this?    analyze context-span
     which functions are load-bearing?     analyze hubs
     what breaks if I change this?         analyze impact
     did my diff sprawl or leave debris?   analyze footprint
@@ -94,11 +94,11 @@ pub const ANALYZE: &str = concat!(
 Every analyzer takes the same path filters: `--only-tests`,
 `--exclude-tests`, and a repeatable `--exclude <GLOB>`.
 
-Every analyzer but `coupling` and `context-span` takes more than one PATH
+Every analyzer but `coupling` and `communities` takes more than one PATH
 — `analyze similarity packages cli web/src` walks all three into one
 report, which is what finds a duplicate spanning two of them. Display
 paths are written relative to the paths' deepest common ancestor.
-`coupling` and `context-span` grow a module graph out of a single entry
+`coupling` and `communities` grow a module graph out of a single entry
 point, so they keep the one-PATH signature.
 
 `--top` bounds the length of a `--format md` report. Every analyzer that
@@ -133,6 +133,8 @@ Examples:
     agent-lens analyze coupling ./crates/core --format md
     agent-lens analyze coupling src/index.ts --exclude-tests --format md
     agent-lens analyze coupling ./src/mypkg --format md
+    agent-lens analyze coupling . --entry-glob 'app/**/page.tsx' \\
+      --entry-glob 'app/**/route.ts' --format md
 ";
 
 pub const CYCLES: &str = "\
@@ -155,14 +157,6 @@ Examples:
       --symbol parse --direction both --depth 2 --format md
     agent-lens analyze graph src/ --query path \\
       --symbol main --to write_stdout_json --format md
-";
-
-pub const CONTEXT_SPAN: &str = "\
-Examples:
-
-    agent-lens analyze context-span src/lib.rs --format md
-    agent-lens analyze context-span . --entry-glob 'app/**/page.tsx' \\
-      --entry-glob 'app/**/route.ts' --format md
 ";
 
 pub const HUBS: &str = "\
@@ -357,7 +351,7 @@ Examples:
 pub const BASELINE: &str = "\
 A baseline snapshots the profile's analyzers as named numbers, so a later
 run can tell a regression from debt that was already there. Covered
-analyzers: complexity, cohesion, coupling, context-span, hotspot, and
+analyzers: complexity, cohesion, coupling, hotspot, and
 similarity; anything else in the profile is listed under `skipped`.
 
 The document is deterministic — same tree, same commit, same bytes — so it

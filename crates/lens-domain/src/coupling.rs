@@ -22,6 +22,14 @@
 //!   maximally unstable (only depends on others); `0.0` is maximally
 //!   stable (only depended upon). Modules with no edges have `instability
 //!   = None`.
+//! * **Abstractness** — Martin's `A = Na / Nc`, abstract type
+//!   declarations over all type declarations in the module, from a
+//!   [`TypeCensus`] the adapter fills. `None` when the module declares
+//!   no types, or the adapter does not take a census.
+//! * **Distance from the main sequence** — `D = |A + I - 1|`. `0.0` sits
+//!   on the line where stability and abstractness balance; `1.0` is a
+//!   corner: stable and concrete (the zone of pain) or unstable and
+//!   abstract (the zone of uselessness). See [`main_sequence_distance`].
 //! * **Cycles** — the strongly-connected components of the dependency
 //!   graph with at least two members. Reported as
 //!   [`DependencyCycle`]s, each carrying its participating modules in
@@ -342,6 +350,37 @@ fn instability_of(fan_in: usize, fan_out: usize) -> Option<f64> {
         return None;
     }
     Some(fan_out as f64 / total as f64)
+}
+
+/// How many abstract and concrete types one module declares, the input
+/// to Martin's abstractness.
+///
+/// What counts as abstract is the adapter's call, spelled per language:
+/// a Rust `trait` or a Go `interface` is abstract; a `struct`, `enum`,
+/// `union`, or a Go named type over anything but an interface is
+/// concrete. Aliases are neither: they declare no new type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypeCensus {
+    pub abstract_types: usize,
+    pub concrete_types: usize,
+}
+
+impl TypeCensus {
+    /// Martin's `A = Na / Nc`. `None` when the module declares no types,
+    /// so a function-only module is not read as maximally concrete.
+    pub fn abstractness(self) -> Option<f64> {
+        let total = self.abstract_types + self.concrete_types;
+        if total == 0 {
+            return None;
+        }
+        Some(self.abstract_types as f64 / total as f64)
+    }
+}
+
+/// Martin's normalised distance from the main sequence, `|A + I - 1|`,
+/// clamped to `[0, 1]` against floating-point drift.
+pub fn main_sequence_distance(abstractness: f64, instability: f64) -> f64 {
+    (abstractness + instability - 1.0).abs().clamp(0.0, 1.0)
 }
 
 /// Tarjan-style SCC discovery against the directed dependency graph.
@@ -876,5 +915,44 @@ mod tests {
             CouplingError::skip_walked_file(Ok(7)).ok().flatten(),
             Some(7)
         );
+    }
+
+    #[rstest::rstest]
+    #[case::no_types(0, 0, None)]
+    #[case::all_concrete(0, 3, Some(0.0))]
+    #[case::all_abstract(2, 0, Some(1.0))]
+    #[case::mixed(1, 3, Some(0.25))]
+    fn abstractness_is_abstract_over_all_types(
+        #[case] abstract_types: usize,
+        #[case] concrete_types: usize,
+        #[case] expected: Option<f64>,
+    ) {
+        let census = TypeCensus {
+            abstract_types,
+            concrete_types,
+        };
+        assert_eq!(census.abstractness(), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::zone_of_pain(0.0, 0.0, 1.0)]
+    #[case::zone_of_uselessness(1.0, 1.0, 1.0)]
+    #[case::stable_abstract(1.0, 0.0, 0.0)]
+    #[case::unstable_concrete(0.0, 1.0, 0.0)]
+    #[case::off_line(0.25, 0.25, 0.5)]
+    fn distance_is_offset_from_the_main_sequence(
+        #[case] abstractness: f64,
+        #[case] instability: f64,
+        #[case] expected: f64,
+    ) {
+        assert!((main_sequence_distance(abstractness, instability) - expected).abs() < 1e-12);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn distance_stays_in_unit_interval(a in 0.0f64..=1.0, i in 0.0f64..=1.0) {
+            let d = main_sequence_distance(a, i);
+            proptest::prop_assert!((0.0..=1.0).contains(&d));
+        }
     }
 }

@@ -16,7 +16,8 @@ load with the analyzer and the table key that select it now
 `agent-lens.toml` then says how to fix itself.
 
 Status: `reach`, `narrowable`, `forwarding`, `similarity --target tests` and
-`graph` are done (29 → 21). The rest of this plan is still open.
+`graph` are done, and `context-span` is now columns of `coupling` (29 → 21).
+The rest of this plan is still open.
 
 ## Target surface
 
@@ -88,7 +89,11 @@ into each other, so they are mostly CLI, config and output-schema work.
    `function-graph` + `graph-query` → `graph` — done;
    `risk` → `hotspot --by blast`;
    `hidden-coupling` → `co-change --against-code`;
-   `context-span` → `coupling`.
+   `context-span` → `coupling` — done: `transitive` and `files` are
+   columns of the module table, `--entry-glob` moved with them, and the
+   baseline's `transitive_max` / `transitive_sum` are `coupling` metrics.
+   It is not a section, so the old name's hint (`config::ABSORBED_TOOLS`)
+   names the columns instead of a `--section`.
 2. **`reach`** — done. `footprint` and `stop delta` still call the
    `unreachable` module directly; only the CLI surface moved.
 3. **`forwarding`** — done. The `post-tool-use wrapper` hook and the

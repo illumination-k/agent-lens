@@ -51,7 +51,6 @@ use crate::analyze::OutputFormat;
 pub use crate::analyze::cohesion::CohesionOptions;
 pub use crate::analyze::communities::CommunitiesOptions;
 pub use crate::analyze::complexity::ComplexityOptions;
-pub use crate::analyze::context_span::ContextSpanOptions;
 pub use crate::analyze::coupling::CouplingOptions;
 pub use crate::analyze::footprint::FootprintOptions;
 pub use crate::analyze::forwarding::ForwardingOptions;
@@ -180,8 +179,6 @@ pub struct Profile {
     pub reach: Option<ReachOptions>,
     #[serde(default)]
     pub graph: Option<GraphOptions>,
-    #[serde(default)]
-    pub context_span: Option<ContextSpanOptions>,
     #[serde(default)]
     pub coupling: Option<CouplingOptions>,
 }
@@ -343,7 +340,6 @@ pub enum ToolName {
     Communities,
     Complexity,
     Coupling,
-    ContextSpan,
     Cycles,
     Footprint,
     Forwarding,
@@ -405,7 +401,7 @@ impl MergedTool {
 /// Analyzers that were folded into another. Both the CLI's unknown
 /// subcommand error and a profile's unknown tool error read this table,
 /// so a stale skill or `agent-lens.toml` says how to fix itself.
-pub const MERGED_TOOLS: [MergedTool; 12] = [
+pub const MERGED_TOOLS: [MergedTool; 13] = [
     MergedTool::new(
         "untested",
         "reach",
@@ -473,6 +469,14 @@ pub const MERGED_TOOLS: [MergedTool; 12] = [
         "--query <verb> --symbol <fn>",
         "set `query` and `symbol` in its table",
     ),
+    // Absorbed as columns rather than a section: nothing to select, so
+    // the note says where the report went instead.
+    MergedTool::new(
+        "context-span",
+        "coupling",
+        "",
+        "its `transitive` and `files` columns carry it",
+    ),
 ];
 
 impl TryFrom<String> for ToolName {
@@ -504,14 +508,13 @@ impl TryFrom<String> for ToolName {
 
 impl ToolName {
     /// Every analyzer, in `as_str` order.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 21] = [
         Self::ChangeEntropy,
         Self::CoChange,
         Self::Cohesion,
         Self::Communities,
         Self::Complexity,
         Self::Coupling,
-        Self::ContextSpan,
         Self::Cycles,
         Self::Footprint,
         Self::Forwarding,
@@ -538,7 +541,6 @@ impl ToolName {
             Self::Communities => "communities",
             Self::Complexity => "complexity",
             Self::Coupling => "coupling",
-            Self::ContextSpan => "context-span",
             Self::Cycles => "cycles",
             Self::Footprint => "footprint",
             Self::Forwarding => "forwarding",
@@ -559,14 +561,14 @@ impl ToolName {
 
     /// Whether this analyzer takes exactly one path.
     ///
-    /// `coupling`, `context-span` and `communities` grow a module graph
+    /// `coupling` and `communities` grow a module graph
     /// outwards from a single entry point — a crate root, a TS/JS entry
     /// file, a Go module — so two entry points are two graphs rather than
     /// a wider one, and they kept the single-`PATH` CLI signature when the
     /// rest gained `PATH...`. A profile's `path` array is bounded by the
     /// same rule.
     pub fn is_single_root(self) -> bool {
-        matches!(self, Self::Coupling | Self::ContextSpan | Self::Communities)
+        matches!(self, Self::Coupling | Self::Communities)
     }
 }
 
@@ -854,6 +856,10 @@ since = "90.days.ago"
     )]
     #[case("graph-query", "now `analyze graph --query <verb> --symbol <fn>`")]
     #[case("graph-query", "(set `query` and `symbol` in its table)")]
+    #[case(
+        "context-span",
+        "`context-span` is now `analyze coupling`: list `coupling` in `tools` (its `transitive`"
+    )]
     #[case("typo", "unknown tool `typo`, expected one of: change-entropy")]
     fn a_removed_tool_name_says_where_it_went(#[case] name: &str, #[case] expected: &str) {
         let err = toml::from_str::<Config>(&format!(
@@ -1107,12 +1113,12 @@ since = "90.days.ago"
         assert_eq!(config.profile("backend").unwrap().path.display(), expected);
     }
 
-    /// A one-path profile is what `coupling` and `context-span` need, so
+    /// A one-path profile is what `coupling` and `communities` need, so
     /// listing them beside a single-element array is fine — only a wider
     /// corpus is the mistake.
     #[rstest]
     #[case::coupling("coupling")]
-    #[case::context_span("context-span")]
+    #[case::communities("communities")]
     fn load_accepts_a_single_element_array_for_a_single_root_tool(#[case] tool: &str) {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(
@@ -1125,7 +1131,7 @@ since = "90.days.ago"
 
     #[rstest]
     #[case::coupling("coupling")]
-    #[case::context_span("context-span")]
+    #[case::communities("communities")]
     fn load_rejects_several_paths_for_a_single_root_tool(#[case] tool: &str) {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(
@@ -1157,7 +1163,7 @@ since = "90.days.ago"
 
     #[rstest]
     #[case::coupling(ToolName::Coupling, true)]
-    #[case::context_span(ToolName::ContextSpan, true)]
+    #[case::communities(ToolName::Communities, true)]
     #[case::similarity(ToolName::Similarity, false)]
     #[case::cycles(ToolName::Cycles, false)]
     fn is_single_root_marks_only_the_graph_rooted_pair(

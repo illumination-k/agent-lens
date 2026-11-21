@@ -153,6 +153,8 @@ pub(crate) fn unit_label(lang: SourceLang, kind: &CohesionUnitKind, type_name: &
                 SourceLang::Rust => "impl",
                 SourceLang::Python | SourceLang::TypeScript(_) => "class",
                 SourceLang::Go => "type",
+                // Quint has no impl/class; its adapter yields no units.
+                SourceLang::Quint => "module",
             };
             format!("{keyword} {type_name}")
         }

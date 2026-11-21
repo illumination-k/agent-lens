@@ -6,8 +6,13 @@
 //! derived from the cross-module reference graph: Number of Couplings,
 //! Fan-In, Fan-Out, simplified Henry-Kafura Information Flow Complexity,
 //! per-pair Inter-module Coupling (distinct shared symbols),
-//! Robert C. Martin's Instability `I = Ce / (Ca + Ce)`, and the strongly
-//! connected components of the dependency graph (cycles). JSON is the
+//! Robert C. Martin's Instability `I = Ce / (Ca + Ce)`, Abstractness
+//! `A = Na / Nc` and distance from the main sequence `D = |A + I - 1|`
+//! (Rust and Go), each module's transitive outgoing closure
+//! (`transitive` modules, spanning `files` distinct source files other
+//! than its own — the "how many files must I open to reason about this"
+//! estimate), and the strongly connected components of the dependency
+//! graph (cycles). JSON is the
 //! default machine-readable output; `--format md` emits a compact
 //! summary tuned for LLM context windows rather than for humans.
 //!
@@ -21,7 +26,9 @@
 //! entry point is a `.go` file or a directory containing `go.mod`, and
 //! one package is one module. For Python the entry point is a `.py` file
 //! or a package directory, one source file is one module, and `import` /
-//! `from … import` statements become the edges.
+//! `from … import` statements become the edges. TS/JS frameworks with
+//! many implicit entries (Next.js App Router, file-routed Remix / Astro)
+//! pass `--entry-glob` repeatedly to merge several entry trees.
 //!
 //! Module paths are reported in the analyzed language's own spelling —
 //! Go packages by `go.mod` import path, TS/JS and Python modules by
@@ -45,17 +52,24 @@
 //!   dropped, matching the single-tree scope of the other backends.
 //!   Dynamic imports (`importlib`, `__import__`) are invisible, and
 //!   `sys.path` manipulation is not modelled.
+//! * Abstractness: Rust counts a module's own `trait`s against its
+//!   `struct` / `enum` / `union`s, skipping `#[cfg(test)]` items; Go
+//!   counts a package's `interface` types against its other named types,
+//!   skipping `_test.go` files. Aliases are not counted, and a module
+//!   declaring no types has no abstractness. TypeScript / JavaScript,
+//!   Python, and Quint take no census, so their modules carry neither `A` nor `D`.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 
 use lens_domain::{
-    CouplingEdge, CouplingReport, DependencyCycle, ModuleMetrics, ModulePath, PairCoupling,
-    compute_report,
+    CouplingEdge, CouplingReport, DependencyCycle, ModuleContextSpan, ModuleMetrics, ModulePath,
+    PairCoupling, TypeCensus, compute_context_spans, compute_report, main_sequence_distance,
 };
 use serde::Serialize;
 
-use super::module_graph::{GraphPolicy, build_graph, module_paths};
+use super::module_graph::{ModuleFile, build_graph, build_ts_graph_from_entry_globs, module_paths};
 use super::module_label::ModuleLabeler;
 use super::options::analyzer_options;
 use super::{AnalyzePathFilter, CouplingAnalyzerError, OutputFormat, format_optional_f64};
@@ -64,6 +78,13 @@ analyzer_options! {
     /// `analyze coupling` flags, and the `[profile.<name>.coupling]` table.
     pub struct CouplingOptions {
         @shared(ranking);
+        /// Treat `path` as a project root and merge the TS/JS module trees
+        /// rooted at every file matching this gitignore-aware glob.
+        /// Repeatable: pass `--entry-glob 'app/**/page.tsx' --entry-glob
+        /// 'app/**/route.ts'` to cover Next.js App Router entries in one
+        /// invocation. Patterns are evaluated relative to `path`.
+        #[arg(long = "entry-glob", value_name = "GLOB")]
+        pub entry_glob: Vec<String>,
     }
 }
 
@@ -78,10 +99,15 @@ const DEFAULT_TOP: usize = 20;
 /// cap and `--top` can only narrow it further.
 const TOP_PAIRS_LIMIT: usize = 10;
 
+/// Modules listed in the markdown main-sequence section. Like the pair
+/// list it is a supporting exhibit with its own cap.
+const TOP_DISTANCE_LIMIT: usize = 10;
+
 /// Analyzer entry point.
 #[derive(Debug, Default, Clone)]
 pub struct CouplingAnalyzer {
     path_filter: AnalyzePathFilter,
+    entry_globs: Vec<String>,
     top: Option<usize>,
 }
 
@@ -102,7 +128,16 @@ impl CouplingAnalyzer {
     /// `[profile.<name>.coupling]` table are the same type, so this is
     /// the only seam between parsed options and the analyzer.
     pub fn with_options(self, opts: CouplingOptions) -> Self {
-        self.with_top(opts.top)
+        self.with_entry_globs(opts.entry_glob).with_top(opts.top)
+    }
+
+    /// Treat the analyzer's `path` argument as a project root and merge
+    /// the TS/JS module trees rooted at every file matching one of
+    /// `patterns` (gitignore-aware globs relative to `path`). Empty input
+    /// keeps the default single-entry behavior.
+    pub fn with_entry_globs(mut self, patterns: Vec<String>) -> Self {
+        self.entry_globs = patterns;
+        self
     }
 
     pub fn with_only_tests(mut self, only_tests: bool) -> Self {
@@ -130,7 +165,12 @@ impl CouplingAnalyzer {
         path: impl AsRef<Path>,
         format: OutputFormat,
     ) -> Result<String, CouplingAnalyzerError> {
-        let mut graph = build_graph(path.as_ref(), GraphPolicy::COUPLING, &self.path_filter)?;
+        let path = path.as_ref();
+        let mut graph = if self.entry_globs.is_empty() {
+            build_graph(path, &self.path_filter)?
+        } else {
+            build_ts_graph_from_entry_globs(path, &self.entry_globs)?
+        };
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: std::collections::HashSet<&ModulePath> =
@@ -138,8 +178,18 @@ impl CouplingAnalyzer {
         graph
             .edges
             .retain(|e| kept.contains(&e.from) && kept.contains(&e.to));
-        let report = compute_report(&module_paths(&graph), graph.edges);
-        let view = ReportView::new(&graph.root, &graph.labeler, &report);
+        let census: HashMap<ModulePath, TypeCensus> = graph
+            .modules
+            .iter()
+            .filter_map(|m| m.types.map(|t| (m.path.clone(), t)))
+            .collect();
+        let paths = module_paths(&graph);
+        let report = compute_report(&paths, graph.edges);
+        // `compute_report` deduplicates and drops self-loops; the closure
+        // walk reuses its cleaned edge list.
+        let spans = compute_context_spans(&paths, &report.edges);
+        let spans = SpanIndex::new(&spans.modules, &graph.modules);
+        let view = ReportView::new(&graph.root, &graph.labeler, &report, &spans, &census);
         match format {
             OutputFormat::Json => {
                 serde_json::to_string_pretty(&view).map_err(CouplingAnalyzerError::Serialize)
@@ -168,7 +218,7 @@ pub(crate) struct LabeledReport {
 /// is folded into `None` because "this directory isn't the kind of root
 /// we analyze" is not an error worth surfacing at session start.
 pub(crate) fn report_for_path(path: &Path) -> Result<Option<LabeledReport>, CouplingAnalyzerError> {
-    let graph = match build_graph(path, GraphPolicy::COUPLING, &AnalyzePathFilter::new()) {
+    let graph = match build_graph(path, &AnalyzePathFilter::new()) {
         Ok(graph) => graph,
         Err(CouplingAnalyzerError::UnsupportedRoot { .. }) => return Ok(None),
         Err(e) => return Err(e),
@@ -193,7 +243,13 @@ struct ReportView<'a> {
 }
 
 impl<'a> ReportView<'a> {
-    fn new(root: &Path, labeler: &ModuleLabeler, report: &'a CouplingReport) -> Self {
+    fn new(
+        root: &Path,
+        labeler: &ModuleLabeler,
+        report: &'a CouplingReport,
+        spans: &SpanIndex<'_>,
+        census: &HashMap<ModulePath, TypeCensus>,
+    ) -> Self {
         Self {
             crate_root: root.display().to_string(),
             module_count: report.modules.len(),
@@ -202,7 +258,9 @@ impl<'a> ReportView<'a> {
             modules: report
                 .modules
                 .iter()
-                .map(|m| ModuleView::new(m, labeler))
+                .map(|m| {
+                    ModuleView::new(m, labeler, spans.get(&m.path), census.get(&m.path).copied())
+                })
                 .collect(),
             edges: report
                 .edges
@@ -233,17 +291,96 @@ struct ModuleView {
     /// JSON when the module has no edges (so the ratio is undefined).
     #[serde(skip_serializing_if = "Option::is_none")]
     instability: Option<f64>,
+    /// Modules reachable through one or more outgoing edges, excluding
+    /// the module itself.
+    transitive: usize,
+    /// Distinct source files those reachable modules live in, excluding
+    /// the module's own file: inline modules sharing a file count once.
+    files: usize,
+    /// Abstract and concrete type declarations counted for the module.
+    /// Omitted where the language takes no census (TS/JS, Python, Quint).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abstract_types: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concrete_types: Option<usize>,
+    /// Martin's abstractness `A = Na / Nc`. Omitted when the module
+    /// declares no types or the language takes no census.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abstractness: Option<f64>,
+    /// Distance from the main sequence `D = |A + I - 1|`. Omitted unless
+    /// both `abstractness` and `instability` are defined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distance: Option<f64>,
 }
 
 impl ModuleView {
-    fn new(m: &ModuleMetrics, labeler: &ModuleLabeler) -> Self {
+    fn new(
+        m: &ModuleMetrics,
+        labeler: &ModuleLabeler,
+        span: Span,
+        census: Option<TypeCensus>,
+    ) -> Self {
+        let abstractness = census.and_then(TypeCensus::abstractness);
+        let distance = abstractness
+            .zip(m.instability)
+            .map(|(a, i)| main_sequence_distance(a, i));
         Self {
             path: labeler.label(&m.path),
             fan_in: m.fan_in,
             fan_out: m.fan_out,
             ifc: m.ifc,
             instability: m.instability,
+            transitive: span.transitive,
+            files: span.files,
+            abstract_types: census.map(|c| c.abstract_types),
+            concrete_types: census.map(|c| c.concrete_types),
+            abstractness,
+            distance,
         }
+    }
+}
+
+/// A module's transitive closure, reduced to the two counts the report
+/// carries.
+#[derive(Debug, Clone, Copy, Default)]
+struct Span {
+    transitive: usize,
+    files: usize,
+}
+
+/// Each module's [`Span`], keyed by its canonical path.
+struct SpanIndex<'a> {
+    by_path: HashMap<&'a ModulePath, Span>,
+}
+
+impl<'a> SpanIndex<'a> {
+    fn new(spans: &'a [ModuleContextSpan], modules: &[ModuleFile]) -> Self {
+        let file_of: HashMap<&ModulePath, &Path> = modules
+            .iter()
+            .map(|m| (&m.path, m.file.as_path()))
+            .collect();
+        let by_path = spans
+            .iter()
+            .map(|s| {
+                let home = file_of.get(&s.path).copied();
+                let files: BTreeSet<&Path> = s
+                    .reachable
+                    .iter()
+                    .filter_map(|p| file_of.get(p).copied())
+                    .filter(|f| Some(*f) != home)
+                    .collect();
+                let span = Span {
+                    transitive: s.transitive,
+                    files: files.len(),
+                };
+                (&s.path, span)
+            })
+            .collect();
+        Self { by_path }
+    }
+
+    fn get(&self, path: &ModulePath) -> Span {
+        self.by_path.get(path).copied().unwrap_or_default()
     }
 }
 
@@ -313,6 +450,7 @@ fn format_markdown(view: &ReportView<'_>, top: Option<usize>) -> String {
     // "these are the cycles" while hiding the rest, and the list is
     // short whenever the news is good.
     render_cycles(&mut out, &view.cycles);
+    render_distance(&mut out, &view.modules, limit.min(TOP_DISTANCE_LIMIT));
     render_pairs(&mut out, &view.pairs, limit.min(TOP_PAIRS_LIMIT));
     out
 }
@@ -322,8 +460,11 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView], limit: usize) 
     // deliberately rather than unwrapped to satisfy the workspace's
     // `unwrap_used` lint.
     let _ = writeln!(out, "\n## Modules (by IFC desc, top {limit})\n");
-    let _ = writeln!(out, "| module | fan_in | fan_out | ifc | instability |");
-    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: |");
+    let _ = writeln!(
+        out,
+        "| module | fan_in | fan_out | ifc | instability | transitive | files |"
+    );
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
     let mut sorted: Vec<&ModuleView> = modules.iter().collect();
     sorted.sort_by(|a, b| {
         b.ifc
@@ -335,12 +476,14 @@ fn render_modules_table(out: &mut String, modules: &[ModuleView], limit: usize) 
     for m in sorted.iter().take(limit) {
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} |",
             m.path,
             m.fan_in,
             m.fan_out,
             m.ifc,
             format_optional_f64(m.instability, 2),
+            m.transitive,
+            m.files,
         );
     }
     let omitted = sorted.len().saturating_sub(limit);
@@ -359,6 +502,63 @@ fn render_cycles(out: &mut String, cycles: &[CycleView]) {
     let _ = writeln!(out, "\n## Dependency cycles\n");
     for c in cycles {
         let _ = writeln!(out, "- {} module(s): {}", c.size, c.members.join(" → "));
+    }
+}
+
+/// Modules furthest from the main sequence, with the side of the line
+/// they fall on: below it (`A + I < 1`) is stable and concrete, the
+/// zone of pain, where dependents pin a module that offers no
+/// abstraction to extend; above it is unstable and abstract, the zone of
+/// uselessness. Modules on the line (`D = 0`) are not listed.
+fn render_distance(out: &mut String, modules: &[ModuleView], limit: usize) {
+    let mut ranked: Vec<(&ModuleView, f64, f64, f64)> = modules
+        .iter()
+        .filter_map(|m| Some((m, m.abstractness?, m.instability?, m.distance?)))
+        .filter(|&(_, _, _, d)| d > 0.0)
+        .collect();
+    if ranked.is_empty() {
+        return;
+    }
+    ranked.sort_by(|a, b| {
+        b.3.total_cmp(&a.3)
+            .then_with(|| b.0.fan_in.cmp(&a.0.fan_in))
+            .then_with(|| a.0.path.cmp(&b.0.path))
+    });
+    let _ = writeln!(
+        out,
+        "\n## Main-sequence distance (D = |A + I - 1| desc, top {limit})\n"
+    );
+    let _ = writeln!(
+        out,
+        "| module | fan_in | A | I | D | types (abstract/concrete) | side |"
+    );
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: | ---: | --- |");
+    for &(m, a, i, d) in ranked.iter().take(limit) {
+        let side = if a + i < 1.0 {
+            "stable+concrete"
+        } else {
+            "unstable+abstract"
+        };
+        let _ = writeln!(
+            out,
+            "| {} | {} | {a:.2} | {i:.2} | {d:.2} | {}/{} | {side} |",
+            m.path,
+            m.fan_in,
+            m.abstract_types.unwrap_or(0),
+            m.concrete_types.unwrap_or(0),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n_stable+concrete costs only where the module changes: value-type modules sit there \
+         harmlessly; cross-check churn with `analyze hotspot`._"
+    );
+    let omitted = ranked.len().saturating_sub(limit);
+    if omitted > 0 {
+        let _ = writeln!(
+            out,
+            "_{omitted} module(s) closer to the main sequence not shown; use --format json._",
+        );
     }
 }
 
@@ -484,9 +684,10 @@ mod tests {
             .analyze(&lib, OutputFormat::Md)
             .unwrap();
         assert!(md.contains("(by IFC desc, top 1)"), "got: {md}");
+        let table = |md: &str| md.split("## Main-sequence").next().unwrap().to_owned();
         // Three modules exist (crate, crate::a, crate::b); one row of
         // the table survives and the other two are accounted for.
-        assert_eq!(md.matches("| crate").count(), 1, "got: {md}");
+        assert_eq!(table(&md).matches("| crate").count(), 1, "got: {md}");
         assert!(md.contains("_2 lower-IFC module(s) not shown"), "got: {md}",);
 
         // Above the module count the note disappears entirely.
@@ -495,7 +696,7 @@ mod tests {
             .analyze(&lib, OutputFormat::Md)
             .unwrap();
         assert!(!md.contains("not shown"), "got: {md}");
-        assert_eq!(md.matches("| crate").count(), 3, "got: {md}");
+        assert_eq!(table(&md).matches("| crate").count(), 3, "got: {md}");
     }
 
     /// JSON is the machine-readable half and must stay complete: `--top`
@@ -676,6 +877,144 @@ mod tests {
         assert_eq!(a["instability"].as_f64().unwrap(), 0.0);
         // b only depends on others (Ca=0, Ce>0), so I = 1.
         assert_eq!(b["instability"].as_f64().unwrap(), 1.0);
+    }
+
+    /// `a` is depended on (I = 0) and declares one struct and no trait
+    /// (A = 0): the corner of the zone of pain. `b` declares no types,
+    /// so it carries a census but no abstractness, and no distance.
+    #[test]
+    fn json_report_records_abstractness_and_main_sequence_distance() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = small_crate(dir.path());
+        let json = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let a = module(&parsed, "crate::a");
+        assert_eq!(a["abstract_types"], 0);
+        assert_eq!(a["concrete_types"], 1);
+        assert_eq!(a["abstractness"].as_f64(), Some(0.0));
+        assert_eq!(a["distance"].as_f64(), Some(1.0));
+        let b = module(&parsed, "crate::b");
+        assert_eq!(b["concrete_types"], 0);
+        assert!(b.get("abstractness").is_none(), "got {b}");
+        assert!(b.get("distance").is_none(), "got {b}");
+    }
+
+    /// A stable module of traits sits on the main sequence (A = 1,
+    /// I = 0), so it gets a distance of zero and no markdown row. The
+    /// stable concrete one is listed on the stable+concrete side, and a
+    /// half-stable module of traits (A = 1, I = 0.5) on the other side —
+    /// a case where `A + I` and `A * I` disagree about the side.
+    #[test]
+    fn markdown_distance_section_lists_off_sequence_modules_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            "pub mod port;\npub mod model;\npub mod plug;\npub mod app;\n",
+        );
+        write_file(dir.path(), "port.rs", "pub trait Store {}\n");
+        write_file(dir.path(), "model.rs", "pub struct Row;\n");
+        write_file(
+            dir.path(),
+            "plug.rs",
+            "use crate::model::Row;\npub trait Plug { fn f(&self, r: Row); }\n",
+        );
+        write_file(
+            dir.path(),
+            "app.rs",
+            "use crate::port::Store;\nuse crate::model::Row;\nuse crate::plug::Plug;\nfn _f(_s: &dyn Store, _r: Row, _p: &dyn Plug) {}\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            module(&parsed, "crate::port")["distance"].as_f64(),
+            Some(0.0)
+        );
+
+        let md = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        let section = md
+            .split("## Main-sequence distance")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("distance section");
+        assert!(
+            section.contains("| crate::model | 2 | 0.00 | 0.00 | 1.00 | 0/1 | stable+concrete |"),
+            "got: {md}"
+        );
+        assert!(
+            section.contains("| crate::plug | 1 | 1.00 | 0.50 | 0.50 | 1/0 | unstable+abstract |"),
+            "got: {md}"
+        );
+        assert!(!section.contains("crate::port"), "got: {md}");
+        assert!(!section.contains("not shown"), "got: {md}");
+
+        // `--top 1` keeps the furthest module and counts the other.
+        let md = CouplingAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(
+            md.contains("_1 module(s) closer to the main sequence not shown"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn typescript_modules_carry_no_abstractness() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = write_file(
+            dir.path(),
+            "main.ts",
+            "import { Row } from './model'; export const r: Row = { id: 1 };\n",
+        );
+        write_file(
+            dir.path(),
+            "model.ts",
+            "export interface Row { id: number }\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(&main, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let model = module(&parsed, "model");
+        for key in [
+            "abstract_types",
+            "concrete_types",
+            "abstractness",
+            "distance",
+        ] {
+            assert!(model.get(key).is_none(), "{key} in {model}");
+        }
+    }
+
+    #[test]
+    fn go_package_abstractness_counts_interfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "go.mod", "module example.com/p\n");
+        write_file(
+            dir.path(),
+            "app/app.go",
+            "package app\n\nimport \"example.com/p/store\"\n\nfunc Run(s store.Store) {}\n",
+        );
+        write_file(
+            dir.path(),
+            "store/store.go",
+            "package store\n\ntype Store interface{ Get() }\n\ntype Mem struct{}\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let store = module(&parsed, "example.com/p/store");
+        assert_eq!(store["abstractness"].as_f64(), Some(0.5));
+        assert_eq!(store["instability"].as_f64(), Some(0.0));
+        assert_eq!(store["distance"].as_f64(), Some(0.5));
     }
 
     #[test]
@@ -1195,5 +1534,224 @@ mod tests {
             .unwrap();
         assert!(md.contains("Dependency cycles"));
         assert!(md.contains("instability"));
+    }
+
+    fn module<'v>(parsed: &'v serde_json::Value, path: &str) -> &'v serde_json::Value {
+        parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["path"] == path)
+            .unwrap_or_else(|| panic!("{path} present in {parsed}"))
+    }
+
+    /// `crate::a → crate::b → crate::c`: a's closure is the whole chain,
+    /// c is a leaf. The closure counts modules and the files they span.
+    #[rstest::rstest]
+    #[case("crate::a", 2, 2)]
+    #[case("crate::b", 1, 1)]
+    #[case("crate::c", 0, 0)]
+    fn json_report_records_transitive_span_and_files(
+        #[case] path: &str,
+        #[case] transitive: u64,
+        #[case] files: u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "pub mod a;\npub mod b;\npub mod c;\n");
+        write_file(
+            dir.path(),
+            "a.rs",
+            "use crate::b::Bar;\npub fn _x(_b: Bar) {}\n",
+        );
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::c::Quux;\npub struct Bar;\npub fn _y(_q: Quux) {}\n",
+        );
+        write_file(dir.path(), "c.rs", "pub struct Quux;\n");
+        let json = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let m = module(&parsed, path);
+        assert_eq!(m["transitive"], transitive);
+        assert_eq!(m["files"], files);
+    }
+
+    #[test]
+    fn markdown_module_table_carries_the_span_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = small_crate(dir.path());
+        let md = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("| transitive | files |"), "got: {md}");
+        // crate::b reaches crate::a, one module in one other file.
+        assert!(
+            md.contains("| crate::b | 0 | 1 | 0 | 1.00 | 1 | 1 |"),
+            "got: {md}"
+        );
+    }
+
+    /// A module in a cycle never counts itself in its own closure.
+    #[test]
+    fn cycle_does_not_count_a_module_in_its_own_span() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "lib.rs", "pub mod a;\npub mod b;\n");
+        write_file(
+            dir.path(),
+            "a.rs",
+            "use crate::b::Bar;\npub struct Foo;\nfn _x(_b: Bar) {}\n",
+        );
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::a::Foo;\npub struct Bar;\nfn _y(_f: Foo) {}\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .analyze(dir.path().join("lib.rs"), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(module(&parsed, "crate::a")["transitive"], 1);
+        assert_eq!(module(&parsed, "crate::a")["files"], 1);
+    }
+
+    /// Inline modules share their parent's file, so reaching a sibling
+    /// inline module adds a module to the closure but no file.
+    #[test]
+    fn inline_modules_share_a_file_so_files_dedupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(
+            dir.path(),
+            "lib.rs",
+            r#"
+            pub mod leaf;
+            pub mod host {
+                use crate::leaf::Leaf;
+                pub fn _x(_l: Leaf) {}
+                pub fn _y() { crate::sibling::ping(); }
+            }
+            pub mod sibling {
+                pub fn ping() {}
+            }
+            "#,
+        );
+        write_file(dir.path(), "leaf.rs", "pub struct Leaf;\n");
+        let json = CouplingAnalyzer::new()
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let host = module(&parsed, "crate::host");
+        assert_eq!(host["transitive"], 2);
+        assert_eq!(host["files"], 1);
+    }
+
+    /// An excluded module is out of the closure too, not just out of the
+    /// table: its file is not one the agent has to read.
+    #[test]
+    fn excluded_modules_leave_the_transitive_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write_file(dir.path(), "lib.rs", "pub mod a;\npub mod b;\npub mod c;\n");
+        write_file(
+            dir.path(),
+            "a.rs",
+            "use crate::b::Bar;\npub fn _x(_b: Bar) {}\n",
+        );
+        write_file(
+            dir.path(),
+            "b.rs",
+            "use crate::c::Quux;\npub struct Bar;\npub fn _y(_q: Quux) {}\n",
+        );
+        write_file(dir.path(), "c.rs", "pub struct Quux;\n");
+        let json = CouplingAnalyzer::new()
+            .with_exclude_patterns(vec!["c.rs".to_owned()])
+            .analyze(&lib, OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(module(&parsed, "crate::a")["transitive"], 1);
+    }
+
+    /// Two TS entries sharing a transitively-imported file: the shared
+    /// file collapses to one module in the merged graph.
+    #[test]
+    fn entry_globs_merge_trees_and_dedupe_shared_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "app/page.tsx",
+            "import { sharedUtil } from '../lib/util';\nexport default function Page() { return sharedUtil(); }\n",
+        );
+        write_file(
+            dir.path(),
+            "app/route.ts",
+            "import { sharedUtil } from '../lib/util';\nexport function GET() { return sharedUtil(); }\n",
+        );
+        write_file(
+            dir.path(),
+            "lib/util.ts",
+            "export const sharedUtil = () => 'ok';\n",
+        );
+        let json = CouplingAnalyzer::new()
+            .with_entry_globs(vec![
+                "app/**/page.tsx".to_owned(),
+                "app/**/route.ts".to_owned(),
+            ])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let paths: Vec<&str> = parsed["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(parsed["module_count"], 3, "got {paths:?}");
+        assert!(paths.iter().any(|p| p.ends_with("util")), "got {paths:?}");
+        let util = paths.iter().find(|p| p.ends_with("util")).unwrap();
+        assert_eq!(module(&parsed, util)["fan_in"], 2);
+    }
+
+    /// A glob that incidentally catches a non-TS sibling skips it rather
+    /// than failing the run.
+    #[test]
+    fn entry_globs_skip_non_ts_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "app/page.tsx",
+            "import { x } from './data';\nexport default function P() { return x; }\n",
+        );
+        write_file(dir.path(), "app/data.ts", "export const x = 1;\n");
+        write_file(dir.path(), "app/data.json", "{\"x\": 1}\n");
+        let json = CouplingAnalyzer::new()
+            .with_entry_globs(vec!["app/*".to_owned()])
+            .analyze(dir.path(), OutputFormat::Json)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["module_count"], 2, "got {parsed}");
+    }
+
+    #[rstest::rstest]
+    #[case::no_matches(&["app/**/page.tsx"], false)]
+    #[case::invalid_pattern(&["["], false)]
+    #[case::file_base(&["**/*.ts"], true)]
+    fn entry_globs_reject_unusable_input(#[case] patterns: &[&str], #[case] file_base: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = write_file(dir.path(), "src/main.ts", "export const x = 1;\n");
+        let base = if file_base {
+            entry
+        } else {
+            dir.path().to_path_buf()
+        };
+        let err = CouplingAnalyzer::new()
+            .with_entry_globs(patterns.iter().map(|p| (*p).to_owned()).collect())
+            .analyze(&base, OutputFormat::Json)
+            .unwrap_err();
+        let expected = match patterns[0] {
+            "[" => matches!(err, CouplingAnalyzerError::InvalidEntryGlob { .. }),
+            _ if file_base => matches!(err, CouplingAnalyzerError::EntryGlobBaseNotDir { .. }),
+            _ => matches!(err, CouplingAnalyzerError::EntryGlobNoMatches { .. }),
+        };
+        assert!(expected, "got {err:?}");
     }
 }

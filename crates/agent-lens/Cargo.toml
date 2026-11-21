@@ -19,6 +19,7 @@ ignore = { workspace = true }
 lens-domain = { path = "../lens-domain", version = "0.10.0" }
 lens-golang = { path = "../lens-golang", version = "0.10.0" }
 lens-py = { path = "../lens-py", version = "0.10.0" }
+lens-quint = { path = "../lens-quint", version = "0.10.0" }
 lens-rust = { path = "../lens-rust", version = "0.10.0" }
 lens-ts = { path = "../lens-ts", version = "0.10.0" }
 rayon = { workspace = true }

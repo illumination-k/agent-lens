@@ -73,7 +73,17 @@ fn merged_subcommand_hint(err: &clap::Error) -> Option<String> {
     let merged = agent_lens::config::MERGED_TOOLS
         .iter()
         .find(|merged| merged.old == name)?;
-    Some(format!("`analyze {name}` is now `{}`", merged.command()))
+    // With no flags to name, the profile note is what says where the
+    // report went (columns of another analyzer).
+    let note = if merged.flags.is_empty() && !merged.profile.is_empty() {
+        format!(" ({})", merged.profile)
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "`analyze {name}` is now `{}`{note}",
+        merged.command()
+    ))
 }
 
 fn init_tracing() {
@@ -212,6 +222,10 @@ mod tests {
     #[case(
         "test-redundancy",
         "`analyze test-redundancy` is now `analyze similarity --target tests`"
+    )]
+    #[case(
+        "context-span",
+        "`analyze context-span` is now `analyze coupling` (its `transitive` and `files` columns carry it)"
     )]
     fn a_merged_subcommand_names_its_new_home(#[case] name: &str, #[case] expected: &str) {
         let err = Cli::try_parse_from(["agent-lens", "analyze", name, "."]).unwrap_err();

@@ -91,9 +91,10 @@ use lens_domain::{
 };
 use serde::Serialize;
 
+use super::format::render_overflow;
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
-use super::module_graph::{GraphPolicy, ModuleGraph, build_graph};
+use super::module_graph::{ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
 use super::{AnalyzePathFilter, AnalyzeRoots, CrateAnalyzerError, OutputFormat, PathFilterError};
 
@@ -458,8 +459,7 @@ impl CommunitiesAnalyzer {
     ) -> Result<String, CommunitiesError> {
         self.validate()?;
         let path = path.as_ref();
-        let mut graph = build_graph(path, GraphPolicy::COUPLING, &self.path_filter)
-            .map_err(CommunitiesError::Graph)?;
+        let mut graph = build_graph(path, &self.path_filter).map_err(CommunitiesError::Graph)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: BTreeSet<&ModulePath> = graph.modules.iter().map(|m| &m.path).collect();
@@ -1131,7 +1131,7 @@ fn render_agreement(out: &mut String, agreement: &AgreementView, limit: usize) {
             row.member, row.static_mates, row.co_change_mates, row.shared_mates, row.jaccard,
         );
     }
-    render_overflow(out, agreement.divergent.len(), limit, "divergent member");
+    render_overflow(out, agreement.divergent.len(), limit, "divergent member(s)");
 }
 
 fn render_modularity(out: &mut String, view: &ReportView) {
@@ -1219,7 +1219,7 @@ fn render_misfiled(out: &mut String, rows: &[MisfiledView], limit: usize) {
             weight(row.evidence),
         );
     }
-    render_overflow(out, rows.len(), limit, "misfiled member");
+    render_overflow(out, rows.len(), limit, "misfiled member(s)");
 }
 
 fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
@@ -1249,7 +1249,7 @@ fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
             members_cell(&c.members),
         );
     }
-    render_overflow(out, view.communities.len(), limit, "community");
+    render_overflow(out, view.communities.len(), limit, "community(s)");
 }
 
 fn members_cell(members: &[String]) -> String {
@@ -1285,17 +1285,7 @@ fn render_spanning(out: &mut String, rows: &[SpanningView], limit: usize) {
             row.community, row.size, row.declared_group_count,
         );
     }
-    render_overflow(out, rows.len(), limit, "spanning community");
-}
-
-fn render_overflow(out: &mut String, total: usize, limit: usize, unit: &str) {
-    let omitted = total.saturating_sub(limit);
-    if omitted > 0 {
-        let _ = writeln!(
-            out,
-            "\n_{omitted} more {unit}(s) not shown; raise --top or use --format json._",
-        );
-    }
+    render_overflow(out, rows.len(), limit, "spanning community(s)");
 }
 
 #[cfg(test)]
@@ -1432,7 +1422,7 @@ mod tests {
     fn a_module_holding_submodules_is_declared_in_itself() {
         let dir = tempfile::tempdir().unwrap();
         let lib = planted_crate(dir.path());
-        let graph = build_graph(&lib, GraphPolicy::COUPLING, &AnalyzePathFilter::new()).unwrap();
+        let graph = build_graph(&lib, &AnalyzePathFilter::new()).unwrap();
         let member = Membership::new(&graph, Granularity::File);
 
         assert_eq!(

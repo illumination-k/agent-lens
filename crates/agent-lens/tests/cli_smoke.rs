@@ -662,7 +662,6 @@ fn exclude_prunes_a_directory_however_it_is_spelled(
 #[case("cohesion")]
 #[case("coupling")]
 #[case("communities")]
-#[case("context-span")]
 #[case("graph")]
 fn a_walked_undecodable_file_is_warned_about_and_skipped(#[case] analyzer: &str) {
     let dir = tempfile::tempdir().unwrap();
@@ -1166,12 +1165,11 @@ fn %NAME%(x: i32) -> i32 {
     );
 }
 
-/// `coupling` and `context-span` grow one module graph from one entry
+/// `coupling` and `communities` grow one module graph from one entry
 /// point, so the config rejects a wider corpus for them by name rather
 /// than picking a path and running a report nobody asked for.
 #[rstest]
 #[case::coupling("coupling")]
-#[case::context_span("context-span")]
 #[case::communities("communities")]
 fn run_profile_rejects_several_paths_for_a_single_root_tool(#[case] tool: &str) {
     let dir = tempfile::tempdir().unwrap();

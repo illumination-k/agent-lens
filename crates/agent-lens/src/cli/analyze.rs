@@ -5,20 +5,20 @@ use std::path::PathBuf;
 
 use agent_lens::analyze::{
     ChangeEntropyAnalyzer, CoChangeAnalyzer, CohesionAnalyzer, CommunitiesAnalyzer,
-    ComplexityAnalyzer, ContextSpanAnalyzer, CouplingAnalyzer, CyclesAnalyzer, FootprintAnalyzer,
-    ForwardingAnalyzer, FunctionSelection, GraphAnalyzer, HiddenCouplingAnalyzer, HotspotAnalyzer,
-    HubsAnalyzer, ImpactAnalyzer, LayersAnalyzer, NarrowableAnalyzer, OutputFormat,
-    OwnershipAnalyzer, ReachAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
+    ComplexityAnalyzer, CouplingAnalyzer, CyclesAnalyzer, FootprintAnalyzer, ForwardingAnalyzer,
+    FunctionSelection, GraphAnalyzer, HiddenCouplingAnalyzer, HotspotAnalyzer, HubsAnalyzer,
+    ImpactAnalyzer, LayersAnalyzer, NarrowableAnalyzer, OutputFormat, OwnershipAnalyzer,
+    ReachAnalyzer, RiskAnalyzer, SearchAnalyzer, SimilarityAnalyzer,
 };
 use agent_lens::config::{self, ConfigError};
 
 use super::args::{
     AnalyzeChangeEntropyArgs, AnalyzeCoChangeArgs, AnalyzeCohesionArgs, AnalyzeCommand,
-    AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeContextSpanArgs,
-    AnalyzeCouplingArgs, AnalyzeFootprintArgs, AnalyzeForwardingArgs, AnalyzeGraphArgs,
-    AnalyzeHiddenCouplingArgs, AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs,
-    AnalyzeLayersArgs, AnalyzeNarrowableArgs, AnalyzeOwnershipArgs, AnalyzePathArgs,
-    AnalyzeReachArgs, AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
+    AnalyzeCommonArgs, AnalyzeCommunitiesArgs, AnalyzeComplexityArgs, AnalyzeCouplingArgs,
+    AnalyzeFootprintArgs, AnalyzeForwardingArgs, AnalyzeGraphArgs, AnalyzeHiddenCouplingArgs,
+    AnalyzeHotspotArgs, AnalyzeHubsArgs, AnalyzeImpactArgs, AnalyzeLayersArgs,
+    AnalyzeNarrowableArgs, AnalyzeOwnershipArgs, AnalyzePathArgs, AnalyzeReachArgs,
+    AnalyzeRiskArgs, AnalyzeRootArgs, AnalyzeSearchArgs, AnalyzeSimilarityArgs,
 };
 use super::output::write_stdout_line;
 
@@ -96,10 +96,6 @@ pub(super) fn build_analyze_command(
         config::ToolName::Complexity => AnalyzeCommand::Complexity(AnalyzeComplexityArgs {
             common,
             opts: profile.complexity.clone().unwrap_or_default(),
-        }),
-        config::ToolName::ContextSpan => AnalyzeCommand::ContextSpan(AnalyzeContextSpanArgs {
-            common: root()?,
-            opts: profile.context_span.clone().unwrap_or_default(),
         }),
         config::ToolName::Coupling => AnalyzeCommand::Coupling(AnalyzeCouplingArgs {
             common: root()?,
@@ -215,7 +211,6 @@ impl_with_analyze_path_args!(
     CouplingAnalyzer,
     CyclesAnalyzer,
     GraphAnalyzer,
-    ContextSpanAnalyzer,
     HiddenCouplingAnalyzer,
     HotspotAnalyzer,
     HubsAnalyzer,
@@ -309,7 +304,6 @@ impl AnalyzeCommand {
                 Communities => CommunitiesAnalyzer,
                 Complexity => ComplexityAnalyzer,
                 Coupling => CouplingAnalyzer,
-                ContextSpan => ContextSpanAnalyzer,
                 HiddenCoupling => HiddenCouplingAnalyzer,
                 Hotspot => HotspotAnalyzer,
                 Hubs => HubsAnalyzer,
@@ -497,7 +491,7 @@ fn dispatch(n: i32) -> i32 {
     /// the one outcome worse than the error.
     #[rstest]
     #[case::coupling(config::ToolName::Coupling)]
-    #[case::context_span(config::ToolName::ContextSpan)]
+    #[case::communities(config::ToolName::Communities)]
     fn build_analyze_command_rejects_several_paths_for_a_single_root_tool(
         #[case] tool: config::ToolName,
     ) {

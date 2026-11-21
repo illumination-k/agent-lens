@@ -54,12 +54,6 @@ fn endpoints(edge: &CallGraphEdge, index_by_id: &HashMap<&str, usize>) -> Option
 /// Whether `edge` was resolved through the last-segment fallback
 /// family, making the caller attribution itself heuristic.
 pub(super) fn is_fallback_resolved(edge: &CallGraphEdge) -> bool {
-    matches!(
-        edge.resolution_method,
-        Some(
-            ResolutionMethod::LastSegment
-                | ResolutionMethod::PathSuffix
-                | ResolutionMethod::CrateNarrowed
-        )
-    )
+    edge.resolution_method
+        .is_some_and(ResolutionMethod::is_name_fallback)
 }

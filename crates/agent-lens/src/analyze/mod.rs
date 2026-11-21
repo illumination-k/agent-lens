@@ -13,7 +13,6 @@ pub mod cohesion;
 pub mod communities;
 pub mod complexity;
 mod composite;
-pub mod context_span;
 pub mod coupling;
 mod crate_root;
 pub mod cycles;
@@ -66,7 +65,6 @@ use lens_domain::LanguageParser;
 pub use cohesion::CohesionAnalyzer;
 pub use communities::{CommunitiesAnalyzer, Granularity};
 pub use complexity::ComplexityAnalyzer;
-pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
 pub use cycles::CyclesAnalyzer;
 pub use delegation::DelegationAnalyzer;
@@ -153,6 +151,7 @@ pub enum SourceLang {
     TypeScript(lens_ts::Dialect),
     Python,
     Go,
+    Quint,
 }
 
 impl SourceLang {
@@ -165,6 +164,9 @@ impl SourceLang {
         }
         if ext == "go" {
             return Some(Self::Go);
+        }
+        if ext == "qnt" {
+            return Some(Self::Quint);
         }
         lens_ts::Dialect::from_extension(ext).map(Self::TypeScript)
     }
@@ -183,6 +185,7 @@ impl SourceLang {
             }
             Self::Python => Box::new(lens_py::PythonParser::new()),
             Self::Go => Box::new(lens_golang::GoParser::new()),
+            Self::Quint => Box::new(lens_quint::QuintParser::new()),
         }
     }
 }
@@ -210,6 +213,8 @@ macro_rules! dispatch_lens {
                 .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
             $crate::analyze::SourceLang::Go => ::lens_golang::$extract($source $(, $arg)*)
                 .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
+            $crate::analyze::SourceLang::Quint => ::lens_quint::$extract($source $(, $arg)*)
+                .map_err(|e| ::std::boxed::Box::new(e) as BoxedError),
         }
     }};
 }
@@ -224,7 +229,7 @@ pub(crate) fn relative_display_path(path: &Path, base: &Path) -> String {
 
 /// Errors common to single-file analyzers (cohesion, complexity).
 ///
-/// Coupling and context-span carry extra variants (`UnsupportedRoot`,
+/// The module-graph analyzers carry extra variants (`UnsupportedRoot`,
 /// `MissingMod`) and use the dedicated [`CrateAnalyzerError`] below
 /// instead.
 #[derive(Debug, thiserror::Error)]
@@ -286,10 +291,10 @@ pub enum AnalyzerError {
 }
 
 /// Errors raised by analyzers that walk a Rust crate from a `.rs` root
-/// (coupling, context-span, …).
+/// (coupling, communities, …).
 ///
-/// Both analyzers reach into the same `lens_rust` extractor and surface
-/// the same handful of failure modes; they used to duplicate this enum.
+/// They reach into the same `lens_rust` extractor and surface the same
+/// handful of failure modes.
 #[derive(Debug, thiserror::Error)]
 pub enum CrateAnalyzerError {
     #[error("failed to read {path:?}: {source}")]
@@ -307,7 +312,7 @@ pub enum CrateAnalyzerError {
     /// The provided path exists but no language backend claims it: not a
     /// crate root, not an entry file, and a directory walk found nothing.
     #[error(
-        "unsupported analysis root {path:?}; pass a Rust crate root (.rs file or a directory containing src/lib.rs or src/main.rs), a TS/JS entry file, a Python file/directory, or a Go file/module directory"
+        "unsupported analysis root {path:?}; pass a Rust crate root (.rs file or a directory containing src/lib.rs or src/main.rs), a TS/JS entry file, a Python file/directory, a Go file/module directory, or a Quint file/directory"
     )]
     UnsupportedRoot { path: PathBuf },
     /// `mod foo;` was declared in a parent file but neither `foo.rs` nor
@@ -324,6 +329,19 @@ pub enum CrateAnalyzerError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error("--entry-glob requires {path:?} to be a directory")]
+    EntryGlobBaseNotDir { path: PathBuf },
+    #[error("invalid --entry-glob pattern {pattern:?}: {source}")]
+    InvalidEntryGlob {
+        pattern: String,
+        #[source]
+        source: globset::Error,
+    },
+    #[error("no files matched any --entry-glob pattern under {path:?}; patterns: {patterns:?}")]
+    EntryGlobNoMatches {
+        path: PathBuf,
+        patterns: Vec<String>,
+    },
 }
 
 impl From<lens_domain::CouplingError> for CrateAnalyzerError {
@@ -370,6 +388,7 @@ mod tests {
         assert_eq!(SourceLang::from_extension("rs"), Some(SourceLang::Rust));
         assert_eq!(SourceLang::from_extension("py"), Some(SourceLang::Python));
         assert_eq!(SourceLang::from_extension("go"), Some(SourceLang::Go));
+        assert_eq!(SourceLang::from_extension("qnt"), Some(SourceLang::Quint));
         assert_eq!(SourceLang::from_extension("md"), None);
     }
 

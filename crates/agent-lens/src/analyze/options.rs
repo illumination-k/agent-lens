@@ -182,7 +182,6 @@ mod tests {
         WeightSource,
     };
     use crate::analyze::complexity::{ComplexityAnalyzer, ComplexityOptions};
-    use crate::analyze::context_span::{ContextSpanAnalyzer, ContextSpanOptions};
     use crate::analyze::coupling::{CouplingAnalyzer, CouplingOptions};
     use crate::analyze::delegation::{DelegationAnalyzer, DelegationOptions};
     use crate::analyze::footprint::{FootprintAnalyzer, FootprintOptions};
@@ -352,13 +351,6 @@ mod tests {
         |a| a.with_top(Some(3)).with_min_score(Some(4)).with_diff_only(true)
     );
     assert_options_reach_the_analyzer!(
-        context_span_options_reach_the_analyzer: ContextSpanAnalyzer,
-        ContextSpanOptions { top: Some(3), entry_glob: vec!["app/**/page.tsx".to_owned()] },
-        |a| a
-            .with_entry_globs(vec!["app/**/page.tsx".to_owned()])
-            .with_top(Some(3))
-    );
-    assert_options_reach_the_analyzer!(
         delegation_options_reach_the_analyzer: DelegationAnalyzer,
         DelegationOptions { top: Some(3), diff_only: true, diff_range: None },
         |a| a.with_top(Some(3)).with_diff_only(true)
@@ -448,8 +440,10 @@ mod tests {
     );
     assert_options_reach_the_analyzer!(
         coupling_options_reach_the_analyzer: CouplingAnalyzer,
-        CouplingOptions { top: Some(3) },
-        |a| a.with_top(Some(3))
+        CouplingOptions { top: Some(3), entry_glob: vec!["app/**/page.tsx".to_owned()] },
+        |a| a
+            .with_entry_globs(vec!["app/**/page.tsx".to_owned()])
+            .with_top(Some(3))
     );
     assert_options_reach_the_analyzer!(
         wrapper_options_reach_the_analyzer: WrapperAnalyzer,
