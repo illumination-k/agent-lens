@@ -16,7 +16,6 @@ mod attrs;
 mod call_index;
 mod cohesion;
 mod complexity;
-mod context_span;
 mod coupling;
 mod dependence;
 mod harness;
@@ -39,7 +38,6 @@ pub use call_index::{
 };
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
-pub use context_span::{ContextSpanError, extract_context_spans};
 pub use coupling::{TsModule, build_module_tree, extract_edges};
 pub use dependence::TsVocabulary;
 pub use lens_domain::CouplingError;

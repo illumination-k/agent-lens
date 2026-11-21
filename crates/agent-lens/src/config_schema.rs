@@ -25,16 +25,15 @@ use clap::{Arg, ArgAction, Args, Command};
 
 use crate::config::{
     CONFIG_FILE_NAME, ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
-    ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions, ForwardingOptions,
-    GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions, LayersOptions,
-    NarrowableOptions, OwnershipOptions, ReachOptions, RiskOptions, SearchOptions,
-    SimilarityOptions, TestRedundancyOptions, ToolName,
+    ComplexityOptions, CouplingOptions, FootprintOptions, ForwardingOptions, GraphQueryOptions,
+    HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, NarrowableOptions, OwnershipOptions,
+    ReachOptions, RiskOptions, SearchOptions, SimilarityOptions, TestRedundancyOptions, ToolName,
 };
 
 /// Order the per-tool tables are rendered in. Kept in sync with the
 /// exhaustive `match` in [`tool_table`]; a missing variant there is a
 /// compile error, and the cohesion test guards the reverse direction.
-const TOOL_ORDER: [ToolName; 24] = [
+const TOOL_ORDER: [ToolName; 23] = [
     ToolName::Search,
     ToolName::Similarity,
     ToolName::Complexity,
@@ -54,7 +53,6 @@ const TOOL_ORDER: [ToolName; 24] = [
     ToolName::TestRedundancy,
     ToolName::Forwarding,
     ToolName::GraphQuery,
-    ToolName::ContextSpan,
     ToolName::Coupling,
     ToolName::Communities,
     ToolName::FunctionGraph,
@@ -81,13 +79,13 @@ const PROFILE_FIELDS: &[Field] = &[
         key: "path",
         ty: "string (path) or array<string>",
         presence: "required",
-        desc: "Target path handed to every analyzer in `tools`, or an array of them walked into one report (the config spelling of `analyze <tool> PATH...`). A relative path is resolved against the directory holding agent-lens.toml. An array of more than one path is rejected for coupling, context-span and communities, which take a single entry point.",
+        desc: "Target path handed to every analyzer in `tools`, or an array of them walked into one report (the config spelling of `analyze <tool> PATH...`). A relative path is resolved against the directory holding agent-lens.toml. An array of more than one path is rejected for coupling and communities, which take a single entry point.",
     },
     Field {
         key: "tools",
         ty: "array<tool-name>",
         presence: "required",
-        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, context-span, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, ownership, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding.",
+        desc: "Analyzers to run, in order. Each entry is one of: change-entropy, cohesion, communities, complexity, coupling, co-change, cycles, footprint, forwarding, function-graph, graph-query, hidden-coupling, hotspot, hubs, impact, layers, narrowable, ownership, reach, risk, search, similarity, test-redundancy. The former untested, test-only and unreachable are sections of reach; single-use, single-impl, parameters and visibility are sections of narrowable; wrapper and delegation are sections of forwarding; context-span is the transitive and files columns of coupling.",
     },
     Field {
         key: "format",
@@ -168,7 +166,6 @@ fn tool_command(tool: ToolName) -> Option<Command> {
         ToolName::TestRedundancy => of::<TestRedundancyOptions>("test-redundancy"),
         ToolName::Forwarding => of::<ForwardingOptions>("forwarding"),
         ToolName::GraphQuery => of::<GraphQueryOptions>("graph-query"),
-        ToolName::ContextSpan => of::<ContextSpanOptions>("context-span"),
         ToolName::Coupling => of::<CouplingOptions>("coupling"),
         ToolName::Communities => of::<CommunitiesOptions>("communities"),
         // Declaring a `[profile.<name>.cycles]` table is a parse error.
@@ -491,10 +488,10 @@ mod tests {
     use crate::analyze::{DEFAULT_SIMILARITY_MIN_LINES, DEFAULT_SIMILARITY_THRESHOLD};
     use crate::config::{
         ChangeEntropyOptions, CoChangeOptions, CohesionOptions, CommunitiesOptions,
-        ComplexityOptions, ContextSpanOptions, CouplingOptions, FootprintOptions,
-        ForwardingOptions, GraphQueryOptions, HotspotOptions, HubsOptions, ImpactOptions,
-        LayersOptions, NarrowableOptions, OwnershipOptions, Profile, ReachOptions, RiskOptions,
-        SearchOptions, SimilarityOptions, TestRedundancyOptions,
+        ComplexityOptions, CouplingOptions, FootprintOptions, ForwardingOptions, GraphQueryOptions,
+        HotspotOptions, HubsOptions, ImpactOptions, LayersOptions, NarrowableOptions,
+        OwnershipOptions, Profile, ReachOptions, RiskOptions, SearchOptions, SimilarityOptions,
+        TestRedundancyOptions,
     };
 
     /// Schema keys documented for `tool` must match, exactly, the serde field
@@ -535,7 +532,6 @@ mod tests {
         assert_tool_parity::<TestRedundancyOptions>(ToolName::TestRedundancy);
         assert_tool_parity::<ForwardingOptions>(ToolName::Forwarding);
         assert_tool_parity::<GraphQueryOptions>(ToolName::GraphQuery);
-        assert_tool_parity::<ContextSpanOptions>(ToolName::ContextSpan);
         assert_tool_parity::<CouplingOptions>(ToolName::Coupling);
     }
 

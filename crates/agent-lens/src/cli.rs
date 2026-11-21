@@ -70,11 +70,15 @@ fn merged_subcommand_hint(err: &clap::Error) -> Option<String> {
     let Some(ContextValue::String(name)) = err.get(ContextKind::InvalidSubcommand) else {
         return None;
     };
-    let (_, tool, section) = agent_lens::config::MERGED_TOOLS
-        .iter()
-        .find(|(old, ..)| old == name)?;
+    use agent_lens::config::{ABSORBED_TOOLS, MERGED_TOOLS};
+    if let Some((_, tool, section)) = MERGED_TOOLS.iter().find(|(old, ..)| old == name) {
+        return Some(format!(
+            "`analyze {name}` is now `analyze {tool} --section {section}`"
+        ));
+    }
+    let (_, tool, carrier) = ABSORBED_TOOLS.iter().find(|(old, ..)| old == name)?;
     Some(format!(
-        "`analyze {name}` is now `analyze {tool} --section {section}`"
+        "`analyze {name}` is now `analyze {tool}` ({carrier})"
     ))
 }
 
@@ -210,6 +214,10 @@ mod tests {
     #[case(
         "visibility",
         "`analyze visibility` is now `analyze narrowable --section visibility`"
+    )]
+    #[case(
+        "context-span",
+        "`analyze context-span` is now `analyze coupling` (its `transitive` and `files` columns)"
     )]
     fn a_merged_subcommand_names_its_new_home(#[case] name: &str, #[case] expected: &str) {
         let err = Cli::try_parse_from(["agent-lens", "analyze", name, "."]).unwrap_err();

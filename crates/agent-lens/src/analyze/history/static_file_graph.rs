@@ -37,7 +37,7 @@ use super::churn::ChurnScope;
 use crate::analyze::call_graph::CallGraph;
 use crate::analyze::call_graph::model::Resolution;
 use crate::analyze::cargo_meta::CrateNameCache;
-use crate::analyze::module_graph::{GraphPolicy, ModuleGraph, build_graph};
+use crate::analyze::module_graph::{ModuleGraph, build_graph};
 use crate::analyze::path_filter::AnalyzePathFilter;
 
 /// Which of the two projections put an edge in the graph.
@@ -425,7 +425,7 @@ pub(crate) fn add_module_graphs(
 ) -> ModuleGraphCoverage {
     let mut coverage = ModuleGraphCoverage::default();
     for root in module_graph_roots(scope.targets(), files) {
-        match build_graph(&root, GraphPolicy::COUPLING, &AnalyzePathFilter::new()) {
+        match build_graph(&root, &AnalyzePathFilter::new()) {
             Ok(graph) => {
                 coverage.roots += 1;
                 builder.add_module_graph(&graph, scope);
