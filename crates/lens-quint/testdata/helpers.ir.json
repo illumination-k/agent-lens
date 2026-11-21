@@ -1,0 +1,150 @@
+{
+  "stage": "parsing",
+  "warnings": [],
+  "modules": [
+    {
+      "id": 9,
+      "name": "helpers",
+      "declarations": [
+        {
+          "id": 8,
+          "kind": "def",
+          "name": "inc",
+          "qualifier": "puredef",
+          "expr": {
+            "id": 7,
+            "kind": "lambda",
+            "params": [{ "id": 2, "name": "n", "typeAnnotation": { "id": 1, "kind": "int" } }],
+            "qualifier": "puredef",
+            "expr": {
+              "id": 6,
+              "kind": "app",
+              "opcode": "iadd",
+              "args": [{ "id": 4, "kind": "name", "name": "n" }, { "id": 5, "kind": "int", "value": 1 }]
+            }
+          },
+          "typeAnnotation": { "kind": "oper", "args": [{ "id": 1, "kind": "int" }], "res": { "id": 3, "kind": "int" } }
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "name": "extra",
+      "declarations": [
+        { "id": 10, "kind": "import", "defName": "*", "protoName": "helpers" },
+        {
+          "id": 18,
+          "kind": "def",
+          "name": "twice",
+          "qualifier": "puredef",
+          "expr": {
+            "id": 17,
+            "kind": "lambda",
+            "params": [{ "id": 12, "name": "n", "typeAnnotation": { "id": 11, "kind": "int" } }],
+            "qualifier": "puredef",
+            "expr": {
+              "id": 16,
+              "kind": "app",
+              "opcode": "inc",
+              "args": [
+                { "id": 15, "kind": "app", "opcode": "inc", "args": [{ "id": 14, "kind": "name", "name": "n" }] }
+              ]
+            }
+          },
+          "typeAnnotation": {
+            "kind": "oper",
+            "args": [{ "id": 11, "kind": "int" }],
+            "res": { "id": 13, "kind": "int" }
+          }
+        }
+      ]
+    }
+  ],
+  "table": {
+    "4": { "id": 2, "name": "n", "typeAnnotation": { "id": 1, "kind": "int" }, "kind": "param", "depth": 1 },
+    "8": {
+      "id": 8,
+      "kind": "def",
+      "name": "inc",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 7,
+        "kind": "lambda",
+        "params": [{ "id": 2, "name": "n", "typeAnnotation": { "id": 1, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 6,
+          "kind": "app",
+          "opcode": "iadd",
+          "args": [{ "id": 4, "kind": "name", "name": "n" }, { "id": 5, "kind": "int", "value": 1 }]
+        }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 1, "kind": "int" }], "res": { "id": 3, "kind": "int" } },
+      "depth": 0
+    },
+    "14": { "id": 12, "name": "n", "typeAnnotation": { "id": 11, "kind": "int" }, "kind": "param", "depth": 1 },
+    "15": {
+      "id": 8,
+      "kind": "def",
+      "name": "inc",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 7,
+        "kind": "lambda",
+        "params": [{ "id": 2, "name": "n", "typeAnnotation": { "id": 1, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 6,
+          "kind": "app",
+          "opcode": "iadd",
+          "args": [{ "id": 4, "kind": "name", "name": "n" }, { "id": 5, "kind": "int", "value": 1 }]
+        }
+      },
+      "depth": 0,
+      "importedFrom": { "id": 10, "kind": "import", "defName": "*", "protoName": "helpers" },
+      "hidden": true
+    },
+    "16": {
+      "id": 8,
+      "kind": "def",
+      "name": "inc",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 7,
+        "kind": "lambda",
+        "params": [{ "id": 2, "name": "n", "typeAnnotation": { "id": 1, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 6,
+          "kind": "app",
+          "opcode": "iadd",
+          "args": [{ "id": 4, "kind": "name", "name": "n" }, { "id": 5, "kind": "int", "value": 1 }]
+        }
+      },
+      "depth": 0,
+      "importedFrom": { "id": 10, "kind": "import", "defName": "*", "protoName": "helpers" },
+      "hidden": true
+    },
+    "18": {
+      "id": 18,
+      "kind": "def",
+      "name": "twice",
+      "qualifier": "puredef",
+      "expr": {
+        "id": 17,
+        "kind": "lambda",
+        "params": [{ "id": 12, "name": "n", "typeAnnotation": { "id": 11, "kind": "int" } }],
+        "qualifier": "puredef",
+        "expr": {
+          "id": 16,
+          "kind": "app",
+          "opcode": "inc",
+          "args": [{ "id": 15, "kind": "app", "opcode": "inc", "args": [{ "id": 14, "kind": "name", "name": "n" }] }]
+        }
+      },
+      "typeAnnotation": { "kind": "oper", "args": [{ "id": 11, "kind": "int" }], "res": { "id": 13, "kind": "int" } },
+      "depth": 0
+    }
+  },
+  "errors": []
+}

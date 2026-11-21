@@ -62,6 +62,7 @@ fn vocabulary_for(lang: SourceLang) -> &'static dyn DependenceVocabulary {
         SourceLang::TypeScript(_) => &lens_ts::TsVocabulary,
         SourceLang::Python => &lens_py::PythonVocabulary,
         SourceLang::Go => &lens_golang::GoVocabulary,
+        SourceLang::Quint => &lens_quint::QuintVocabulary,
     }
 }
 
