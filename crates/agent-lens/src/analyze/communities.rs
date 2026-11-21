@@ -91,6 +91,7 @@ use lens_domain::{
 };
 use serde::Serialize;
 
+use super::format::render_overflow;
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
 use super::module_graph::{ModuleGraph, build_graph};
@@ -1130,7 +1131,7 @@ fn render_agreement(out: &mut String, agreement: &AgreementView, limit: usize) {
             row.member, row.static_mates, row.co_change_mates, row.shared_mates, row.jaccard,
         );
     }
-    render_overflow(out, agreement.divergent.len(), limit, "divergent member");
+    render_overflow(out, agreement.divergent.len(), limit, "divergent member(s)");
 }
 
 fn render_modularity(out: &mut String, view: &ReportView) {
@@ -1218,7 +1219,7 @@ fn render_misfiled(out: &mut String, rows: &[MisfiledView], limit: usize) {
             weight(row.evidence),
         );
     }
-    render_overflow(out, rows.len(), limit, "misfiled member");
+    render_overflow(out, rows.len(), limit, "misfiled member(s)");
 }
 
 fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
@@ -1248,7 +1249,7 @@ fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
             members_cell(&c.members),
         );
     }
-    render_overflow(out, view.communities.len(), limit, "community");
+    render_overflow(out, view.communities.len(), limit, "community(s)");
 }
 
 fn members_cell(members: &[String]) -> String {
@@ -1284,17 +1285,7 @@ fn render_spanning(out: &mut String, rows: &[SpanningView], limit: usize) {
             row.community, row.size, row.declared_group_count,
         );
     }
-    render_overflow(out, rows.len(), limit, "spanning community");
-}
-
-fn render_overflow(out: &mut String, total: usize, limit: usize, unit: &str) {
-    let omitted = total.saturating_sub(limit);
-    if omitted > 0 {
-        let _ = writeln!(
-            out,
-            "\n_{omitted} more {unit}(s) not shown; raise --top or use --format json._",
-        );
-    }
+    render_overflow(out, rows.len(), limit, "spanning community(s)");
 }
 
 #[cfg(test)]
