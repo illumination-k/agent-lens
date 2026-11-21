@@ -24,6 +24,7 @@ mod format;
 pub mod forwarding;
 pub(crate) mod function_delta;
 pub mod function_graph;
+pub mod graph;
 pub mod graph_query;
 pub mod history;
 pub mod hotspot;
@@ -71,6 +72,7 @@ pub use footprint::{DEFAULT_FOOTPRINT_DEPTH, FootprintAnalyzer, FootprintError};
 pub use format::ConfidenceDeduper;
 pub use forwarding::{ForwardingAnalyzer, ForwardingSection};
 pub use function_graph::FunctionGraphAnalyzer;
+pub use graph::{GraphAnalyzer, GraphOptions};
 pub use graph_query::{
     DEFAULT_GRAPH_QUERY_DEPTH, DEFAULT_GRAPH_QUERY_LIMIT, GraphDirection, GraphQueryAnalyzer,
     GraphQueryKind,
@@ -272,6 +274,11 @@ pub enum AnalyzerError {
         "--paired-by is incompatible with --target blocks: a statement window has no name to key siblings on; drop --paired-by to cluster blocks by similarity"
     )]
     BlockTargetPairedBy,
+    #[error("{flag} does not apply to similarity --target {target}")]
+    SimilarityTargetOption {
+        flag: &'static str,
+        target: &'static str,
+    },
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
     #[error("invalid graph query: {message}")]

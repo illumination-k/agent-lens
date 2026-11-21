@@ -54,7 +54,7 @@ pub use crate::analyze::complexity::ComplexityOptions;
 pub use crate::analyze::coupling::CouplingOptions;
 pub use crate::analyze::footprint::FootprintOptions;
 pub use crate::analyze::forwarding::ForwardingOptions;
-pub use crate::analyze::graph_query::GraphQueryOptions;
+pub use crate::analyze::graph::GraphOptions;
 /// Per-tool option tables.
 ///
 /// Each analyzer owns its own, next to the builder that consumes it (see
@@ -76,7 +76,6 @@ pub use crate::analyze::reach::ReachOptions;
 pub use crate::analyze::risk::RiskOptions;
 pub use crate::analyze::search::SearchOptions;
 pub use crate::analyze::similarity::SimilarityOptions;
-pub use crate::analyze::test_redundancy::TestRedundancyOptions;
 
 /// File name searched for when discovering a project config.
 pub const CONFIG_FILE_NAME: &str = "agent-lens.toml";
@@ -179,11 +178,9 @@ pub struct Profile {
     #[serde(default)]
     pub reach: Option<ReachOptions>,
     #[serde(default)]
-    pub graph_query: Option<GraphQueryOptions>,
+    pub graph: Option<GraphOptions>,
     #[serde(default)]
     pub coupling: Option<CouplingOptions>,
-    #[serde(default)]
-    pub test_redundancy: Option<TestRedundancyOptions>,
 }
 
 impl Profile {
@@ -225,12 +222,8 @@ impl Profile {
                  name different diffs, so set exactly one",
             ));
         }
-        if self.tools.contains(&ToolName::GraphQuery) && self.graph_query.is_none() {
-            return Some(
-                "listing `graph-query` in `tools` requires a \
-                 `[profile.<name>.graph-query]` table declaring `query` and `symbol`"
-                    .to_owned(),
-            );
+        if let Some(problem) = self.graph.as_ref().and_then(GraphOptions::problem) {
+            return Some(format!("`[profile.{name}.graph]`: {problem}"));
         }
         if self.path.paths().is_empty() {
             return Some("`path` must name at least one target".to_owned());
@@ -350,8 +343,7 @@ pub enum ToolName {
     Cycles,
     Footprint,
     Forwarding,
-    FunctionGraph,
-    GraphQuery,
+    Graph,
     HiddenCoupling,
     Hotspot,
     Hubs,
@@ -363,31 +355,129 @@ pub enum ToolName {
     Risk,
     Search,
     Similarity,
-    TestRedundancy,
 }
 
-/// Analyzers that became a section of another: `(old name, analyzer,
-/// section)`.
-pub const MERGED_TOOLS: [(&str, &str, &str); 9] = [
-    ("untested", "reach", "untested"),
-    ("test-only", "reach", "test-only"),
-    ("unreachable", "reach", "unreachable"),
-    ("single-use", "narrowable", "single-use"),
-    ("single-impl", "narrowable", "single-impl"),
-    ("parameters", "narrowable", "parameters"),
-    ("visibility", "narrowable", "visibility"),
-    ("wrapper", "forwarding", "wrapper"),
-    ("delegation", "forwarding", "delegation"),
-];
+/// An analyzer folded into another: where its report lives now, spelled
+/// once for the command line and once for a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergedTool {
+    /// The removed analyzer name.
+    pub old: &'static str,
+    /// The analyzer that carries its report now.
+    pub tool: &'static str,
+    /// The flags that select it on `analyze <tool>`, empty when the
+    /// analyzer's default run already is the old report.
+    pub flags: &'static str,
+    /// The same selection in `[profile.<name>.<tool>]`, as an
+    /// instruction, empty when listing the tool is enough.
+    pub profile: &'static str,
+}
 
-/// Analyzers whose report became columns of another: `(old name,
-/// analyzer, what carries it now)`. Not a section, so there is nothing
-/// to select: listing the analyzer is the whole fix.
-pub const ABSORBED_TOOLS: [(&str, &str, &str); 1] = [(
-    "context-span",
-    "coupling",
-    "its `transitive` and `files` columns",
-)];
+impl MergedTool {
+    const fn new(
+        old: &'static str,
+        tool: &'static str,
+        flags: &'static str,
+        profile: &'static str,
+    ) -> Self {
+        Self {
+            old,
+            tool,
+            flags,
+            profile,
+        }
+    }
+
+    /// The replacement invocation, `analyze <tool> <flags>`.
+    pub fn command(&self) -> String {
+        if self.flags.is_empty() {
+            format!("analyze {}", self.tool)
+        } else {
+            format!("analyze {} {}", self.tool, self.flags)
+        }
+    }
+}
+
+/// Analyzers that were folded into another. Both the CLI's unknown
+/// subcommand error and a profile's unknown tool error read this table,
+/// so a stale skill or `agent-lens.toml` says how to fix itself.
+pub const MERGED_TOOLS: [MergedTool; 13] = [
+    MergedTool::new(
+        "untested",
+        "reach",
+        "--section untested",
+        "set `section = [\"untested\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "test-only",
+        "reach",
+        "--section test-only",
+        "set `section = [\"test-only\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "unreachable",
+        "reach",
+        "--section unreachable",
+        "set `section = [\"unreachable\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "single-use",
+        "narrowable",
+        "--section single-use",
+        "set `section = [\"single-use\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "single-impl",
+        "narrowable",
+        "--section single-impl",
+        "set `section = [\"single-impl\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "parameters",
+        "narrowable",
+        "--section parameters",
+        "set `section = [\"parameters\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "visibility",
+        "narrowable",
+        "--section visibility",
+        "set `section = [\"visibility\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "wrapper",
+        "forwarding",
+        "--section wrapper",
+        "set `section = [\"wrapper\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "delegation",
+        "forwarding",
+        "--section delegation",
+        "set `section = [\"delegation\"]` in its table to run only this section",
+    ),
+    MergedTool::new(
+        "test-redundancy",
+        "similarity",
+        "--target tests",
+        "set `target = \"tests\"` in its table",
+    ),
+    MergedTool::new("function-graph", "graph", "", ""),
+    MergedTool::new(
+        "graph-query",
+        "graph",
+        "--query <verb> --symbol <fn>",
+        "set `query` and `symbol` in its table",
+    ),
+    // Absorbed as columns rather than a section: nothing to select, so
+    // the note says where the report went instead.
+    MergedTool::new(
+        "context-span",
+        "coupling",
+        "",
+        "its `transitive` and `files` columns carry it",
+    ),
+];
 
 impl TryFrom<String> for ToolName {
     type Error = String;
@@ -396,15 +486,16 @@ impl TryFrom<String> for ToolName {
         if let Some(tool) = Self::ALL.into_iter().find(|t| t.as_str() == name) {
             return Ok(tool);
         }
-        if let Some((_, tool, section)) = MERGED_TOOLS.iter().find(|(old, ..)| *old == name) {
+        if let Some(merged) = MERGED_TOOLS.iter().find(|merged| merged.old == name) {
+            let tool = merged.tool;
+            let how = if merged.profile.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", merged.profile)
+            };
             return Err(format!(
-                "`{name}` is now the `{section}` section of `{tool}`: list `{tool}` in `tools` \
-                 (set `section = [\"{section}\"]` in its table to run only this section)"
-            ));
-        }
-        if let Some((_, tool, carrier)) = ABSORBED_TOOLS.iter().find(|(old, ..)| *old == name) {
-            return Err(format!(
-                "`{name}` is now part of `{tool}` ({carrier}): list `{tool}` in `tools`"
+                "`{name}` is now `{}`: list `{tool}` in `tools`{how}",
+                merged.command()
             ));
         }
         let known: Vec<&str> = Self::ALL.iter().map(|t| t.as_str()).collect();
@@ -417,7 +508,7 @@ impl TryFrom<String> for ToolName {
 
 impl ToolName {
     /// Every analyzer, in `as_str` order.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 21] = [
         Self::ChangeEntropy,
         Self::CoChange,
         Self::Cohesion,
@@ -427,8 +518,7 @@ impl ToolName {
         Self::Cycles,
         Self::Footprint,
         Self::Forwarding,
-        Self::FunctionGraph,
-        Self::GraphQuery,
+        Self::Graph,
         Self::HiddenCoupling,
         Self::Hotspot,
         Self::Hubs,
@@ -440,7 +530,6 @@ impl ToolName {
         Self::Risk,
         Self::Search,
         Self::Similarity,
-        Self::TestRedundancy,
     ];
 
     /// Stable lowercase spelling, matching the `analyze` subcommand name.
@@ -455,8 +544,7 @@ impl ToolName {
             Self::Cycles => "cycles",
             Self::Footprint => "footprint",
             Self::Forwarding => "forwarding",
-            Self::FunctionGraph => "function-graph",
-            Self::GraphQuery => "graph-query",
+            Self::Graph => "graph",
             Self::HiddenCoupling => "hidden-coupling",
             Self::Hotspot => "hotspot",
             Self::Hubs => "hubs",
@@ -468,7 +556,6 @@ impl ToolName {
             Self::Risk => "risk",
             Self::Search => "search",
             Self::Similarity => "similarity",
-            Self::TestRedundancy => "test-redundancy",
         }
     }
 
@@ -751,14 +838,28 @@ since = "90.days.ago"
     /// A merged tool's name is not just unknown: the error names the
     /// analyzer and section that carry it now.
     #[rstest]
-    #[case("untested", "`untested` section of `reach`")]
-    #[case("test-only", "`test-only` section of `reach`")]
-    #[case("unreachable", "`unreachable` section of `reach`")]
-    #[case("single-use", "`single-use` section of `narrowable`")]
-    #[case("single-impl", "`single-impl` section of `narrowable`")]
-    #[case("parameters", "`parameters` section of `narrowable`")]
-    #[case("visibility", "`visibility` section of `narrowable`")]
-    #[case("context-span", "`context-span` is now part of `coupling`")]
+    #[case("untested", "now `analyze reach --section untested`: list `reach`")]
+    #[case("test-only", "now `analyze reach --section test-only`")]
+    #[case("unreachable", "now `analyze reach --section unreachable`")]
+    #[case("single-use", "now `analyze narrowable --section single-use`")]
+    #[case("single-impl", "now `analyze narrowable --section single-impl`")]
+    #[case("parameters", "now `analyze narrowable --section parameters`")]
+    #[case("visibility", "`section = [\"visibility\"]`")]
+    #[case(
+        "test-redundancy",
+        "now `analyze similarity --target tests`: list `similarity`"
+    )]
+    #[case("test-redundancy", "set `target = \"tests\"` in its table")]
+    #[case(
+        "function-graph",
+        "`function-graph` is now `analyze graph`: list `graph` in `tools`"
+    )]
+    #[case("graph-query", "now `analyze graph --query <verb> --symbol <fn>`")]
+    #[case("graph-query", "(set `query` and `symbol` in its table)")]
+    #[case(
+        "context-span",
+        "`context-span` is now `analyze coupling`: list `coupling` in `tools` (its `transitive`"
+    )]
     #[case("typo", "unknown tool `typo`, expected one of: change-entropy")]
     fn a_removed_tool_name_says_where_it_went(#[case] name: &str, #[case] expected: &str) {
         let err = toml::from_str::<Config>(&format!(
@@ -813,38 +914,54 @@ since = "90.days.ago"
     }
 
     #[test]
-    fn parses_graph_query_options() {
+    fn parses_graph_options() {
         let config: Config = toml::from_str(
-            "[profile.trace]\npath = \"src/\"\ntools = [\"graph-query\"]\n\n\
-             [profile.trace.graph-query]\nquery = \"neighborhood\"\nsymbol = \"resolve\"\n\
+            "[profile.trace]\npath = \"src/\"\ntools = [\"graph\"]\n\n\
+             [profile.trace.graph]\nquery = \"neighborhood\"\nsymbol = \"resolve\"\n\
              direction = \"in\"\ndepth = 2\nlimit = 25\n",
         )
         .unwrap();
-        let opts = config
-            .profile("trace")
-            .unwrap()
-            .graph_query
-            .as_ref()
-            .unwrap();
-        assert_eq!(opts.query, GraphQueryKind::Neighborhood);
-        assert_eq!(opts.symbol, "resolve");
+        let opts = config.profile("trace").unwrap().graph.as_ref().unwrap();
+        assert_eq!(opts.query, Some(GraphQueryKind::Neighborhood));
+        assert_eq!(opts.symbol.as_deref(), Some("resolve"));
         assert_eq!(opts.to, None);
         assert_eq!(opts.direction, Some(GraphDirection::In));
         assert_eq!(opts.depth, Some(2));
         assert_eq!(opts.limit, Some(25));
     }
 
+    /// `graph` without a table dumps the graph, so it loads.
     #[test]
-    fn load_rejects_graph_query_tool_without_its_table() {
+    fn load_accepts_graph_tool_without_its_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(
             dir.path(),
             CONFIG_FILE_NAME,
-            "[profile.trace]\npath = \"src/\"\ntools = [\"graph-query\"]\n",
+            "[profile.trace]\npath = \"src/\"\ntools = [\"graph\"]\n",
+        );
+        load(&path).expect("a bare `graph` is the whole-graph dump");
+    }
+
+    /// A traversal key without its partner fails at load time, naming
+    /// the table, rather than halfway through a run.
+    #[rstest]
+    #[case::query_without_symbol("query = \"callers\"\n", "requires `symbol`")]
+    #[case::symbol_without_query("symbol = \"foo\"\n", "only apply with `query`")]
+    fn load_rejects_a_graph_table_that_cannot_run(#[case] table: &str, #[case] expected: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            CONFIG_FILE_NAME,
+            &format!(
+                "[profile.trace]\npath = \"src/\"\ntools = [\"graph\"]\n\n\
+                 [profile.trace.graph]\n{table}"
+            ),
         );
         let err = load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { .. }), "got: {err:?}");
-        assert!(err.to_string().contains("graph-query"), "got: {err}");
+        let message = err.to_string();
+        assert!(message.contains("[profile.trace.graph]"), "got: {message}");
+        assert!(message.contains(expected), "got: {message}");
     }
 
     /// The CLI cannot express this combination — clap rejects it — so
@@ -895,11 +1012,8 @@ since = "90.days.ago"
     #[case::path_array_of_non_strings("[profile.web]\npath = [1, 2]\ntools = [\"similarity\"]\n")]
     #[case::missing_tools("[profile.web]\npath = \"web/\"\n")]
     #[case::unknown_tool_name("[profile.web]\npath = \"web/\"\ntools = [\"lint\"]\n")]
-    #[case::graph_query_without_symbol(
-        "[profile.web]\npath = \"web/\"\ntools = [\"graph-query\"]\n\n[profile.web.graph-query]\nquery = \"callers\"\n"
-    )]
-    #[case::graph_query_without_query(
-        "[profile.web]\npath = \"web/\"\ntools = [\"graph-query\"]\n\n[profile.web.graph-query]\nsymbol = \"foo\"\n"
+    #[case::graph_unknown_key(
+        "[profile.web]\npath = \"web/\"\ntools = [\"graph\"]\n\n[profile.web.graph]\nverb = \"callers\"\n"
     )]
     fn rejects_invalid_profiles(#[case] toml_src: &str) {
         assert!(

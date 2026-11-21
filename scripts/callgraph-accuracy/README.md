@@ -1,6 +1,6 @@
 # Call-graph accuracy harness
 
-Measures `agent-lens analyze function-graph` against mechanical oracles. The
+Measures `agent-lens analyze graph` against mechanical oracles. The
 edge definition, the oracle JSON contract, the metrics and the adjudication
 workflow are in [`docs/callgraph-accuracy.md`](../../docs/callgraph-accuracy.md).
 

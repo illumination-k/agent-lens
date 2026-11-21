@@ -133,8 +133,7 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::CoChange
         | ToolName::Communities
         | ToolName::Cycles
-        | ToolName::FunctionGraph
-        | ToolName::GraphQuery
+        | ToolName::Graph
         | ToolName::HiddenCoupling
         | ToolName::Hubs
         | ToolName::Footprint
@@ -145,7 +144,6 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         | ToolName::Reach
         | ToolName::Risk
         | ToolName::Search
-        | ToolName::TestRedundancy
         | ToolName::Forwarding => None,
     }
 }
@@ -576,8 +574,7 @@ mod tests {
     #[case(ToolName::Communities)]
     #[case(ToolName::Cycles)]
     #[case(ToolName::Forwarding)]
-    #[case(ToolName::FunctionGraph)]
-    #[case(ToolName::GraphQuery)]
+    #[case(ToolName::Graph)]
     #[case(ToolName::Hubs)]
     #[case(ToolName::Impact)]
     #[case(ToolName::Footprint)]
@@ -586,9 +583,21 @@ mod tests {
     #[case(ToolName::Ownership)]
     #[case(ToolName::Reach)]
     #[case(ToolName::Risk)]
-    #[case(ToolName::TestRedundancy)]
     fn tools_without_a_summary_are_reported_as_such(#[case] tool: ToolName) {
         assert!(summarizer(tool).is_none());
+    }
+
+    /// A `similarity --target tests` report has no clusters to measure;
+    /// its metrics are absent, never written as zero.
+    #[test]
+    fn similarity_target_tests_invents_no_cluster_metrics() {
+        let report = json!({
+            "target": "tests",
+            "groups": [],
+            "summary": { "foldable_count": 0, "group_count": 0 },
+        });
+        let metrics = summarizer(ToolName::Similarity).unwrap()(&report);
+        assert!(metrics.is_empty(), "got: {metrics:?}");
     }
 
     #[test]

@@ -70,6 +70,9 @@ struct Source {
     tool: ToolName,
     /// The section's CLI spelling, for a bundled analyzer.
     section: Option<&'static str>,
+    /// The `--target` spelling, for a `similarity` run on anything but
+    /// the default `functions`.
+    target: Option<&'static str>,
 }
 
 impl Source {
@@ -77,16 +80,29 @@ impl Source {
         Self {
             tool,
             section: None,
+            target: None,
         }
     }
 
     /// How the source is named in the corpus and "nothing to report"
     /// lines.
     fn label(self) -> String {
-        match self.section {
+        match self.section.or(self.target) {
             None => self.tool.as_str().to_owned(),
-            Some(section) => format!("{} {section}", self.tool.as_str()),
+            Some(part) => format!("{} {part}", self.tool.as_str()),
         }
+    }
+}
+
+/// The non-default `--target` a `similarity` report was run with, read
+/// back from the report itself: a profile's table can set it, and the
+/// digest only sees the JSON.
+fn similarity_target(report: &Value) -> Option<&'static str> {
+    match report.get("target").and_then(Value::as_str) {
+        Some("types") => Some("types"),
+        Some("blocks") => Some("blocks"),
+        Some("tests") => Some("tests"),
+        _ => None,
     }
 }
 
@@ -139,6 +155,19 @@ fn fold_report(tool: ToolName, report: &Value, base: &Path) -> Option<Vec<(Sourc
         ToolName::Forwarding => bundle_folds(forwarding_fold),
         ToolName::Reach => bundle_folds(reach_fold),
         ToolName::Narrowable => bundle_folds(narrowable_fold),
+        ToolName::Similarity => {
+            let source = Source {
+                target: similarity_target(report),
+                ..Source::tool(tool)
+            };
+            // `--target tests` is a keep/fold selection, not clusters.
+            let extraction = if source.target == Some("tests") {
+                test_redundancy(report, base)
+            } else {
+                similarity(report, base)
+            };
+            return Some(vec![(source, extraction)]);
+        }
         _ => return extract(tool, report, base).map(|e| vec![(Source::tool(tool), e)]),
     };
     Some(
@@ -146,8 +175,8 @@ fn fold_report(tool: ToolName, report: &Value, base: &Path) -> Option<Vec<(Sourc
             .into_iter()
             .filter_map(|(key, section, fold)| {
                 let source = Source {
-                    tool,
                     section: Some(section),
+                    ..Source::tool(tool)
                 };
                 report.get(key).map(|sub| (source, fold(sub, base)))
             })
@@ -366,10 +395,11 @@ struct EntityRow {
 /// The `agent-lens analyze …` invocation that reproduces the full
 /// detail behind a digest row or corpus line.
 fn drill_down(source: Source, path_args: &str) -> String {
-    let section = source
-        .section
-        .map(|section| format!(" --section {section}"))
-        .unwrap_or_default();
+    let section = match (source.section, source.target) {
+        (Some(section), _) => format!(" --section {section}"),
+        (None, Some(target)) => format!(" --target {target}"),
+        (None, None) => String::new(),
+    };
     format!(
         "`agent-lens analyze {} {path_args}{section} --format md`",
         source.tool.as_str()
@@ -382,11 +412,10 @@ fn drill_down(source: Source, path_args: &str) -> String {
 /// its `delegation` section follows chains across files.
 fn file_scoped(source: Source) -> bool {
     matches!(
-        (source.tool, source.section),
-        (
-            ToolName::Complexity | ToolName::Cohesion | ToolName::Similarity,
-            None
-        ) | (ToolName::Forwarding, Some("wrapper"))
+        (source.tool, source.section, source.target),
+        (ToolName::Complexity | ToolName::Cohesion, None, None)
+            | (ToolName::Similarity, None, None | Some("types" | "blocks"))
+            | (ToolName::Forwarding, Some("wrapper"), None)
     )
 }
 
@@ -411,11 +440,11 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
     Some(match tool {
         ToolName::Complexity => complexity(report, base),
         ToolName::Cohesion => cohesion(report, base),
+        // Read by `fold_report`, which needs the report's target first.
         ToolName::Similarity => similarity(report, base),
         ToolName::Hotspot => hotspot(report, base),
         ToolName::Risk => risk(report, base),
         ToolName::Hubs => hubs(report, base),
-        ToolName::TestRedundancy => test_redundancy(report, base),
         ToolName::ChangeEntropy => change_entropy(report, base),
         ToolName::Ownership => ownership(report, base),
         ToolName::CoChange => co_change(report),
@@ -426,11 +455,7 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::Layers => layers(report),
         // Bundles are folded per section by `fold_report`, never whole.
         ToolName::Forwarding | ToolName::Narrowable | ToolName::Reach => return None,
-        ToolName::Footprint
-        | ToolName::FunctionGraph
-        | ToolName::GraphQuery
-        | ToolName::Impact
-        | ToolName::Search => {
+        ToolName::Footprint | ToolName::Graph | ToolName::Impact | ToolName::Search => {
             return None;
         }
     })
@@ -1462,14 +1487,13 @@ mod tests {
     use super::*;
 
     /// Every tool the digest folds, for shape-robustness sweeps.
-    const FOLDED: [ToolName; 15] = [
+    const FOLDED: [ToolName; 14] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Similarity,
         ToolName::Hotspot,
         ToolName::Risk,
         ToolName::Hubs,
-        ToolName::TestRedundancy,
         ToolName::ChangeEntropy,
         ToolName::Ownership,
         ToolName::CoChange,
@@ -2174,9 +2198,8 @@ mod tests {
 
     #[rstest]
     #[case(ToolName::Search)]
-    #[case(ToolName::GraphQuery)]
     #[case(ToolName::Impact)]
-    #[case(ToolName::FunctionGraph)]
+    #[case(ToolName::Graph)]
     fn per_question_tools_have_no_fold(#[case] tool: ToolName) {
         assert_eq!(extract(tool, &json!({}), &base()), None);
     }
@@ -2213,17 +2236,76 @@ mod tests {
 
     /// The per-file `wrapper` section drills down into the file; the
     /// cross-file `delegation` section keeps the profile target.
+    /// `similarity --target tests` checks folds against the whole call
+    /// graph, so it keeps the profile target too.
     #[rstest]
-    #[case(ToolName::Forwarding, Some("wrapper"), true)]
-    #[case(ToolName::Forwarding, Some("delegation"), false)]
-    #[case(ToolName::Complexity, None, true)]
-    #[case(ToolName::Reach, Some("untested"), false)]
+    #[case(ToolName::Forwarding, Some("wrapper"), None, true)]
+    #[case(ToolName::Forwarding, Some("delegation"), None, false)]
+    #[case(ToolName::Complexity, None, None, true)]
+    #[case(ToolName::Reach, Some("untested"), None, false)]
+    #[case(ToolName::Similarity, None, None, true)]
+    #[case(ToolName::Similarity, None, Some("types"), true)]
+    #[case(ToolName::Similarity, None, Some("tests"), false)]
     fn file_scoped_follows_the_section(
         #[case] tool: ToolName,
         #[case] section: Option<&'static str>,
+        #[case] target: Option<&'static str>,
         #[case] expected: bool,
     ) {
-        assert_eq!(file_scoped(Source { tool, section }), expected);
+        assert_eq!(
+            file_scoped(Source {
+                tool,
+                section,
+                target
+            }),
+            expected
+        );
+    }
+
+    /// A `similarity` report run with `--target tests` folds as the
+    /// keep/fold selection it is, and its drill-down repeats the target.
+    #[test]
+    fn similarity_target_tests_folds_foldable_members_and_drills_down_with_its_target() {
+        let report = json!({
+            "target": "tests",
+            "groups": [{
+                "representative": { "file": "keep.rs", "name": "kept" },
+                "members": [{ "file": "copy.rs", "name": "a", "folds": true }],
+            }],
+            "summary": { "foldable_count": 1, "group_count": 1, "redundancy_score": 0.5 },
+        });
+        let folds = fold_report(ToolName::Similarity, &report, &base()).unwrap();
+        let [(source, extraction)] = folds.as_slice() else {
+            panic!("one fold expected, got {folds:?}");
+        };
+        assert_eq!(source.label(), "similarity tests");
+        assert_eq!(
+            files_of(extraction),
+            [("/repo/src/copy.rs", "1 near-copy test foldable")],
+        );
+        assert_eq!(
+            drill_down(*source, "src"),
+            "`agent-lens analyze similarity src --target tests --format md`",
+        );
+    }
+
+    #[rstest]
+    #[case(json!({ "target": "functions", "clusters": [] }), "similarity", "")]
+    #[case(json!({ "clusters": [] }), "similarity", "")]
+    #[case(json!({ "target": "blocks", "clusters": [] }), "similarity blocks", " --target blocks")]
+    #[case(json!({ "target": "types", "clusters": [] }), "similarity types", " --target types")]
+    fn similarity_drill_down_names_a_non_default_target(
+        #[case] report: Value,
+        #[case] label: &str,
+        #[case] flag: &str,
+    ) {
+        let folds = fold_report(ToolName::Similarity, &report, &base()).unwrap();
+        let (source, _) = &folds[0];
+        assert_eq!(source.label(), label);
+        assert_eq!(
+            drill_down(*source, "src"),
+            format!("`agent-lens analyze similarity src{flag} --format md`"),
+        );
     }
 
     #[test]

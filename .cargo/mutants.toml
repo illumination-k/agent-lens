@@ -59,4 +59,9 @@ exclude_re = [
   # `A + I == 1` (where D = 0) never reaches the side label and `<` / `<=`
   # pick the same side for every listed row.
   "replace < with <= in render_distance",
+  # runner: `FilterConfig::only_tests` is read only to hand `--only-tests`
+  # to `similarity --target tests`, whose corpus is test functions
+  # already, so narrowing the walk to test-like paths keeps the same
+  # files and either constant gives the same report.
+  "FilterConfig::only_tests",
 ]

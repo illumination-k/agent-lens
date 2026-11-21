@@ -18,4 +18,4 @@ The two reference documents below are generated from the code at deploy time, so
 ## Optional
 
 - [README](https://raw.githubusercontent.com/illumination-k/agent-lens/main/README.md): narrative overview, language support matrix, and worked examples
-- [Function-graph viewer](https://illumination-k.github.io/agent-lens/analyze/): interactive viewer for `agent-lens analyze function-graph` JSON
+- [Function-graph viewer](https://illumination-k.github.io/agent-lens/analyze/): interactive viewer for `agent-lens analyze graph` JSON

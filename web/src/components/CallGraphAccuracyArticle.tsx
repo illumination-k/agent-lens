@@ -12,7 +12,7 @@ const SCRIPTS_URL = `${REPOSITORY_URL}/tree/main/scripts/callgraph-accuracy`;
 const ALL = totals(TARGETS);
 
 /**
- * How accurate and how fast `agent-lens analyze function-graph` is, measured
+ * How accurate and how fast `agent-lens analyze graph` is, measured
  * against a type checker per language. Prerendered, so the prose and tables
  * below are what a crawler indexes.
  */
@@ -35,9 +35,9 @@ export function CallGraphAccuracyArticle() {
             <p className="kicker">Benchmark · {MEASURED_AT}</p>
             <h1>How accurate is a call graph built without a type checker?</h1>
             <p className="lede">
-              <code>agent-lens analyze function-graph</code> resolves calls from syntax alone. We
-              scored it against a real type checker for each language — go-vta, pyright,
-              rust-analyzer, and tsc — on eight open-source projects. Resolved edges are right{" "}
+              <code>agent-lens analyze graph</code> resolves calls from syntax alone. We scored it
+              against a real type checker for each language — go-vta, pyright, rust-analyzer, and
+              tsc — on eight open-source projects. Resolved edges are right{" "}
               <strong>{pct(ALL.tp, ALL.resolved)}</strong> of the time, it finds{" "}
               <strong>{pct(ALL.found, ALL.staticPairs)}</strong> of statically dispatched calls, and
               it does so <strong>{Math.round(speedup(ALL))}× faster</strong> than the oracles.
@@ -263,10 +263,10 @@ export function CallGraphAccuracyArticle() {
             <h2 id="speed-title">Speed against accuracy</h2>
             <p>
               Wall-clock for the whole repository, warm caches, on a 4-vCPU Xeon @ 2.10GHz: median
-              of 10 runs of <code>agent-lens analyze function-graph --format json</code>, median of
-              3 runs of each oracle. The Go oracle is timed as a prebuilt binary, so its compile is
-              excluded; pyright and rust-analyzer include starting the server and indexing, which is
-              what a caller pays.
+              of 10 runs of <code>agent-lens analyze graph --format json</code>, median of 3 runs of
+              each oracle. The Go oracle is timed as a prebuilt binary, so its compile is excluded;
+              pyright and rust-analyzer include starting the server and indexing, which is what a
+              caller pays.
             </p>
             <ParetoChart />
             <details className="table-view">

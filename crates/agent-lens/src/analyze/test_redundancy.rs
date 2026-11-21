@@ -1,4 +1,4 @@
-//! `analyze test-redundancy` — which test functions are near-copies of
+//! `analyze similarity --target tests` — which test functions are near-copies of
 //! each other, and which one of each set is worth keeping.
 //!
 //! The shape is Pan et al.'s similarity-based test-suite minimization
@@ -46,6 +46,10 @@
 //!   one of its tests reaches no production function over resolved edges
 //!   while having ambiguous call sites, no longer folds.
 //!   `reach_guarded_count` counts only members held by unique reach.
+//! * `schema_version: 3` — `target: "tests"`. The report moved from
+//!   `analyze test-redundancy` to `analyze similarity --target tests`,
+//!   and the field is how a reader of `similarity` JSON tells this shape
+//!   from the clustering one.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -60,7 +64,7 @@ use super::runner::render_report;
 use super::similarity::{ScoredCorpus, ScoredUnit, SimilarityAnalyzer, SimilarityMethod};
 use super::{AnalyzeRoots, AnalyzerError, FunctionSelection, OutputFormat};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Default similarity cut. Held at `analyze similarity`'s own default so
 /// a group reported here is a cluster that report would also show — the
@@ -127,59 +131,7 @@ const NOTE: &str = "Structural, not behavioural: two tests scoring alike share a
      written in its arguments are seen), so a clean guard is not a coverage proof, and a suite \
      whose tests call only through macro expansions gets no guard at all.";
 
-/// `analyze test-redundancy` flags, and the
-/// `[profile.<name>.test-redundancy]` table.
-///
-/// Hand-written rather than built by `analyzer_options!` for the same
-/// reason [`super::similarity::SimilarityOptions`] is: the score cuts
-/// carry non-trivial clap defaults, and a derived `Default` would be
-/// free to disagree with them.
-#[derive(Debug, Clone, clap::Args, serde::Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
-pub struct TestRedundancyOptions {
-    /// Cap the markdown group list to the top-N groups. JSON output
-    /// always carries the full list.
-    #[arg(long)]
-    pub top: Option<usize>,
-    /// Similarity at or above which two test bodies are near-copies.
-    #[arg(long, default_value_t = DEFAULT_THRESHOLD)]
-    pub threshold: f64,
-    /// Body-scoring algorithm, as `analyze similarity --method`. `pdg`
-    /// is worth reaching for on a suite whose tests were copied and
-    /// then reordered: it scores dependence structure, so a moved
-    /// arrange step does not read as a different test.
-    #[arg(long, value_enum, default_value_t = SimilarityMethod::Tsed)]
-    pub method: SimilarityMethod,
-    /// Minimum source line count for a test to be considered.
-    #[arg(long)]
-    pub min_lines: Option<usize>,
-    /// Minimum body-tree nodes a test needs before it is eligible.
-    /// Guards against bodies the parser keeps opaque — a Rust test whose
-    /// whole body is one `assert_eq!` is a two-node tree, identical to
-    /// every other such test however different the assertion.
-    #[arg(long)]
-    pub min_body_nodes: Option<usize>,
-    /// Offer a test as foldable even when the call graph shows it is
-    /// the only one with a resolved path to some production function.
-    /// Skips building the graph, which is the bulk of the run.
-    #[arg(long)]
-    pub no_reach_guard: bool,
-}
-
-impl Default for TestRedundancyOptions {
-    fn default() -> Self {
-        Self {
-            top: None,
-            threshold: DEFAULT_THRESHOLD,
-            method: SimilarityMethod::default(),
-            min_lines: None,
-            min_body_nodes: None,
-            no_reach_guard: false,
-        }
-    }
-}
-
-/// Analyzer entry point for `analyze test-redundancy`.
+/// The keep/fold selection behind `analyze similarity --target tests`.
 ///
 /// Holds the path-filter flags as plain values rather than a
 /// [`super::runner::FilterConfig`]: there is no per-file walk here to
@@ -193,6 +145,7 @@ pub struct TestRedundancyAnalyzer {
     exclude: Vec<String>,
     threshold: f64,
     method: SimilarityMethod,
+    idf: bool,
     min_lines: Option<usize>,
     min_body_nodes: Option<usize>,
     top: Option<usize>,
@@ -213,23 +166,12 @@ impl TestRedundancyAnalyzer {
             exclude: Vec::new(),
             threshold: DEFAULT_THRESHOLD,
             method: SimilarityMethod::default(),
+            idf: false,
             min_lines: None,
             min_body_nodes: None,
             top: None,
             reach_guard: true,
         }
-    }
-
-    /// Apply a whole [`TestRedundancyOptions`] group. The CLI flags and
-    /// the `[profile.<name>.test-redundancy]` table are the same type,
-    /// so this is the only seam between parsed options and the analyzer.
-    pub fn with_options(self, opts: TestRedundancyOptions) -> Self {
-        self.with_threshold(opts.threshold)
-            .with_method(opts.method)
-            .with_min_lines_opt(opts.min_lines)
-            .with_min_body_nodes_opt(opts.min_body_nodes)
-            .with_reach_guard(!opts.no_reach_guard)
-            .with_top(opts.top)
     }
 
     /// Accepted for CLI uniformity and already implied: the corpus is
@@ -262,6 +204,13 @@ impl TestRedundancyAnalyzer {
 
     pub fn with_method(mut self, method: SimilarityMethod) -> Self {
         self.method = method;
+        self
+    }
+
+    /// `--method token` only: weight k-grams by inverse document
+    /// frequency, as `analyze similarity --idf`.
+    pub fn with_idf(mut self, idf: bool) -> Self {
+        self.idf = idf;
         self
     }
 
@@ -332,6 +281,7 @@ impl TestRedundancyAnalyzer {
         SimilarityAnalyzer::new()
             .with_threshold(self.threshold)
             .with_method(self.method)
+            .with_idf(self.idf)
             .with_min_lines_opt(Some(self.min_lines.unwrap_or(DEFAULT_MIN_LINES)))
             .with_function_selection(FunctionSelection::OnlyTests)
             .with_only_tests(self.only_tests)
@@ -662,6 +612,9 @@ fn production_reach(graph: &CallGraph, edges: &[Vec<usize>], starts: &[usize]) -
 #[derive(Debug, Serialize)]
 struct Report {
     schema_version: u32,
+    /// Always `tests`: the `analyze similarity --target` that produced
+    /// this shape.
+    target: &'static str,
     /// Input path: a single source file, or the root directory walked.
     root: String,
     /// What every verdict on this report is relative to.
@@ -720,6 +673,7 @@ impl Report {
         });
         Self {
             schema_version: SCHEMA_VERSION,
+            target: "tests",
             root: roots.display(),
             note: NOTE,
             method: analyzer.method.as_str(),
@@ -1196,7 +1150,8 @@ mod tests {
         write_file(dir.path(), "src/lib.rs", &one_target_source());
 
         let report = analyze_json(dir.path(), TestRedundancyAnalyzer::new());
-        assert_eq!(report["schema_version"], 2);
+        assert_eq!(report["schema_version"], 3);
+        assert_eq!(report["target"], "tests");
         assert_eq!(report["summary"]["group_count"], 1);
         // Three near-copies: one is kept, two fold into it.
         assert_eq!(report["summary"]["redundant_test_count"], 2);
@@ -1211,6 +1166,139 @@ mod tests {
         assert_eq!(members, ["beta", "gamma"]);
         // The outlier shares the target but not the body.
         assert!(!members.contains(&"outlier"));
+    }
+
+    /// `analyze similarity --target tests` is this analyzer: the same
+    /// cuts produce the same report, byte for byte.
+    #[rstest]
+    #[case::json(OutputFormat::Json)]
+    #[case::md(OutputFormat::Md)]
+    fn similarity_target_tests_is_this_report(#[case] format: OutputFormat) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &one_target_source());
+
+        let via_similarity = SimilarityAnalyzer::new()
+            .with_target(super::super::SimilarityTarget::Tests)
+            .with_threshold(0.8)
+            .with_min_body_nodes_opt(Some(6))
+            .with_reach_guard(false)
+            .with_top(Some(1))
+            .analyze(dir.path().to_path_buf(), format)
+            .unwrap();
+        let direct = TestRedundancyAnalyzer::new()
+            .with_threshold(0.8)
+            .with_min_body_nodes_opt(Some(6))
+            .with_reach_guard(false)
+            .with_top(Some(1))
+            .analyze(dir.path().to_path_buf(), format)
+            .unwrap();
+        assert_eq!(via_similarity, direct);
+    }
+
+    /// The path filters reach the test-suite run through `similarity`:
+    /// each exclusion changes which copies are in scope, and the merged
+    /// entry point sees exactly what a direct run sees.
+    #[rstest]
+    #[case::unfiltered(false, false, &[])]
+    #[case::only_tests(true, false, &[])]
+    #[case::exclude_tests(false, true, &[])]
+    #[case::exclude_glob(false, false, &["tests/**"])]
+    fn similarity_target_tests_forwards_its_path_filters(
+        #[case] only_tests: bool,
+        #[case] exclude_tests: bool,
+        #[case] exclude: &[&str],
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &one_target_source());
+        let mut it = String::new();
+        for (name, seed) in [("delta", 4u32), ("epsilon", 5), ("zeta", 6), ("eta", 7)] {
+            it.push_str(&format!(
+                "#[test]\nfn {name}() {{\n{}}}\n",
+                test_body("shared", seed)
+            ));
+        }
+        write_file(dir.path(), "tests/it.rs", &it);
+        let exclude: Vec<String> = exclude.iter().map(|g| (*g).to_owned()).collect();
+
+        let run = |only_tests: bool, exclude_tests: bool, exclude: Vec<String>| {
+            let via_similarity = SimilarityAnalyzer::new()
+                .with_target(super::super::SimilarityTarget::Tests)
+                .with_reach_guard(false)
+                .with_only_tests(only_tests)
+                .with_exclude_tests(exclude_tests)
+                .with_exclude_patterns(exclude.clone())
+                .analyze(dir.path().to_path_buf(), OutputFormat::Json)
+                .unwrap();
+            let direct = TestRedundancyAnalyzer::new()
+                .with_reach_guard(false)
+                .with_only_tests(only_tests)
+                .with_exclude_tests(exclude_tests)
+                .with_exclude_patterns(exclude)
+                .analyze(dir.path().to_path_buf(), OutputFormat::Json)
+                .unwrap();
+            assert_eq!(via_similarity, direct);
+            let report: Value = serde_json::from_str(&direct).unwrap();
+            report["groups"].clone()
+        };
+        let filtered = run(only_tests, exclude_tests, exclude.clone());
+        let unfiltered = run(false, false, Vec::new());
+        // `only-tests` is forwarded too, but the corpus is test functions
+        // already: narrowing the walk to test-like paths keeps the same
+        // files, so it is checked for parity only.
+        let excludes_something = exclude_tests || !exclude.is_empty();
+        assert_eq!(
+            filtered != unfiltered,
+            excludes_something,
+            "{filtered} vs {unfiltered}"
+        );
+    }
+
+    /// The corpus is test functions only: production near-copies, however
+    /// alike, never form a group.
+    #[test]
+    fn production_near_copies_are_not_test_redundancy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = String::from("pub fn shared(a: u32, b: u32) -> u32 { a + b }\n");
+        for (name, seed) in [("one", 1u32), ("two", 2), ("three", 3)] {
+            src.push_str(&format!(
+                "pub fn {name}() {{\n{}}}\n",
+                test_body("shared", seed)
+            ));
+        }
+        write_file(dir.path(), "src/lib.rs", &src);
+
+        let report = analyze_json(
+            dir.path(),
+            TestRedundancyAnalyzer::new().with_reach_guard(false),
+        );
+        assert_eq!(report["summary"]["group_count"], 0, "got {report}");
+    }
+
+    /// Each target rejects the options only the other side reads, rather
+    /// than ignoring them.
+    #[rstest]
+    #[case::sweep_on_tests(true, |a: SimilarityAnalyzer| a.with_sweep(Some(vec![0.7, 0.9])), "--sweep")]
+    #[case::paired_by_on_tests(true, |a: SimilarityAnalyzer| a.with_paired_by(Some(crate::analyze::PairKey::Qualified)), "--paired-by")]
+    #[case::doc_overlap_on_tests(true, |a: SimilarityAnalyzer| a.with_doc_overlap(true), "--doc-overlap")]
+    #[case::diff_on_tests(true, |a: SimilarityAnalyzer| a.with_diff_only(true), "--diff-only")]
+    #[case::body_nodes_on_functions(false, |a: SimilarityAnalyzer| a.with_min_body_nodes_opt(Some(3)), "--min-body-nodes")]
+    #[case::reach_guard_on_functions(false, |a: SimilarityAnalyzer| a.with_reach_guard(false), "--no-reach-guard")]
+    fn similarity_rejects_options_its_target_does_not_read(
+        #[case] tests: bool,
+        #[case] set: fn(SimilarityAnalyzer) -> SimilarityAnalyzer,
+        #[case] flag: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/lib.rs", &one_target_source());
+        let target = if tests {
+            super::super::SimilarityTarget::Tests
+        } else {
+            super::super::SimilarityTarget::Functions
+        };
+        let err = set(SimilarityAnalyzer::new().with_target(target))
+            .analyze(dir.path().to_path_buf(), OutputFormat::Json)
+            .unwrap_err();
+        assert!(err.to_string().contains(flag), "{err}");
     }
 
     /// One module per importer, each defining `read` and testing it

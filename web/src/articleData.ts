@@ -4,7 +4,7 @@
  * Accuracy is `mise run callgraph-accuracy` on agent-lens `2a26836`
  * (`target/callgraph-accuracy/results/<target>/score.json`); the method
  * behind it is `docs/callgraph-accuracy.md`. Wall-clock is the median of 10
- * runs of `agent-lens analyze function-graph` and of 3 runs of each oracle,
+ * runs of `agent-lens analyze graph` and of 3 runs of each oracle,
  * warm caches, on a 4-vCPU Xeon @ 2.10GHz. Rerun both when the resolver
  * changes rather than editing one row.
  */

@@ -236,7 +236,8 @@ mod tests {
     use super::*;
     use agent_lens::analyze::{
         DEFAULT_SIMILARITY_DRIFT_FLOOR, ForwardingSection, GraphDirection, GraphQueryKind,
-        NarrowableSection, PairKey, ReachSection, SimilarityMethod, UnreachableTier,
+        NarrowableSection, PairKey, ReachSection, SimilarityMethod, SimilarityTarget,
+        UnreachableTier,
     };
     use agent_lens::hooks::setup_engine::{HookSelection, SetupScope};
     use clap::CommandFactory;
@@ -814,7 +815,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "graph-query",
+            "graph",
             ".",
             "--query",
             "path",
@@ -828,11 +829,11 @@ mod tests {
             "10",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
-            panic!("expected analyze graph-query");
+        let Command::Analyze(AnalyzeCommand::Graph(args)) = cli.command else {
+            panic!("expected analyze graph");
         };
-        assert_eq!(args.opts.query, GraphQueryKind::Path);
-        assert_eq!(args.opts.symbol, "handler");
+        assert_eq!(args.opts.query, Some(GraphQueryKind::Path));
+        assert_eq!(args.opts.symbol.as_deref(), Some("handler"));
         assert_eq!(args.opts.to.as_deref(), Some("db_write"));
         assert_eq!(args.opts.depth, Some(4));
         assert_eq!(args.opts.direction, None);
@@ -845,7 +846,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "graph-query",
+            "graph",
             ".",
             "--query",
             "neighborhood",
@@ -855,17 +856,25 @@ mod tests {
             "in",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::GraphQuery(args)) = cli.command else {
-            panic!("expected analyze graph-query");
+        let Command::Analyze(AnalyzeCommand::Graph(args)) = cli.command else {
+            panic!("expected analyze graph");
         };
-        assert_eq!(args.opts.query, GraphQueryKind::Neighborhood);
+        assert_eq!(args.opts.query, Some(GraphQueryKind::Neighborhood));
         assert_eq!(args.opts.direction, Some(GraphDirection::In));
     }
 
-    #[test]
-    fn analyze_graph_query_requires_query_and_symbol() {
-        let err = Cli::try_parse_from(["agent-lens", "analyze", "graph-query", "."])
-            .expect_err("missing required flags");
+    /// A traversal flag without `--query` is a parse error: without a
+    /// verb the run is the whole-graph dump, which would ignore it.
+    #[rstest]
+    #[case::symbol(&["--symbol", "foo"])]
+    #[case::to(&["--to", "foo"])]
+    #[case::depth(&["--depth", "2"])]
+    #[case::direction(&["--direction", "in"])]
+    #[case::limit(&["--limit", "3"])]
+    fn analyze_graph_traversal_flags_require_query(#[case] flags: &[&str]) {
+        let mut argv = vec!["agent-lens", "analyze", "graph", "."];
+        argv.extend_from_slice(flags);
+        let err = Cli::try_parse_from(argv).expect_err("flag without --query");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
@@ -1039,12 +1048,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_analyze_test_redundancy_with_its_cuts() {
+    fn parses_analyze_similarity_target_tests_with_its_cuts() {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "test-redundancy",
+            "similarity",
             "crates",
+            "--target",
+            "tests",
             "--threshold",
             "0.9",
             "--method",
@@ -1056,9 +1067,10 @@ mod tests {
             "md",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::TestRedundancy(args)) = cli.command else {
-            panic!("expected analyze test-redundancy");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
         };
+        assert_eq!(args.opts.target, SimilarityTarget::Tests);
         assert_eq!(args.opts.threshold, 0.9);
         assert_eq!(args.opts.method, SimilarityMethod::Pdg);
         assert_eq!(args.opts.min_body_nodes, Some(12));
@@ -1067,11 +1079,18 @@ mod tests {
 
     /// The defaults the analyzer documents are the defaults clap parses.
     #[test]
-    fn analyze_test_redundancy_defaults_match_the_analyzer() {
-        let cli = Cli::try_parse_from(["agent-lens", "analyze", "test-redundancy", "crates"])
-            .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::TestRedundancy(args)) = cli.command else {
-            panic!("expected analyze test-redundancy");
+    fn analyze_similarity_target_tests_defaults_match_the_analyzer() {
+        let cli = Cli::try_parse_from([
+            "agent-lens",
+            "analyze",
+            "similarity",
+            "crates",
+            "--target",
+            "tests",
+        ])
+        .expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Similarity(args)) = cli.command else {
+            panic!("expected analyze similarity");
         };
         assert_eq!(
             args.opts.threshold,
@@ -1337,32 +1356,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_analyze_function_graph_default_format_is_json() {
-        let cli = Cli::try_parse_from(["agent-lens", "analyze", "function-graph", "."])
-            .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
-            panic!("expected analyze function-graph");
+    fn parses_analyze_graph_without_query_default_format_is_json() {
+        let cli =
+            Cli::try_parse_from(["agent-lens", "analyze", "graph", "."]).expect("clean parse");
+        let Command::Analyze(AnalyzeCommand::Graph(args)) = cli.command else {
+            panic!("expected analyze graph");
         };
-        assert_eq!(args.paths, [PathBuf::from(".")]);
-        assert_eq!(args.format, OutputFormat::Json);
+        assert_eq!(args.opts.query, None);
+        assert_eq!(args.common.paths, [PathBuf::from(".")]);
+        assert_eq!(args.common.format, OutputFormat::Json);
     }
 
     #[test]
-    fn parses_analyze_function_graph_with_md_format() {
+    fn parses_analyze_graph_with_md_format() {
         let cli = Cli::try_parse_from([
             "agent-lens",
             "analyze",
-            "function-graph",
+            "graph",
             "src/lib.rs",
             "--format",
             "md",
         ])
         .expect("clean parse");
-        let Command::Analyze(AnalyzeCommand::FunctionGraph(args)) = cli.command else {
-            panic!("expected analyze function-graph");
+        let Command::Analyze(AnalyzeCommand::Graph(args)) = cli.command else {
+            panic!("expected analyze graph");
         };
-        assert_eq!(args.paths, [PathBuf::from("src/lib.rs")]);
-        assert_eq!(args.format, OutputFormat::Md);
+        assert_eq!(args.common.paths, [PathBuf::from("src/lib.rs")]);
+        assert_eq!(args.common.format, OutputFormat::Md);
     }
 
     #[test]

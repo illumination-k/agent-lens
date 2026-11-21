@@ -2,7 +2,7 @@
 """Run the call-graph accuracy benchmark: `run.py [target ...]` (default: all).
 
 For each target in targets.toml: check out the pinned commit, run its oracle,
-run `agent-lens analyze function-graph`, and score the graph against the
+run `agent-lens analyze graph`, and score the graph against the
 oracle with score.py. Everything is written under target/callgraph-accuracy/
 (gitignored); the combined per-language table is printed to stdout.
 
@@ -119,9 +119,9 @@ def run_target(t: dict, binary: Path, adjudications: Path) -> dict:
     else:
         sys.exit(f"{t['name']}: unknown oracle {t['oracle']!r}")
 
-    log(f"{binary} analyze function-graph {root}")
+    log(f"{binary} analyze graph {root}")
     with graph_json.open("w") as f:
-        subprocess.run([str(binary), "analyze", "function-graph", str(root), "--format", "json"], check=True, stdout=f)
+        subprocess.run([str(binary), "analyze", "graph", str(root), "--format", "json"], check=True, stdout=f)
 
     graph = json.loads(graph_json.read_text())
     oracle = json.loads(oracle_json.read_text())

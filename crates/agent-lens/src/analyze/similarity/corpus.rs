@@ -143,7 +143,7 @@ fn collect_file(
     let started = Instant::now();
     let (lang, source) = read_source(&file.path)?;
     let out: Vec<_> = match target {
-        SimilarityTarget::Functions => extract_functions(lang, &source)?
+        SimilarityTarget::Functions | SimilarityTarget::Tests => extract_functions(lang, &source)?
             .into_iter()
             .filter_map(|def| {
                 let is_test = def.is_test || path_is_test;

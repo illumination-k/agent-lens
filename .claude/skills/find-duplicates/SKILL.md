@@ -268,10 +268,10 @@ This drops `#[test]` / `#[rstest]` / `#[<runner>::test]` free functions and ever
 
 ## Confirming call-site count for a wrapper hit
 
-`wrapper` reports a hit but doesn't tell you _how many_ call sites it has — and "many call sites" vs "one call site" decides between inline and keep. Use `function-graph` to count:
+`wrapper` reports a hit but doesn't tell you _how many_ call sites it has — and "many call sites" vs "one call site" decides between inline and keep. Use `graph` to count:
 
 ```bash
-agent-lens analyze function-graph crates/<name>/src \
+agent-lens analyze graph crates/<name>/src \
   | jq --arg fn "<wrapper-fn-name>" '
       [.edges[] | select(.callee_name == $fn)] | length'
 ```

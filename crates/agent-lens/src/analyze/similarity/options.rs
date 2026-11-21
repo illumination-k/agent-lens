@@ -124,6 +124,12 @@ pub enum SimilarityTarget {
     /// functions differ, so they never cluster; the repeated fragment
     /// does.
     Blocks,
+    /// Test functions, read as a suite rather than as clusters: each
+    /// group names one test to keep and the near-copies it makes
+    /// redundant, checked against the call graph so a test that is the
+    /// only static caller of something is never offered as foldable.
+    /// Scores the same pairs `functions` would over the test corpus.
+    Tests,
 }
 
 impl SimilarityTarget {
@@ -132,6 +138,7 @@ impl SimilarityTarget {
             Self::Functions => "functions",
             Self::Types => "types",
             Self::Blocks => "blocks",
+            Self::Tests => "tests",
         }
     }
 
@@ -141,6 +148,7 @@ impl SimilarityTarget {
             Self::Functions => "function",
             Self::Types => "type",
             Self::Blocks => "block",
+            Self::Tests => "test",
         }
     }
 }
@@ -222,7 +230,11 @@ pub struct SimilarityOptions {
     /// duplicated DTOs and drifted mirror structs surface the same way
     /// duplicated functions do. With name-anchored pairing, only the
     /// `qualified`/`name` key applies; `method` has no meaning for a
-    /// type and is rejected.
+    /// type and is rejected. `tests` compares test functions and picks,
+    /// for each set of near-copies, the one to keep and the ones it
+    /// makes redundant; it takes `--min-body-nodes` and
+    /// `--no-reach-guard`, and rejects `--sweep`, `--paired-by`,
+    /// `--doc-overlap`, and the diff gates.
     #[arg(long, value_enum, default_value_t = SimilarityTarget::Functions)]
     pub target: SimilarityTarget,
     /// Body-scoring algorithm. `tsed` (default) uses APTED tree-edit
@@ -256,6 +268,19 @@ pub struct SimilarityOptions {
     /// flag.
     #[arg(long)]
     pub doc_overlap: bool,
+    /// `--target tests` only. Minimum body-tree nodes a test needs
+    /// before it is eligible (default 8). Guards against bodies the
+    /// parser keeps opaque — a Rust test whose whole body is one
+    /// `assert_eq!` is a two-node tree, identical to every other such
+    /// test however different the assertion.
+    #[arg(long)]
+    pub min_body_nodes: Option<usize>,
+    /// `--target tests` only. Offer a test as foldable even when the
+    /// call graph shows it is the only one with a resolved path to some
+    /// production function. Skips building the graph, which is the bulk
+    /// of the run.
+    #[arg(long)]
+    pub no_reach_guard: bool,
 }
 
 impl Default for SimilarityOptions {
@@ -273,6 +298,8 @@ impl Default for SimilarityOptions {
             method: SimilarityMethod::Tsed,
             idf: false,
             doc_overlap: false,
+            min_body_nodes: None,
+            no_reach_guard: false,
         }
     }
 }

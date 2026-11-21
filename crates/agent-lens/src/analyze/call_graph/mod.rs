@@ -2,7 +2,7 @@
 //!
 //! Builds a per-function call graph for Rust / TypeScript / Python /
 //! Go from the lens adapters' `FunctionShape` / `CallShape` /
-//! `FunctionComplexity` facts. `analyze function-graph` serializes the
+//! `FunctionComplexity` facts. `analyze graph` serializes the
 //! graph verbatim; the planned analyzer family (hubs, cycles, impact,
 //! …) consumes the same [`CallGraph`] plus the traversal algorithms in
 //! [`lens_domain::graph_algo`] instead of re-deriving the pipeline per analyzer.
@@ -178,7 +178,7 @@ pub(crate) fn match_symbol(graph: &CallGraph, symbol: &str) -> Vec<usize> {
 }
 
 /// Scans source trees into [`FileGraphInput`]s and assembles the
-/// [`CallGraph`]. Shared by `analyze function-graph` and the analyzer
+/// [`CallGraph`]. Shared by `analyze graph` and the analyzer
 /// family so test/path filtering semantics stay identical everywhere.
 ///
 /// `Eq`/`Hash` cover the whole configuration because a builder clone
