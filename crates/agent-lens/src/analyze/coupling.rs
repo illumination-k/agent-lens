@@ -56,8 +56,8 @@
 //!   `struct` / `enum` / `union`s, skipping `#[cfg(test)]` items; Go
 //!   counts a package's `interface` types against its other named types,
 //!   skipping `_test.go` files. Aliases are not counted, and a module
-//!   declaring no types has no abstractness. TypeScript / JavaScript and
-//!   Python take no census, so their modules carry neither `A` nor `D`.
+//!   declaring no types has no abstractness. TypeScript / JavaScript,
+//!   Python, and Quint take no census, so their modules carry neither `A` nor `D`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -298,7 +298,7 @@ struct ModuleView {
     /// the module's own file: inline modules sharing a file count once.
     files: usize,
     /// Abstract and concrete type declarations counted for the module.
-    /// Omitted where the language takes no census (TS/JS, Python).
+    /// Omitted where the language takes no census (TS/JS, Python, Quint).
     #[serde(skip_serializing_if = "Option::is_none")]
     abstract_types: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

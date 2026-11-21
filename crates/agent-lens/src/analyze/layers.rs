@@ -660,21 +660,6 @@ struct PairAccumulator {
     calls: BTreeMap<(usize, usize), (Vec<usize>, bool)>,
 }
 
-/// Whether the resolver reached this edge's target through a name
-/// fallback (last segment, path suffix, crate narrowing) rather than a
-/// direct lexical or `self`-method match. Edges with no recorded method
-/// are not fallbacks.
-fn is_fallback(method: Option<ResolutionMethod>) -> bool {
-    matches!(
-        method,
-        Some(
-            ResolutionMethod::LastSegment
-                | ResolutionMethod::PathSuffix
-                | ResolutionMethod::CrateNarrowed
-        )
-    )
-}
-
 /// One pass over the resolved edges: per-level edge support, the
 /// module-pair listings, and the in-cycle call-site count.
 struct EdgeScan {
@@ -718,7 +703,9 @@ impl EdgeScan {
             let Some(class) = classify(module_graph, from_module, to_module) else {
                 continue;
             };
-            let fallback = is_fallback(edge.resolution_method);
+            let fallback = edge
+                .resolution_method
+                .is_some_and(ResolutionMethod::is_name_fallback);
             let accumulator = pairs.entry((class, from_module, to_module)).or_default();
             accumulator.call_count += edge.call_count;
             if fallback {
@@ -1275,20 +1262,6 @@ mod tests {
         assert_eq!(skips, [("crate::top", "crate::leaf", 2)]);
         assert_eq!(report["summary"]["skip_pair_count"], 1);
         assert_eq!(report["summary"]["skip_call_count"], 1);
-    }
-
-    #[rstest]
-    #[case::direct(Some(ResolutionMethod::Lexical), false)]
-    #[case::self_method(Some(ResolutionMethod::SelfMethod), false)]
-    #[case::unrecorded(None, false)]
-    #[case::last_segment(Some(ResolutionMethod::LastSegment), true)]
-    #[case::path_suffix(Some(ResolutionMethod::PathSuffix), true)]
-    #[case::crate_narrowed(Some(ResolutionMethod::CrateNarrowed), true)]
-    fn fallback_covers_the_name_matching_heuristics(
-        #[case] method: Option<ResolutionMethod>,
-        #[case] expected: bool,
-    ) {
-        assert_eq!(is_fallback(method), expected);
     }
 
     #[test]

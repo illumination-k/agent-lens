@@ -473,9 +473,24 @@ Adding a language means writing one adapter crate and wiring it into the
 | Astro (experimental)    | `tree-sitter-astro-next` to locate scripts, then oxc          | `lens-ts`     |
 | Python                  | [`ruff_python_parser`](https://docs.rs/ruff_python_parser)    | `lens-py`     |
 | Go                      | [tree-sitter](https://docs.rs/tree-sitter) + `tree-sitter-go` | `lens-golang` |
+| Quint (experimental)    | the `quint` CLI's JSON IR (`quint parse --out`)               | `lens-quint`  |
 
 Supported source extensions: `.rs`; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
-`.jsx`, `.mjs`, `.cjs`, `.astro`; `.py`; `.go`.
+`.jsx`, `.mjs`, `.cjs`, `.astro`; `.py`; `.go`; `.qnt`.
+
+`.qnt` support is **experimental** and needs the
+[`quint`](https://github.com/informalsystems/quint) CLI at run time
+(`npm i -g @informalsystems/quint`; `AGENT_LENS_QUINT` names another
+binary). Without it, `.qnt` files are skipped with a warning. A unit is a
+top-level definition (`def`, `pure def`, `action`, `val`, `temporal`,
+`run`; `run` counts as a test), named `Module::name` when a file declares
+several modules. `complexity` scores `if` / `match` / `any { }` /
+`and`-`or` chains, `similarity` and `forwarding`'s `wrapper` section
+compare definitions, `hotspot` ranks `.qnt` files, and `coupling` and
+`communities` take a `.qnt` file or a directory (read as Quint when it holds no `.py` file) whose `module`s are
+the units, with `import` / `export` / instances and cross-module
+references as edges. Cohesion, `--target types` / `blocks`, and the
+call-graph analyzers do not read Quint yet.
 
 `.astro` support is **experimental**: only the frontmatter and JavaScript
 `<script>` bodies are analyzed, as one TypeScript module whose line numbers
@@ -496,7 +511,9 @@ a file is skipped under the rule above until upstream covers the syntax.
 
 Language coverage per analyzer:
 
-- Most analyzers cover all four language families.
+- Most analyzers cover the four language families Rust, TypeScript /
+  JavaScript, Python, and Go; experimental Quint covers the subset listed
+  above.
 - The `test-only` and `unreachable` sections of `reach`, and the
   `single-impl` and `visibility` sections of `narrowable`, judge Rust and
   Go only — the two adapters that extract export status (and, for
@@ -576,7 +593,8 @@ crates/
 ├── lens-rust/     # syn-based Rust adapter
 ├── lens-ts/       # oxc-based TypeScript / JavaScript adapter
 ├── lens-py/       # ruff_python_parser-based Python adapter
-└── lens-golang/   # tree-sitter-based Go adapter
+├── lens-golang/   # tree-sitter-based Go adapter
+└── lens-quint/    # Quint adapter over the `quint` CLI's JSON IR
 ```
 
 Adapters translate a language's AST into the neutral primitives and nothing

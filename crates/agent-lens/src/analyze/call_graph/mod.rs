@@ -401,6 +401,11 @@ impl CallGraphBuilder {
         ts_resolver: Option<&lens_ts::ModuleResolver>,
     ) -> Result<FileGraphInput, AnalyzerError> {
         let (lang, source) = read_source(&file.path)?;
+        let language =
+            lang.graph_language()
+                .ok_or_else(|| AnalyzerError::UnsupportedExtension {
+                    path: file.path.clone(),
+                })?;
         let crate_info = match lang {
             SourceLang::Rust => Some(
                 crate_cache
@@ -466,7 +471,7 @@ impl CallGraphBuilder {
 
         Ok(FileGraphInput {
             file: file.display_path.clone(),
-            language: lang.graph_language(),
+            language,
             module,
             path_is_test,
             functions,
@@ -544,10 +549,7 @@ pub(crate) use delegate_call_graph_builders;
 /// from. Other supported extensions exist (the per-file analyzers read
 /// them), so this is the graph's own narrower gate.
 fn graphed_language(path: &Path) -> bool {
-    matches!(
-        SourceLang::from_path(path),
-        Some(SourceLang::Rust | SourceLang::TypeScript(_) | SourceLang::Python | SourceLang::Go)
-    )
+    SourceLang::from_path(path).is_some_and(|lang| lang.graph_language().is_some())
 }
 
 fn parse_err<E>(e: E) -> AnalyzerError
@@ -636,6 +638,8 @@ fn extract_call_shapes_uncached(
         SourceLang::Go => {
             lens_golang::extract_call_shapes_with_module(source, module).map_err(parse_err)
         }
+        // Not a graphed language ([`graphed_language`]): no file reaches here.
+        SourceLang::Quint => Ok(Vec::new()),
     }
 }
 
@@ -842,12 +846,15 @@ pub(crate) struct FileGraphInput {
 }
 
 impl SourceLang {
-    pub(crate) fn graph_language(self) -> GraphLanguage {
+    /// The call-graph language of a source language, or `None` for one
+    /// the graph is not built from (Quint).
+    pub(crate) fn graph_language(self) -> Option<GraphLanguage> {
         match self {
-            Self::Rust => GraphLanguage::Rust,
-            Self::TypeScript(_) => GraphLanguage::TypeScript,
-            Self::Python => GraphLanguage::Python,
-            Self::Go => GraphLanguage::Go,
+            Self::Rust => Some(GraphLanguage::Rust),
+            Self::TypeScript(_) => Some(GraphLanguage::TypeScript),
+            Self::Python => Some(GraphLanguage::Python),
+            Self::Go => Some(GraphLanguage::Go),
+            Self::Quint => None,
         }
     }
 }
@@ -857,7 +864,7 @@ impl CallGraphNode {
     /// `None` for a path no language claims — which cannot happen for a
     /// node the graph built.
     pub(crate) fn graph_language(&self) -> Option<GraphLanguage> {
-        SourceLang::from_path(Path::new(&self.file)).map(SourceLang::graph_language)
+        SourceLang::from_path(Path::new(&self.file)).and_then(SourceLang::graph_language)
     }
 }
 
