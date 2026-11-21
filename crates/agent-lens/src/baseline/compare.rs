@@ -570,11 +570,10 @@ mod tests {
 
     /// Every analyzer a snapshot covers, with a report carrying every
     /// field its summarizer reads.
-    const SUMMARIZED: [ToolName; 6] = [
+    const SUMMARIZED: [ToolName; 5] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Coupling,
-        ToolName::ContextSpan,
         ToolName::Hotspot,
         ToolName::Similarity,
     ];

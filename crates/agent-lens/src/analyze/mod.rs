@@ -13,7 +13,6 @@ pub mod cohesion;
 pub mod communities;
 pub mod complexity;
 mod composite;
-pub mod context_span;
 pub mod coupling;
 mod crate_root;
 pub mod cycles;
@@ -65,7 +64,6 @@ use lens_domain::LanguageParser;
 pub use cohesion::CohesionAnalyzer;
 pub use communities::{CommunitiesAnalyzer, Granularity};
 pub use complexity::ComplexityAnalyzer;
-pub use context_span::{ContextSpanAnalyzer, ContextSpanAnalyzerError};
 pub use coupling::CouplingAnalyzer;
 pub use cycles::CyclesAnalyzer;
 pub use delegation::DelegationAnalyzer;
@@ -222,7 +220,7 @@ pub(crate) fn relative_display_path(path: &Path, base: &Path) -> String {
 
 /// Errors common to single-file analyzers (cohesion, complexity).
 ///
-/// Coupling and context-span carry extra variants (`UnsupportedRoot`,
+/// The module-graph analyzers carry extra variants (`UnsupportedRoot`,
 /// `MissingMod`) and use the dedicated [`CrateAnalyzerError`] below
 /// instead.
 #[derive(Debug, thiserror::Error)]
@@ -279,10 +277,10 @@ pub enum AnalyzerError {
 }
 
 /// Errors raised by analyzers that walk a Rust crate from a `.rs` root
-/// (coupling, context-span, …).
+/// (coupling, communities, …).
 ///
-/// Both analyzers reach into the same `lens_rust` extractor and surface
-/// the same handful of failure modes; they used to duplicate this enum.
+/// They reach into the same `lens_rust` extractor and surface the same
+/// handful of failure modes.
 #[derive(Debug, thiserror::Error)]
 pub enum CrateAnalyzerError {
     #[error("failed to read {path:?}: {source}")]
@@ -317,6 +315,19 @@ pub enum CrateAnalyzerError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error("--entry-glob requires {path:?} to be a directory")]
+    EntryGlobBaseNotDir { path: PathBuf },
+    #[error("invalid --entry-glob pattern {pattern:?}: {source}")]
+    InvalidEntryGlob {
+        pattern: String,
+        #[source]
+        source: globset::Error,
+    },
+    #[error("no files matched any --entry-glob pattern under {path:?}; patterns: {patterns:?}")]
+    EntryGlobNoMatches {
+        path: PathBuf,
+        patterns: Vec<String>,
+    },
 }
 
 impl From<lens_domain::CouplingError> for CrateAnalyzerError {

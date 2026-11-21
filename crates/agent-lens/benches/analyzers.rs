@@ -11,9 +11,8 @@ mod support;
 
 use agent_lens::analyze::communities::Algorithm;
 use agent_lens::analyze::{
-    CohesionAnalyzer, CommunitiesAnalyzer, ComplexityAnalyzer, ContextSpanAnalyzer,
-    CouplingAnalyzer, CyclesAnalyzer, DelegationAnalyzer, HubsAnalyzer, LayersAnalyzer,
-    OutputFormat, WrapperAnalyzer,
+    CohesionAnalyzer, CommunitiesAnalyzer, ComplexityAnalyzer, CouplingAnalyzer, CyclesAnalyzer,
+    DelegationAnalyzer, HubsAnalyzer, LayersAnalyzer, OutputFormat, WrapperAnalyzer,
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -63,10 +62,6 @@ fn bench_rust_analyzers(c: &mut Criterion) {
     let communities_leiden = CommunitiesAnalyzer::new().with_algorithm(Algorithm::Leiden);
     group.bench_function("communities_leiden", |b| {
         b.iter(|| support::consume(communities_leiden.analyze(root, JSON)));
-    });
-    let context_span = ContextSpanAnalyzer::new();
-    group.bench_function("context_span", |b| {
-        b.iter(|| support::consume(context_span.analyze(root, JSON)));
     });
     group.finish();
 }
