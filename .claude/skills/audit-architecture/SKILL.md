@@ -1,14 +1,13 @@
 ---
 name: audit-architecture
-description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, layering and level inversions, instability, whether the declared module boundaries match the clustering the dependencies form, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `layers`, `communities`, `context-span`, and `cohesion`, all of which work on Rust, TypeScript / JavaScript, Python, and Go.
+description: Use when the user wants to evaluate the structural health of a module or crate — coupling, Fan-In bottlenecks, dependency cycles, layering and level inversions, instability, whether the declared module boundaries match the clustering the dependencies form, or `impl`/class-level cohesion (LCOM4). Wraps `agent-lens analyze coupling`, `layers`, `communities`, and `cohesion`, all of which work on Rust, TypeScript / JavaScript, Python, and Go.
 ---
 
 # Audit module structure with agent-lens
 
-Five analyzers cover the architecture question:
+Four analyzers cover the architecture question:
 
-- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, Abstractness `A = Na/Nc` and distance from the main sequence `D = |A + I - 1|` (Rust and Go only), and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), Go modules (package-granular), and Python package trees (file-granular, in-tree imports only).
-- `context-span` — per-module transitive outgoing closure (the modules and source files an agent must read to reason about the module). Runs on Rust, TS/JS, Python, and Go. For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
+- `coupling` — module-level metrics: Number of Couplings, Fan-In, Fan-Out, Henry-Kafura IFC `(fan_in × fan_out)²`, Martin's Instability `Ce/(Ca+Ce)`, Abstractness `A = Na/Nc` and distance from the main sequence `D = |A + I - 1|` (Rust and Go only), each module's transitive outgoing closure (`transitive` modules spanning `files` other source files — what an agent must read to reason about the module), and the strongly connected components of the dependency graph (cycles). Runs on Rust crates, TS/JS module graphs (the entry file's relative-import closure), Go modules (package-granular), and Python package trees (file-granular, in-tree imports only). For TS/JS frameworks with many implicit entries (Next.js App Router, file-routed Remix / Astro), pass `--entry-glob` repeatedly to merge several entry trees into one report.
 - `layers` — inferred Lakos levelization of the call graph: a level per function and per module, the entry-point set, the module cycles that make levelization impossible (with the concrete call sites), and downward calls skipping a level. Needs no crate root or entry file — it walks any directory of Rust, TS/JS, Python, or Go.
 - `communities` — the clusters the dependency graph forms, scored against the module boundaries the repository declares. Modularity `Q` for both partitions over one graph, plus the members filed in one module but wired into another. Greedy or Leiden (`--algorithm`), tunable resolution, and optional git co-change edge weights (`--weights co-change|both`, which also compares the static and co-change clusterings). Same entry-point rule as `coupling`.
 - `cohesion` — per-`impl` (Rust) / per-class (TS, Python, Go) LCOM4: number of connected components in the field-sharing graph. `1` is healthy; `≥ 2` means the unit has disjoint responsibilities.
@@ -85,28 +84,12 @@ Read it top-down and stop early when you can:
 
 Two things to discount before acting. Only resolved references become edges, so a module whose imports the extractor cannot resolve looks under-connected to its own neighbours — check the file before believing a row with `→declared 0`. And modularity has a resolution limit: a small genuine cluster can be absorbed into a larger neighbour, which is why every community reports its size.
 
-### 4. Module read-cost (context span)
+### 4. Module read-cost (transitive span)
 
-Pair `coupling` with `context-span` to estimate how much of the crate an agent must hold in context to safely change a given module:
-
-```bash
-# Rust crate
-agent-lens analyze context-span crates/agent-lens --format md
-
-# TS/JS entry
-agent-lens analyze context-span app/src/index.ts --format md
-
-# Python file or directory
-agent-lens analyze context-span pkg/foo --format md
-
-# Go file or module directory
-agent-lens analyze context-span ./cmd/server --format md
-```
-
-For TS/JS frameworks where there is no single entry (Next.js App Router, Remix, Astro), pass `path` as the project root and merge several entry trees with `--entry-glob` (repeatable):
+`coupling`'s `transitive` and `files` columns estimate how much of the crate an agent must hold in context to safely change a given module. For TS/JS frameworks where there is no single entry (Next.js App Router, Remix, Astro), pass `path` as the project root and merge several entry trees with `--entry-glob` (repeatable):
 
 ```bash
-agent-lens analyze context-span app \
+agent-lens analyze coupling app \
   --entry-glob 'app/**/page.tsx' \
   --entry-glob 'app/**/route.ts' \
   --format md
@@ -175,4 +158,4 @@ agent-lens analyze communities crates/agent-lens \
 - The crate / entry tree is a single file — Fan-In / Fan-Out are degenerate, the report will be empty.
 - The "module structure" question is across Rust crates — `coupling` is intra-crate. For inter-crate dependency questions, `cargo tree` is the right tool.
 - The Python question is about imports that leave the tree — `coupling` only draws edges for imports resolving to a `.py` file under the root, so stdlib and third-party dependencies are invisible.
-- The TS/JS project has no single entry file (e.g. a library exporting many barrels, or a Next.js App Router app) — `coupling` requires one entry, so you'll need to pick a representative one. `context-span` supports merging entries via `--entry-glob`, but `coupling` does not.
+- The TS/JS project has no single entry file (e.g. a library exporting many barrels, or a Next.js App Router app) — pass the project root with repeated `--entry-glob` patterns to merge the entry trees, or pick a representative entry.

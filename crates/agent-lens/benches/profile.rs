@@ -21,7 +21,7 @@ path = "."
 format = "json"
 tools = [
   "complexity", "cohesion", "similarity", "forwarding",
-  "coupling", "communities", "context-span", "cycles", "layers", "hubs",
+  "coupling", "communities", "cycles", "layers", "hubs",
   "hotspot", "risk",
 ]
 

@@ -422,7 +422,6 @@ fn extract(tool: ToolName, report: &Value, base: &Path) -> Option<Extraction> {
         ToolName::HiddenCoupling => hidden_coupling(report),
         ToolName::Coupling => coupling(report),
         ToolName::Communities => communities(report),
-        ToolName::ContextSpan => context_span(report),
         ToolName::Cycles => cycles(report),
         ToolName::Layers => layers(report),
         // Bundles are folded per section by `fold_report`, never whole.
@@ -1337,10 +1336,36 @@ fn coupling(report: &Value) -> Extraction {
     {
         corpus.push(format!("IFC max {ifc} (`{module}`)"));
     }
+    if let Some(span) = widest_span(report) {
+        corpus.push(span);
+    }
     Extraction {
         files: Vec::new(),
         corpus,
     }
+}
+
+/// The module with the largest transitive closure: the one an agent must
+/// read the most of the crate to reason about.
+fn widest_span(report: &Value) -> Option<String> {
+    arr(report, "modules")
+        .iter()
+        .filter_map(|module| {
+            Some((
+                u64_of(module, "transitive")?,
+                u64_of(module, "files").unwrap_or(0),
+                str_of(module, "path")?,
+            ))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.2.cmp(a.2)))
+        .filter(|&(transitive, _, _)| transitive > 0)
+        .map(|(transitive, files, module)| {
+            format!(
+                "widest span `{module}` reaches {} ({})",
+                counted(transitive, "module", "modules"),
+                counted(files, "file", "files"),
+            )
+        })
 }
 
 fn communities(report: &Value) -> Extraction {
@@ -1367,33 +1392,6 @@ fn communities(report: &Value) -> Extraction {
             "spanning communities",
         ));
     }
-    Extraction {
-        files: Vec::new(),
-        corpus,
-    }
-}
-
-fn context_span(report: &Value) -> Extraction {
-    let corpus = arr(report, "modules")
-        .iter()
-        .filter_map(|module| {
-            Some((
-                u64_of(module, "transitive")?,
-                u64_of(module, "files").unwrap_or(0),
-                str_of(module, "path")?,
-            ))
-        })
-        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.2.cmp(a.2)))
-        .filter(|&(transitive, _, _)| transitive > 0)
-        .map(|(transitive, files, module)| {
-            format!(
-                "widest span `{module}` reaches {} ({})",
-                counted(transitive, "module", "modules"),
-                counted(files, "file", "files"),
-            )
-        })
-        .into_iter()
-        .collect();
     Extraction {
         files: Vec::new(),
         corpus,
@@ -1464,7 +1462,7 @@ mod tests {
     use super::*;
 
     /// Every tool the digest folds, for shape-robustness sweeps.
-    const FOLDED: [ToolName; 16] = [
+    const FOLDED: [ToolName; 15] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Similarity,
@@ -1478,7 +1476,6 @@ mod tests {
         ToolName::HiddenCoupling,
         ToolName::Coupling,
         ToolName::Communities,
-        ToolName::ContextSpan,
         ToolName::Cycles,
         ToolName::Layers,
     ];
@@ -2114,14 +2111,14 @@ mod tests {
     }
 
     #[test]
-    fn context_span_reports_the_widest_module() {
+    fn coupling_reports_the_widest_span() {
         let report = json!({
             "modules": [
                 { "path": "crate::thin", "transitive": 2, "files": 3 },
                 { "path": "crate::wide", "transitive": 40, "files": 39 },
             ],
         });
-        let extraction = context_span(&report);
+        let extraction = coupling(&report);
         assert_eq!(
             extraction.corpus,
             ["widest span `crate::wide` reaches 40 modules (39 files)"],
@@ -2163,11 +2160,10 @@ mod tests {
 
     #[rstest]
     #[case(ToolName::Cycles, json!({ "summary": { "scc_count": 0, "largest": 0 } }))]
-    #[case(ToolName::Coupling, json!({ "cycle_count": 0, "modules": [ { "path": "crate::a", "fan_in": 0, "ifc": 0 } ] }))]
+    #[case(ToolName::Coupling, json!({ "cycle_count": 0, "modules": [ { "path": "crate::a", "fan_in": 0, "ifc": 0, "transitive": 0, "files": 0 } ] }))]
     #[case(ToolName::CoChange, json!({ "pairs": [] }))]
     #[case(ToolName::HiddenCoupling, json!({ "hidden_coupling": [], "suspect_dependencies": [] }))]
     #[case(ToolName::Communities, json!({ "misfiled": [], "spanning": [] }))]
-    #[case(ToolName::ContextSpan, json!({ "modules": [ { "path": "crate::a", "transitive": 0, "files": 0 } ] }))]
     #[case(ToolName::Layers, json!({ "summary": { "module_cycle_count": 0, "skip_pair_count": 0, "wide_span_module_count": 0 } }))]
     fn a_clean_report_digests_to_nothing_rather_than_a_zero_claim(
         #[case] tool: ToolName,

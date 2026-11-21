@@ -117,7 +117,7 @@ pub type Summarizer = fn(&Value) -> Metrics;
 /// one list of covered analyzers instead of a support check that can
 /// drift from the extraction.
 ///
-/// Covered today are the six analyzers whose reports are whole-project
+/// Covered today are the five analyzers whose reports are whole-project
 /// aggregates over a stable shape; the graph analyzers (hubs, impact,
 /// layers, …) rank individual symbols, and what a *snapshot* of one
 /// should be is not yet settled. An uncovered tool is recorded under
@@ -127,7 +127,6 @@ pub fn summarizer(tool: ToolName) -> Option<Summarizer> {
         ToolName::Complexity => Some(complexity_metrics),
         ToolName::Cohesion => Some(cohesion_metrics),
         ToolName::Coupling => Some(coupling_metrics),
-        ToolName::ContextSpan => Some(context_span_metrics),
         ToolName::Hotspot => Some(hotspot_metrics),
         ToolName::Similarity => Some(similarity_metrics),
         ToolName::ChangeEntropy
@@ -193,6 +192,9 @@ fn cohesion_metrics(report: &Value) -> Metrics {
     metrics
 }
 
+/// The span sum is the total reading cost of the crate: shrinking one
+/// module's transitive span while inflating every other one should not
+/// read as an improvement, which a max alone would allow.
 fn coupling_metrics(report: &Value) -> Metrics {
     let mut metrics = Metrics::new();
     for name in ["module_count", "edge_count", "cycle_count"] {
@@ -205,19 +207,6 @@ fn coupling_metrics(report: &Value) -> Metrics {
             max(&collect(report, &["modules", "*", name])),
         );
     }
-    metrics
-}
-
-/// The span sum is the total reading cost of the crate: shrinking one
-/// module's span while inflating every other one should not read as an
-/// improvement, which a max alone would allow.
-fn context_span_metrics(report: &Value) -> Metrics {
-    let mut metrics = Metrics::new();
-    put(
-        &mut metrics,
-        "module_count",
-        scalar(report, &["module_count"]),
-    );
     let transitive = collect(report, &["modules", "*", "transitive"]);
     put(&mut metrics, "transitive_max", max(&transitive));
     put(&mut metrics, "transitive_sum", sum(&transitive));
@@ -394,11 +383,10 @@ mod tests {
     use super::*;
 
     /// Every analyzer a snapshot covers.
-    const SUMMARIZED: [ToolName; 6] = [
+    const SUMMARIZED: [ToolName; 5] = [
         ToolName::Complexity,
         ToolName::Cohesion,
         ToolName::Coupling,
-        ToolName::ContextSpan,
         ToolName::Hotspot,
         ToolName::Similarity,
     ];
@@ -488,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn context_span_summary_reports_both_worst_and_total_span() {
+    fn coupling_summary_reports_both_worst_and_total_span() {
         let report = json!({
             "module_count": 3,
             "modules": [
@@ -497,7 +485,7 @@ mod tests {
                 { "transitive": 0 },
             ],
         });
-        let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
+        let metrics = summarizer(ToolName::Coupling).unwrap()(&report);
         assert_eq!(metric(&metrics, "transitive_max"), Some(11.0));
         assert_eq!(metric(&metrics, "transitive_sum"), Some(13.0));
     }
@@ -567,7 +555,6 @@ mod tests {
     #[case(ToolName::Complexity)]
     #[case(ToolName::Cohesion)]
     #[case(ToolName::Coupling)]
-    #[case(ToolName::ContextSpan)]
     #[case(ToolName::Hotspot)]
     #[case(ToolName::Similarity)]
     fn summarized_tools_never_panic_on_a_report_shape_they_did_not_expect(#[case] tool: ToolName) {
@@ -607,7 +594,7 @@ mod tests {
     #[test]
     fn aggregates_keep_whole_numbers_whole() {
         let report = json!({ "modules": [ { "transitive": 2 }, { "transitive": 3 } ] });
-        let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
+        let metrics = summarizer(ToolName::Coupling).unwrap()(&report);
         // Exact, not a substring check: `5.0` would also contain `5`,
         // and a count rendered as a float is the bug this guards.
         assert_eq!(
@@ -619,7 +606,7 @@ mod tests {
     #[test]
     fn a_fractional_aggregate_keeps_its_fraction() {
         let report = json!({ "modules": [ { "transitive": 0.5 }, { "transitive": 1.0 } ] });
-        let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
+        let metrics = summarizer(ToolName::Coupling).unwrap()(&report);
         assert_eq!(metric(&metrics, "transitive_sum"), Some(1.5));
         assert_eq!(
             serde_json::to_string(&metrics).unwrap(),
@@ -633,7 +620,7 @@ mod tests {
         // runaway total to a fixed number that looks like a real
         // measurement. Past that range the value stays a float.
         let report = json!({ "modules": [ { "transitive": 1e19 } ] });
-        let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
+        let metrics = summarizer(ToolName::Coupling).unwrap()(&report);
         assert_eq!(metric(&metrics, "transitive_sum"), Some(1e19));
         assert_eq!(metric(&metrics, "transitive_max"), Some(1e19));
     }
@@ -781,7 +768,7 @@ mod tests {
             let report = json!({
                 "modules": spans.iter().map(|s| json!({ "transitive": s })).collect::<Vec<_>>(),
             });
-            let metrics = summarizer(ToolName::ContextSpan).unwrap()(&report);
+            let metrics = summarizer(ToolName::Coupling).unwrap()(&report);
             match metric(&metrics, "transitive_max") {
                 Some(max) => prop_assert!(spans.contains(&(max as i64))),
                 None => prop_assert!(spans.is_empty()),

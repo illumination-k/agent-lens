@@ -51,7 +51,6 @@ use crate::analyze::OutputFormat;
 pub use crate::analyze::cohesion::CohesionOptions;
 pub use crate::analyze::communities::CommunitiesOptions;
 pub use crate::analyze::complexity::ComplexityOptions;
-pub use crate::analyze::context_span::ContextSpanOptions;
 pub use crate::analyze::coupling::CouplingOptions;
 pub use crate::analyze::footprint::FootprintOptions;
 pub use crate::analyze::forwarding::ForwardingOptions;
@@ -181,8 +180,6 @@ pub struct Profile {
     pub reach: Option<ReachOptions>,
     #[serde(default)]
     pub graph_query: Option<GraphQueryOptions>,
-    #[serde(default)]
-    pub context_span: Option<ContextSpanOptions>,
     #[serde(default)]
     pub coupling: Option<CouplingOptions>,
     #[serde(default)]
@@ -350,7 +347,6 @@ pub enum ToolName {
     Communities,
     Complexity,
     Coupling,
-    ContextSpan,
     Cycles,
     Footprint,
     Forwarding,
@@ -384,6 +380,15 @@ pub const MERGED_TOOLS: [(&str, &str, &str); 9] = [
     ("delegation", "forwarding", "delegation"),
 ];
 
+/// Analyzers whose report became columns of another: `(old name,
+/// analyzer, what carries it now)`. Not a section, so there is nothing
+/// to select: listing the analyzer is the whole fix.
+pub const ABSORBED_TOOLS: [(&str, &str, &str); 1] = [(
+    "context-span",
+    "coupling",
+    "its `transitive` and `files` columns",
+)];
+
 impl TryFrom<String> for ToolName {
     type Error = String;
 
@@ -397,6 +402,11 @@ impl TryFrom<String> for ToolName {
                  (set `section = [\"{section}\"]` in its table to run only this section)"
             ));
         }
+        if let Some((_, tool, carrier)) = ABSORBED_TOOLS.iter().find(|(old, ..)| *old == name) {
+            return Err(format!(
+                "`{name}` is now part of `{tool}` ({carrier}): list `{tool}` in `tools`"
+            ));
+        }
         let known: Vec<&str> = Self::ALL.iter().map(|t| t.as_str()).collect();
         Err(format!(
             "unknown tool `{name}`, expected one of: {}",
@@ -407,14 +417,13 @@ impl TryFrom<String> for ToolName {
 
 impl ToolName {
     /// Every analyzer, in `as_str` order.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 23] = [
         Self::ChangeEntropy,
         Self::CoChange,
         Self::Cohesion,
         Self::Communities,
         Self::Complexity,
         Self::Coupling,
-        Self::ContextSpan,
         Self::Cycles,
         Self::Footprint,
         Self::Forwarding,
@@ -443,7 +452,6 @@ impl ToolName {
             Self::Communities => "communities",
             Self::Complexity => "complexity",
             Self::Coupling => "coupling",
-            Self::ContextSpan => "context-span",
             Self::Cycles => "cycles",
             Self::Footprint => "footprint",
             Self::Forwarding => "forwarding",
@@ -466,14 +474,14 @@ impl ToolName {
 
     /// Whether this analyzer takes exactly one path.
     ///
-    /// `coupling`, `context-span` and `communities` grow a module graph
+    /// `coupling` and `communities` grow a module graph
     /// outwards from a single entry point — a crate root, a TS/JS entry
     /// file, a Go module — so two entry points are two graphs rather than
     /// a wider one, and they kept the single-`PATH` CLI signature when the
     /// rest gained `PATH...`. A profile's `path` array is bounded by the
     /// same rule.
     pub fn is_single_root(self) -> bool {
-        matches!(self, Self::Coupling | Self::ContextSpan | Self::Communities)
+        matches!(self, Self::Coupling | Self::Communities)
     }
 }
 
@@ -750,6 +758,7 @@ since = "90.days.ago"
     #[case("single-impl", "`single-impl` section of `narrowable`")]
     #[case("parameters", "`parameters` section of `narrowable`")]
     #[case("visibility", "`visibility` section of `narrowable`")]
+    #[case("context-span", "`context-span` is now part of `coupling`")]
     #[case("typo", "unknown tool `typo`, expected one of: change-entropy")]
     fn a_removed_tool_name_says_where_it_went(#[case] name: &str, #[case] expected: &str) {
         let err = toml::from_str::<Config>(&format!(
@@ -990,12 +999,12 @@ since = "90.days.ago"
         assert_eq!(config.profile("backend").unwrap().path.display(), expected);
     }
 
-    /// A one-path profile is what `coupling` and `context-span` need, so
+    /// A one-path profile is what `coupling` and `communities` need, so
     /// listing them beside a single-element array is fine — only a wider
     /// corpus is the mistake.
     #[rstest]
     #[case::coupling("coupling")]
-    #[case::context_span("context-span")]
+    #[case::communities("communities")]
     fn load_accepts_a_single_element_array_for_a_single_root_tool(#[case] tool: &str) {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(
@@ -1008,7 +1017,7 @@ since = "90.days.ago"
 
     #[rstest]
     #[case::coupling("coupling")]
-    #[case::context_span("context-span")]
+    #[case::communities("communities")]
     fn load_rejects_several_paths_for_a_single_root_tool(#[case] tool: &str) {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(
@@ -1040,7 +1049,7 @@ since = "90.days.ago"
 
     #[rstest]
     #[case::coupling(ToolName::Coupling, true)]
-    #[case::context_span(ToolName::ContextSpan, true)]
+    #[case::communities(ToolName::Communities, true)]
     #[case::similarity(ToolName::Similarity, false)]
     #[case::cycles(ToolName::Cycles, false)]
     fn is_single_root_marks_only_the_graph_rooted_pair(

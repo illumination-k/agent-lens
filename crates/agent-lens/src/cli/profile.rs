@@ -205,10 +205,6 @@ fn unused_tool_option_tables(profile: &config::Profile) -> Vec<config::ToolName>
             config::ToolName::TestRedundancy,
         ),
         (profile.graph_query.is_some(), config::ToolName::GraphQuery),
-        (
-            profile.context_span.is_some(),
-            config::ToolName::ContextSpan,
-        ),
         (profile.forwarding.is_some(), config::ToolName::Forwarding),
     ]
     .into_iter()

@@ -61,14 +61,13 @@ agent-lens analyze cohesion <hotspot-path> --format md
 
 ### 4. Verify the file isn't an architectural bottleneck
 
-If the hotspot is a module that lots of other modules import from, refactoring needs more care. Run coupling and context-span on the crate (or TS/JS entry, or Go module):
+If the hotspot is a module that lots of other modules import from, refactoring needs more care. Run coupling on the crate (or TS/JS entry, or Go module):
 
 ```bash
-agent-lens analyze coupling     crates/<name> --format md
-agent-lens analyze context-span crates/<name> --format md
+agent-lens analyze coupling crates/<name> --format md
 ```
 
-A high `fan_in` on the hotspot module means changes ripple. A wide `context-span` `files` count means the module is also expensive to reason about end-to-end. Stage the refactor: extract first, then change the implementation.
+A high `fan_in` on the hotspot module means changes ripple. A wide `files` count (its transitive span) means the module is also expensive to reason about end-to-end. Stage the refactor: extract first, then change the implementation.
 
 ### 5. Map blast radius at the function level
 

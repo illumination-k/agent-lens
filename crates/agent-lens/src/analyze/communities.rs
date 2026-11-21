@@ -93,7 +93,7 @@ use serde::Serialize;
 
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
-use super::module_graph::{GraphPolicy, ModuleGraph, build_graph};
+use super::module_graph::{ModuleGraph, build_graph};
 use super::module_label::ModuleLabeler;
 use super::{AnalyzePathFilter, AnalyzeRoots, CrateAnalyzerError, OutputFormat, PathFilterError};
 
@@ -458,8 +458,7 @@ impl CommunitiesAnalyzer {
     ) -> Result<String, CommunitiesError> {
         self.validate()?;
         let path = path.as_ref();
-        let mut graph = build_graph(path, GraphPolicy::COUPLING, &self.path_filter)
-            .map_err(CommunitiesError::Graph)?;
+        let mut graph = build_graph(path, &self.path_filter).map_err(CommunitiesError::Graph)?;
         let filter = self.path_filter.compile(&graph.root)?;
         graph.modules.retain(|m| filter.includes_path(&m.file));
         let kept: BTreeSet<&ModulePath> = graph.modules.iter().map(|m| &m.path).collect();
@@ -1432,7 +1431,7 @@ mod tests {
     fn a_module_holding_submodules_is_declared_in_itself() {
         let dir = tempfile::tempdir().unwrap();
         let lib = planted_crate(dir.path());
-        let graph = build_graph(&lib, GraphPolicy::COUPLING, &AnalyzePathFilter::new()).unwrap();
+        let graph = build_graph(&lib, &AnalyzePathFilter::new()).unwrap();
         let member = Membership::new(&graph, Granularity::File);
 
         assert_eq!(

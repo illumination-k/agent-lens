@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use agent_lens::analyze::cohesion::CohesionOptions;
 use agent_lens::analyze::communities::CommunitiesOptions;
 use agent_lens::analyze::complexity::ComplexityOptions;
-use agent_lens::analyze::context_span::ContextSpanOptions;
 use agent_lens::analyze::coupling::CouplingOptions;
 use agent_lens::analyze::footprint::FootprintOptions;
 use agent_lens::analyze::forwarding::ForwardingOptions;
@@ -66,8 +65,11 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
     /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, Abstractness
     /// `Na/Nc` and distance from the main sequence `|A+I-1|` (Rust and
-    /// Go: traits / interfaces against concrete types), and the strongly
-    /// connected components of the dependency graph (cycles). `path`
+    /// Go: traits / interfaces against concrete types), each module's
+    /// transitive outgoing closure (`transitive` modules spanning `files`
+    /// other source files — how many files an agent must open to reason
+    /// about it), and the strongly connected components of the
+    /// dependency graph (cycles). `path`
     /// may be a `.rs` crate root (e.g. `src/lib.rs`) or a directory
     /// containing one, a TypeScript / JavaScript entry file
     /// (`.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.jsx` / `.mjs` /
@@ -77,6 +79,10 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// `.py` file or package directory whose in-tree imports define the
     /// module graph. The graph grows outwards from that one entry, so
     /// unlike the file-walking analyzers this takes exactly one `path`.
+    /// Frameworks with many implicit entries (Next.js App Router,
+    /// file-routed Remix / Astro) pass `--entry-glob` repeatedly to merge
+    /// several TS/JS entry trees; `path` is then a directory the patterns
+    /// are evaluated against.
     /// JSON is the default and carries every module; `--format md` caps
     /// the module table at `--top` (default 20) and the coupled-pair
     /// list at `--top` or 10, whichever is smaller. Dependency cycles
@@ -209,24 +215,6 @@ pub(in crate::cli) enum AnalyzeCommand {
     /// rows for larger ones.
     #[command(after_long_help = examples::GRAPH_QUERY)]
     GraphQuery(AnalyzeGraphQueryArgs),
-    /// Report each module's transitive outgoing dependency closure
-    /// (its "context span").
-    ///
-    /// For every module in the graph, lists the directly-depended
-    /// modules, the modules reachable through one or more outgoing
-    /// edges, and the count of distinct source files those modules
-    /// span. Useful as an "onboarding cost" estimate — how many files
-    /// an agent must open to reason about a given module. `path` may
-    /// be a Rust crate root (or a directory containing one), a
-    /// TypeScript/JavaScript entry file, a Python file/directory, or a
-    /// Go file or module directory (containing `go.mod`). Frameworks
-    /// with many implicit entries (Next.js App Router, file-routed
-    /// Remix / Astro) can pass `--entry-glob` repeatedly to merge
-    /// several TS/JS entry trees into one report; in that mode `path`
-    /// must be a directory and the patterns are evaluated relative to
-    /// it.
-    #[command(after_long_help = examples::CONTEXT_SPAN)]
-    ContextSpan(AnalyzeContextSpanArgs),
     /// Report hub smells on the static function call graph: god
     /// functions, load-bearing utilities, bottlenecks, and misplaced
     /// functions.
@@ -659,7 +647,7 @@ impl AnalyzeCommonArgs {
 /// The single-entry counterpart to [`AnalyzeCommonArgs`], for the
 /// graph-rooted analyzers.
 ///
-/// `coupling` and `context-span` grow their module graph outwards from
+/// `coupling` and `communities` grow their module graph outwards from
 /// one entry point — a crate root, a TS/JS entry file, a Go module — so
 /// "several roots" has no meaning for them: two entry points are two
 /// graphs, not a wider one. They keep the single-PATH signature, and the
@@ -701,14 +689,6 @@ pub(in crate::cli) struct AnalyzeComplexityArgs {
     pub(in crate::cli) common: AnalyzeCommonArgs,
     #[command(flatten)]
     pub(in crate::cli) opts: ComplexityOptions,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(in crate::cli) struct AnalyzeContextSpanArgs {
-    #[command(flatten)]
-    pub(in crate::cli) common: AnalyzeRootArgs,
-    #[command(flatten)]
-    pub(in crate::cli) opts: ContextSpanOptions,
 }
 
 #[derive(Debug, Clone, Args)]
