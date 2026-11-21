@@ -13,7 +13,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use tracing::warn;
 
-use lens_domain::{CouplingEdge, ModulePath};
+use lens_domain::{CouplingEdge, ModulePath, TypeCensus};
 
 use super::module_label::ModuleLabeler;
 use super::{
@@ -25,6 +25,11 @@ use super::{
 pub(crate) struct ModuleFile {
     pub(crate) path: ModulePath,
     pub(crate) file: PathBuf,
+    /// Abstract and concrete types the module declares, for Martin's
+    /// abstractness. `None` where the adapter takes no census
+    /// (TypeScript / JavaScript, Python, and Quint, which extract no abstraction
+    /// declarations), as distinct from a census that found no types.
+    pub(crate) types: Option<TypeCensus>,
 }
 
 /// A language-agnostic module dependency graph.
@@ -56,27 +61,47 @@ impl ModuleGraph {
     }
 }
 
-/// Each adapter's module type carries the same two fields under its own
+/// Each adapter's module type carries `path` and `file` under its own
 /// name (`CrateModule`, `TsModule`, `PythonModule`, `GoPackage`); the
 /// rest of its payload is adapter-private and already consumed by
-/// `extract_edges` before we get here.
-macro_rules! impl_into_module_file {
+/// `extract_edges` before we get here, except the type census the Rust
+/// and Go adapters can take.
+impl From<lens_rust::CrateModule> for ModuleFile {
+    fn from(m: lens_rust::CrateModule) -> Self {
+        let types = Some(lens_rust::type_census(&m));
+        Self {
+            path: m.path,
+            file: m.file,
+            types,
+        }
+    }
+}
+
+impl From<lens_golang::GoPackage> for ModuleFile {
+    fn from(m: lens_golang::GoPackage) -> Self {
+        Self {
+            path: m.path,
+            file: m.file,
+            types: Some(m.types),
+        }
+    }
+}
+
+macro_rules! impl_into_module_file_without_census {
     ($($ty:ty),+ $(,)?) => {
         $(
             impl From<$ty> for ModuleFile {
                 fn from(m: $ty) -> Self {
-                    Self { path: m.path, file: m.file }
+                    Self { path: m.path, file: m.file, types: None }
                 }
             }
         )+
     };
 }
 
-impl_into_module_file!(
-    lens_rust::CrateModule,
+impl_into_module_file_without_census!(
     lens_ts::TsModule,
     lens_py::PythonModule,
-    lens_golang::GoPackage,
     lens_quint::QuintModule,
 );
 

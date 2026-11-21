@@ -2,6 +2,44 @@
 
 lockfile_version = 2
 
+[[tools."aqua:pnpm/pnpm"]]
+version = "11.28.13"
+backend = "aqua:pnpm/pnpm"
+specifiers = ["11.28.13"]
+
+[tools."aqua:pnpm/pnpm"."platforms.linux-arm64"]
+checksum = "sha256:a566f3d9f277f6cc67b1d0c47e55ff6a2c59904971fccf9f181c3134ac5b7075"
+url = "https://github.com/pnpm/pnpm/releases/download/v11.28.13/pnpm-linux-arm64.tar.gz"
+url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/759796631"
+provenance = "github-attestations"
+
+[tools."aqua:pnpm/pnpm"."platforms.linux-arm64-musl"]
+provenance = "github-attestations"
+
+[tools."aqua:pnpm/pnpm"."platforms.linux-x64"]
+checksum = "sha256:b1a0f00fa001fc88c9d76abca12f1eb2641d66ba599cd64cf68e7e66c8dd0a69"
+url = "https://github.com/pnpm/pnpm/releases/download/v11.28.13/pnpm-linux-x64.tar.gz"
+url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/759796611"
+provenance = "github-attestations"
+
+[tools."aqua:pnpm/pnpm"."platforms.linux-x64-musl"]
+checksum = "sha256:18618aa2c538f54323e84c710e7f0c691dafa75a52b7372885d0cb0027a71a55"
+url = "https://github.com/pnpm/pnpm/releases/download/v11.28.13/pnpm-linux-x64-musl.tar.gz"
+url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/759796619"
+provenance = "github-attestations"
+
+[tools."aqua:pnpm/pnpm"."platforms.macos-arm64"]
+checksum = "sha256:e98fd2e9ae491c0e55273b89e7a7080fc884983d8c437da8bf1c8ec754fec095"
+url = "https://github.com/pnpm/pnpm/releases/download/v11.28.13/pnpm-darwin-arm64.tar.gz"
+url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/759796606"
+provenance = "github-attestations"
+
+[tools."aqua:pnpm/pnpm"."platforms.windows-x64"]
+checksum = "sha256:e94a3720974cf0acdf7947ffe8b12a292170fec36c881e10aca545cc22cf2067"
+url = "https://github.com/pnpm/pnpm/releases/download/v11.28.13/pnpm-win32-x64.zip"
+url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/759796608"
+provenance = "github-attestations"
+
 [[tools.node]]
 version = "25.9.0"
 backend = "core:node"
@@ -34,43 +72,3 @@ url = "https://nodejs.org/dist/v25.9.0/node-v25.9.0-darwin-x64.tar.gz"
 [tools.node."platforms.windows-x64"]
 checksum = "sha256:929552b8305effac843ba7b4270c437aefb702fc3fbd73fcd1bffd35d4ac284e"
 url = "https://nodejs.org/dist/v25.9.0/node-v25.9.0-win-x64.zip"
-
-[[tools.pnpm]]
-version = "11.0.1"
-backend = "aqua:pnpm/pnpm"
-specifiers = ["11.0.1"]
-
-[tools.pnpm."platforms.linux-arm64"]
-checksum = "sha256:a04fd2e07580011061db897dcb9951e0d95ba95795aff16cbaee1ceb721ff131"
-url = "https://github.com/pnpm/pnpm/releases/download/v11.0.1/pnpm-linux-arm64.tar.gz"
-url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/408504850"
-
-[tools.pnpm."platforms.linux-arm64-musl"]
-checksum = "sha256:0314aae1c52f44b1c7e03df667690a729dbb5e96ec1a2528a5c9c44312b52f1b"
-url = "https://github.com/pnpm/pnpm/releases/download/v11.0.1/pnpm-linux-arm64-musl.tar.gz"
-url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/408504854"
-
-[tools.pnpm."platforms.linux-x64"]
-checksum = "sha256:8094c4cea89440c2a4208f5a6402de7b3802bb39c480c1d854519b0545c1554d"
-url = "https://github.com/pnpm/pnpm/releases/download/v11.0.1/pnpm-linux-x64.tar.gz"
-url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/408504855"
-
-[tools.pnpm."platforms.linux-x64-musl"]
-checksum = "sha256:acca60f1d57c50d37d0ac418837a4697c5a2f0ebc243de1c009efdab24a16e90"
-url = "https://github.com/pnpm/pnpm/releases/download/v11.0.1/pnpm-linux-x64-musl.tar.gz"
-url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/408504851"
-
-[tools.pnpm."platforms.macos-arm64"]
-checksum = "sha256:e857b8422c26137cb8d43fa8fd91e79e588cf74151125b3fd51c0860b8e2c34b"
-url = "https://github.com/pnpm/pnpm/releases/download/v11.0.1/pnpm-darwin-arm64.tar.gz"
-url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/408504853"
-
-[tools.pnpm."platforms.macos-x64"]
-checksum = "sha256:2e9fdba84cbcdfab8ea217338ae8dca8b983bae621786150da8ade247fae10b4"
-url = "https://github.com/pnpm/pnpm/releases/download/v11.0.1/pnpm-darwin-x64.tar.gz"
-url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/408504849"
-
-[tools.pnpm."platforms.windows-x64"]
-checksum = "sha256:08f1301a2fe9d089ca0e5c31c4377d52316b38a09434dec443e656883de254af"
-url = "https://github.com/pnpm/pnpm/releases/download/v11.0.1/pnpm-win32-x64.zip"
-url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/408504847"

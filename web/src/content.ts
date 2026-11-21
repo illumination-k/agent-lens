@@ -151,7 +151,7 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
       {
         name: "coupling",
         summary:
-          "Module-level Fan-In, Fan-Out, Henry-Kafura IFC, Martin's Instability, the transitive span (how many files an agent must read to reason about a module), per-pair shared symbols, and the cycles.",
+          "Module-level Fan-In, Fan-Out, Henry-Kafura IFC, Martin's Instability, Abstractness and main-sequence distance (Rust, Go), the transitive span (how many files an agent must read to reason about a module), per-pair shared symbols, and the cycles.",
       },
       {
         name: "communities",

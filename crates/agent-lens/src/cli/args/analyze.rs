@@ -64,7 +64,9 @@ pub(in crate::cli) enum AnalyzeCommand {
     ///
     /// Number of Couplings, Fan-In, Fan-Out, simplified Henry-Kafura
     /// IFC ((fan_in*fan_out)^2), per-pair shared-symbol counts,
-    /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, each module's
+    /// Robert C. Martin's Instability `Ce/(Ca+Ce)`, Abstractness
+    /// `Na/Nc` and distance from the main sequence `|A+I-1|` (Rust and
+    /// Go: traits / interfaces against concrete types), each module's
     /// transitive outgoing closure (`transitive` modules spanning `files`
     /// other source files — how many files an agent must open to reason
     /// about it), and the strongly connected components of the
