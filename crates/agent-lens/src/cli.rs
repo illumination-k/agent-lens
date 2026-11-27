@@ -60,7 +60,7 @@ pub fn main() -> ExitCode {
 }
 
 /// A merged analyzer's old subcommand is not just unrecognised: say
-/// which analyzer and section carry it now, so a stale skill or script
+/// which analyzer and flags carry it now, so a stale skill or script
 /// can fix itself from the error alone.
 fn merged_subcommand_hint(err: &clap::Error) -> Option<String> {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -70,15 +70,19 @@ fn merged_subcommand_hint(err: &clap::Error) -> Option<String> {
     let Some(ContextValue::String(name)) = err.get(ContextKind::InvalidSubcommand) else {
         return None;
     };
-    use agent_lens::config::{ABSORBED_TOOLS, MERGED_TOOLS};
-    if let Some((_, tool, section)) = MERGED_TOOLS.iter().find(|(old, ..)| old == name) {
-        return Some(format!(
-            "`analyze {name}` is now `analyze {tool} --section {section}`"
-        ));
-    }
-    let (_, tool, carrier) = ABSORBED_TOOLS.iter().find(|(old, ..)| old == name)?;
+    let merged = agent_lens::config::MERGED_TOOLS
+        .iter()
+        .find(|merged| merged.old == name)?;
+    // With no flags to name, the profile note is what says where the
+    // report went (columns of another analyzer).
+    let note = if merged.flags.is_empty() && !merged.profile.is_empty() {
+        format!(" ({})", merged.profile)
+    } else {
+        String::new()
+    };
     Some(format!(
-        "`analyze {name}` is now `analyze {tool}` ({carrier})"
+        "`analyze {name}` is now `{}`{note}",
+        merged.command()
     ))
 }
 
@@ -216,8 +220,12 @@ mod tests {
         "`analyze visibility` is now `analyze narrowable --section visibility`"
     )]
     #[case(
+        "test-redundancy",
+        "`analyze test-redundancy` is now `analyze similarity --target tests`"
+    )]
+    #[case(
         "context-span",
-        "`analyze context-span` is now `analyze coupling` (its `transitive` and `files` columns)"
+        "`analyze context-span` is now `analyze coupling` (its `transitive` and `files` columns carry it)"
     )]
     fn a_merged_subcommand_names_its_new_home(#[case] name: &str, #[case] expected: &str) {
         let err = Cli::try_parse_from(["agent-lens", "analyze", name, "."]).unwrap_err();

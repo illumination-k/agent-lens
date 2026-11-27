@@ -115,7 +115,7 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
       {
         name: "similarity",
         summary:
-          "Near-duplicate pairs by TSED tree-edit distance over normalised ASTs, folded into clusters. --target picks functions, type definitions, or statement blocks inside function bodies.",
+          "Near-duplicate pairs by TSED tree-edit distance over normalised ASTs, folded into clusters. --target picks functions, type definitions, or statement blocks inside function bodies; --target tests picks which of each set of near-copy tests to keep — duplicate or parameterize, with the call graph vetoing a fold that would drop a test's only path to production code.",
       },
       {
         name: "forwarding",
@@ -126,11 +126,6 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
         name: "narrowable",
         summary:
           "Declarations wider than their uses: functions one caller needs, traits and interfaces one type implements, parameters that only ever get one value, and pub items whose callers all sit in a narrower scope — each a section with its own caveats.",
-      },
-      {
-        name: "test-redundancy",
-        summary:
-          "Tests that are near-copies of each other, and which one of each set to keep — duplicate or parameterize, with the call graph vetoing a fold that would drop a test's only path to production code.",
       },
     ],
   },
@@ -151,7 +146,7 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
       {
         name: "coupling",
         summary:
-          "Module-level Fan-In, Fan-Out, Henry-Kafura IFC, Martin's Instability, the transitive span (how many files an agent must read to reason about a module), per-pair shared symbols, and the cycles.",
+          "Module-level Fan-In, Fan-Out, Henry-Kafura IFC, Martin's Instability, Abstractness and main-sequence distance (Rust, Go), the transitive span (how many files an agent must read to reason about a module), per-pair shared symbols, and the cycles.",
       },
       {
         name: "communities",
@@ -165,9 +160,9 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
     blurb: "Who calls what, what a change reaches, and which layers were crossed to get there.",
     analyzers: [
       {
-        name: "function-graph",
+        name: "graph",
         summary:
-          "Nodes and heuristic caller-to-callee edges as visualization-ready JSON, weighted by calls, fan-in/out, LOC, complexity, and MI.",
+          "Nodes and heuristic caller-to-callee edges as visualization-ready JSON, weighted by calls, fan-in/out, LOC, complexity, and MI — or, with --query, one canned traversal: callers, callees, neighborhood, or the shortest path between two symbols.",
       },
       {
         name: "cycles",
@@ -193,11 +188,6 @@ export const ANALYZER_GROUPS: readonly AnalyzerGroup[] = [
         name: "footprint",
         summary:
           "The shape of the pending diff: how many functions it touched, which edits sit outside its impact closure, and what it left behind — new wrappers, complexity increases, uncalled additions.",
-      },
-      {
-        name: "graph-query",
-        summary:
-          "One canned traversal per run — callers, callees, neighborhood, or the shortest path between two symbols.",
       },
     ],
   },

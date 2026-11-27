@@ -4,7 +4,7 @@
 //! builder ([`super::CallGraph`]), the symbol resolver
 //! ([`super::resolve::Resolver`]), and every analyzer that consumes
 //! the graph. They double as the serialized report shapes for
-//! `analyze function-graph`, so field names and ordering here are
+//! `analyze graph`, so field names and ordering here are
 //! part of the JSON schema.
 
 use lens_domain::{
@@ -251,6 +251,19 @@ pub(crate) enum ResolutionMethod {
     CrateNarrowed,
 }
 
+impl ResolutionMethod {
+    /// Whether the resolver reached the target through a name fallback
+    /// (last segment, path suffix, crate narrowing) rather than a
+    /// semantic binding, lexical path, or `self`-method match. Callers
+    /// treat these edges' attribution as heuristic.
+    pub(crate) fn is_name_fallback(self) -> bool {
+        matches!(
+            self,
+            Self::LastSegment | Self::PathSuffix | Self::CrateNarrowed
+        )
+    }
+}
+
 /// Call-site counts bucketed by resolution outcome. Used per node
 /// (outgoing sites) and per module (graph-confidence summary).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -389,5 +402,26 @@ impl GraphLanguage {
             Self::Python => lens_py::INERT_ATTRIBUTE_NAMES,
             Self::Go => lens_golang::INERT_ATTRIBUTE_NAMES,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::ResolutionMethod;
+
+    #[rstest]
+    #[case::binding(ResolutionMethod::Binding, false)]
+    #[case::lexical(ResolutionMethod::Lexical, false)]
+    #[case::self_method(ResolutionMethod::SelfMethod, false)]
+    #[case::last_segment(ResolutionMethod::LastSegment, true)]
+    #[case::path_suffix(ResolutionMethod::PathSuffix, true)]
+    #[case::crate_narrowed(ResolutionMethod::CrateNarrowed, true)]
+    fn name_fallback_covers_the_name_matching_heuristics(
+        #[case] method: ResolutionMethod,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(method.is_name_fallback(), expected);
     }
 }

@@ -475,7 +475,7 @@ def render(result: dict, title: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--graph", required=True, type=Path, help="agent-lens analyze function-graph --format json output")
+    ap.add_argument("--graph", required=True, type=Path, help="agent-lens analyze graph --format json output")
     ap.add_argument("--oracle", required=True, type=Path, help="oracle JSON (see docs/callgraph-accuracy.md)")
     ap.add_argument("--adjudications", type=Path, help="adjudications.toml")
     ap.add_argument("--target", default="", help="target name the adjudications are filtered by")

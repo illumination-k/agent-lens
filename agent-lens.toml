@@ -8,7 +8,7 @@
 # Run them all against a freshly built binary with `mise run selftest`,
 # or one at a time with `agent-lens run <profile>`.
 #
-# `graph-query`, `impact` and `search` appear in no profile on purpose:
+# `graph --query`, `impact` and `search` appear in no profile on purpose:
 # each needs a symbol or a query to start from, which is a per-question
 # argument rather than a project setting.
 
@@ -138,23 +138,17 @@ top = 10
 path = "crates/agent-lens"
 format = "md"
 only-tests = true
-tools = ["similarity", "complexity", "cohesion", "test-redundancy"]
+tools = ["similarity", "complexity", "cohesion"]
 
+# `target = "tests"` reads the suite as a suite: of each set of
+# near-copies it picks the test to keep, and holds back a test the call
+# graph shows is the only static caller of something. Plain clusters
+# over tests name the same sets without saying what to do with them, and
+# a profile runs each tool once, so the keep/fold view is the one kept.
+# `only-tests = true` above already narrows the walk; the target keeps
+# test functions regardless, so the corpus is the same either way.
 [profile.self-tests.similarity]
-top = 20
-# Lower than `self`: near-identical test bodies are the finding here, not
-# the noise. Each cluster is a candidate `#[rstest]` parameterisation,
-# which is what CLAUDE.md asks new tests to be written as.
-threshold = 0.85
-min-lines = 6
-
-# The other half of the same question. `similarity` reports which test
-# bodies are alike; this one picks which of each set to keep, and holds
-# back a test the call graph shows is the only static caller of
-# something. `only-tests = true` above already narrows the walk, and the
-# analyzer keeps test functions regardless, so the corpus is the same
-# either way.
-[profile.self-tests.test-redundancy]
+target = "tests"
 top = 15
 
 [profile.self-tests.complexity]
@@ -165,7 +159,7 @@ min-score = 8
 top = 10
 min-score = 3
 
-# The language front-ends: four parallel implementations of one
+# The language front-ends: five parallel implementations of one
 # interface. Cross-crate similarity is expected in shape and a real
 # finding in body, so this is the profile that catches a fix applied to
 # `lens-rust` and forgotten in `lens-py`.
@@ -176,7 +170,9 @@ min-score = 3
 path = "crates"
 format = "md"
 exclude-tests = true
-exclude = ["agent-lens/**", "agent-hooks/**"]
+# `lens-quint/testdata` holds Quint fixtures, test inputs rather than
+# product code, and reading them needs the `quint` CLI.
+exclude = ["agent-lens/**", "agent-hooks/**", "lens-quint/testdata/**"]
 tools = ["similarity", "complexity", "forwarding", "cohesion"]
 
 [profile.lenses.similarity]

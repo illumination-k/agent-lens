@@ -668,6 +668,30 @@ impl DeadTarget {
     }
 }
 
+/// Dead-check targets grouped by the file they sit in, so the source
+/// scan only tests the targets of the file it is reading.
+struct DeadTargetIndex<'a> {
+    by_file: HashMap<&'a str, Vec<&'a DeadTarget>>,
+}
+
+impl<'a> DeadTargetIndex<'a> {
+    fn new(targets: &'a [DeadTarget]) -> Self {
+        let mut by_file: HashMap<&str, Vec<&DeadTarget>> = HashMap::new();
+        for target in targets {
+            by_file
+                .entry(target.file.as_str())
+                .or_default()
+                .push(target);
+        }
+        Self { by_file }
+    }
+
+    /// The targets declared in `file`; empty when it has none.
+    fn file(&self, file: &str) -> &[&'a DeadTarget] {
+        self.by_file.get(file).map_or(&[][..], Vec::as_slice)
+    }
+}
+
 /// Everything the source scan cannot compute: candidate rows waiting on
 /// their scan-derived caveats, plus the targets.
 struct Collected {
@@ -915,23 +939,15 @@ impl SourceScan {
             });
         }
 
-        let mut dead_by_file: HashMap<&str, Vec<&DeadTarget>> = HashMap::new();
-        for target in dead_targets {
-            dead_by_file
-                .entry(target.file.as_str())
-                .or_default()
-                .push(target);
-        }
+        let dead_index = DeadTargetIndex::new(dead_targets);
         let raw_index = RawTarget::index(raw_targets);
 
         builder.visit_source_texts(roots, |file, source| {
-            let dead = dead_by_file.get(file).map_or(&[][..], Vec::as_slice);
+            let dead = dead_index.file(file);
             let raw_spans = raw_index.file(file);
             for (line_no, token) in identifiers_by_line(source) {
-                for target in dead {
-                    if target.mentions(token, line_no) {
-                        dead_counts[target.slot] += 1;
-                    }
+                for target in dead.iter().filter(|t| t.mentions(token, line_no)) {
+                    dead_counts[target.slot] += 1;
                 }
                 for slot in raw_spans.unaccounted(token, line_no) {
                     raw_counts[slot] += 1;

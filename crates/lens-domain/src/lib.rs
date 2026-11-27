@@ -156,7 +156,7 @@ pub use complexity::{ComplexityCounters, FunctionComplexity, HalsteadAcc, Halste
 pub use context_span::{ContextSpanReport, ModuleContextSpan, compute_context_spans};
 pub use coupling::{
     CouplingEdge, CouplingError, CouplingReport, DependencyCycle, EdgeKind, ModuleMetrics,
-    ModulePath, PairCoupling, compute_report,
+    ModulePath, PairCoupling, TypeCensus, compute_report, main_sequence_distance,
 };
 pub use function::{
     CandidateStrategy, FunctionDef, FunctionSignature, LanguageParseError, LanguageParser,

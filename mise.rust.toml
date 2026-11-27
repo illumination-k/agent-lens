@@ -192,7 +192,7 @@ depends = [
 ]
 
 # Call-graph accuracy benchmark (issue #579, docs/callgraph-accuracy.md):
-# precision/recall of `function-graph` per ResolutionMethod against a Go
+# precision/recall of `analyze graph` per ResolutionMethod against a Go
 # go/callgraph/vta oracle, a Python pyright oracle, a rust-analyzer
 # oracle and a TypeScript type-checker oracle on the pinned projects in
 # scripts/callgraph-accuracy/targets.toml.

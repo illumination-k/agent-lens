@@ -68,6 +68,18 @@ impl FilterConfig {
         &self.diff
     }
 
+    pub fn only_tests(&self) -> bool {
+        self.only_tests
+    }
+
+    pub fn exclude_tests(&self) -> bool {
+        self.exclude_tests
+    }
+
+    pub fn exclude(&self) -> &[String] {
+        &self.exclude
+    }
+
     /// Build a fresh [`AnalyzePathFilter`] reflecting the current
     /// state. Cheap to call (a few bool copies plus a `Vec` clone) and
     /// kept as a factory rather than a borrowed field so the config

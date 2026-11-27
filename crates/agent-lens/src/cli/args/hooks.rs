@@ -143,7 +143,7 @@ pub(in crate::cli) enum PreToolUseCommand {
     /// file the agent is about to edit.
     ///
     /// The parser is chosen from the file extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// TypeScript/JavaScript, Python, Go, or Quint). Files with an unsupported
     /// extension are ignored silently. `Write` against a brand-new path
     /// is a silent no-op (no current state to read).
     Complexity,
@@ -167,14 +167,14 @@ pub(in crate::cli) enum PostToolUseCommand {
     /// Report clusters of similar functions in the file that was just edited.
     ///
     /// The parser is chosen from the file extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// TypeScript/JavaScript, Python, Go, or Quint). Files with an unsupported
     /// extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
     /// trivial adapters, is just a forwarding call to another function.
     ///
     /// The parser is chosen from the file extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// TypeScript/JavaScript, Python, Go, or Quint). Files with an unsupported
     /// extension are ignored silently.
     Wrapper,
     /// Report the pending diff's footprint flags that land in the file
@@ -269,7 +269,7 @@ pub(in crate::cli) enum CodexPostToolUseCommand {
     /// `apply_patch` just touched.
     ///
     /// The parser is chosen from each file's extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// TypeScript/JavaScript, Python, Go, or Quint). Files with an unsupported
     /// extension are ignored silently.
     Similarity,
     /// Report functions whose body, after stripping a short chain of
@@ -277,7 +277,7 @@ pub(in crate::cli) enum CodexPostToolUseCommand {
     ///
     /// Runs against every file Codex's `apply_patch` just touched. The
     /// parser is chosen from each file's extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// TypeScript/JavaScript, Python, Go, or Quint). Files with an unsupported
     /// extension are ignored silently.
     Wrapper,
     /// Report the pending diff's footprint flags that land in the files
@@ -299,7 +299,7 @@ pub(in crate::cli) enum CodexPreToolUseCommand {
     /// `*** Add File:` entries are skipped (no current state on disk);
     /// only `*** Update File:` paths are inspected.
     /// The parser is chosen from each updated file's extension (Rust,
-    /// TypeScript/JavaScript, Python, or Go). Files with an unsupported
+    /// TypeScript/JavaScript, Python, Go, or Quint). Files with an unsupported
     /// extension are ignored silently.
     Complexity,
     /// Report cohesion units (`impl` blocks, classes, or module units)

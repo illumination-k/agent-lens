@@ -34,7 +34,7 @@ pub use call_index::{
 };
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
-pub use coupling::{CrateModule, build_module_tree, extract_edges};
+pub use coupling::{CrateModule, build_module_tree, extract_edges, type_census};
 pub use dependence::RustVocabulary;
 pub use lens_domain::{CouplingError, WrapperFinding};
 pub use macro_items::{ImplMacroCall, MacroFacts, MacroTemplate, extract_macro_facts_with_module};

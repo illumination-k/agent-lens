@@ -222,6 +222,14 @@ fn extract_calls(lang: SourceLang, source: &str) -> Result<Vec<CallRef>, BoxedEr
             let shapes = lens_golang::extract_call_shapes_with_module(source, "").map_err(boxed)?;
             Ok(shapes.into_iter().map(CallRef::from_shape).collect())
         }
+        SourceLang::Quint => Ok(lens_quint::extract_call_refs(source)
+            .map_err(boxed)?
+            .into_iter()
+            .map(|r| CallRef {
+                callee: Some(r.callee),
+                caller: Some(r.caller),
+            })
+            .collect()),
     }
 }
 

@@ -64,6 +64,7 @@ pub(crate) fn module_path_for(
         SourceLang::TypeScript(_) => ts_module_path_from_relative_file(&file.display_path),
         SourceLang::Python => python_module_path_from_relative_file(&file.display_path),
         SourceLang::Go => go_module_path_from_file(&file.display_path, source),
+        SourceLang::Quint => quint_module_path_from_relative_file(&file.display_path),
     }
 }
 
@@ -156,6 +157,14 @@ fn python_module_path_from_relative_file(file: &str) -> String {
     join_or_placeholder(lens_py::module_segments(&normalize_separators(file)))
 }
 
+/// A Quint file is named by its path with the `.qnt` extension dropped;
+/// the `module` blocks inside it qualify their own definitions.
+fn quint_module_path_from_relative_file(file: &str) -> String {
+    join_or_placeholder(lens_domain::path_segments(
+        &normalize_separators(file).with_extension(""),
+    ))
+}
+
 /// Go's compilation unit is a *package* (directory), not a single file,
 /// so two `.go` files sharing a directory must collapse to the same
 /// module path — hence the file's parent, not the file itself, feeds
@@ -236,6 +245,14 @@ mod tests {
             module_path_for(Path::new("."), &source_file, lang, None, ""),
             under_a_directory,
         );
+    }
+
+    #[rstest]
+    #[case("spec.qnt", "spec")]
+    #[case("specs/bank/ledger.qnt", "specs::bank::ledger")]
+    #[case("", "module")]
+    fn quint_module_paths_drop_the_extension(#[case] file: &str, #[case] expected: &str) {
+        assert_eq!(quint_module_path_from_relative_file(file), expected);
     }
 
     #[rstest]

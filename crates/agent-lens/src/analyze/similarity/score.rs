@@ -35,7 +35,7 @@ impl SimilarityTarget {
     /// therefore score on the body alone.
     pub(super) fn weights(self) -> ScoreWeights {
         match self {
-            Self::Functions | Self::Types => ScoreWeights {
+            Self::Functions | Self::Types | Self::Tests => ScoreWeights {
                 body: BODY_SIMILARITY_WEIGHT,
                 signature: SIGNATURE_SIMILARITY_WEIGHT,
             },

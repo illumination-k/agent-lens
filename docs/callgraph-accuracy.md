@@ -3,7 +3,7 @@
 Every call-graph analyzer (`hubs`, `impact`, `unreachable`, `untested`, `risk`,
 `layers`, ...) sits on the syntactic resolver in
 `crates/agent-lens/src/analyze/call_graph/`. This benchmark measures that
-resolver: precision and recall of `agent-lens analyze function-graph` per
+resolver: precision and recall of `agent-lens analyze graph` per
 `ResolutionMethod`, against mechanical oracles, with humans adjudicating only
 the disagreements (issue #579).
 

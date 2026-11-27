@@ -27,7 +27,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lens_domain::{
-    CouplingEdge, CouplingError, EdgeKind, ModulePath, SourceFilter, collect_files_with_extension,
+    CouplingEdge, CouplingError, EdgeKind, ModulePath, SourceFilter, TypeCensus,
+    collect_files_with_extension,
 };
 use tree_sitter::Node;
 
@@ -48,6 +49,11 @@ pub struct GoPackage {
     /// `github.com/me/proj/pkg/util`); external imports are filtered out
     /// when edges are extracted.
     imports: Vec<String>,
+    /// Abstract (`interface`) and concrete named types declared at file
+    /// scope across the package's non-test files. `_test.go` files are
+    /// left out: their mocks and fixtures are not what the package
+    /// offers its importers.
+    pub types: TypeCensus,
 }
 
 /// Build Go packages from `root`.
@@ -71,11 +77,16 @@ pub fn build_module_tree(
                 expected: "a .go file or directory",
             });
         }
-        let imports = parse_imports(root)?;
+        let parsed = parse_file(root)?;
         return Ok(vec![GoPackage {
             path: ModulePath::new("crate"),
             file: root.to_path_buf(),
-            imports,
+            imports: parsed.imports,
+            types: if is_test_file(root) {
+                TypeCensus::default()
+            } else {
+                parsed.types
+            },
         }]);
     }
     if !root.is_dir() {
@@ -103,18 +114,26 @@ pub fn build_module_tree(
         let rel = dir.strip_prefix(root).unwrap_or(&dir);
         let path = module_path_for_rel(rel);
         let mut imports = Vec::new();
+        let mut types = TypeCensus::default();
         for file in &files {
             // A walked file that cannot be read or parsed loses its
             // imports with a warning instead of failing the whole module
             // tree ([`CouplingError::skip_walked_file`]). An explicit
             // single-file root (above) keeps the hard error.
-            let found = CouplingError::skip_walked_file(parse_imports(file))?;
-            imports.extend(found.into_iter().flatten());
+            let Some(parsed) = CouplingError::skip_walked_file(parse_file(file))? else {
+                continue;
+            };
+            imports.extend(parsed.imports);
+            if !is_test_file(file) {
+                types.abstract_types += parsed.types.abstract_types;
+                types.concrete_types += parsed.types.concrete_types;
+            }
         }
         out.push(GoPackage {
             path,
             file: dir,
             imports,
+            types,
         });
     }
     Ok(out)
@@ -170,11 +189,24 @@ fn module_path_for_rel(rel: &Path) -> ModulePath {
     ModulePath::new(parts.join("::"))
 }
 
+/// What one `.go` file contributes to its package node.
+struct ParsedFile {
+    imports: Vec<String>,
+    types: TypeCensus,
+}
+
+fn is_test_file(file: &Path) -> bool {
+    file.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.ends_with("_test.go"))
+}
+
 /// Parse a single `.go` file and pull every resolved import path out of
-/// its `import` declarations. `_`-imports (used for side effects), `.`-
-/// imports, and aliased imports are all included — the analyzer only
-/// needs the import path itself for edge resolution.
-fn parse_imports(file: &Path) -> Result<Vec<String>, CouplingError> {
+/// its `import` declarations, plus the census of its file-scope type
+/// declarations. `_`-imports (used for side effects), `.`-imports, and
+/// aliased imports are all included — the analyzer only needs the
+/// import path itself for edge resolution.
+fn parse_file(file: &Path) -> Result<ParsedFile, CouplingError> {
     let source = std::fs::read_to_string(file).map_err(|source| CouplingError::Io {
         path: file.to_path_buf(),
         source,
@@ -182,14 +214,40 @@ fn parse_imports(file: &Path) -> Result<Vec<String>, CouplingError> {
     let tree =
         parse_tree(&source).map_err(|source| CouplingError::parse(file.to_path_buf(), source))?;
     let bytes = source.as_bytes();
-    let mut out = Vec::new();
+    let mut out = ParsedFile {
+        imports: Vec::new(),
+        types: TypeCensus::default(),
+    };
     let mut cursor = tree.root_node().walk();
     for child in tree.root_node().named_children(&mut cursor) {
-        if child.kind() == "import_declaration" {
-            collect_import_specs(child, bytes, &mut out);
+        match child.kind() {
+            "import_declaration" => collect_import_specs(child, bytes, &mut out.imports),
+            "type_declaration" => count_type_specs(child, &mut out.types),
+            _ => {}
         }
     }
     Ok(out)
+}
+
+/// A `type_spec` over an `interface_type` is abstract; any other named
+/// type (struct, a defined type over a builtin, a func type) is
+/// concrete. `type A = B` parses as `type_alias`, declares no new type,
+/// and is skipped.
+fn count_type_specs(decl: Node<'_>, census: &mut TypeCensus) {
+    let mut cursor = decl.walk();
+    for spec in decl.named_children(&mut cursor) {
+        if spec.kind() != "type_spec" {
+            continue;
+        }
+        let is_interface = spec
+            .child_by_field_name("type")
+            .is_some_and(|ty| ty.kind() == "interface_type");
+        if is_interface {
+            census.abstract_types += 1;
+        } else {
+            census.concrete_types += 1;
+        }
+    }
 }
 
 fn collect_import_specs(node: Node<'_>, source: &[u8], out: &mut Vec<String>) {
@@ -600,6 +658,7 @@ mod tests {
             path: ModulePath::new("crate"),
             file: root.path().to_path_buf(),
             imports: Vec::new(),
+            types: TypeCensus::default(),
         }];
 
         let (prefix, logs) = crate::test_support::capture_logs(|| module_prefix(&packages));
@@ -616,6 +675,7 @@ mod tests {
             path: ModulePath::new("crate"),
             file: quiet_root.path().to_path_buf(),
             imports: Vec::new(),
+            types: TypeCensus::default(),
         }];
 
         let (prefix, logs) = crate::test_support::capture_logs(|| module_prefix(&quiet_packages));
@@ -883,6 +943,42 @@ mod tests {
                 Some("github.com/x/proj")
             ),
             "github.com/x/proj/pkg/util",
+        );
+    }
+
+    /// Interfaces are abstract, every other named type concrete; aliases
+    /// and `_test.go` declarations are not counted.
+    #[test]
+    fn package_type_census_sums_non_test_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(root.path(), "go.mod", "module example.com/p\n");
+        write(
+            root.path(),
+            "store/a.go",
+            "package store\n\ntype Store interface { Get() }\n\ntype (\n\tMem struct{}\n\tID int\n\tAlias = Mem\n)\n",
+        );
+        write(
+            root.path(),
+            "store/b.go",
+            "package store\n\ntype Handler func()\n\nfunc f() { type local struct{} }\n",
+        );
+        write(
+            root.path(),
+            "store/a_test.go",
+            "package store\n\ntype fake struct{}\n\ntype Port interface{}\n",
+        );
+
+        let modules = build_module_tree(root.path(), &IncludeAll).expect("tree");
+        let store = modules
+            .iter()
+            .find(|m| m.path.as_str() == "crate::store")
+            .expect("store package");
+        assert_eq!(
+            store.types,
+            TypeCensus {
+                abstract_types: 1,
+                concrete_types: 3
+            }
         );
     }
 }

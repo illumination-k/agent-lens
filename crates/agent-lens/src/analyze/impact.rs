@@ -19,7 +19,7 @@
 //! excluded entirely (lower bound) — both exclusion counts are
 //! reported per seed.
 //!
-//! Symbols follow the same matching rules as `analyze graph-query`
+//! Symbols follow the same matching rules as `analyze graph --query`
 //! (`::`-segment suffix on the qualified name, or an exact node id);
 //! ambiguous matches are listed, never guessed.
 //!

@@ -1,4 +1,4 @@
-//! `analyze function-graph` — emit a static function call graph.
+//! `analyze graph` without `--query` — emit a static function call graph.
 //!
 //! This report is intentionally machine-facing JSON for downstream
 //! visualization tools. It is static and heuristic: no type inference,

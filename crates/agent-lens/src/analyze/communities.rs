@@ -91,7 +91,7 @@ use lens_domain::{
 };
 use serde::Serialize;
 
-use super::format;
+use super::format::render_overflow;
 use super::history::churn::ChurnScope;
 use super::history::error_from::impl_from_churn_error;
 use super::module_graph::{ModuleGraph, build_graph};
@@ -1252,7 +1252,7 @@ fn render_communities(out: &mut String, view: &ReportView, limit: usize) {
             members_cell(&c.members),
         );
     }
-    render_overflow(out, view.communities.len(), limit, "communities");
+    render_overflow(out, view.communities.len(), limit, "community(s)");
 }
 
 fn members_cell(members: &[String]) -> String {
@@ -1288,13 +1288,7 @@ fn render_spanning(out: &mut String, rows: &[SpanningView], limit: usize) {
             row.community, row.size, row.declared_group_count,
         );
     }
-    render_overflow(out, rows.len(), limit, "spanning communities");
-}
-
-/// [`format::render_overflow`] with the cap clamped to what exists, as
-/// every listing here passes the raw `--top`.
-fn render_overflow(out: &mut String, total: usize, limit: usize, unit: &str) {
-    format::render_overflow(out, total, total.min(limit), unit);
+    render_overflow(out, rows.len(), limit, "spanning community(s)");
 }
 
 #[cfg(test)]

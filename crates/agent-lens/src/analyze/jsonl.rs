@@ -28,7 +28,6 @@ pub const SUPPORTED: &[&str] = &[
     "forwarding --section wrapper",
     "narrowable",
     "similarity",
-    "test-redundancy",
 ];
 
 /// An analyzer was asked for `--format jsonl` and has no record shape
