@@ -241,6 +241,9 @@ fn render_profile_report(
             }
             out
         }
+        // Each record names its analyzer, so the profile's records are
+        // the tools' records back to back, with no wrapper object.
+        OutputFormat::Jsonl => sections.iter().map(|(_, report)| report.as_str()).collect(),
         OutputFormat::Json => {
             let mut results = Vec::with_capacity(sections.len());
             for (tool, report) in sections {

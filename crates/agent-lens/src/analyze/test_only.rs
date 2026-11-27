@@ -63,7 +63,7 @@ use serde::Serialize;
 use super::call_graph::model::{ModuleResolutionSummary, NodeVisibility, Resolution};
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
 use super::export_lang::{ExportLang, InterfaceIndex};
-use super::format::render_module_confidence;
+use super::format::{render_module_confidence, render_overflow_in};
 use super::options::analyzer_options;
 use super::runner::render_report;
 use super::unreachable::{EntryKind, entry_kind_of, identifiers};
@@ -865,6 +865,14 @@ fn render_entries(out: &mut String, entries: &[&FindingEntry], limit: usize) {
         }
         out.push('\n');
     }
+    let shown = entries.len().min(limit);
+    render_overflow_in(
+        out,
+        entries.len(),
+        shown,
+        "function(s)",
+        entries[shown..].iter().map(|e| e.file.as_str()),
+    );
 }
 
 #[cfg(test)]

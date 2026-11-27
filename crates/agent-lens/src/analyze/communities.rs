@@ -237,6 +237,8 @@ pub enum CommunitiesError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error(transparent)]
+    UnsupportedFormat(#[from] super::jsonl::UnsupportedFormat),
 }
 
 impl_from_churn_error!(CommunitiesError);
@@ -501,6 +503,7 @@ impl CommunitiesAnalyzer {
                 serde_json::to_string_pretty(&view).map_err(CommunitiesError::Serialize)
             }
             OutputFormat::Md => Ok(format_markdown(&view, self.top)),
+            OutputFormat::Jsonl => Err(super::jsonl::UnsupportedFormat.into()),
         }
     }
 

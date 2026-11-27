@@ -139,6 +139,8 @@ pub enum CompareError {
     ProfileMismatch { baseline: String, current: String },
     #[error("failed to serialize comparison: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    UnsupportedFormat(#[from] crate::analyze::jsonl::UnsupportedFormat),
 }
 
 /// One side of the comparison, as the snapshot described itself.
@@ -235,6 +237,7 @@ impl Comparison {
         match format {
             OutputFormat::Json => Ok(serde_json::to_string_pretty(self)?),
             OutputFormat::Md => Ok(self.render_md()),
+            OutputFormat::Jsonl => Err(crate::analyze::jsonl::UnsupportedFormat.into()),
         }
     }
 

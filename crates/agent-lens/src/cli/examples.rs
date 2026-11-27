@@ -60,8 +60,11 @@ macro_rules! conventions {
         "\
 Reports go to stdout; logs and diagnostics go to stderr via `tracing` (set
 RUST_LOG to change the level). Analyzers default to `--format json`;
-`--format md` is the compact rendering tuned for LLM context. Exit status is
-0 on success and 1 on failure.
+`--format md` is the compact rendering tuned for LLM context; `--format
+jsonl` prints one JSON object per finding, each opening with `analyzer`,
+`kind`, `file`, `line`, and `name` (cohesion, complexity, forwarding
+`--section wrapper`, narrowable, similarity on every `--target`; the others
+refuse it). Exit status is 0 on success and 1 on failure.
 "
     };
 }
@@ -103,7 +106,10 @@ point, so they keep the one-PATH signature.
 
 `--top` bounds the length of a `--format md` report. Every analyzer that
 can produce a long one accepts it; `cycles` does not, because a truncated
-cycle list reads as the whole list.
+cycle list reads as the whole list. A capped ranking ends with how many
+rows it left out, the directory most of them sit in, and — when it would
+at most double the listing — the `--top` that shows them all. JSON and
+JSONL always carry every row.
 
 ",
     routing!()
@@ -414,3 +420,19 @@ Examples:
     agent-lens help          # the same reference `--help` prints
     agent-lens help --md     # every command and flag as one Markdown doc
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The conventions name the JSONL analyzers by hand; every one the
+    /// code supports must be among them, so the help cannot fall behind.
+    #[test]
+    fn conventions_name_every_jsonl_analyzer() {
+        let help = ROOT.split_whitespace().collect::<Vec<_>>().join(" ");
+        for analyzer in agent_lens::analyze::jsonl::SUPPORTED {
+            let spelled = analyzer.replace(" --section wrapper", " `--section wrapper`");
+            assert!(help.contains(&spelled), "{spelled} missing from: {help}");
+        }
+    }
+}

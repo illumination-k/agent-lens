@@ -139,6 +139,7 @@ agent-lens analyze search crates/ --query 'diff range gate' --format md
 
 # Complexity, cohesion (LCOM4), forwarding wrappers, delegation chains
 agent-lens analyze complexity src/foo.rs --format md --top 20 --min-score 8
+agent-lens analyze complexity crates --format jsonl | jq -c 'select(.cognitive >= 15)'
 agent-lens analyze cohesion src/foo.rs --format md --min-score 2
 agent-lens analyze forwarding src/foo.rs --section wrapper
 agent-lens analyze forwarding crates/agent-lens --format md   # wrappers + chains
@@ -186,7 +187,7 @@ agent-lens analyze hotspot . --exclude vendor --exclude 'docs/generated/**'
 
 Conventions that hold across analyzers:
 
-- Analyzer commands share `PATH...`, `--format json|md`, `--only-tests`,
+- Analyzer commands share `PATH...`, `--format json|md|jsonl`, `--only-tests`,
   `--exclude-tests`, and repeatable `--exclude GLOB`. Directory walks follow
   `.gitignore` and do not descend symlinked directories, so a linked build
   output or virtualenv never joins the corpus. The test flags select whole
@@ -221,7 +222,7 @@ For a repeatable multi-analyzer pass, declare a named profile in
 # agent-lens.toml — discovered by walking up from the current directory
 [profile.web]
 path = "web/" # target handed to every tool; also takes an array
-format = "md" # json (default) or md
+format = "md" # json (default), md, or jsonl
 exclude-tests = true # or only-tests, plus extra `exclude` globs
 tools = ["similarity", "complexity", "cohesion"]
 
@@ -456,7 +457,11 @@ ordinary CLI contract: errors exit non-zero.
 | `ownership`       | Files ranked by low code ownership × churn: top-author share, contributor count, and minor contributors (Bird et al.), with identities normalised through `.mailmap`, bots filtered and counted, and `Co-authored-by:` trailers credited.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 All analyzers default to JSON on stdout; `--format md` emits a compact
-Markdown summary tuned to drop straight into an LLM prompt.
+Markdown summary tuned to drop straight into an LLM prompt, and ends a capped
+ranking with what it left out and where to narrow. `--format jsonl` prints one
+flat JSON object per finding — `analyzer`, `kind`, `file`, `line`, `name`,
+then the finding's own fields — so `grep` and `jq -c 'select(…)'` work the
+same on every analyzer that supports it (`agent-lens help --md` lists them).
 
 ## Languages
 

@@ -21,7 +21,7 @@ use lens_domain::{
 use rayon::prelude::*;
 use tracing::debug;
 
-use super::runner::{FilterConfig, delegate_filter_builders, render_report};
+use super::runner::{FilterConfig, delegate_filter_builders, render_report_jsonl};
 use super::test_redundancy::TestRedundancyAnalyzer;
 use super::{
     AnalyzeRoots, AnalyzerError, DiffScope, FunctionSelection, LineRange, OutputFormat,
@@ -52,7 +52,7 @@ use paired::{PairedCandidate, name_matched_pairs};
 use pdg::PdgProfile;
 use report::{
     ClusterView, PairedReport, PairedReportInputs, Report, ScoredMatch, build_drift_groups,
-    format_markdown, format_paired_markdown,
+    cluster_records, format_markdown, format_paired_markdown, paired_records,
 };
 #[cfg(test)]
 use score::{BODY_SIMILARITY_WEIGHT, SIGNATURE_SIMILARITY_WEIGHT};
@@ -425,9 +425,12 @@ impl SimilarityAnalyzer {
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "analyze similarity finished"
         );
-        render_report(&report, format, || {
-            format_markdown(&report, self.top, self.doc_overlap, self.target)
-        })
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top, self.doc_overlap, self.target),
+            Some(("similarity", &cluster_records)),
+        )
     }
 
     /// Name-anchored counterpart to [`Self::find_clusters`]: pair first
@@ -511,9 +514,12 @@ impl SimilarityAnalyzer {
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "analyze similarity --paired-by finished"
         );
-        render_report(&report, format, || {
-            format_paired_markdown(&report, self.top, self.target.noun())
-        })
+        render_report_jsonl(
+            &report,
+            format,
+            || format_paired_markdown(&report, self.top, self.target.noun()),
+            Some(("similarity", &paired_records)),
+        )
     }
 
     /// `--diff-only` for the paired path. Same rule as the clustering

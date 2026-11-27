@@ -13,8 +13,10 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
+use serde_json::Value;
 
 use super::call_graph::{CallGraph, CallGraphBuilder};
+use super::jsonl::{JsonlSink, UnsupportedFormat};
 use super::{
     AnalyzePathFilter, AnalyzeRoots, AnalyzerError, DiffScope, OutputFormat, SourceFile,
     changed_line_ranges, collect_source_files, overlaps_any, scan_files_par,
@@ -173,17 +175,43 @@ pub(super) struct PerFileScan<R> {
 /// markdown formatter to a closure so each analyzer keeps its own
 /// presentation logic. Centralising the match here means the JSON
 /// pretty-printer and the `AnalyzerError::Serialize` mapping live in
-/// one place.
+/// one place. `--format jsonl` is refused: an analyzer that renders it
+/// goes through [`render_report_jsonl`].
 pub(super) fn render_report<R: Serialize>(
     report: &R,
     format: OutputFormat,
     md: impl FnOnce() -> String,
+) -> Result<String, AnalyzerError> {
+    render_report_jsonl(report, format, md, None)
+}
+
+/// How an analyzer reads its JSONL records off its JSON report value:
+/// the analyzer's CLI name, and the walk pushing one record per finding.
+pub(super) type JsonlRecords<'a> = (
+    &'static str,
+    &'a dyn Fn(&Value, &mut JsonlSink) -> Result<(), AnalyzerError>,
+);
+
+/// [`render_report`] for an analyzer with a JSONL shape. `jsonl` is
+/// `None` for an analyzer without one, which then refuses the format.
+pub(super) fn render_report_jsonl<R: Serialize>(
+    report: &R,
+    format: OutputFormat,
+    md: impl FnOnce() -> String,
+    jsonl: Option<JsonlRecords<'_>>,
 ) -> Result<String, AnalyzerError> {
     match format {
         OutputFormat::Json => {
             serde_json::to_string_pretty(report).map_err(AnalyzerError::Serialize)
         }
         OutputFormat::Md => Ok(md()),
+        OutputFormat::Jsonl => {
+            let (analyzer, records) = jsonl.ok_or(UnsupportedFormat)?;
+            let value = serde_json::to_value(report)?;
+            let mut sink = JsonlSink::new(analyzer);
+            records(&value, &mut sink)?;
+            Ok(sink.finish())
+        }
     }
 }
 
@@ -198,10 +226,29 @@ pub(super) fn render_graph_report<R: Serialize>(
     build: impl FnOnce(&AnalyzeRoots, Arc<CallGraph>) -> R,
     md: impl FnOnce(&R) -> String,
 ) -> Result<String, AnalyzerError> {
+    if format == OutputFormat::Jsonl {
+        // None of these analyzers has a JSONL shape yet; refuse before
+        // the graph build, the expensive part.
+        return Err(UnsupportedFormat.into());
+    }
     let roots = roots.into();
     let graph = builder.build(&roots)?;
     let report = build(&roots, graph);
     render_report(&report, format, || md(&report))
+}
+
+/// The JSONL walk every [`PerFileReport`] shares: one `kind` record per
+/// item under `.files[].<S::ITEMS_FIELD>[]`, carrying its file.
+pub(super) fn per_file_records<S: PerFileShape>(
+    kind: &'static str,
+) -> impl Fn(&Value, &mut JsonlSink) -> Result<(), AnalyzerError> {
+    move |report, sink| {
+        for file in report["files"].as_array().into_iter().flatten() {
+            let path = file["file"].as_str();
+            sink.push_all(kind, path, &file[S::ITEMS_FIELD], &[])?;
+        }
+        Ok(())
+    }
 }
 
 /// Names the two report fields that differ between otherwise-identical
@@ -690,5 +737,33 @@ mod tests {
         assert_eq!(view.file(), "a.rs");
         assert_eq!(view.items(), ["one", "two"]);
         assert_eq!(view.count(), 2);
+    }
+
+    #[test]
+    fn render_report_refuses_jsonl_without_a_record_shape() {
+        let err =
+            render_report(&serde_json::json!({}), OutputFormat::Jsonl, String::new).unwrap_err();
+        assert!(
+            matches!(err, AnalyzerError::UnsupportedFormat(_)),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn render_report_jsonl_runs_the_record_walk_over_the_json_value() {
+        let report = serde_json::json!({"rows": [{"name": "a", "file": "x.rs", "line": 1}]});
+        let walk =
+            |value: &Value, sink: &mut JsonlSink| sink.push_all("row", None, &value["rows"], &[]);
+        let out = render_report_jsonl(
+            &report,
+            OutputFormat::Jsonl,
+            String::new,
+            Some(("t", &walk)),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "{\"analyzer\":\"t\",\"kind\":\"row\",\"file\":\"x.rs\",\"line\":1,\"name\":\"a\"}\n",
+        );
     }
 }

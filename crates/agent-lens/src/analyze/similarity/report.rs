@@ -3,11 +3,14 @@ use std::fmt::Write as _;
 
 use lens_domain::SimilarCluster;
 use serde::Serialize;
+use serde_json::Value;
 
 use super::corpus::OwnedUnit;
 use super::options::SimilarityTarget;
 use super::score::{SimilarityComponents, sorted_pair_key};
-use crate::analyze::AnalyzeRoots;
+use crate::analyze::format::render_overflow_in;
+use crate::analyze::jsonl::{JsonlSink, lifted};
+use crate::analyze::{AnalyzeRoots, AnalyzerError};
 
 /// Longest representative snippet rendered for a block cluster. Long
 /// enough to show the repeated shape, short enough that a 40-cluster
@@ -405,6 +408,56 @@ fn min_max(values: &[f64]) -> Option<(f64, f64)> {
     )
 }
 
+/// JSONL records of a clustering report: one `member` per cluster unit
+/// and one `pair` per scored pair, each tagged with its cluster's index
+/// in the report, so `select(.cluster == N)` regroups them.
+pub(super) fn cluster_records(report: &Value, sink: &mut JsonlSink) -> Result<(), AnalyzerError> {
+    for (index, cluster) in report["clusters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let tag = ("cluster", Value::from(index));
+        sink.push_all(
+            "member",
+            None,
+            &cluster["units"],
+            &[
+                tag.clone(),
+                ("cluster_size", cluster["size"].clone()),
+                ("cluster_min_similarity", cluster["min_similarity"].clone()),
+                ("cluster_max_similarity", cluster["max_similarity"].clone()),
+            ],
+        )?;
+        for pair in cluster["pairs"].as_array().into_iter().flatten() {
+            sink.push("pair", None, &lifted(pair, "a"), std::slice::from_ref(&tag))?;
+        }
+    }
+    Ok(())
+}
+
+/// JSONL records of a `--paired-by` report: the clustering shape, keyed
+/// by each group's name key instead of a cluster index.
+pub(super) fn paired_records(report: &Value, sink: &mut JsonlSink) -> Result<(), AnalyzerError> {
+    for group in report["groups"].as_array().into_iter().flatten() {
+        let tag = ("group_key", group["key"].clone());
+        sink.push_all(
+            "member",
+            None,
+            &group["units"],
+            &[
+                tag.clone(),
+                ("drifted_pair_count", group["drifted_pair_count"].clone()),
+            ],
+        )?;
+        for pair in group["pairs"].as_array().into_iter().flatten() {
+            sink.push("pair", None, &lifted(pair, "a"), std::slice::from_ref(&tag))?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn format_markdown(
     report: &Report<'_>,
     top: Option<usize>,
@@ -454,6 +507,15 @@ pub(super) fn format_markdown(
             );
         }
     }
+    render_overflow_in(
+        &mut out,
+        report.clusters.len(),
+        clusters.len(),
+        "cluster(s)",
+        report.clusters[clusters.len()..]
+            .iter()
+            .filter_map(|cluster| cluster.units.first().map(|unit| unit.file)),
+    );
     out
 }
 
@@ -832,6 +894,15 @@ pub(super) fn format_paired_markdown(
             );
         }
     }
+    render_overflow_in(
+        &mut out,
+        report.groups.len(),
+        groups.len(),
+        "name key(s)",
+        report.groups[groups.len()..]
+            .iter()
+            .filter_map(|group| group.units.first().map(|unit| unit.file)),
+    );
     out
 }
 

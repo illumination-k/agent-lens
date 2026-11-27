@@ -10,7 +10,9 @@ pub(super) fn write_stdout_line(report: &str) -> Result<(), Box<dyn std::error::
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     stdout.write_all(report.as_bytes())?;
-    if !report.ends_with('\n') {
+    // An empty report — `--format jsonl` with no findings — stays empty:
+    // a lone newline would be a blank record to a line reader.
+    if !report.is_empty() && !report.ends_with('\n') {
         stdout.write_all(b"\n")?;
     }
     Ok(())

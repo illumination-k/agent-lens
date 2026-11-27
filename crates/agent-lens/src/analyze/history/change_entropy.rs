@@ -106,6 +106,8 @@ pub enum ChangeEntropyError {
     Serialize(#[from] serde_json::Error),
     #[error(transparent)]
     PathFilter(#[from] PathFilterError),
+    #[error(transparent)]
+    UnsupportedFormat(#[from] crate::analyze::jsonl::UnsupportedFormat),
 }
 
 impl_from_churn_error!(ChangeEntropyError);
@@ -358,6 +360,7 @@ impl ChangeEntropyAnalyzer {
                 serde_json::to_string_pretty(view).map_err(ChangeEntropyError::Serialize)
             }
             OutputFormat::Md => Ok(markdown(view)),
+            OutputFormat::Jsonl => Err(crate::analyze::jsonl::UnsupportedFormat.into()),
         }
     }
 }

@@ -2465,3 +2465,185 @@ fn skills_install_reports_conflict_until_forced() {
             .contains("name: agent-lens")
     );
 }
+
+fn stdout_records(output: &Output) -> Vec<serde_json::Value> {
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8(output.stdout.clone())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The JSONL contract: one object per finding, each opening with the
+/// same five keys and carrying its own file — the join a `jq` user had
+/// to write by hand for complexity, whose JSON keeps the file on the
+/// parent `files[]` entry.
+#[rstest]
+#[case::flag(None)]
+#[case::profile(Some(
+    "[profile.lines]\npath = [\"a\", \"b\"]\nformat = \"jsonl\"\ntools = [\"complexity\", \"similarity\"]\n"
+))]
+fn analyze_jsonl_emits_one_self_contained_record_per_finding(#[case] config: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "a/lib.rs",
+        &SWEEP_RS.replace("gamma", "g1").replace("delta", "d1"),
+    );
+    write_file(
+        dir.path(),
+        "b/lib.rs",
+        "fn lone(n: i32) -> i32 { if n > 0 { 1 } else { 0 } }\n",
+    );
+
+    let records = match config {
+        None => {
+            let mut records = stdout_records(&agent_lens(
+                &["analyze", "complexity", "a", "b", "--format", "jsonl"],
+                dir.path(),
+                None,
+            ));
+            records.extend(stdout_records(&agent_lens(
+                &["analyze", "similarity", "a", "b", "--format", "jsonl"],
+                dir.path(),
+                None,
+            )));
+            records
+        }
+        Some(toml) => {
+            std::fs::write(dir.path().join("agent-lens.toml"), toml).unwrap();
+            stdout_records(&agent_lens(&["run", "lines"], dir.path(), None))
+        }
+    };
+
+    let functions: Vec<&serde_json::Value> = records
+        .iter()
+        .filter(|r| r["analyzer"] == "complexity")
+        .collect();
+    assert_eq!(functions.len(), 5, "got: {records:?}");
+    let lone = functions.iter().find(|r| r["name"] == "lone").unwrap();
+    assert_eq!(lone["kind"], "function");
+    assert_eq!(lone["file"], "b/lib.rs");
+    assert_eq!(lone["line"], 1);
+    assert!(lone["cognitive"].is_number(), "metrics ride along: {lone}");
+
+    let pairs: Vec<&serde_json::Value> = records
+        .iter()
+        .filter(|r| r["analyzer"] == "similarity" && r["kind"] == "pair")
+        .collect();
+    assert!(!pairs.is_empty(), "got: {records:?}");
+    assert!(
+        pairs
+            .iter()
+            .all(|p| p["file"] == "a/lib.rs" && p["line"].is_number())
+    );
+    for record in &records {
+        let keys: Vec<&String> = record.as_object().unwrap().keys().take(5).collect();
+        assert_eq!(
+            keys,
+            ["analyzer", "kind", "file", "line", "name"],
+            "got: {record}"
+        );
+    }
+}
+
+#[test]
+fn analyze_jsonl_with_no_findings_prints_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "lib.rs", "fn a() {}\n");
+    let output = agent_lens(
+        &["analyze", "similarity", ".", "--format", "jsonl"],
+        dir.path(),
+        None,
+    );
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty(), "got: {:?}", output.stdout);
+}
+
+/// An analyzer without a record shape fails and names the ones that
+/// have one, instead of answering in a format a line reader cannot
+/// parse.
+#[rstest]
+#[case::per_file_bundle(&["analyze", "forwarding", ".", "--format", "jsonl"])]
+#[case::module_graph(&["analyze", "coupling", "lib.rs", "--format", "jsonl"])]
+fn analyze_jsonl_is_refused_where_unsupported(#[case] args: &[&str]) {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "lib.rs", "pub fn a() {}\n");
+    let output = agent_lens(args, dir.path(), None);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .contains("--format jsonl is not supported by this analyzer yet; supported: cohesion"),
+        "got: {stderr}",
+    );
+}
+
+#[test]
+fn analyze_narrowable_jsonl_tags_each_record_with_its_section() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/lib.rs",
+        "pub fn entry() -> i32 { helper(3) }\nfn helper(n: i32) -> i32 { n + 1 }\n",
+    );
+    let records = stdout_records(&agent_lens(
+        &[
+            "analyze",
+            "narrowable",
+            "src",
+            "--format",
+            "jsonl",
+            "--section",
+            "single-use",
+        ],
+        dir.path(),
+        None,
+    ));
+    let helper = records
+        .iter()
+        .find(|r| r["name"].as_str().is_some_and(|n| n.ends_with("helper")))
+        .unwrap_or_else(|| panic!("got: {records:?}"));
+    assert_eq!(helper["analyzer"], "narrowable");
+    assert_eq!(helper["kind"], "single-use");
+    assert_eq!(helper["section"], "single-use");
+    assert_eq!(helper["file"], "lib.rs");
+    assert_eq!(helper["line"], 2);
+}
+
+/// `--paired-by` JSONL: each sibling and each scored pair, tagged with
+/// the name key that matched them.
+#[test]
+fn analyze_similarity_paired_by_jsonl_tags_records_with_the_name_key() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "napi.rs", NAPI_SIBLING_RS);
+    write_file(dir.path(), "wasm.rs", WASM_SIBLING_RS);
+    let records = stdout_records(&agent_lens(
+        &[
+            "analyze",
+            "similarity",
+            ".",
+            "--format",
+            "jsonl",
+            "--paired-by",
+            "name",
+        ],
+        dir.path(),
+        None,
+    ));
+    let members: Vec<&serde_json::Value> =
+        records.iter().filter(|r| r["kind"] == "member").collect();
+    let pairs: Vec<&serde_json::Value> = records.iter().filter(|r| r["kind"] == "pair").collect();
+    assert_eq!(members.len(), 2, "got: {records:?}");
+    assert_eq!(pairs.len(), 1, "got: {records:?}");
+    for record in members.iter().chain(&pairs) {
+        assert_eq!(record["group_key"], "summary::from_raw", "got: {record}");
+        assert!(record["file"].is_string() && record["line"].is_number());
+    }
+}

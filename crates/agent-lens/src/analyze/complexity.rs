@@ -21,9 +21,11 @@ use serde::Serialize;
 
 use self::rollup::{FileReport, Rollup};
 use super::FunctionSelection;
+use super::format::render_overflow_in;
 use super::options::analyzer_options;
 use super::runner::{
-    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
+    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, per_file_records,
+    render_report_jsonl,
 };
 use super::{
     AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, format_optional_f64, read_source,
@@ -114,9 +116,15 @@ impl ComplexityAnalyzer {
             self.analyze_file(sf, tests.is_test_path(&sf.path))
         })?;
         let report = build_report(&roots, scan.scanned_file_count, &scan.reports);
-        render_report(&report, format, || {
-            format_markdown(&report, self.top, self.min_score)
-        })
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top, self.min_score),
+            Some((
+                "complexity",
+                &per_file_records::<ComplexityShape>("function"),
+            )),
+        )
     }
 
     /// Analyze a single file. Returns `None` when the file has no
@@ -413,6 +421,14 @@ fn render_top_functions(
             format_optional_f64(f.maintainability_index, 0),
         );
     }
+    let shown = rows.len().min(limit);
+    render_overflow_in(
+        out,
+        rows.len(),
+        shown,
+        "function(s)",
+        rows[shown..].iter().map(|row| row.file),
+    );
 }
 
 /// Top-N rollup rows. Skipped when there is only one row: a lone file or
@@ -541,6 +557,69 @@ fn dispatch(n: i32) -> i32 {
         assert!(md.contains("`branchy`"));
         assert!(!md.contains("`dispatch`"), "got: {md}");
         assert!(!md.contains("`quiet`"), "got: {md}");
+    }
+
+    /// A cut ranking ends with the omitted count, the directory most of
+    /// the cut rows sit in, and the `--top` that shows them all.
+    #[test]
+    fn markdown_truncation_steers_to_the_densest_omitted_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "hot/lib.rs",
+            "fn top(n: i32) -> i32 { if n > 0 { if n > 1 { 2 } else { 1 } } else { 0 } }\n",
+        );
+        write_file(dir.path(), "cold/a.rs", "fn a() {}\nfn b() {}\n");
+        write_file(dir.path(), "warm/c.rs", "fn c() {}\n");
+        let md = ComplexityAnalyzer::new()
+            .with_top(Some(1))
+            .analyze(dir.path(), OutputFormat::Md)
+            .unwrap();
+        assert!(md.contains("`top`"), "got: {md}");
+        assert!(
+            md.contains(
+                "+3 more function(s) not shown; 2 of them under `cold`. Re-run on that path to see them"
+            ),
+            "got: {md}",
+        );
+    }
+
+    #[test]
+    fn markdown_without_truncation_has_no_overflow_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "lib.rs", "fn a() {}\nfn b() {}\n");
+        let md = ComplexityAnalyzer::new()
+            .analyze(&file, OutputFormat::Md)
+            .unwrap();
+        assert!(!md.contains("not shown"), "got: {md}");
+    }
+
+    #[test]
+    fn jsonl_puts_the_file_on_every_function() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "a.rs", "fn a() {}\n");
+        write_file(dir.path(), "sub/b.rs", "fn b() {}\nfn c() {}\n");
+        let out = ComplexityAnalyzer::new()
+            .analyze(dir.path(), OutputFormat::Jsonl)
+            .unwrap();
+        let mut located: Vec<(String, String)> = out
+            .lines()
+            .map(|line| {
+                let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                assert_eq!(record["analyzer"], "complexity");
+                assert_eq!(record["kind"], "function");
+                (
+                    record["file"].as_str().unwrap().to_owned(),
+                    record["name"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        located.sort();
+        assert_eq!(
+            located,
+            [("a.rs", "a"), ("sub/b.rs", "b"), ("sub/b.rs", "c")]
+                .map(|(f, n)| (f.to_owned(), n.to_owned())),
+        );
     }
 
     #[test]

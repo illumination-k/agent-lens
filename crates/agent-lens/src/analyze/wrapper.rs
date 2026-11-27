@@ -14,9 +14,11 @@ use std::fmt::Write as _;
 use lens_domain::{InterfaceShape, ReuseMetrics, WrapperFinding};
 use serde::Serialize;
 
+use super::format::render_overflow_in;
 use super::options::analyzer_options;
 use super::runner::{
-    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, render_report,
+    FilterConfig, PerFileReport, PerFileShape, delegate_filter_builders, per_file_records,
+    render_report_jsonl,
 };
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat, SourceFile, SourceLang, read_source};
 
@@ -76,7 +78,12 @@ impl WrapperAnalyzer {
         let roots = roots.into();
         let (files, scanned_file_count) = self.collect_file_reports(&roots)?;
         let report = build_report(&roots, scanned_file_count, &files);
-        render_report(&report, format, || format_markdown(&report, self.top))
+        render_report_jsonl(
+            &report,
+            format,
+            || format_markdown(&report, self.top),
+            Some(("forwarding", &per_file_records::<WrapperShape>("wrapper"))),
+        )
     }
 
     /// Resolve `roots` to a list of per-file reports plus the number of
@@ -483,14 +490,18 @@ fn format_markdown(report: &Report<'_>, top: Option<usize>) -> String {
             let _ = writeln!(out, "{}", wrapper_row(w));
         }
     }
-    let omitted = report.item_count().saturating_sub(limit);
-    if omitted > 0 {
-        let _ = writeln!(
-            out,
-            "\n_{omitted} more wrapper(s) not shown (--top {limit}); raise --top or use \
-             --format json for the full list._",
-        );
-    }
+    let omitted_files = report
+        .files()
+        .iter()
+        .flat_map(|file| std::iter::repeat_n(file.file(), file.count()))
+        .skip(limit);
+    render_overflow_in(
+        &mut out,
+        report.item_count(),
+        report.item_count().min(limit),
+        "wrapper(s)",
+        omitted_files,
+    );
     out
 }
 
@@ -643,7 +654,10 @@ fn meaningful(x: i32) -> i32 { let y = x + 1; y * 2 }
         assert!(!md.contains("`two`"), "got: {md}");
         // The second file never starts: the budget ran out inside a.rs.
         assert!(!md.contains("## b.rs"), "got: {md}");
-        assert!(md.contains("_2 more wrapper(s) not shown"), "got: {md}");
+        assert!(
+            md.contains("+2 more wrapper(s) not shown. Narrow the path or filters"),
+            "got: {md}"
+        );
 
         // A budget above the finding count lists everything, with no
         // "of N" qualifier and no trailing note.

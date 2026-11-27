@@ -32,6 +32,7 @@ pub mod hubs;
 pub mod impact;
 mod inbound_edges;
 pub mod index;
+pub mod jsonl;
 pub mod layers;
 mod module_graph;
 pub(crate) mod module_label;
@@ -133,8 +134,14 @@ pub(crate) use source_files::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
+    /// One JSON report, carrying every metric.
     Json,
+    /// A compact markdown summary, capped by `--top`.
     Md,
+    /// One self-contained JSON object per finding, each opening with
+    /// `analyzer`, `kind`, `file`, `line`, and `name`. Supported by
+    /// the analyzers [`jsonl::SUPPORTED`] lists.
+    Jsonl,
 }
 
 /// Source languages the analyzers know how to handle.
@@ -288,6 +295,8 @@ pub enum AnalyzerError {
     /// nothing like this", which is a different — and wrong — answer.
     #[error("search query {query:?} contains no searchable term")]
     EmptySearchQuery { query: String },
+    #[error(transparent)]
+    UnsupportedFormat(#[from] jsonl::UnsupportedFormat),
 }
 
 /// Errors raised by analyzers that walk a Rust crate from a `.rs` root
@@ -342,6 +351,8 @@ pub enum CrateAnalyzerError {
         path: PathBuf,
         patterns: Vec<String>,
     },
+    #[error(transparent)]
+    UnsupportedFormat(#[from] jsonl::UnsupportedFormat),
 }
 
 impl From<lens_domain::CouplingError> for CrateAnalyzerError {

@@ -36,7 +36,7 @@ use super::call_graph::model::{
     CallGraphEdge, CallGraphNode, ModuleResolutionSummary, Resolution, ResolutionMethod,
 };
 use super::call_graph::{CallGraph, CallGraphBuilder, delegate_call_graph_builders};
-use super::format::render_module_confidence;
+use super::format::{render_module_confidence, render_overflow_in};
 use super::options::analyzer_options;
 use super::runner::render_graph_report;
 use super::{AnalyzeRoots, AnalyzerError, OutputFormat};
@@ -674,6 +674,14 @@ fn render_entries(
             detail(entry),
         );
     }
+    let shown = entries.len().min(limit);
+    render_overflow_in(
+        out,
+        entries.len(),
+        shown,
+        "function(s)",
+        entries[shown..].iter().map(|e| e.file.as_str()),
+    );
 }
 
 fn format_fraction(fraction: Option<f64>) -> String {
