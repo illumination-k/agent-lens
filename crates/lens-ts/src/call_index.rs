@@ -162,6 +162,12 @@ pub fn extract_re_exports(
     module: &str,
     context: Option<&ImportContext<'_>>,
 ) -> Result<Vec<ReExportShape>, TsParseError> {
+    // Every statement read below has `export` followed by `{` or `*`
+    // (whitespace and comments aside); most files have neither, and the
+    // text check spares them a second parse.
+    if !has_export_list_or_star(source) {
+        return Ok(Vec::new());
+    }
     let alloc = Allocator::default();
     let ret = dialect.parse_clean(&alloc, source)?;
     let imports = collect_imports(&ret.program, module, context);
@@ -233,6 +239,18 @@ pub fn extract_re_exports(
         }
     }
     Ok(out)
+}
+
+/// Whether `source` may hold an `export { … }` or `export * …` statement:
+/// some `export` keyword whose next non-blank character is `{` or `*`, or
+/// a comment (which the check cannot see past, so it says yes).
+fn has_export_list_or_star(source: &str) -> bool {
+    source.match_indices("export").any(|(at, keyword)| {
+        let rest = source[at + keyword.len()..].trim_start();
+        // `export type { … }` / `export type * …`
+        let rest = rest.strip_prefix("type").map_or(rest, str::trim_start);
+        rest.starts_with(['{', '*', '/'])
+    })
 }
 
 /// Module-scope variables that hold a computed value rather than a
@@ -1520,6 +1538,8 @@ mod tests {
     #[case::type_specifier("export { type Area, area } from './geo'\n", &[(Some("area"), "src::geo::area")])]
     #[case::type_star("export type * from './geo'\n", &[])]
     #[case::default_re_export("export { default } from './geo'\n", &[])]
+    #[case::spaced_out("export\n  {\n area } from './geo'\n", &[(Some("area"), "src::geo::area")])]
+    #[case::comment_between("export /* re */ * from './geo'\n", &[(None, "src::geo")])]
     #[case::type_only_local_export("import { Area } from './geo'\nexport type { Area }\n", &[])]
     #[case::default_import_then_export(
         "import { default as Area } from './geo'\nexport { Area }\n",
