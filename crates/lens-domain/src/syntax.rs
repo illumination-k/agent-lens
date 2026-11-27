@@ -524,6 +524,28 @@ pub enum LexicalResolutionStatus {
 /// module whose items it brings into scope.
 pub const GLOB_IMPORT_ALIAS: &str = "*";
 
+/// A name one module exposes on behalf of another: a TypeScript barrel's
+/// `export { render } from './render'` or `export * from './render'`, a
+/// Python package's `from .core import Command` in `__init__.py`.
+///
+/// An adapter sees one file, so an import of `render` from the barrel
+/// binds `barrel::render`, which is no declaration. A pass over every
+/// file's re-exports follows that path to `render::render`, where the
+/// function is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReExportShape {
+    /// The re-exporting module (`barrel`).
+    pub module: String,
+    /// The name it exposes (`render`, or `ns` for `export * as ns from
+    /// …`), or `None` for a star re-export, which exposes every name of
+    /// [`Self::target`] under [`Self::module`] itself.
+    pub name: Option<String>,
+    /// The qualified path the exposed name stands for: a declaration
+    /// (`render::render`) or a module (`render`, for a star or namespace
+    /// re-export).
+    pub target: String,
+}
+
 /// Neutral representation of an import/export fact visible in a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportShape {

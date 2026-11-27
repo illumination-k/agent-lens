@@ -1949,6 +1949,7 @@ mod tests {
                 macro_facts: None,
                 value_references: Arc::new(Vec::new()),
                 go_type_facts: None,
+                re_exports: Default::default(),
             }],
             true,
         );

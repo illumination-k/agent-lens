@@ -82,3 +82,12 @@ caller = "tests::test_more::LongestCommonPrefixTests::test_contains_infinite_ite
 callee = "more_itertools::more::numeric_range::count"
 verdict = "agent_lens_wrong"
 note = "tests/test_more.py:5846 `count()` is itertools.count (imported at the top of the file), not numeric_range.count"
+
+# more-itertools: `cls(...)` in a classmethod runs the owner's `__init__`;
+# pyright reports no edge for a call through the `cls` parameter.
+[[adjudication]]
+target = "more-itertools"
+caller = "tests::test_more::IteratorWithWeakReferences::FROM_SIZE"
+callee = "tests::test_more::IteratorWithWeakReferences::__init__"
+verdict = "oracle_wrong"
+note = "tests/test_more.py:3281 `cls([...])` in the @classmethod FROM_SIZE constructs IteratorWithWeakReferences, whose __init__ runs"

@@ -34,7 +34,7 @@ mod wrapper;
 
 pub use call_index::{
     ImportContext, extract_call_shapes_with_imports, extract_call_shapes_with_module,
-    extract_function_shapes_with_module,
+    extract_function_shapes_with_module, extract_re_exports,
 };
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};

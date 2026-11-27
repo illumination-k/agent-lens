@@ -26,7 +26,10 @@ mod type_defs;
 mod walk;
 mod wrapper;
 
-pub use call_index::{extract_call_shapes_with_module, extract_function_shapes_with_module};
+pub use call_index::{
+    extract_call_shapes, extract_call_shapes_with_module, extract_function_shapes_with_module,
+    extract_re_exports,
+};
 pub use cohesion::{CohesionError, extract_cohesion_units};
 pub use complexity::{ComplexityError, extract_complexity_units};
 pub use coupling::{PythonModule, build_module_tree, extract_edges};
