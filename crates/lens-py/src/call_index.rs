@@ -20,8 +20,8 @@ use std::collections::HashSet;
 
 use lens_domain::{
     ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, ImportShape,
-    LexicalResolutionStatus, LineIndex, OwnerKind, OwnerShape, ReceiverExprKind, SignatureShape,
-    SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
+    LexicalResolutionStatus, LineIndex, OwnerKind, OwnerShape, ReExportShape, ReceiverExprKind,
+    SignatureShape, SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
 };
 use ruff_python_ast::visitor::{Visitor, walk_expr};
 use ruff_python_ast::{
@@ -63,9 +63,22 @@ pub fn extract_call_shapes_with_module(
     source: &str,
     module: &str,
 ) -> Result<Vec<CallShape>, PythonParseError> {
+    extract_call_shapes(source, module, false)
+}
+
+/// [`extract_call_shapes_with_module`] for a file that may be a package's
+/// `__init__.py` (`package_init`). There `module` is the package itself,
+/// so `from .core import X` names `module::core`, where in a plain module
+/// it names a sibling of `module`.
+pub fn extract_call_shapes(
+    source: &str,
+    module: &str,
+    package_init: bool,
+) -> Result<Vec<CallShape>, PythonParseError> {
     let parsed = parse_module(source)?.into_syntax();
     let lines = LineIndex::new(source);
-    let imports = collect_imports(&parsed.body, module);
+    let import_base = relative_import_base(module, package_init);
+    let imports = collect_imports(&parsed.body, &import_base);
     let namespace_aliases: HashSet<String> = imports
         .iter()
         .filter_map(|import| {
@@ -83,7 +96,7 @@ pub fn extract_call_shapes_with_module(
         line_index: &lines,
         imports: &imports,
         namespace_aliases: &namespace_aliases,
-        bindings: &bind_module(&parsed.body, module),
+        bindings: &bind_module(&parsed.body, &import_base),
     };
     let mut out = Vec::new();
     walk_module_fns(&parsed.body, &mut |site| {
@@ -152,6 +165,7 @@ fn collect_calls_in_function(
         caller_qualified_name: caller_qualified,
         caller_owner: site.owner.map(ToOwned::to_owned),
         caller_class: site.class,
+        class_parameter: site.owner.and_then(|_| class_parameter(site.func)),
         out: Vec::new(),
     };
     for body_stmt in &site.func.body {
@@ -165,7 +179,31 @@ struct FunctionBodyCallVisitor<'f, 'a, 'b> {
     caller_qualified_name: String,
     caller_owner: Option<String>,
     caller_class: Option<&'f StmtClassDef>,
+    /// The parameter a class method receives its class in (`cls`), so
+    /// `cls(...)` constructs the owner and `cls.make()` calls the owner's
+    /// own method, as `self.make()` does in an instance method.
+    class_parameter: Option<&'f str>,
     out: Vec<CallShape>,
+}
+
+/// The first parameter of `func` when it receives the class rather than
+/// an instance: a `@classmethod`, or `__new__` / `__init_subclass__` /
+/// `__class_getitem__`, which Python makes class methods implicitly.
+fn class_parameter(func: &StmtFunctionDef) -> Option<&str> {
+    const IMPLICIT: [&str; 3] = ["__new__", "__init_subclass__", "__class_getitem__"];
+    let decorated = func.decorator_list.iter().any(|decorator| {
+        matches!(&decorator.expression, Expr::Name(name) if name.id.as_str() == "classmethod")
+    });
+    if !decorated && !IMPLICIT.contains(&func.name.as_str()) {
+        return None;
+    }
+    let first = func
+        .parameters
+        .posonlyargs
+        .iter()
+        .chain(&func.parameters.args)
+        .next()?;
+    Some(first.parameter.name.as_str())
 }
 
 /// What `super().name(...)` in a method names.
@@ -218,6 +256,14 @@ impl FunctionBodyCallVisitor<'_, '_, '_> {
         };
         let line = self.file.line_index.line(call.range.start().to_u32());
         let referent = head.and_then(|head| self.file.bindings.referent(head));
+        let mut facts = facts;
+        // `cls.make()` in a class method is the owner's `make`, exactly
+        // as `self.make()` is in an instance method.
+        let on_class_parameter = referent == Some(Referent::Local)
+            && head.is_some_and(|head| Some(head.id.as_str()) == self.class_parameter);
+        if on_class_parameter && matches!(facts.path_segments.as_deref(), Some([_, _])) {
+            facts.receiver = ReceiverExprKind::SelfValue;
+        }
         let segments = facts.path_segments.as_deref();
         // A local — a parameter, an assignment, a nested `def` — shadows
         // every definition outside the function, but only a bare call
@@ -239,6 +285,14 @@ impl FunctionBodyCallVisitor<'_, '_, '_> {
         };
         let callee_binding = if matches!(super_callee, Some((SuperCallee::Object, _))) {
             SyntaxFact::Known(CalleeBinding::External)
+        } else if let (true, Some([_]), Some(owner)) =
+            (on_class_parameter, segments, &self.caller_owner)
+        {
+            // `cls(...)` constructs the owner, running its `__init__`.
+            SyntaxFact::Known(CalleeBinding::Declaration(qualify_module(
+                self.file.module,
+                &format!("{owner}::__init__"),
+            )))
         } else {
             match (referent, segments) {
                 // `s.send()` on `s: Session` or `s = Session()` calls
@@ -506,6 +560,78 @@ fn expression_path(expr: &Expr) -> Option<Vec<String>> {
     }
 }
 
+/// The names `module` binds at module scope through an import, which any
+/// importer of `module` can reach as `module.name`: a package's
+/// `__init__.py` re-exporting `from .core import Command`, a `from .x
+/// import *`. A pass over every file follows `pkg::Command` to
+/// `pkg::core::Command` with them. `import a.b` (which binds `a`, a whole
+/// package) and imports nested in blocks are left out. `package_init` is
+/// as for [`extract_call_shapes`].
+pub fn extract_re_exports(
+    source: &str,
+    module: &str,
+    package_init: bool,
+) -> Result<Vec<ReExportShape>, PythonParseError> {
+    let parsed = parse_module(source)?.into_syntax();
+    let import_base = relative_import_base(module, package_init);
+    let mut out = Vec::new();
+    let mut push = |name: Option<String>, target: String| {
+        out.push(ReExportShape {
+            module: module.to_owned(),
+            name,
+            target,
+        });
+    };
+    for stmt in &parsed.body {
+        match stmt {
+            Stmt::Import(StmtImport { names, .. }) => {
+                for alias in names {
+                    if let Some(asname) = &alias.asname {
+                        push(
+                            Some(asname.as_str().to_owned()),
+                            dotted_to_module_path(alias.name.as_str()),
+                        );
+                    }
+                }
+            }
+            Stmt::ImportFrom(from) => {
+                let Some(base) = resolve_from_base(
+                    &import_base,
+                    from.level,
+                    from.module.as_ref().map(|m| m.as_str()),
+                ) else {
+                    continue;
+                };
+                for alias in &from.names {
+                    let imported = alias.name.as_str();
+                    if imported == "*" {
+                        if !base.is_empty() {
+                            push(None, base.clone());
+                        }
+                        continue;
+                    }
+                    let local = alias.asname.as_ref().map_or(imported, |n| n.as_str());
+                    push(Some(local.to_owned()), qualify_module(&base, imported));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// The module path relative imports climb from: a plain module's own
+/// path, whose last segment the first `.` drops, or for a package's
+/// `__init__.py` a path one segment below the package, since there `.`
+/// is the package itself.
+fn relative_import_base(module: &str, package_init: bool) -> String {
+    if package_init {
+        qualify_module(module, "__init__")
+    } else {
+        module.to_owned()
+    }
+}
+
 fn collect_imports(body: &[Stmt], module: &str) -> Vec<ImportShape> {
     let mut out = Vec::new();
     for stmt in body {
@@ -599,6 +725,87 @@ mod tests {
             CalleeBinding::Declaration(target) => target.as_str(),
             CalleeBinding::External => "<external>",
         })
+    }
+
+    /// In a package's `__init__.py` the module path is the package
+    /// itself, so `.` stays there instead of climbing to its parent.
+    #[rstest]
+    #[case::plain_module(false, "pkg::geo::area")]
+    #[case::package_init(true, "pkg::sub::geo::area")]
+    fn relative_imports_climb_from_the_package_in_an_init(
+        #[case] package_init: bool,
+        #[case] expected: &str,
+    ) {
+        let src = "from .geo import area\ndef run():\n    area()\n";
+        let calls = extract_call_shapes(src, "pkg::sub", package_init).unwrap();
+        assert_eq!(binding_of(&calls[0]), Some(expected));
+    }
+
+    #[rstest]
+    #[case::from_import("from .geo import area\n", false, &[(Some("area"), "pkg::geo::area")])]
+    #[case::aliased("from .geo import area as size\n", false, &[(Some("size"), "pkg::geo::area")])]
+    #[case::package_init("from .geo import area\n", true, &[(Some("area"), "pkg::m::geo::area")])]
+    #[case::star("from .geo import *\n", false, &[(None, "pkg::geo")])]
+    #[case::aliased_module("import pkg.geo as g\n", false, &[(Some("g"), "pkg::geo")])]
+    #[case::bare_module_import("import pkg.geo\n", false, &[])]
+    #[case::nested_in_a_block("if X:\n    from .geo import area\n", false, &[])]
+    #[case::outrunning_depth("from ... import area\n", false, &[])]
+    fn re_exports_are_module_scope_imports(
+        #[case] src: &str,
+        #[case] package_init: bool,
+        #[case] expected: &[(Option<&str>, &str)],
+    ) {
+        let module = "pkg::m";
+        let got: Vec<(Option<String>, String)> = extract_re_exports(src, module, package_init)
+            .unwrap()
+            .into_iter()
+            .inspect(|re_export| assert_eq!(re_export.module, module))
+            .map(|re_export| (re_export.name, re_export.target))
+            .collect();
+        let expected: Vec<(Option<String>, String)> = expected
+            .iter()
+            .map(|(name, target)| (name.map(ToOwned::to_owned), (*target).to_owned()))
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    #[rstest]
+    #[case::class_method(
+        "class B:\n    @classmethod\n    def make(cls):\n        return cls()\n",
+        Some("m::B::__init__")
+    )]
+    #[case::implicit_new(
+        "class B:\n    def __new__(klass):\n        return klass()\n",
+        Some("m::B::__init__")
+    )]
+    #[case::instance_method_parameter(
+        "class B:\n    def make(self, cls):\n        return cls()\n",
+        None
+    )]
+    #[case::free_function("def make(cls):\n    return cls()\n", None)]
+    fn class_parameter_calls_construct_the_owner(
+        #[case] src: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let calls = calls(src, "m");
+        assert_eq!(binding_of(&calls[0]), expected);
+    }
+
+    #[rstest]
+    #[case::class_method(
+        "class B:\n    @classmethod\n    def make(cls):\n        return cls.build()\n",
+        ReceiverExprKind::SelfValue
+    )]
+    #[case::instance_method_parameter(
+        "class B:\n    def make(self, cls):\n        return cls.build()\n",
+        ReceiverExprKind::LocalValue
+    )]
+    fn class_parameter_receivers_are_the_owner(
+        #[case] src: &str,
+        #[case] expected: ReceiverExprKind,
+    ) {
+        let calls = calls(src, "m");
+        assert_eq!(calls[0].receiver_expr_kind, SyntaxFact::Known(expected));
     }
 
     /// A callee bound in the caller's own scope — a nested `def`, a

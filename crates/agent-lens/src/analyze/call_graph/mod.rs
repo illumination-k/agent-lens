@@ -22,7 +22,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lens_domain::{CallShape, FunctionComplexity, FunctionShape, InterfaceShape, WrapperFinding};
+use lens_domain::{
+    CallShape, FunctionComplexity, FunctionShape, InterfaceShape, ReExportShape, WrapperFinding,
+};
 use lens_rust::{CallIndexOptions, ValueReferenceShape};
 
 use super::cargo_meta::CrateNameCache;
@@ -431,6 +433,14 @@ impl CallGraphBuilder {
             resolver,
             module_of: &module_of,
         });
+        let origin = ImportOrigin {
+            ts: ts_imports.as_ref(),
+            python_package_init: matches!(lang, SourceLang::Python)
+                && file
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name == "__init__.py"),
+        };
         // Go reads the package-level type facts in the same parse as the
         // calls; every other language has none.
         let (calls, go_type_facts) = match lang {
@@ -439,13 +449,7 @@ impl CallGraphBuilder {
                 (Arc::clone(&shared.0), Some(Arc::clone(&shared.1)))
             }
             _ => (
-                extract_call_shapes(
-                    lang,
-                    &source,
-                    &module,
-                    !self.exclude_tests,
-                    ts_imports.as_ref(),
-                )?,
+                extract_call_shapes(lang, &source, &module, !self.exclude_tests, origin)?,
                 None,
             ),
         };
@@ -464,6 +468,12 @@ impl CallGraphBuilder {
         let macro_facts = matches!(lang, SourceLang::Rust)
             .then(|| extract_macro_facts(lang, &source, &module))
             .transpose()?;
+        let re_exports = match lang {
+            SourceLang::TypeScript(_) | SourceLang::Python => {
+                extract_re_exports(lang, &source, &module, origin)?
+            }
+            SourceLang::Rust | SourceLang::Go | SourceLang::Quint => Arc::default(),
+        };
         let value_references = (self.value_reference_facts && matches!(lang, SourceLang::Rust))
             .then(|| extract_value_references(lang, &source, &module, !self.exclude_tests))
             .transpose()?
@@ -483,6 +493,7 @@ impl CallGraphBuilder {
             macro_facts,
             value_references,
             go_type_facts,
+            re_exports,
         })
     }
 
@@ -587,17 +598,25 @@ fn extract_function_shapes_uncached(
         .map_err(AnalyzerError::Parse)
 }
 
-/// `ts_imports` resolves a TS/JS file's imports; the module path already
-/// names the file, so it needs no place in the index key.
+/// Where a file's imports lead, beyond its module path: the TS/JS
+/// resolver context, and whether a Python file is a package's
+/// `__init__.py`. Both follow from the file's path, which the module
+/// path already names, so neither needs a place in an index key.
+#[derive(Clone, Copy)]
+struct ImportOrigin<'c> {
+    ts: Option<&'c lens_ts::ImportContext<'c>>,
+    python_package_init: bool,
+}
+
 fn extract_call_shapes(
     lang: SourceLang,
     source: &str,
     module: &str,
     include_cfg_test_blocks: bool,
-    ts_imports: Option<&lens_ts::ImportContext<'_>>,
+    origin: ImportOrigin<'_>,
 ) -> Result<Arc<Vec<CallShape>>, AnalyzerError> {
     let extract =
-        || extract_call_shapes_uncached(lang, source, module, include_cfg_test_blocks, ts_imports);
+        || extract_call_shapes_uncached(lang, source, module, include_cfg_test_blocks, origin);
     match AnalysisIndex::active() {
         Some(index) => index.call_shapes(
             SourceKey::new(lang, source),
@@ -614,7 +633,7 @@ fn extract_call_shapes_uncached(
     source: &str,
     module: &str,
     include_cfg_test_blocks: bool,
-    ts_imports: Option<&lens_ts::ImportContext<'_>>,
+    origin: ImportOrigin<'_>,
 ) -> Result<Vec<CallShape>, AnalyzerError> {
     match lang {
         SourceLang::Rust => lens_rust::extract_call_shapes_with_module(
@@ -625,7 +644,7 @@ fn extract_call_shapes_uncached(
             module,
         )
         .map_err(parse_err),
-        SourceLang::TypeScript(dialect) => match ts_imports {
+        SourceLang::TypeScript(dialect) => match origin.ts {
             Some(imports) => {
                 lens_ts::extract_call_shapes_with_imports(source, dialect, module, imports)
             }
@@ -633,7 +652,8 @@ fn extract_call_shapes_uncached(
         }
         .map_err(parse_err),
         SourceLang::Python => {
-            lens_py::extract_call_shapes_with_module(source, module).map_err(parse_err)
+            lens_py::extract_call_shapes(source, module, origin.python_package_init)
+                .map_err(parse_err)
         }
         SourceLang::Go => {
             lens_golang::extract_call_shapes_with_module(source, module).map_err(parse_err)
@@ -641,6 +661,45 @@ fn extract_call_shapes_uncached(
         // Not a graphed language ([`graphed_language`]): no file reaches here.
         SourceLang::Quint => Ok(Vec::new()),
     }
+}
+
+/// Re-exports of one file, for the languages whose modules forward
+/// names (TypeScript barrels, Python packages); empty for the others,
+/// which [`CallGraphBuilder::scan_file`] does not ask.
+fn extract_re_exports(
+    lang: SourceLang,
+    source: &str,
+    module: &str,
+    origin: ImportOrigin<'_>,
+) -> Result<Arc<Vec<ReExportShape>>, AnalyzerError> {
+    let extract = || match lang {
+        SourceLang::TypeScript(dialect) => {
+            lens_ts::extract_re_exports(source, dialect, module, origin.ts).map_err(parse_err)
+        }
+        SourceLang::Python => {
+            lens_py::extract_re_exports(source, module, origin.python_package_init)
+                .map_err(parse_err)
+        }
+        SourceLang::Rust | SourceLang::Go | SourceLang::Quint => Ok(Vec::new()),
+    };
+    match AnalysisIndex::active() {
+        Some(index) => index.memoize_typed(
+            ReExportKey {
+                source: SourceKey::new(lang, source),
+                module: module.to_owned(),
+            },
+            extract,
+        ),
+        None => extract().map(Arc::new),
+    }
+}
+
+/// [`AnalysisIndex`] key of [`extract_re_exports`]: a type of its own so
+/// the typed table is not shared with another fact.
+#[derive(PartialEq, Eq, Hash)]
+struct ReExportKey {
+    source: SourceKey,
+    module: String,
 }
 
 /// `macro_rules!` templates and `impl`-item macro invocations for one
@@ -843,6 +902,10 @@ pub(crate) struct FileGraphInput {
     /// Package-level type declarations (Go only), joined across files by
     /// [`go_types::bind_go_receiver_calls`].
     pub(crate) go_type_facts: Option<Arc<lens_golang::GoTypeFacts>>,
+    /// Names this file exposes on behalf of other modules (TypeScript
+    /// barrels, Python package imports), followed across files when a
+    /// call's binding names no node.
+    pub(crate) re_exports: Arc<Vec<ReExportShape>>,
 }
 
 impl SourceLang {
@@ -1077,7 +1140,8 @@ fn build_edges(
     nodes: &[CallGraphNode],
     argument_facts: bool,
 ) -> (Vec<CallGraphEdge>, Vec<ModuleResolutionSummary>) {
-    let resolver = Resolver::new(nodes);
+    let resolver =
+        Resolver::new(nodes).with_re_exports(files.iter().flat_map(|file| file.re_exports.iter()));
     let caller_index = CallerIndex::new(nodes);
     let mut grouped: BTreeMap<EdgeKey, CallGraphEdge> = BTreeMap::new();
     let mut by_module: BTreeMap<String, ResolutionCallCounts> = BTreeMap::new();
@@ -1170,7 +1234,8 @@ fn build_value_references(
     if files.iter().all(|file| file.value_references.is_empty()) {
         return Vec::new();
     }
-    let resolver = Resolver::new(nodes);
+    let resolver =
+        Resolver::new(nodes).with_re_exports(files.iter().flat_map(|file| file.re_exports.iter()));
     let caller_index = CallerIndex::new(nodes);
     files
         .iter()

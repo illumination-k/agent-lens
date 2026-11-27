@@ -548,8 +548,9 @@ falling back to `src/` when its manifest points at build output. Other
 bare specifiers (`react`, `node:fs`) stay external. Call graphs also bind
 each TS/JS callee's name with `oxc_semantic`: a call through an import or
 a module-scope declaration resolves with `resolution_method: "binding"`,
-and a call to a global or an external package's import is never matched
-to a same-named workspace function.
+following barrel re-exports (`export { x } from`, `export * from`) to the
+declaring module, and a call to a global or an external package's import
+is never matched to a same-named workspace function.
 Python callees are bound the same way through the module's scopes with
 [`ruff_python_semantic`](https://github.com/astral-sh/ruff/tree/main/crates/ruff_python_semantic):
 a call through an import or to a module-level `def` / `class` resolves
@@ -559,8 +560,10 @@ matched to a workspace function, a bare call to a parameter or local is
 never matched by name, and a receiver held in a parameter or local is
 read as a value, bound through its class where an annotation
 (`s: Session`) or a constructor call (`s = Session()`) names one.
-`A()` reaches `A.__init__`, and `super().m()` binds through the class's
-first base.
+Imports follow a package's `__init__.py` re-exports and find a package
+that sits below the analysed root (`import click` over `src/click/`).
+`A()` and `cls()` in a class method reach `A.__init__`, `cls.m()` binds
+like `self.m()`, and `super().m()` binds through the class's first base.
 
 Go packages are named by the nearest `go.mod` above them, so a scan can span
 several modules. A directory holding `go.work` is a Go root in its own

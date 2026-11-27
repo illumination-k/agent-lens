@@ -30,10 +30,11 @@
 //! lexical candidates included — is skipped and the site stays
 //! [`Resolution::Unresolved`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use lens_domain::{
-    CallShape, CalleeBinding, GLOB_IMPORT_ALIAS, ReceiverExprKind, SyntaxFact, qualify_module,
+    CallShape, CalleeBinding, GLOB_IMPORT_ALIAS, ReExportShape, ReceiverExprKind, SyntaxFact,
+    qualify_module,
 };
 
 use super::model::{CallGraphNode, GraphLanguage, Resolution, ResolutionMethod, name_last_segment};
@@ -160,7 +161,23 @@ pub(crate) struct Resolver {
     /// Every segment of every node's module path: the names an import
     /// can start with and still land in the workspace.
     module_segments: HashSet<String>,
+    /// Exposed path → the paths it re-exports (`barrel::render` →
+    /// `render::render`), from every file's named re-exports.
+    re_exports: HashMap<String, Vec<String>>,
+    /// Module → the modules it star-re-exports (`barrel` → `render`).
+    star_re_exports: HashMap<String, Vec<String>>,
+    /// Module segment → the module paths that end at it below the
+    /// analysis root (`click` → `src::click`): where a Python import
+    /// rooted at the import root (`click.testing`) sits in the graph's
+    /// module paths. Only segments at depth two or more, which an
+    /// import cannot name as they are, appear.
+    nested_packages: HashMap<String, BTreeSet<String>>,
 }
+
+/// Bound on the paths one binding may be rewritten into while following
+/// re-exports: a barrel chain is a handful of hops, and the bound keeps a
+/// pathological star-export web from costing more than that.
+const RE_EXPORT_VISIT_LIMIT: usize = 64;
 
 impl Resolver {
     pub(crate) fn new(nodes: &[CallGraphNode]) -> Self {
@@ -195,7 +212,137 @@ impl Resolver {
             id_to_qualified,
             methods,
             module_segments,
+            re_exports: HashMap::new(),
+            star_re_exports: HashMap::new(),
+            nested_packages: HashMap::new(),
         }
+        .with_nested_packages(nodes.iter().map(|node| node.module.as_str()))
+    }
+
+    fn with_nested_packages<'a>(mut self, modules: impl IntoIterator<Item = &'a str>) -> Self {
+        for module in modules {
+            let segments: Vec<&str> = module.split("::").collect();
+            for depth in 2..=segments.len() {
+                self.nested_packages
+                    .entry(segments[depth - 1].to_owned())
+                    .or_default()
+                    .insert(segments[..depth].join("::"));
+            }
+        }
+        self
+    }
+
+    /// Follow `re_exports` when a binding names a path that is no node:
+    /// an import of a barrel's name then lands on the declaration the
+    /// barrel forwards.
+    pub(crate) fn with_re_exports<'a>(
+        mut self,
+        re_exports: impl IntoIterator<Item = &'a ReExportShape>,
+    ) -> Self {
+        let mut modules = Vec::new();
+        for re_export in re_exports {
+            modules.push(re_export.module.clone());
+            match &re_export.name {
+                Some(name) => self
+                    .re_exports
+                    .entry(qualify_module(&re_export.module, name))
+                    .or_default()
+                    .push(re_export.target.clone()),
+                None => self
+                    .star_re_exports
+                    .entry(re_export.module.clone())
+                    .or_default()
+                    .push(re_export.target.clone()),
+            }
+        }
+        // A package whose `__init__.py` only re-exports declares no node,
+        // so its module path is known from its re-exports alone.
+        self.with_nested_packages(modules.iter().map(String::as_str))
+    }
+
+    /// The nodes a Python import-rooted `path` (`click::testing::CliRunner`)
+    /// reaches where the package sits below the analysis root
+    /// (`src::click::testing::CliRunner`), directly or through
+    /// re-exports. Every placement of the package is tried; more than
+    /// one reaching a node is a real ambiguity (two copies of a package).
+    fn follow_nested_package(&self, path: &str) -> Vec<String> {
+        let (head, rest) = path.split_once("::").unwrap_or((path, ""));
+        let Some(placements) = self.nested_packages.get(head) else {
+            return Vec::new();
+        };
+        let mut ids = BTreeSet::new();
+        for placement in placements {
+            let rerooted = if rest.is_empty() {
+                placement.clone()
+            } else {
+                qualify_module(placement, rest)
+            };
+            match self.qualified.get(&rerooted) {
+                Some(found) => ids.extend(found.iter().cloned()),
+                None => ids.extend(self.follow_re_exports(&rerooted)),
+            }
+        }
+        ids.into_iter().collect()
+    }
+
+    /// The nodes `path` reaches through re-exports, when it names no node
+    /// itself. At each step the longest prefix of the path that some
+    /// module re-exports by name is rewritten (`barrel::Hono::constructor`
+    /// → `hono::Hono::constructor`); a path no named re-export covers
+    /// goes through the star re-exports of its longest module prefix
+    /// instead, as an explicit export shadows a star one in the language.
+    fn follow_re_exports(&self, path: &str) -> Vec<String> {
+        if self.re_exports.is_empty() && self.star_re_exports.is_empty() {
+            return Vec::new();
+        }
+        let mut ids = BTreeSet::new();
+        let mut seen = HashSet::new();
+        let mut pending = vec![path.to_owned()];
+        while let Some(path) = pending.pop() {
+            if seen.len() >= RE_EXPORT_VISIT_LIMIT || !seen.insert(path.clone()) {
+                continue;
+            }
+            if let Some(found) = self.qualified.get(&path) {
+                ids.extend(found.iter().cloned());
+                continue;
+            }
+            pending.extend(self.re_export_rewrites(&path));
+        }
+        ids.into_iter().collect()
+    }
+
+    /// One step of [`Self::follow_re_exports`]: the paths `path` stands
+    /// for under the re-exports of the modules its prefixes name.
+    fn re_export_rewrites(&self, path: &str) -> Vec<String> {
+        let segments: Vec<&str> = path.split("::").collect();
+        let rewrite = |targets: &[String], rest: &[&str]| -> Vec<String> {
+            targets
+                .iter()
+                .map(|target| {
+                    if rest.is_empty() {
+                        target.clone()
+                    } else {
+                        qualify_module(target, &rest.join("::"))
+                    }
+                })
+                .collect()
+        };
+        for split in (1..=segments.len()).rev() {
+            let (prefix, rest) = segments.split_at(split);
+            if let Some(targets) = self.re_exports.get(&prefix.join("::")) {
+                return rewrite(targets, rest);
+            }
+        }
+        for split in (1..segments.len()).rev() {
+            let (prefix, rest) = segments.split_at(split);
+            if let Some(targets) = self.star_re_exports.get(&prefix.join("::")) {
+                return rewrite(targets, rest);
+            }
+        }
+        // A barrel at the analysis root has the empty module path.
+        self.star_re_exports
+            .get("")
+            .map_or_else(Vec::new, |targets| rewrite(targets, &segments))
     }
 
     /// `language` is the language of the file the call site lives in;
@@ -237,6 +384,13 @@ impl Resolver {
             Some(CalleeBinding::Declaration(target)) => {
                 if let Some(ids) = self.qualified.get(target) {
                     return resolve_ids(ids, ResolutionMethod::Binding);
+                }
+                let mut forwarded = self.follow_re_exports(target);
+                if forwarded.is_empty() && language == GraphLanguage::Python {
+                    forwarded = self.follow_nested_package(target);
+                }
+                if !forwarded.is_empty() {
+                    return resolve_ids(&forwarded, ResolutionMethod::Binding);
                 }
                 // `from itertools import count`, `import pytest`: a Python
                 // import whose top-level package names no module in the
@@ -1071,7 +1225,11 @@ mod tests {
     #[case::rust_denies_clone(GraphLanguage::Rust, "clone", Resolution::Unresolved)]
     #[case::rust_allows_workspace_name(GraphLanguage::Rust, "with_children", Resolution::Resolved)]
     #[case::typescript_denies_map(GraphLanguage::TypeScript, "map", Resolution::Unresolved)]
-    #[case::typescript_allows_rust_name(GraphLanguage::TypeScript, "clone", Resolution::Resolved)]
+    #[case::typescript_allows_rust_name(
+        GraphLanguage::TypeScript,
+        "with_children",
+        Resolution::Resolved
+    )]
     #[case::python_denies_append(GraphLanguage::Python, "append", Resolution::Unresolved)]
     #[case::python_allows_rust_name(GraphLanguage::Python, "clone", Resolution::Resolved)]
     #[case::go_denies_string(GraphLanguage::Go, "String", Resolution::Unresolved)]
@@ -1528,6 +1686,107 @@ mod tests {
         let call = resolver.resolve(&call_site, GraphLanguage::Python);
 
         assert_eq!(call.to.as_deref(), expected);
+    }
+
+    fn re_export(module: &str, name: Option<&str>, target: &str) -> ReExportShape {
+        ReExportShape {
+            module: module.to_owned(),
+            name: name.map(ToOwned::to_owned),
+            target: target.to_owned(),
+        }
+    }
+
+    /// A binding to a barrel's name follows the barrel's re-exports to
+    /// the declaration; the decoy shows the name fallback was not what
+    /// resolved it.
+    #[rstest]
+    #[case::named(&[("barrel", Some("area"), "geo::area")], "barrel::area", "geo::area")]
+    #[case::star(&[("barrel", None, "geo")], "barrel::area", "geo::area")]
+    #[case::chain(
+        &[("barrel", None, "inner"), ("inner", Some("area"), "geo::area")],
+        "barrel::area",
+        "geo::area"
+    )]
+    #[case::named_shadows_star(
+        &[("barrel", None, "decoy"), ("barrel", Some("area"), "geo::area")],
+        "barrel::area",
+        "geo::area"
+    )]
+    #[case::class_member(&[("barrel", Some("Shape"), "geo::Shape")], "barrel::Shape::new", "geo::Shape::new")]
+    #[case::namespace(&[("barrel", Some("g"), "geo")], "barrel::g::area", "geo::area")]
+    #[case::root_barrel(&[("", None, "geo")], "area", "geo::area")]
+    fn bindings_follow_re_exports(
+        #[case] re_exports: &[(&str, Option<&str>, &str)],
+        #[case] binding: &str,
+        #[case] expected: &str,
+    ) {
+        let nodes: Vec<CallGraphNode> = [
+            "geo::area",
+            "decoy::area",
+            "geo::Shape::new",
+            "decoy::Shape::new",
+        ]
+        .into_iter()
+        .map(node)
+        .collect();
+        let re_exports: Vec<ReExportShape> = re_exports
+            .iter()
+            .map(|(module, name, target)| re_export(module, *name, target))
+            .collect();
+        let resolver = Resolver::new(&nodes).with_re_exports(&re_exports);
+        let call_site = bound_site("area", CalleeBinding::Declaration(binding.to_owned()));
+
+        let call = resolver.resolve(&call_site, GraphLanguage::TypeScript);
+
+        assert_eq!(call.resolution, Resolution::Resolved);
+        assert_eq!(call.method, Some(ResolutionMethod::Binding));
+        assert_eq!(call.to, Some(format!("src/lib.rs:{expected}:1")));
+    }
+
+    #[test]
+    fn cyclic_re_exports_terminate_and_fall_back() {
+        let nodes = vec![node("geo::area"), node("decoy::area")];
+        let re_exports = [re_export("a", None, "b"), re_export("b", None, "a")];
+        let resolver = Resolver::new(&nodes).with_re_exports(&re_exports);
+        let call_site = bound_site("area", CalleeBinding::Declaration("a::area".to_owned()));
+
+        let call = resolver.resolve(&call_site, GraphLanguage::TypeScript);
+
+        assert_eq!(call.resolution, Resolution::Ambiguous);
+        assert_eq!(call.method, Some(ResolutionMethod::LastSegment));
+    }
+
+    /// A Python import is rooted at the import root (`pkg.geo`), the
+    /// graph's module paths at the analysis root (`src::pkg::geo`).
+    #[rstest]
+    #[case::direct("pkg::geo::area", Some("src::pkg::geo::area"))]
+    #[case::through_package_init("pkg::area", Some("src::pkg::geo::area"))]
+    #[case::unknown_member("pkg::volume", None)]
+    fn python_bindings_find_packages_below_the_analysis_root(
+        #[case] binding: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let nodes: Vec<CallGraphNode> = ["src::pkg::geo::area", "src::decoy::area"]
+            .into_iter()
+            .map(|qualified| CallGraphNode {
+                module: qualified.rsplit_once("::").unwrap().0.to_owned(),
+                ..node(qualified)
+            })
+            .collect();
+        let re_exports = [re_export("src::pkg", Some("area"), "src::pkg::geo::area")];
+        let resolver = Resolver::new(&nodes).with_re_exports(&re_exports);
+        let callee = name_last_segment(binding);
+        let call_site = bound_site(callee, CalleeBinding::Declaration(binding.to_owned()));
+
+        let call = resolver.resolve(&call_site, GraphLanguage::Python);
+
+        assert_eq!(
+            call.to,
+            expected.map(|qualified| format!("src/lib.rs:{qualified}:1"))
+        );
+        if expected.is_some() {
+            assert_eq!(call.method, Some(ResolutionMethod::Binding));
+        }
     }
 
     /// Only Python reads an unmatched import as external: other adapters'

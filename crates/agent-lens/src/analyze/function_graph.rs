@@ -952,8 +952,9 @@ export function useState() {}
                 Some(target)
             );
         }
-        // `@acme/ui` resolves to the barrel, which declares no `Button`.
-        assert_eq!(edge("Button")["resolution_method"], "last_segment");
+        // `@acme/ui` resolves to the barrel, which declares no `Button`
+        // but re-exports it, so the binding follows the re-export.
+        assert_eq!(edge("Button")["resolution_method"], "binding");
         assert_eq!(
             target_qualified_name(&report, edge("Button")).as_deref(),
             Some("packages::ui::src::button::Button")
@@ -1119,6 +1120,139 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
             .map(|n| n["qualified_name"].as_str().unwrap())
             .collect();
         assert_eq!(names, ["pkg::root"]);
+    }
+
+    /// A decoy of the same name elsewhere makes the bare-name fallback
+    /// ambiguous, so only a followed re-export resolves these calls.
+    #[rstest]
+    #[case::named_re_export("export { area } from './geo'\n")]
+    #[case::star_re_export("export * from './geo'\n")]
+    #[case::import_then_export("import { area } from './geo'\nexport { area }\n")]
+    #[case::chained_barrels("export * from './inner'\n")]
+    fn typescript_barrel_imports_bind_through_re_exports(#[case] barrel: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/geo.ts",
+            "export function area() {}\nexport class Shape { constructor() {} }\n",
+        );
+        write_file(dir.path(), "src/inner.ts", "export * from './geo'\n");
+        write_file(
+            dir.path(),
+            "src/decoy.ts",
+            "export function area() {}\nexport class Shape { constructor() {} }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/index.ts",
+            &format!("{barrel}export {{ Shape }} from './geo'\n"),
+        );
+        write_file(
+            dir.path(),
+            "src/main.ts",
+            "import { area, Shape } from './index'\nexport function run() { area(); new Shape(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        for (callee, target) in [
+            ("area", "src::geo::area"),
+            ("constructor", "src::geo::Shape::constructor"),
+        ] {
+            let edge = edge_by_callee(&report, callee);
+            assert_eq!(edge["resolution"], "resolved", "{callee}");
+            assert_eq!(edge["resolution_method"], "binding", "{callee}");
+            assert_eq!(
+                target_qualified_name(&report, edge).as_deref(),
+                Some(target)
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_fetch_body_readers_do_not_reach_workspace_methods() {
+        // `res.json()` reads a fetch `Response`; a workspace class that
+        // happens to declare `json` must not absorb the call.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/request.ts",
+            "export class Req { json() { return 1 } }\n",
+        );
+        write_file(
+            dir.path(),
+            "src/main.ts",
+            "export async function run(url: string) { const res = await fetch(url); return res.json(); }\n",
+        );
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "json");
+        assert_eq!(edge["resolution"], "unresolved");
+        assert_eq!(edge["to"], Value::Null);
+    }
+
+    #[rstest]
+    // `from pkg import area`: `pkg/__init__.py` re-exports it relative to
+    // the package itself, so `.geo` is `pkg::geo`, not a sibling of `pkg`.
+    #[case::package_re_export("from pkg import area\n\ndef run():\n    area()\n")]
+    #[case::package_attribute("import pkg\n\ndef run():\n    pkg.area()\n")]
+    #[case::direct_import("from pkg.geo import area\n\ndef run():\n    area()\n")]
+    fn python_imports_bind_through_package_inits_below_a_source_root(#[case] main: &str) {
+        // The package sits under `src/`, so the graph names it
+        // `src::pkg` while the import names it `pkg`.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/pkg/geo.py", "def area():\n    return 1\n");
+        write_file(dir.path(), "src/pkg/__init__.py", "from .geo import area\n");
+        write_file(dir.path(), "src/decoy.py", "def area():\n    return 2\n");
+        write_file(dir.path(), "tests/test_main.py", main);
+
+        let report = analyze_json(dir.path());
+        let edge = edge_by_callee(&report, "area");
+        assert_eq!(edge["resolution"], "resolved");
+        assert_eq!(edge["resolution_method"], "binding");
+        assert_eq!(
+            target_qualified_name(&report, edge).as_deref(),
+            Some("src::pkg::geo::area"),
+        );
+    }
+
+    #[test]
+    fn python_class_method_parameter_reaches_the_owner() {
+        // `cls(...)` constructs the owner and `cls.make()` is the
+        // owner's own `make`, even with a same-named decoy elsewhere.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "shapes.py",
+            concat!(
+                "class Box:\n",
+                "    def __init__(self, w):\n",
+                "        self.w = w\n",
+                "    @classmethod\n",
+                "    def make(cls, w):\n",
+                "        return cls(w)\n",
+                "    @classmethod\n",
+                "    def unit(cls):\n",
+                "        return cls.make(1)\n",
+                "class Other:\n",
+                "    def make(self):\n",
+                "        return 0\n",
+            ),
+        );
+
+        let report = analyze_json(dir.path());
+        let construct = edge_by_callee(&report, "cls");
+        assert_eq!(construct["resolution"], "resolved");
+        assert_eq!(
+            target_qualified_name(&report, construct).as_deref(),
+            Some("shapes::Box::__init__"),
+        );
+        let make = edge_by_callee(&report, "make");
+        assert_eq!(make["resolution"], "resolved");
+        assert_eq!(make["resolution_method"], "self_method");
+        assert_eq!(
+            target_qualified_name(&report, make).as_deref(),
+            Some("shapes::Box::make"),
+        );
     }
 
     #[test]

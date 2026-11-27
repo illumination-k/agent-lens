@@ -8,7 +8,10 @@
 //! `Array`, `String`, `Object`, `Map`, `Set`, `Promise`, `RegExp`,
 //! `JSON`, and `console` members that appear in nearly every function
 //! body, including the static ones (`Object.assign`, `Promise.all`)
-//! since those parse as receiver calls too.
+//! since those parse as receiver calls too — plus the Fetch API's body
+//! readers (`res.json()`, `res.text()`), which every `fetch` caller and
+//! request handler invokes on a `Response` or `Request` no workspace
+//! declares.
 //!
 //! Names a project invented stay out: matching those by name is the
 //! resolver's main source of true positives.
@@ -21,14 +24,18 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "add",
     "all",
     "apply",
+    "arrayBuffer",
     "assign",
     "at",
     "bind",
+    "blob",
+    "bytes",
     "call",
     "catch",
     "charAt",
     "charCodeAt",
     "clear",
+    "clone",
     "codePointAt",
     "concat",
     // Every object's `.constructor`: `draft.arr.constructor(1)` is
@@ -53,6 +60,7 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "flat",
     "flatMap",
     "forEach",
+    "formData",
     "freeze",
     "from",
     "fromEntries",
@@ -66,6 +74,7 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "info",
     "isArray",
     "join",
+    "json",
     "keys",
     "lastIndexOf",
     "localeCompare",
@@ -101,6 +110,7 @@ pub const UBIQUITOUS_METHOD_NAMES: UbiquitousMethodNames = UbiquitousMethodNames
     "stringify",
     "substring",
     "test",
+    "text",
     "then",
     "toFixed",
     "toISOString",
@@ -181,6 +191,8 @@ mod tests {
     #[case::promise("then", true)]
     #[case::map_get("get", true)]
     #[case::console("log", true)]
+    #[case::fetch_body("json", true)]
+    #[case::fetch_body_text("text", true)]
     #[case::project_specific("renderDiagnostics", false)]
     #[case::project_specific_short("lineFor", false)]
     fn table_separates_builtin_names_from_project_names(

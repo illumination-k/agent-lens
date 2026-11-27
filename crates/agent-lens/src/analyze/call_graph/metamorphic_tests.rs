@@ -874,61 +874,32 @@ struct KnownGap {
 /// expected way to record a fix: the test compares the diff exactly, so
 /// a closed gap fails until its row goes.
 ///
-/// * **Barrels (Rust, TypeScript, Python).** Nothing follows a
-///   re-export: an import through `prelude` / `index.ts` /
-///   `__init__.py` names a path no node carries, so the call drops to
-///   the bare-name fallback — ambiguous against the decoy, or
-///   unresolved for a path call the suffix match cannot place. Closing
-///   it needs a per-module re-export table from every adapter (a
-///   re-exporting module has no functions, so its imports never reach
-///   the graph today), which is more than a resolver fix.
-/// * **Relative imports inside a directory index.** `src/geo/index.ts`
-///   has the module path `src::geo`, so the adapter resolves its
-///   `'../text'` one directory too high (`text`, not `src::text`) and
-///   the call falls back to the bare name. The adapter only sees the
-///   module path, not whether the file is an index; the same holds
-///   for relative imports in a Python package's `__init__.py`.
-const KNOWN_GAPS: &[KnownGap] = &[
-    KnownGap {
-        rewrite: "rust_barrel",
-        missing: &[
-            "crate::run -> crate::geo::area [Resolved] x1",
-            "crate::run -> crate::geo::perimeter [Resolved] x1",
-            "crate::run -> crate::text::shout [Resolved] x1",
-        ],
-        extra: &[
-            "crate::run -> {crate::decoy::area, crate::geo::area} [Ambiguous] x1",
-            "crate::run -> {crate::decoy::shout, crate::text::shout} [Ambiguous] x1",
-            "crate::run -> ?perimeter [Unresolved] x1",
-        ],
-    },
-    KnownGap {
-        rewrite: "typescript_barrel",
-        missing: &[
-            "src::main::run -> src::geo::area [Resolved] x1",
-            "src::main::run -> src::geo::perimeter [Resolved] x1",
-            "src::main::run -> src::text::shout [Resolved] x1",
-        ],
-        extra: &[
-            "src::main::run -> {src::decoy::area, src::geo::area} [Ambiguous] x1",
-            "src::main::run -> {src::decoy::shout, src::text::shout} [Ambiguous] x1",
-            "src::main::run -> ?perimeter [Unresolved] x1",
-        ],
-    },
-    KnownGap {
-        rewrite: "python_barrel",
-        missing: &[
-            "app::main::run -> app::geo::area [Resolved] x1",
-            "app::main::run -> app::geo::perimeter [Resolved] x1",
-            "app::main::run -> app::text::shout [Resolved] x1",
-        ],
-        extra: &[
-            "app::main::run -> {app::decoy::area, app::geo::area} [Ambiguous] x1",
-            "app::main::run -> {app::decoy::perimeter, app::geo::perimeter} [Ambiguous] x1",
-            "app::main::run -> {app::decoy::shout, app::text::shout} [Ambiguous] x1",
-        ],
-    },
-];
+/// * **Rust barrels.** Nothing follows a `pub use` re-export: an import
+///   through `prelude` names a path no node carries, so the call drops
+///   to the bare-name fallback — ambiguous against the decoy, or
+///   unresolved for a path call the suffix match cannot place.
+///   TypeScript barrels and Python package `__init__.py` re-exports are
+///   followed through each adapter's re-export table.
+/// * **Relative imports inside a directory index, without an import
+///   context.** `src/geo/index.ts` has the module path `src::geo`, so
+///   the lexical fallback resolves its `'../text'` one directory too
+///   high (`text`, not `src::text`): it only sees the module path, not
+///   whether the file is an index. A graph build always resolves TS
+///   imports through `lens_ts::ModuleResolver`, which reads the real
+///   file path; a Python package's `__init__.py` is told it is one.
+const KNOWN_GAPS: &[KnownGap] = &[KnownGap {
+    rewrite: "rust_barrel",
+    missing: &[
+        "crate::run -> crate::geo::area [Resolved] x1",
+        "crate::run -> crate::geo::perimeter [Resolved] x1",
+        "crate::run -> crate::text::shout [Resolved] x1",
+    ],
+    extra: &[
+        "crate::run -> {crate::decoy::area, crate::geo::area} [Ambiguous] x1",
+        "crate::run -> {crate::decoy::shout, crate::text::shout} [Ambiguous] x1",
+        "crate::run -> ?perimeter [Unresolved] x1",
+    ],
+}];
 
 /// Render every fixture file with the placeholders replaced by `names`
 /// (original name → new name); unmapped placeholders render as written.

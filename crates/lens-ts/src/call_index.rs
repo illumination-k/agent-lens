@@ -15,8 +15,9 @@ use std::path::Path;
 
 use lens_domain::{
     ArgumentShape, BodyShape, CallShape, CalleeBinding, FunctionShape, ImportShape,
-    LexicalResolutionStatus, LineIndex, OwnerKind, OwnerShape, ParameterShape, ReceiverExprKind,
-    ReceiverShape, SignatureShape, SourceSpan, SyntaxFact, qualify_module, starts_uppercase,
+    LexicalResolutionStatus, LineIndex, OwnerKind, OwnerShape, ParameterShape, ReExportShape,
+    ReceiverExprKind, ReceiverShape, SignatureShape, SourceSpan, SyntaxFact, qualify_module,
+    starts_uppercase,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -142,6 +143,96 @@ fn extract_call_shapes(
     };
     walk_program(&ret.program, &line_index, &mut collector);
     Ok(collector.out)
+}
+
+/// The names this file re-exports from other workspace modules, so a
+/// pass over every file can follow an import of a barrel's name to the
+/// declaration: `export { render } from './render'`, `export * from
+/// './render'`, `export * as dom from './dom'`, and `import { render }
+/// from './render'; export { render }`. Type-only exports, default
+/// exports (whose node is named after a declaration the barrel cannot
+/// see), and re-exports of an external package are left out.
+///
+/// The context, when given, settles the specifiers exactly as
+/// [`extract_call_shapes_with_imports`] does, so the targets match the
+/// importers' bindings.
+pub fn extract_re_exports(
+    source: &str,
+    dialect: Dialect,
+    module: &str,
+    context: Option<&ImportContext<'_>>,
+) -> Result<Vec<ReExportShape>, TsParseError> {
+    let alloc = Allocator::default();
+    let ret = dialect.parse_clean(&alloc, source)?;
+    let imports = collect_imports(&ret.program, module, context);
+    let mut out = Vec::new();
+    let mut push = |name: Option<String>, target: String| {
+        out.push(ReExportShape {
+            module: module.to_owned(),
+            name,
+            target,
+        });
+    };
+    for stmt in &ret.program.body {
+        match stmt {
+            Statement::ExportFromDeclaration(decl) if !decl.export_kind.is_type() => {
+                let specifier = crate::walk::string_literal_text(&decl.source);
+                let Imported::Workspace(from) = imported_module(module, &specifier, context) else {
+                    continue;
+                };
+                for spec in decl.specifiers.iter().filter(|s| !s.export_kind.is_type()) {
+                    let (Some(local), Some(exported)) = (
+                        module_export_name(&spec.local),
+                        module_export_name(&spec.exported),
+                    ) else {
+                        continue;
+                    };
+                    if local != "default" {
+                        push(Some(exported), qualify_module(&from, &local));
+                    }
+                }
+            }
+            Statement::ExportAllDeclaration(decl) if !decl.export_kind.is_type() => {
+                let specifier = crate::walk::string_literal_text(&decl.source);
+                let Imported::Workspace(from) = imported_module(module, &specifier, context) else {
+                    continue;
+                };
+                push(decl.exported.as_ref().and_then(module_export_name), from);
+            }
+            Statement::ExportNamedDeclaration(decl) if !decl.export_kind.is_type() => {
+                for spec in decl.specifiers.iter().filter(|s| !s.export_kind.is_type()) {
+                    let (Some(local), Some(exported)) = (
+                        module_export_name(&spec.local),
+                        module_export_name(&spec.exported),
+                    ) else {
+                        continue;
+                    };
+                    let import = imports.iter().find(|import| import.local == local);
+                    let target = match import {
+                        Some(ImportBinding {
+                            module: Imported::Workspace(from),
+                            name: ImportedName::Named,
+                            exported: Some(name),
+                            ..
+                        }) if name != "default" => qualify_module(from, name),
+                        Some(ImportBinding {
+                            module: Imported::Workspace(from),
+                            name: ImportedName::Namespace,
+                            ..
+                        }) => from.clone(),
+                        Some(_) => continue,
+                        // `export { helper as run }`: the file's own
+                        // declaration under another name.
+                        None if local != exported => qualify_module(module, &local),
+                        None => continue,
+                    };
+                    push(Some(exported), target);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// Module-scope variables that hold a computed value rather than a
@@ -1408,6 +1499,44 @@ mod tests {
                 .map(String::as_str),
             Some("src::helper::helper"),
         );
+    }
+
+    #[rstest]
+    #[case::named("export { area } from './geo'\n", &[(Some("area"), "src::geo::area")])]
+    #[case::renamed("export { area as size } from './geo'\n", &[(Some("size"), "src::geo::area")])]
+    #[case::star("export * from './geo'\n", &[(None, "src::geo")])]
+    #[case::star_namespace("export * as geo from './geo'\n", &[(Some("geo"), "src::geo")])]
+    #[case::import_then_export(
+        "import { area } from './geo'\nexport { area }\n",
+        &[(Some("area"), "src::geo::area")]
+    )]
+    #[case::namespace_import_then_export(
+        "import * as geo from './geo'\nexport { geo }\n",
+        &[(Some("geo"), "src::geo")]
+    )]
+    #[case::local_renamed("function area() {}\nexport { area as size }\n", &[(Some("size"), "src::index::area")])]
+    #[case::local_same_name("function area() {}\nexport { area }\n", &[])]
+    #[case::type_only("export type { Area } from './geo'\n", &[])]
+    #[case::type_specifier("export { type Area, area } from './geo'\n", &[(Some("area"), "src::geo::area")])]
+    #[case::type_star("export type * from './geo'\n", &[])]
+    #[case::default_re_export("export { default } from './geo'\n", &[])]
+    #[case::external_package("export { useState } from 'react'\n", &[])]
+    fn re_exports_follow_barrel_statements(
+        #[case] src: &str,
+        #[case] expected: &[(Option<&str>, &str)],
+    ) {
+        let module = "src::index";
+        let got: Vec<(Option<String>, String)> = extract_re_exports(src, Dialect::Ts, module, None)
+            .unwrap()
+            .into_iter()
+            .inspect(|re_export| assert_eq!(re_export.module, module))
+            .map(|re_export| (re_export.name, re_export.target))
+            .collect();
+        let expected: Vec<(Option<String>, String)> = expected
+            .iter()
+            .map(|(name, target)| (name.map(ToOwned::to_owned), (*target).to_owned()))
+            .collect();
+        assert_eq!(got, expected);
     }
 
     /// A directory's `index.ts` has the directory's module path, so an

@@ -721,7 +721,7 @@ imports, splitting or moving modules, re-exporting through a barrel file) need
 no oracle: any difference is a resolver bug. They run as ordinary cargo tests
 in `ci` (`crates/agent-lens/src/analyze/call_graph/metamorphic_tests.rs`), for
 Rust, TypeScript, Python and Go. Differences the resolver does not handle yet
-(re-exports through a barrel file)
+(Rust re-exports through a `pub use` barrel)
 are pinned exactly in its `KNOWN_GAPS` table; deleting a row records the fix.
 
 ## Existing suites and literature

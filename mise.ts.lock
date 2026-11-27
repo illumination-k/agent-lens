@@ -6,6 +6,7 @@ lockfile_version = 2
 version = "11.28.13"
 backend = "aqua:pnpm/pnpm"
 specifiers = ["11.28.13"]
+unsupported_platforms = ["macos-x64"]
 
 [tools."aqua:pnpm/pnpm"."platforms.linux-arm64"]
 checksum = "sha256:a566f3d9f277f6cc67b1d0c47e55ff6a2c59904971fccf9f181c3134ac5b7075"
