@@ -1195,23 +1195,52 @@ function main(retry) { Result.combine(); new Box(); retry.delay(); isFrozen(); }
     // the package itself, so `.geo` is `pkg::geo`, not a sibling of `pkg`.
     #[case::package_re_export("from pkg import area\n\ndef run():\n    area()\n")]
     #[case::package_attribute("import pkg\n\ndef run():\n    pkg.area()\n")]
+    #[case::star_through_aliased_package("import pkg as p\n\ndef run():\n    p.volume()\n")]
     #[case::direct_import("from pkg.geo import area\n\ndef run():\n    area()\n")]
     fn python_imports_bind_through_package_inits_below_a_source_root(#[case] main: &str) {
         // The package sits under `src/`, so the graph names it
         // `src::pkg` while the import names it `pkg`.
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "src/pkg/geo.py", "def area():\n    return 1\n");
-        write_file(dir.path(), "src/pkg/__init__.py", "from .geo import area\n");
-        write_file(dir.path(), "src/decoy.py", "def area():\n    return 2\n");
+        write_file(
+            dir.path(),
+            "src/pkg/solid.py",
+            "def volume():\n    return 3\n",
+        );
+        write_file(
+            dir.path(),
+            "src/pkg/misc.py",
+            "def other():\n    return 4\n",
+        );
+        write_file(
+            dir.path(),
+            "src/pkg/__init__.py",
+            "from .geo import area\nfrom .misc import *\nfrom .solid import *\n",
+        );
+        write_file(
+            dir.path(),
+            "src/decoy.py",
+            "def area():\n    return 2\ndef volume():\n    return 2\n",
+        );
         write_file(dir.path(), "tests/test_main.py", main);
 
         let report = analyze_json(dir.path());
-        let edge = edge_by_callee(&report, "area");
+        let edge = report["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["callee_name"] == "area" || edge["callee_name"] == "volume")
+            .unwrap();
+        let expected = if edge["callee_name"] == "area" {
+            "src::pkg::geo::area"
+        } else {
+            "src::pkg::solid::volume"
+        };
         assert_eq!(edge["resolution"], "resolved");
         assert_eq!(edge["resolution_method"], "binding");
         assert_eq!(
             target_qualified_name(&report, edge).as_deref(),
-            Some("src::pkg::geo::area"),
+            Some(expected),
         );
     }
 

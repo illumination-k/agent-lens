@@ -30,7 +30,7 @@
 //! lexical candidates included — is skipped and the site stays
 //! [`Resolution::Unresolved`].
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use lens_domain::{
     CallShape, CalleeBinding, GLOB_IMPORT_ALIAS, ReExportShape, ReceiverExprKind, SyntaxFact,
@@ -172,6 +172,9 @@ pub(crate) struct Resolver {
     /// module paths. Only segments at depth two or more, which an
     /// import cannot name as they are, appear.
     nested_packages: HashMap<String, BTreeSet<String>>,
+    /// Every module path a node or a re-export is declared in: where a
+    /// star re-export may apply (see [`Self::re_export_rewrites`]).
+    modules: HashSet<String>,
 }
 
 /// Bound on the paths one binding may be rewritten into while following
@@ -215,6 +218,7 @@ impl Resolver {
             re_exports: HashMap::new(),
             star_re_exports: HashMap::new(),
             nested_packages: HashMap::new(),
+            modules: nodes.iter().map(|node| node.module.clone()).collect(),
         }
         .with_nested_packages(nodes.iter().map(|node| node.module.as_str()))
     }
@@ -257,7 +261,9 @@ impl Resolver {
         }
         // A package whose `__init__.py` only re-exports declares no node,
         // so its module path is known from its re-exports alone.
-        self.with_nested_packages(modules.iter().map(String::as_str))
+        self = self.with_nested_packages(modules.iter().map(String::as_str));
+        self.modules.extend(modules);
+        self
     }
 
     /// The nodes a Python import-rooted `path` (`click::testing::CliRunner`)
@@ -297,8 +303,10 @@ impl Resolver {
         }
         let mut ids = BTreeSet::new();
         let mut seen = HashSet::new();
-        let mut pending = vec![path.to_owned()];
-        while let Some(path) = pending.pop() {
+        // Breadth-first, so the visit bound cuts the longest chains, not
+        // whichever branch happened to be explored first.
+        let mut pending = VecDeque::from([path.to_owned()]);
+        while let Some(path) = pending.pop_front() {
             if seen.len() >= RE_EXPORT_VISIT_LIMIT || !seen.insert(path.clone()) {
                 continue;
             }
@@ -312,7 +320,10 @@ impl Resolver {
     }
 
     /// One step of [`Self::follow_re_exports`]: the paths `path` stands
-    /// for under the re-exports of the modules its prefixes name.
+    /// for under the re-exports of the modules its prefixes name. A star
+    /// re-export applies only through the longest prefix that is a module:
+    /// `pkg::rec::chunked` names `chunked` in `pkg::rec`, never in what
+    /// `pkg`'s own `*` brings in.
     fn re_export_rewrites(&self, path: &str) -> Vec<String> {
         let segments: Vec<&str> = path.split("::").collect();
         let rewrite = |targets: &[String], rest: &[&str]| -> Vec<String> {
@@ -333,16 +344,18 @@ impl Resolver {
                 return rewrite(targets, rest);
             }
         }
-        for split in (1..segments.len()).rev() {
+        for split in (0..segments.len()).rev() {
             let (prefix, rest) = segments.split_at(split);
-            if let Some(targets) = self.star_re_exports.get(&prefix.join("::")) {
+            // A barrel at the analysis root has the empty module path.
+            let module = prefix.join("::");
+            if let Some(targets) = self.star_re_exports.get(&module) {
                 return rewrite(targets, rest);
             }
+            if self.modules.contains(&module) {
+                return Vec::new();
+            }
         }
-        // A barrel at the analysis root has the empty module path.
-        self.star_re_exports
-            .get("")
-            .map_or_else(Vec::new, |targets| rewrite(targets, &segments))
+        Vec::new()
     }
 
     /// `language` is the language of the file the call site lives in;
@@ -1702,6 +1715,13 @@ mod tests {
     #[rstest]
     #[case::named(&[("barrel", Some("area"), "geo::area")], "barrel::area", "geo::area")]
     #[case::star(&[("barrel", None, "geo")], "barrel::area", "geo::area")]
+    // Regression: the second star's miss (`rest::area`) must not be
+    // re-expanded through `barrel`'s stars until the bound runs out.
+    #[case::two_stars(
+        &[("barrel", None, "rest"), ("barrel", None, "geo")],
+        "barrel::area",
+        "geo::area"
+    )]
     #[case::chain(
         &[("barrel", None, "inner"), ("inner", Some("area"), "geo::area")],
         "barrel::area",
