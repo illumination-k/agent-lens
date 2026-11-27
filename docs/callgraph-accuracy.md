@@ -354,9 +354,10 @@ What the misses are, from reading the disagreements:
   method (`reflect.Type.Name`, `time.Time.IsZero`, `reflect.Value.IsNil`) to
   the only in-repo method with that name. All but `reflect.Type.Name` are
   fixed since (see "Go" below).
-- Python static misses are almost all `mi.foo(...)` in more-itertools' tests:
+- Python static misses were almost all `mi.foo(...)` in more-itertools' tests:
   `import more_itertools as mi` over an `__init__.py` that re-exports with
-  `from .more import *` (the barrel gap pinned in the metamorphic tests).
+  `from .more import *`. Re-exports are followed since, so those calls now
+  resolve with `binding` instead of the `path_suffix` fallback.
 - Python unobserved `last_segment` edges are mostly shadowed names: a local, a
   parameter or an `itertools` import bound to a same-named in-repo function.
 
@@ -491,7 +492,8 @@ Dynamic recall is unchanged (215 → 216 of 703). What is left:
   `Immer` method that `dist` re-exports;
 - static misses: calls through a barrel re-export (`import { mask } from
   '../src'` in superstruct's tests, `export { f as g }` aliases in jotai),
-  which leave an ambiguous candidate set or nothing, and method chains on
+  which left an ambiguous candidate set or nothing until barrel re-exports
+  were followed (they now resolve with `binding`), and method chains on
   returned values (`ok(1).andThen(...)` in neverthrow), which need a type.
 
 ### Rust and TypeScript
@@ -640,8 +642,9 @@ What the disagreements are:
   `func(...)` bound to the `curry.func` property (12 pairs in toolz), a class attribute
   `D = dict` bound to a test method `D`. The five `lexical` ones are a local
   (`f = compose(...)`) shadowing a module-level `def f`.
-- Static misses are almost all `mi.foo(...)` in more-itertools' tests
-  (`import more_itertools as mi` over `from .more import *`, the barrel gap).
+- Static misses were almost all `mi.foo(...)` in more-itertools' tests
+  (`import more_itertools as mi` over `from .more import *`); re-exports are
+  followed since, and those calls resolve with `binding`.
 - 9 oracle edges have no agent-lens callee node: functions defined inside an
   `if` / `try` at module level (`dl_split`, `_fsumprod` and `batched` in
   more-itertools, `_check_sigspec` in toolz), which agent-lens does not index.
