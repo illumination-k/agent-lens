@@ -1520,6 +1520,11 @@ mod tests {
     #[case::type_specifier("export { type Area, area } from './geo'\n", &[(Some("area"), "src::geo::area")])]
     #[case::type_star("export type * from './geo'\n", &[])]
     #[case::default_re_export("export { default } from './geo'\n", &[])]
+    #[case::type_only_local_export("import { Area } from './geo'\nexport type { Area }\n", &[])]
+    #[case::default_import_then_export(
+        "import { default as Area } from './geo'\nexport { Area }\n",
+        &[]
+    )]
     #[case::external_package("export { useState } from 'react'\n", &[])]
     fn re_exports_follow_barrel_statements(
         #[case] src: &str,
